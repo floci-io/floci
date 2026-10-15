@@ -6,7 +6,9 @@ import com.fasterxml.jackson.annotation.JsonSetter;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The subset of EC2 {@code RequestLaunchTemplateData} / {@code ResponseLaunchTemplateData} that
@@ -387,6 +389,28 @@ public class LaunchTemplateData {
 
         public Ebs getEbs() { return ebs; }
         public void setEbs(Ebs ebs) { this.ebs = ebs; }
+
+        /**
+         * A launch's mappings, as EC2 documents template overrides: a request entry for a device the
+         * template maps changes only the members it sets, and every other device keeps its own
+         * entry. The template's stored entries are never modified.
+         */
+        public static List<BlockDeviceMapping> merge(List<BlockDeviceMapping> template,
+                                                     List<BlockDeviceMapping> request) {
+            Map<String, BlockDeviceMapping> byDevice = new LinkedHashMap<>();
+            template.forEach(m -> byDevice.put(m.deviceName, m));
+            request.forEach(m -> byDevice.merge(m.deviceName, m, BlockDeviceMapping::overlaid));
+            return new ArrayList<>(byDevice.values());
+        }
+
+        private static BlockDeviceMapping overlaid(BlockDeviceMapping base, BlockDeviceMapping override) {
+            BlockDeviceMapping merged = new BlockDeviceMapping();
+            merged.deviceName = base.deviceName;
+            merged.virtualName = override.virtualName != null ? override.virtualName : base.virtualName;
+            merged.noDevice = override.noDevice != null ? override.noDevice : base.noDevice;
+            merged.ebs = Ebs.overlaid(base.ebs, override.ebs);
+            return merged;
+        }
     }
 
     @RegisterForReflection
@@ -424,6 +448,23 @@ public class LaunchTemplateData {
 
         public Integer getThroughput() { return throughput; }
         public void setThroughput(Integer throughput) { this.throughput = throughput; }
+
+        private static Ebs overlaid(Ebs base, Ebs override) {
+            if (base == null || override == null) {
+                return override != null ? override : base;
+            }
+            Ebs merged = new Ebs();
+            merged.encrypted = override.encrypted != null ? override.encrypted : base.encrypted;
+            merged.deleteOnTermination = override.deleteOnTermination != null
+                    ? override.deleteOnTermination : base.deleteOnTermination;
+            merged.iops = override.iops != null ? override.iops : base.iops;
+            merged.kmsKeyId = override.kmsKeyId != null ? override.kmsKeyId : base.kmsKeyId;
+            merged.snapshotId = override.snapshotId != null ? override.snapshotId : base.snapshotId;
+            merged.volumeSize = override.volumeSize != null ? override.volumeSize : base.volumeSize;
+            merged.volumeType = override.volumeType != null ? override.volumeType : base.volumeType;
+            merged.throughput = override.throughput != null ? override.throughput : base.throughput;
+            return merged;
+        }
     }
 
     @RegisterForReflection

@@ -13,6 +13,8 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -48,6 +50,19 @@ class EcsJsonHandlerVolumesTest {
     private ObjectMapper objectMapper;
     private EmulatorConfig config;
     private EcsJsonHandler handler;
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"fileSystemId\":\"\"}", "{\"fileSystemId\":\" \"}", "\"invalid\""})
+    void registerTaskDefinitionRejectsMalformedEfsVolume(String efs) throws Exception {
+        JsonNode request = objectMapper.readTree("""
+                {"family":"invalid-efs","containerDefinitions":[{"name":"app","image":"busybox:stable",
+                 "mountPoints":[{"sourceVolume":"shared","containerPath":"/data"}]}],
+                 "volumes":[{"name":"shared","efsVolumeConfiguration":%s}]}
+                """.formatted(efs));
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterTaskDefinition", request, "us-east-1"));
+        assertEquals("InvalidParameterException", error.getErrorCode());
+    }
 
     @BeforeEach
     void setUp() {

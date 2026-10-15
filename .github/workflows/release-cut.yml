@@ -2,7 +2,7 @@ name: Release Cut
 
 # One-button release from main.
 #
-# Manually dispatched: semantic-release analyzes the Conventional Commits on
+# On dispatch or cron: semantic-release analyzes the Conventional Commits on
 # main, bumps pom.xml (via the exec plugin running `mvn versions:set`), writes
 # CHANGELOG.md, commits those files, tags the release (tagFormat: ${version}),
 # and creates the GitHub Release. The tag push then fires release.yml exactly
@@ -22,6 +22,12 @@ name: Release Cut
 # Required secrets: GH_TOKEN
 
 on:
+  # 00:30 America/Chicago on the 15th and on the last day of the month.
+  # GitHub applies the timezone, DST included. Cron cannot express "last day
+  # of the month", so it fires on 28-31 and the gate job keeps the real one.
+  schedule:
+    - cron: '30 0 15,28-31 * *'
+      timezone: America/Chicago
   workflow_dispatch:
     inputs:
       dry-run:
@@ -32,19 +38,44 @@ on:
 permissions:
   contents: write
 
-# Serialize release cuts: a second dispatch queues behind the first instead of
-# racing it to the same version/tag. No cancel-in-progress — never kill a
-# mid-flight release. GitHub keeps at most ONE pending run per group, so if
-# several dispatches pile up, only the latest pending one runs — intentional:
-# duplicate queued release cuts are redundant by definition (the surviving run
-# re-analyzes main and releases whatever is unreleased).
-concurrency:
-  group: release-cut
-
 jobs:
+  gate:
+    name: Check release window
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      cut: ${{ steps.window.outputs.cut }}
+    steps:
+      - id: window
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "cut=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          export TZ=America/Chicago
+          if [ "$(date +%d)" = "15" ] || [ "$(date -d tomorrow +%d)" = "01" ]; then
+            echo "cut=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$(date +%F) is neither the 15th nor the last day of the month; skipping."
+          fi
+
   release:
     name: Cut release from main
+    needs: gate
+    if: needs.gate.outputs.cut == 'true'
     runs-on: ubuntu-latest
+    # Serialize release cuts: a second dispatch queues behind the first instead
+    # of racing it to the same version/tag. No cancel-in-progress: never kill a
+    # mid-flight release. GitHub keeps at most ONE pending run per group, so if
+    # several dispatches pile up, only the latest pending one runs. That is
+    # intentional: duplicate queued release cuts are redundant by definition
+    # (the surviving run re-analyzes main and releases whatever is unreleased).
+    #
+    # Job-level, not workflow-level, so the scheduled runs the gate skips
+    # never take or replace the one pending slot in this group.
+    concurrency:
+      group: release-cut
     # semantic-release comments on and labels every issue and PR in the release,
     # which is roughly two API writes each. A 278-PR release took ~22 minutes.
     timeout-minutes: 60
@@ -62,7 +93,7 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 

@@ -50,6 +50,11 @@ final class RdsDataSqlParameters {
      * colon inside any of those is left untouched.
      */
     static ParsedSql parse(String sql, boolean backslashEscapes) {
+        SqlParameterParser.Options statementOptions = new SqlParameterParser.Options(
+                true, backslashEscapes, !backslashEscapes, true, backslashEscapes);
+        if (SqlParameterParser.isMultiStatement(sql, statementOptions)) {
+            throw new AwsException("ValidationException", "Multistatements aren't supported.", 400);
+        }
         return SqlParameterParser.parse(sql, backslashEscapes
                 ? SqlParameterParser.Options.RDS_MYSQL
                 : SqlParameterParser.Options.RDS_POSTGRESQL);

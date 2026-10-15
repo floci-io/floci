@@ -17,6 +17,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -34,6 +35,7 @@ class StepFunctionsServiceStartExecutionIdempotencyTest {
     private static final String REGION = "us-east-1";
 
     private AccountAwareStorageBackend<Execution> execStore;
+    private StepFunctionsEventPublisher eventPublisher;
 
     private StepFunctionsService buildService(String smType) {
         AccountAwareStorageBackend<StateMachine> smStore = AccountAwareStorageBackend.inMemory("000000000000");
@@ -50,8 +52,10 @@ class StepFunctionsServiceStartExecutionIdempotencyTest {
 
         // aslExecutor is null: the return-existing / conflict branches never reach executeAsync, and a
         // null field is never dereferenced (AslExecutor cannot be class-loaded here: it needs Vert.x).
+        eventPublisher = mock(StepFunctionsEventPublisher.class);
         StepFunctionsService svc =
-                new StepFunctionsService(factory, region, null, new ObjectMapper(), mock(SfnMockLoader.class));
+                new StepFunctionsService(factory, region, null, new ObjectMapper(), mock(SfnMockLoader.class),
+                eventPublisher);
 
         StateMachine sm = new StateMachine();
         sm.setStateMachineArn(SM_ARN);
@@ -83,6 +87,8 @@ class StepFunctionsServiceStartExecutionIdempotencyTest {
         assertEquals("RUNNING", result.getStatus());
         // Must be the ORIGINAL execution (with its original startDate), not a freshly built one.
         assertEquals(1234567.0, result.getStartDate());
+        // Nothing changed status, so no second RUNNING event is published.
+        verifyNoInteractions(eventPublisher);
     }
 
     @Test

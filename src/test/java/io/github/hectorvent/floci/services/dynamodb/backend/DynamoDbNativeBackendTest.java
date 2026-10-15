@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.A
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Call;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Reply;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess.TimeToLive;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
@@ -177,6 +178,29 @@ class DynamoDbNativeBackendTest {
         assertNull(none);
         assertNull(updatedNew);
         assertEquals(json("{\"id\":{\"S\":\"k\"},\"n\":{\"N\":\"5\"}}"), backend.getItem(SCOPE, TABLE, key));
+    }
+
+    @Test
+    void typedTimeToLiveIsWhatDescribeTimeToLiveReportsUnderTheScopesAccount() throws Exception {
+        Scope owner = new Scope("111122223333", REGION);
+        backend.createTable(owner, TABLE, List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")), 5L, 5L, List.of(), List.of());
+        JsonNode describe = json("{\"TableName\":\"" + TABLE + "\"}");
+
+        assertEquals(new TimeToLive(false, null), backend.timeToLive(owner, TABLE));
+
+        backend.updateTimeToLive(owner, TABLE, "expiresAt", true);
+
+        assertEquals(new TimeToLive(true, "expiresAt"), backend.timeToLive(owner, TABLE));
+        JsonNode enabled = backend.execute(new Call(owner, Api.DYNAMODB, "DescribeTimeToLive", describe)).body();
+        assertEquals("ENABLED", enabled.path("TimeToLiveDescription").path("TimeToLiveStatus").asText());
+        assertEquals("expiresAt", enabled.path("TimeToLiveDescription").path("AttributeName").asText());
+
+        backend.updateTimeToLive(owner, TABLE, "expiresAt", false);
+
+        assertEquals(new TimeToLive(false, null), backend.timeToLive(owner, TABLE));
+        JsonNode disabled = backend.execute(new Call(owner, Api.DYNAMODB, "DescribeTimeToLive", describe)).body();
+        assertEquals("DISABLED", disabled.path("TimeToLiveDescription").path("TimeToLiveStatus").asText());
     }
 
     @Test

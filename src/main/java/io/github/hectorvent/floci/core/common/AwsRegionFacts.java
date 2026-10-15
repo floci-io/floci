@@ -13,9 +13,10 @@ import java.util.Set;
 /**
  * The per-region and per-partition constants AWS publishes only as prose tables, vendored in
  * {@code aws/region-facts.json} by {@code tools/aws/regen_region_facts.py} from the Terraform
- * provider and the CDK: load balancer and S3 website hosted zone ids, the CloudFront hosted
- * zone per partition, the SAML sign-on URL per partition and the VPC endpoint service-name
- * prefixes. Every accessor is {@link Optional}: the ISO and EUSC partitions have no published
+ * provider, the CDK, the botocore models and the China and GovCloud user guides: load balancer,
+ * S3 website and GovCloud API Gateway hosted zone ids, the CloudFront hosted zone and distribution
+ * domain suffix per partition, the SAML sign-on URL and the management console host per partition
+ * and the VPC endpoint service-name prefixes. Every accessor is {@link Optional}: the ISO and EUSC partitions have no published
  * hosted zones, and a service that needs one there has nothing faithful to answer.
  */
 public final class AwsRegionFacts {
@@ -48,6 +49,22 @@ public final class AwsRegionFacts {
         return regionText(region, "s3WebsiteHostedZoneId");
     }
 
+    /**
+     * The hosted zone of an API Gateway regional endpoint, which a Route 53 alias to a regional
+     * custom domain targets. Published in the corpus for the two GovCloud regions only.
+     */
+    public static Optional<String> apiGatewayRegionalHostedZoneId(String region) {
+        return regionText(region, "apiGatewayRegionalHostedZoneId");
+    }
+
+    /**
+     * The suffix of a distribution's generated domain name: {@code cloudfront.net}, and
+     * {@code cloudfront.cn} in {@code aws-cn}. Absent for the partitions without CloudFront.
+     */
+    public static Optional<String> cloudFrontDomainSuffix(String partition) {
+        return partitionText(partition, "cloudfrontDomainSuffix");
+    }
+
     /** Published for {@code aws} and {@code aws-cn} only, where CloudFront exists. */
     public static Optional<String> cloudFrontHostedZoneId(String partition) {
         return partitionText(partition, "cloudfrontHostedZoneId");
@@ -56,6 +73,14 @@ public final class AwsRegionFacts {
     /** The console's SAML endpoint; absent for {@code aws-iso-e}, {@code aws-iso-f} and {@code aws-eusc}. */
     public static Optional<String> samlSignOnUrl(String partition) {
         return partitionText(partition, "samlSignOnUrl");
+    }
+
+    /**
+     * The management console host, without a scheme. Stated by the user guides for {@code aws},
+     * {@code aws-cn} and {@code aws-us-gov}; absent for the ISO partitions and {@code aws-eusc}.
+     */
+    public static Optional<String> consoleHost(String partition) {
+        return partitionText(partition, "consoleHost");
     }
 
     /** {@code com.amazonaws.vpce}, {@code cn.com.amazonaws.vpce}, ...: the reversed DNS suffix plus {@code .vpce}. */

@@ -4,8 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-
-import java.net.URI;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * Computes the Floci base URL reachable from <em>inside</em> a Docker container that Floci launches.
@@ -33,19 +32,31 @@ public class ContainerReachableEndpoint {
     private final EmulatorConfig config;
     private final DockerHostResolver dockerHostResolver;
     private final EmbeddedDnsServer embeddedDnsServer;
+    private final int httpPort;
 
     @Inject
     public ContainerReachableEndpoint(EmulatorConfig config,
                                       DockerHostResolver dockerHostResolver,
-                                      EmbeddedDnsServer embeddedDnsServer) {
+                                      EmbeddedDnsServer embeddedDnsServer,
+                                      @ConfigProperty(name = "quarkus.http.port") int httpPort) {
         this.config = config;
         this.dockerHostResolver = dockerHostResolver;
         this.embeddedDnsServer = embeddedDnsServer;
+        this.httpPort = httpPort;
     }
 
-    /** The Floci {@code http://host:port} base URL reachable from inside a launched Docker container. */
+    /**
+     * The Floci {@code http://host:port} base URL reachable from inside a launched Docker container.
+     *
+     * <p>The port is the one Floci listens on, not the port in {@code floci.base-url}: base-url
+     * advertises the host-facing address, which differs under a port mapping such as
+     * {@code -p 4811:4566} and is refused inside the Docker network. That is
+     * {@code quarkus.http.port}, which defaults to {@code floci.port} but can be overridden on its
+     * own; with TLS enabled the HTTP server moves to a loopback-only internal port and the public
+     * listener is {@code TlsProxyServer} on {@code floci.port}.
+     */
     public String baseUrl() {
-        int flociPort = URI.create(config.baseUrl()).getPort();
+        int flociPort = config.tls().enabled() ? config.port() : httpPort;
         String flociHostname = embeddedDnsServer.getServerIp().isPresent()
                 ? config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX)
                 : dockerHostResolver.resolve();

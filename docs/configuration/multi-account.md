@@ -172,7 +172,18 @@ By default Floci does not verify SigV4 signatures. Only the access key ID matter
 `FLOCI_AUTH_VALIDATE_SIGNATURES` verifies the SigV4 signature of every signed request, for every service, without evaluating any policy, and leaves unsigned requests alone:
 
 - **S3** verifies every placement (`Authorization` header, presigned URL and presigned POST); see [S3 Signature Verification](../services/s3.md#signature-verification).
-- **Every other service** verifies the `Authorization` header. The canonical request is rebuilt from the request as it arrived, with the path encoded the way AWS signers encode it outside S3 and the body's own SHA-256 as the payload hash. A refusal comes back in the protocol the request used, with the Query and REST-XML name first (Route 53, CloudFront and S3 Control answer in XML) and the JSON, CBOR and REST-JSON name second: `SignatureDoesNotMatch` or `InvalidSignatureException` for a signature that does not verify or is more than 15 minutes from server time, `InvalidClientTokenId` or `UnrecognizedClientException` for an access key Floci does not know, and `IncompleteSignature` or `IncompleteSignatureException` for an `Authorization` header missing a part. Presigned query-string signatures and SigV4a are not verified outside S3, and API Gateway `execute-api` requests keep their own [IAM authorization](../services/api-gateway.md#iam-authorization).
+- **Every other service** verifies the `Authorization` header or a SigV4 presigned query string. A nonblank Authorization header takes precedence. The canonical request is rebuilt from the request as it arrived, with the path encoded the way AWS signers encode it outside S3 and the body's own SHA-256 as the payload hash. A refusal comes back in the protocol the request used, with the Query and REST-XML name first (Route 53, CloudFront and S3 Control answer in XML) and the JSON, CBOR and REST-JSON name second: `SignatureDoesNotMatch` or `InvalidSignatureException` for a signature that does not verify or is more than 15 minutes from server time, `InvalidClientTokenId` or `UnrecognizedClientException` for an access key Floci does not know, and `IncompleteSignature` or `IncompleteSignatureException` for an `Authorization` header missing a part. Presigned requests use their `X-Amz-Expires` lifetime (1–604800 seconds) and may be at most 15 minutes in the future; credential scope date or service mismatches are refused. A signed `x-amz-content-sha256` payload marker is honored; otherwise the actual body is hashed. SigV4a is not verified here. API Gateway `execute-api` requests and AppSync GraphQL keep their own verifiers; API Gateway documents its [IAM authorization](../services/api-gateway.md#iam-authorization).
+
+An expired presigned query reports `Signature expired: <signed-date> is now earlier than <cutoff>`.
+The cutoff is the server time minus `X-Amz-Expires`, so the message describes the URL's lifetime.
+An expired header signature uses the same wording with a cutoff 15 minutes before server time.
+Query and header signatures more than 15 minutes ahead report
+`Signature not yet current: <signed-date> is still later than <cutoff>`, with a cutoff 15 minutes
+after server time.
+When the receiving service has one registered signing scope, a mismatch reports
+`Credential should be scoped to correct service: '<service>'`. Services with multiple accepted
+scopes retain the generic mismatch message because their aliases do not identify a canonical
+signing name.
 
 To verify signatures:
 

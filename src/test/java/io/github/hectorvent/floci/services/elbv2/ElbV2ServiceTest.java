@@ -24,15 +24,23 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -84,6 +92,86 @@ class ElbV2ServiceTest {
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.ec2Service = ec2Service;
         stubAlbSubnets(ec2Service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"HTTPS", "TLS"})
+    void defaultCertificateRemovalIsRefusedBeforeChangingTheList(String protocol) {
+        String lbArn = service.createLoadBalancer(REGION, "default-cert-lb", "internal",
+                "TLS".equals(protocol) ? "network" : "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String first = "arn:aws:iam::000000000000:server-certificate/first";
+        String additional = "arn:aws:iam::000000000000:server-certificate/additional";
+        String listenerArn = service.createListener(REGION, lbArn, protocol, 9443, null,
+                List.of(first, additional), List.of(), List.of(), Map.of()).getListenerArn();
+        clearInvocations(dataPlane);
+
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> service.removeListenerCertificates(REGION, listenerArn, List.of(additional, first)));
+        assertEquals("OperationNotPermitted", rejected.getErrorCode());
+        assertEquals(List.of(first, additional), service.describeListenerCertificates(REGION, listenerArn));
+        verifyNoInteractions(dataPlane);
+
+        service.removeListenerCertificates(REGION, listenerArn, List.of(additional));
+        assertEquals(List.of(first), service.describeListenerCertificates(REGION, listenerArn));
+        assertThrows(AwsException.class,
+                () -> service.removeListenerCertificates(REGION, listenerArn, List.of(first)));
+        assertEquals(List.of(first), service.describeListenerCertificates(REGION, listenerArn));
+    }
+
+    @Test
+    void removalCannotDeleteADefaultPublishedByConcurrentModification() throws Exception {
+        String lbArn = service.createLoadBalancer(REGION, "default-replacement-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String first = "arn:aws:iam::000000000000:server-certificate/first";
+        String additional = "arn:aws:iam::000000000000:server-certificate/additional";
+        String listener = service.createListener(REGION, lbArn, "HTTPS", 9443, null,
+                List.of(first, additional), List.of(), List.of(), Map.of()).getListenerArn();
+        CountDownLatch checkedOriginalDefault = new CountDownLatch(1);
+        CountDownLatch releaseRemoval = new CountDownLatch(1);
+        List<String> requested = new ArrayList<>(List.of(additional)) {
+            @Override
+            public boolean contains(Object value) {
+                boolean contains = super.contains(value);
+                checkedOriginalDefault.countDown();
+                try {
+                    assertTrue(releaseRemoval.await(5, TimeUnit.SECONDS), "removal was not released");
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("removal interrupted", failure);
+                }
+                return contains;
+            }
+        };
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> removal = worker.submit(() -> service.removeListenerCertificates(REGION, listener, requested));
+            assertTrue(checkedOriginalDefault.await(5, TimeUnit.SECONDS), "removal did not check the original default");
+            service.modifyListener(REGION, listener, null, null, null, List.of(additional), null, null);
+            assertEquals(List.of(additional), service.describeListenerCertificates(REGION, listener));
+            releaseRemoval.countDown();
+            removal.get(5, TimeUnit.SECONDS);
+            assertEquals(List.of(additional), service.describeListenerCertificates(REGION, listener));
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.removeListenerCertificates(REGION, listener, List.of(additional)));
+            assertEquals("OperationNotPermitted", rejected.getErrorCode());
+            assertEquals(List.of(additional), service.describeListenerCertificates(REGION, listener));
+        } finally {
+            releaseRemoval.countDown();
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void certificateMetadataOnAnHttpListenerKeepsItsExistingRemovalBehavior() {
+        String lbArn = service.createLoadBalancer(REGION, "http-cert-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String certificate = "arn:aws:iam::000000000000:server-certificate/metadata";
+        String listenerArn = service.createListener(REGION, lbArn, "HTTP", 8080, null,
+                List.of(certificate), List.of(), List.of(), Map.of()).getListenerArn();
+        service.removeListenerCertificates(REGION, listenerArn, List.of(certificate));
+        assertEquals(List.of(), service.describeListenerCertificates(REGION, listenerArn));
     }
 
     @Test

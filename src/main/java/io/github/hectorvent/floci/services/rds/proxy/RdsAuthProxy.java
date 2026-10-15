@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.time.Duration;
 import java.util.concurrent.Semaphore;
 
 /**
@@ -39,6 +40,8 @@ public class RdsAuthProxy {
 
     private volatile boolean running;
     private ServerSocket serverSocket;
+    private Thread acceptThread;
+    Duration acceptRetirementTimeout = Duration.ofSeconds(5);
 
     public RdsAuthProxy(String instanceId, String backendHost, int backendPort,
                         DatabaseEngine engine, boolean iamEnabled,
@@ -99,7 +102,8 @@ public class RdsAuthProxy {
         serverSocket.setReuseAddress(true);
         serverSocket.bind(new InetSocketAddress(proxyPort));
         running = true;
-        Thread.ofVirtual().name("rds-proxy-accept-" + instanceId).start(this::acceptLoop);
+        acceptThread = Thread.ofVirtual().name("rds-proxy-accept-" + instanceId).unstarted(this::acceptLoop);
+        acceptThread.start();
         LOG.infov("RDS proxy started for instance {0} on port {1} → {2}:{3}",
                 instanceId, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
     }
@@ -125,12 +129,29 @@ public class RdsAuthProxy {
             throw new RuntimeException(
                     "Failed to stop RDS proxy for instance " + instanceId, e);
         }
+        // A socket closed during accept can retain its native descriptor until accept exits.
+        // Retire that loop before a reboot binds its replacement to the same port.
+        Thread accepting = acceptThread;
+        if (accepting != null && accepting != Thread.currentThread() && accepting.isAlive()) {
+            try {
+                if (!accepting.join(acceptRetirementTimeout)) {
+                    throw new IllegalStateException("RDS proxy accept loop did not stop for instance " + instanceId);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while stopping RDS proxy for instance " + instanceId, e);
+            }
+        }
     }
 
     private void acceptLoop() {
         while (running) {
             try {
                 Socket client = serverSocket.accept();
+                if (!running) {
+                    closeQuietly(client);
+                    break;
+                }
                 if (!connectionPermits.tryAcquire()) {
                     LOG.warnv("Refusing RDS connection for instance {0}: connection limit reached",
                             instanceId);

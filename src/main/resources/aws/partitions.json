@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_partitions.py",
-    "botocore": "botocore 1.43.98 (local/aws/botocore)",
+    "botocore": "botocore 1.43.113 (local/aws/botocore)",
     "partitionsJsonVersion": "1.1",
     "endpointsJsonVersion": 3,
     "regionFlags": "aws-cdk region-info/lib/aws-entities.ts rules"
@@ -51,6 +51,9 @@
     "cloudsearch": [
       "cloudsearchdomain"
     ],
+    "cloudwatch": [
+      "cloudwatch-omni"
+    ],
     "connect": [
       "contact-lens"
     ],
@@ -65,6 +68,9 @@
     ],
     "ecr-public": [
       "api.ecr-public"
+    ],
+    "events": [
+      "eventsv2"
     ],
     "forecast": [
       "forecastquery"
@@ -138,7 +144,8 @@
       "featurestore-runtime.sagemaker",
       "job-runtime.sagemaker",
       "metrics.sagemaker",
-      "runtime.sagemaker"
+      "runtime.sagemaker",
+      "training-session-runtime.sagemaker"
     ],
     "servicecatalog": [
       "servicecatalog-appregistry"
@@ -501,6 +508,7 @@
         "entitlement.marketplace",
         "es",
         "events",
+        "eventsv2",
         "finspace",
         "finspace-api",
         "firehose",
@@ -1155,6 +1163,7 @@
         "identitystore",
         "internetmonitor",
         "kafka",
+        "kafkaconnect",
         "kendra-ranking",
         "kinesis",
         "kinesisanalytics",
@@ -1641,6 +1650,7 @@
         "route53",
         "route53profiles",
         "route53resolver",
+        "runtime.sagemaker",
         "s3",
         "savingsplans",
         "scheduler",
@@ -1925,6 +1935,7 @@
         "databrew",
         "datasync",
         "datazone",
+        "dax",
         "directconnect",
         "dlm",
         "dms",

@@ -55,7 +55,7 @@ class AslExecutorRedshiftDataDisabledTest {
         RedshiftDataJsonHandler handler = spy(new RedshiftDataJsonHandler(service));
         AslExecutor executor = new AslExecutor(null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null, null, objectMapper,
-                new JsonataEvaluator(objectMapper), null, config, null, null, handler, serviceRegistry);
+                new JsonataEvaluator(objectMapper), null, config, null, null, handler, serviceRegistry, null);
 
         StateMachine stateMachine = new StateMachine();
         stateMachine.setStateMachineArn("arn:aws:states:us-east-1:000000000000:stateMachine:disabled-data");

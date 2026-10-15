@@ -189,13 +189,74 @@ class ScheduleDispatcherTest {
     }
 
     @Test
-    void ratesFireOnceIntervalHasPassed() {
+    void rateWithoutStartDateFiresAtCreationThenWaitsAnInterval() {
+        Schedule schedule = newSchedule("immediate-rate", "rate(5 minutes)", "ENABLED");
+        Instant firstFire = schedule.getCreationDate();
+        when(schedulerService.listAllSchedules()).thenReturn(List.of(schedule));
+
+        dispatcher.tick(firstFire.minusSeconds(1));
+        verifyNoInteractions(invoker);
+        dispatcher.tick(firstFire);
+        dispatcher.tick(firstFire.plusSeconds(299));
+        verify(invoker).invoke(eq(schedule), eq(firstFire), any(), anyInt());
+        dispatcher.tick(firstFire.plusSeconds(300));
+        verify(invoker).invoke(eq(schedule), eq(firstFire.plusSeconds(300)), any(), anyInt());
+        verify(invoker, times(2)).invoke(eq(schedule), any(), any(), anyInt());
+    }
+
+    @Test
+    void rateWithFutureStartDateFiresAtStartDate() {
+        Schedule schedule = newSchedule("future-rate", "rate(10 minutes)", "ENABLED");
+        Instant start = schedule.getCreationDate().plusSeconds(60);
+        schedule.setStartDate(start);
+        when(schedulerService.listAllSchedules()).thenReturn(List.of(schedule));
+
+        dispatcher.tick(start.minusSeconds(1));
+        verifyNoInteractions(invoker);
+        dispatcher.tick(start.plusSeconds(5));
+        verify(invoker).invoke(eq(schedule), eq(start), any(), anyInt());
+        dispatcher.tick(start.plusSeconds(604));
+        verify(invoker, times(1)).invoke(eq(schedule), any(), any(), anyInt());
+        dispatcher.tick(start.plusSeconds(605));
+        verify(invoker).invoke(eq(schedule), eq(start.plusSeconds(605)), any(), anyInt());
+    }
+
+    @Test
+    void rateUsesUpdatedStartDateBeforeFirstFire() {
+        Schedule schedule = newSchedule("updated-rate", "rate(10 minutes)", "ENABLED");
+        Instant start = schedule.getCreationDate().plusSeconds(60);
+        schedule.setStartDate(start);
+        when(schedulerService.listAllSchedules()).thenReturn(List.of(schedule));
+        dispatcher.tick(start.minusSeconds(1));
+        schedule.setStartDate(start.plusSeconds(60));
+
+        dispatcher.tick(start);
+        verifyNoInteractions(invoker);
+        dispatcher.tick(start.plusSeconds(60));
+        verify(invoker).invoke(eq(schedule), eq(start.plusSeconds(60)), any(), anyInt());
+    }
+
+    @Test
+    void rateWithoutCreationDateFiresOnlyOnceAtFirstTick() {
+        Schedule schedule = newSchedule("missing-creation", "rate(5 minutes)", "ENABLED");
+        schedule.setCreationDate(null);
+        Instant now = Instant.parse("2026-04-21T09:00:00Z");
+        when(schedulerService.listAllSchedules()).thenReturn(List.of(schedule));
+
+        dispatcher.tick(now);
+        dispatcher.tick(now.plusSeconds(1));
+        verify(invoker).invoke(eq(schedule), eq(now), any(), anyInt());
+        verify(invoker, times(1)).invoke(eq(schedule), any(), any(), anyInt());
+    }
+
+    @Test
+    void ratesKeepIntervalFromActualDispatchTime() {
         Schedule s = newSchedule("rate1", "rate(5 minutes)", "ENABLED");
         s.setCreationDate(Instant.parse("2026-04-21T09:00:00Z"));
         when(schedulerService.listAllSchedules()).thenReturn(List.of(s));
 
         dispatcher.tick(Instant.parse("2026-04-21T09:04:00Z"));
-        verify(invoker, never()).invoke(any(), any(), any(), anyInt());
+        verify(invoker).invoke(eq(s), eq(s.getCreationDate()), any(), anyInt());
 
         dispatcher.tick(Instant.parse("2026-04-21T09:06:00Z"));
         verify(invoker, times(1)).invoke(eq(s), any(), any(), anyInt());
@@ -209,6 +270,9 @@ class ScheduleDispatcherTest {
         Schedule schedule = newSchedule("legacy-weekly", "rate(1 week)", "ENABLED");
         when(schedulerService.listAllSchedules()).thenReturn(List.of(schedule));
 
+        dispatcher.tick(schedule.getCreationDate());
+        verify(invoker).invoke(eq(schedule), eq(schedule.getCreationDate()), any(), anyInt());
+        clearInvocations(invoker);
         dispatcher.tick(Instant.parse("2026-04-28T08:59:59Z"));
         verify(invoker, never()).invoke(any(), any(), any(), anyInt());
 
@@ -228,6 +292,9 @@ class ScheduleDispatcherTest {
         s.setCreationDate(Instant.parse("2026-03-07T10:30:00Z"));
         when(schedulerService.listAllSchedules()).thenReturn(List.of(s));
 
+        dispatcher.tick(s.getCreationDate());
+        verify(invoker).invoke(eq(s), eq(s.getCreationDate()), any(), anyInt());
+        clearInvocations(invoker);
         dispatcher.tick(Instant.parse("2026-03-08T09:30:00Z"));
         verify(invoker, never()).invoke(any(), any(), any(), anyInt());
         dispatcher.tick(Instant.parse("2026-03-08T10:30:00Z"));
@@ -471,7 +538,7 @@ class ScheduleDispatcherTest {
 
         verify(invoker, times(4)).invoke(eq(s), any(), any(), anyInt());
         List<Map<String, MessageAttributeValue>> deadLetters = deadLetters(2);
-        assertEquals("2026-04-21T09:05:00Z", attribute(deadLetters.get(0), "SCHEDULED_TIME"));
+        assertEquals("2026-04-21T09:00:00Z", attribute(deadLetters.get(0), "SCHEDULED_TIME"));
         assertEquals("2026-04-21T09:10:00Z", attribute(deadLetters.get(1), "SCHEDULED_TIME"));
         assertNotEquals(attribute(deadLetters.get(0), "EXECUTION_ID"), attribute(deadLetters.get(1), "EXECUTION_ID"));
     }

@@ -2,14 +2,22 @@ package io.github.hectorvent.floci.services.ecs;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.net.URI;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * {@code ExecuteCommand}'s control-plane half: what a task has to be for a session to be opened at
@@ -21,6 +29,9 @@ import static org.hamcrest.Matchers.hasSize;
  */
 @QuarkusTest
 class EcsExecuteCommandIntegrationTest {
+
+    @Inject
+    EcsService service;
 
     private static final String TARGET = "AmazonEC2ContainerServiceV20141113.";
     private static final String CT = "application/x-amz-json-1.1";
@@ -52,6 +63,29 @@ class EcsExecuteCommandIntegrationTest {
                 + "\",\"launchType\":\"FARGATE\"," + NETWORK + ",\"enableExecuteCommand\":"
                 + enableExecuteCommand + "}", 200)
                 .jsonPath().getString("tasks[0].taskArn");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"localhost", "127.0.0.1"})
+    void streamUrlUsesTheCallingHttpEndpoint(String hostname) {
+        String taskArn = runTask("exec-caller-" + hostname.replace('.', '-'), true);
+        // A synthetic runtime reaches URL generation without opening a Docker exec session.
+        service.describeTasks(CLUSTER, List.of(taskArn), "us-east-1").getFirst()
+                .getContainers().getFirst().setRuntimeId("runtime-for-url-test");
+
+        Response response = given().baseUri("http://" + hostname).port(RestAssured.port)
+                .contentType(CT).header("X-Amz-Target", TARGET + "ExecuteCommand")
+                .header("X-Forwarded-Host", "untrusted.invalid:1234")
+                .header("X-Forwarded-Proto", "https")
+                .body("{\"cluster\":\"" + CLUSTER + "\",\"task\":\"" + taskArn
+                        + "\",\"container\":\"app\",\"command\":\"/bin/sh\",\"interactive\":true}")
+                .when().post("/").then().statusCode(200).extract().response();
+
+        URI streamUrl = URI.create(response.jsonPath().getString("session.streamUrl"));
+        assertEquals("ws", streamUrl.getScheme());
+        assertEquals(hostname, streamUrl.getHost());
+        assertEquals(RestAssured.port, streamUrl.getPort());
+        assertEquals("/v1/data-channel/" + response.jsonPath().getString("session.sessionId"), streamUrl.getPath());
     }
 
     @Test

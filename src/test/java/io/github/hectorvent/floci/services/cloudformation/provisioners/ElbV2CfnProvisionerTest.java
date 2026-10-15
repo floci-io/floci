@@ -574,12 +574,9 @@ class ElbV2CfnProvisionerTest {
         assertTrue(provisioner.hasReplacementUpdate(r));
         assertEquals(renamed.getLoadBalancerArn(), provisioner.updateCleanupPhysicalId(r));
         org.mockito.Mockito.reset(elb);
-        // A second rollback has no replacement of this update to undo: it deletes nothing and keeps
-        // the orphan owed (the load balancer itself rolls back as complete, nothing being modified).
-        provisioner.rollbackUpdate(r);
-        verify(elb, never()).deleteLoadBalancer(anyString(), anyString());
-        assertTrue(provisioner.hasReplacementUpdate(r));
-        assertEquals(new UpdateCleanupResult(true, true, renamed.getLoadBalancerArn(), 0, null), provisioner.completeUpdate(r));
+        // A retried rollback (ContinueUpdateRollback) re-attempts the delete that failed; succeeding,
+        // it owes nothing more and never touches the restored prior.
+        assertTrue(provisioner.rollbackUpdate(r));
         verify(elb).deleteLoadBalancer(REGION, renamed.getLoadBalancerArn());
         verify(elb, never()).deleteLoadBalancer(REGION, LB_ARN);
         assertFalse(provisioner.hasReplacementUpdate(r));

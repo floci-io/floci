@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -52,18 +51,18 @@ public class RedshiftServerlessUsageLimitService implements Resettable {
 
     public synchronized UsageLimit createUsageLimit(String resourceArn, String usageType, Long amount,
                                                     String period, String breachAction, String region) {
-        requireText(resourceArn, "resourceArn");
-        requireText(usageType, "usageType");
+        ServerlessSupport.requireText(resourceArn, "resourceArn");
+        ServerlessSupport.requireText(usageType, "usageType");
         requireOneOf(usageType, USAGE_TYPES, "usageType");
         if (amount == null) {
-            throw validation("amount is required.");
+            throw ServerlessSupport.validation("amount is required.");
         }
         requirePositive(amount);
         String resolvedPeriod = period == null ? DEFAULT_PERIOD : requireOneOf(period, PERIODS, "period");
         String resolvedAction = breachAction == null
                 ? DEFAULT_BREACH_ACTION : requireOneOf(breachAction, BREACH_ACTIONS, "breachAction");
         serverless.findWorkgroupByArn(resourceArn, region)
-                .orElseThrow(() -> notFound("The resource " + resourceArn + " was not found."));
+                .orElseThrow(() -> ServerlessSupport.notFound("The resource " + resourceArn + " was not found."));
 
         UsageLimit limit = new UsageLimit();
         limit.setUsageLimitId(UUID.randomUUID().toString());
@@ -130,14 +129,14 @@ public class RedshiftServerlessUsageLimitService implements Resettable {
     }
 
     private UsageLimit require(String usageLimitId, String region) {
-        requireText(usageLimitId, "usageLimitId");
+        ServerlessSupport.requireText(usageLimitId, "usageLimitId");
         UsageLimit limit = usageLimits.get(storageKey(region, usageLimitId)).orElse(null);
         if (limit != null && !isLive(limit, region)) {
             usageLimits.delete(storageKey(region, usageLimitId));
             limit = null;
         }
         if (limit == null) {
-            throw notFound("The usage limit " + usageLimitId + " was not found.");
+            throw ServerlessSupport.notFound("The usage limit " + usageLimitId + " was not found.");
         }
         return limit;
     }
@@ -164,30 +163,16 @@ public class RedshiftServerlessUsageLimitService implements Resettable {
         return region + "::" + usageLimitId;
     }
 
-    private static void requireText(String value, String field) {
-        if (value == null || value.isBlank()) {
-            throw validation(field + " is required.");
-        }
-    }
-
     private static String requireOneOf(String value, Set<String> allowed, String field) {
         if (!allowed.contains(value)) {
-            throw validation(field + " must be one of " + allowed.stream().sorted().toList() + ".");
+            throw ServerlessSupport.validation(field + " must be one of " + allowed.stream().sorted().toList() + ".");
         }
         return value;
     }
 
     private static void requirePositive(long amount) {
         if (amount < 1) {
-            throw validation("amount must be a positive number.");
+            throw ServerlessSupport.validation("amount must be a positive number.");
         }
-    }
-
-    private static AwsException notFound(String message) {
-        return new AwsException("ResourceNotFoundException", message, 400);
-    }
-
-    private static AwsException validation(String message) {
-        return new AwsException("ValidationException", message, 400);
     }
 }

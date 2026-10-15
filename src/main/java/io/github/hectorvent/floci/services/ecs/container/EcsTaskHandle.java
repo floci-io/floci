@@ -4,6 +4,7 @@ import java.io.Closeable;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -29,6 +30,7 @@ public class EcsTaskHandle {
     private final String firelensVolumeName;
     private final String networkInterfaceId;
     private final String region;
+    private final Set<String> taskVolumeNames;
     /** Per-container {@code stopTimeout}, so teardown waits as long as the task definition asked. */
     private final Map<String, Integer> stopTimeouts;
     /**
@@ -57,12 +59,21 @@ public class EcsTaskHandle {
                          Map<String, Closeable> logStreamsByContainerId,
                          String firelensVolumeName, String networkInterfaceId, String region,
                          Map<String, Integer> stopTimeouts) {
+        this(taskArn, containerIds, logStreamsByContainerId, firelensVolumeName,
+                networkInterfaceId, region, stopTimeouts, Set.of());
+    }
+
+    public EcsTaskHandle(String taskArn, Map<String, String> containerIds,
+                         Map<String, Closeable> logStreamsByContainerId,
+                         String firelensVolumeName, String networkInterfaceId, String region,
+                         Map<String, Integer> stopTimeouts, Set<String> taskVolumeNames) {
         this.taskArn = taskArn;
         this.containerIds = new LinkedHashMap<>(containerIds);
         this.logStreamsByContainerId = new LinkedHashMap<>(logStreamsByContainerId);
         this.firelensVolumeName = firelensVolumeName;
         this.networkInterfaceId = networkInterfaceId;
         this.region = region;
+        this.taskVolumeNames = new LinkedHashSet<>(taskVolumeNames);
         this.stopTimeouts = new LinkedHashMap<>(stopTimeouts);
     }
 
@@ -72,6 +83,15 @@ public class EcsTaskHandle {
     public String getFirelensVolumeName() { return firelensVolumeName; }
     public String getNetworkInterfaceId() { return networkInterfaceId; }
     public String getRegion() { return region; }
+    public Set<String> getTaskVolumeNames() { return Set.copyOf(taskVolumeNames); }
+
+    public void recordTaskVolumeRemoved(String volumeName) {
+        taskVolumeNames.remove(volumeName);
+    }
+
+    public boolean hasTaskVolumes() {
+        return !taskVolumeNames.isEmpty();
+    }
 
     /** The container's {@code stopTimeout} in seconds, or {@link #DEFAULT_STOP_TIMEOUT_SECONDS}. */
     public int stopTimeoutFor(String containerName) {

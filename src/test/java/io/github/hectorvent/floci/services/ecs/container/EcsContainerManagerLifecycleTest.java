@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
+import com.github.dockerjava.api.command.ListVolumesCmd;
+import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StopContainerCmd;
 import com.github.dockerjava.api.model.Container;
@@ -16,6 +19,7 @@ import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 
 import java.io.Closeable;
@@ -23,6 +27,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -33,6 +39,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -259,10 +266,126 @@ class EcsContainerManagerLifecycleTest {
         verify(lifecycleManager, never()).removeIfExistsStrict(anyString());
     }
 
+    @Test
+    void previousRunVolumesAreRemovedAfterContainersAndFailedRemovalIsRetried() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        stubLeftoverListing(lifecycle, Map.of(), Map.of());
+        InspectVolumeResponse old = leftoverVolume("old", "alpha/4566", "previous");
+        InspectVolumeResponse current = leftoverVolume("current", "alpha/4566", "current");
+        InspectVolumeResponse foreign = leftoverVolume("foreign", "beta/4566", "previous");
+        InspectVolumeResponse unowned = leftoverVolume("unowned", "alpha/4566", null);
+        InspectVolumeResponse conflicting = leftoverVolume("conflicting", "alpha/4566", "previous");
+        when(conflicting.getLabels()).thenReturn(Map.of("io.floci.service", "ecs",
+                "io.floci.owner", "alpha/4566", "floci_owner_port", "beta/4566", "io.floci.ecs.run", "previous"));
+        stubVolumeListing(lifecycle.getDockerClient(), List.of(old, current, foreign, unowned, conflicting));
+        doThrow(new IllegalStateException("busy")).doNothing().when(lifecycle).removeVolumeStrict("old");
+        EcsContainerManager manager = manager(lifecycle, namespacedConfig());
+
+        assertTrue(manager.removeLeftoverContainers("current"));
+        assertFalse(manager.removeLeftoverTaskVolumes("current"));
+        assertTrue(manager.removeLeftoverTaskVolumes("current"));
+        verify(lifecycle, times(2)).removeVolumeStrict("old");
+        verify(lifecycle, never()).removeVolumeStrict("current");
+        verify(lifecycle, never()).removeVolumeStrict("foreign");
+        verify(lifecycle, never()).removeVolumeStrict("unowned");
+        verify(lifecycle, never()).removeVolumeStrict("conflicting");
+    }
+
+    @Test
+    void previousRunVolumeSweepWaitsForContainerRemoval() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        stubLeftoverListing(lifecycle, Map.of("old-container", leftover("old-container",
+                Map.of("io.floci.service", "ecs", "io.floci.owner", "alpha/4566", "io.floci.ecs.run", "previous"))),
+                Map.of());
+        doThrow(new IllegalStateException("busy")).when(lifecycle).removeIfExistsStrict("old-container");
+        assertFalse(manager(lifecycle, namespacedConfig()).removeLeftoverContainers("current"));
+        verify(lifecycle.getDockerClient(), never()).listVolumesCmd();
+    }
+
+    @Test
+    void previousRunVolumeSweepRetriesWhenInventoryCannotBeRead() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        stubLeftoverListing(lifecycle, Map.of(), Map.of());
+        when(lifecycle.getDockerClient().listVolumesCmd()).thenThrow(new IllegalStateException("offline"));
+        EcsContainerManager manager = manager(lifecycle, namespacedConfig());
+        assertTrue(manager.removeLeftoverContainers("current"));
+        assertFalse(manager.removeLeftoverTaskVolumes("current"));
+        verify(lifecycle, never()).removeVolume(anyString());
+    }
+
+    @Test
+    void volumeRemovalWarnsOncePerVolumeAndResetsAfterSuccessfulRemoval() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        stubLeftoverListing(lifecycle, Map.of(), Map.of());
+        stubVolumeListing(lifecycle.getDockerClient(), List.of(
+                leftoverVolume("alpha", "alpha/4566", "previous"),
+                leftoverVolume("beta", "alpha/4566", "previous")));
+        doThrow(new IllegalStateException("busy")).when(lifecycle).removeVolumeStrict(anyString());
+        EcsContainerManager manager = manager(lifecycle, namespacedConfig());
+        List<LogRecord> records = LogCapture.capture(EcsContainerManager.class, () -> {
+            assertFalse(manager.removeLeftoverTaskVolumes("current"));
+            assertFalse(manager.removeLeftoverTaskVolumes("current"));
+            doNothing().when(lifecycle).removeVolumeStrict("alpha");
+            assertFalse(manager.removeLeftoverTaskVolumes("current"));
+            doThrow(new IllegalStateException("busy again")).when(lifecycle).removeVolumeStrict("alpha");
+            assertFalse(manager.removeLeftoverTaskVolumes("current"));
+        });
+        assertEquals(List.of(Level.WARNING.intValue(), Level.WARNING.intValue(),
+                Level.FINE.intValue(), Level.FINE.intValue(), Level.FINE.intValue(),
+                Level.WARNING.intValue(), Level.FINE.intValue()),
+                records.stream().map(record -> record.getLevel().intValue()).toList());
+        verify(lifecycle, times(4)).removeVolumeStrict("alpha");
+        verify(lifecycle, times(4)).removeVolumeStrict("beta");
+        verify(lifecycle, never()).removeVolume(anyString());
+    }
+
+    @Test
+    void volumeListingWarnsOnceAndResetsAfterSuccessfulListing() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        stubLeftoverListing(lifecycle, Map.of(), Map.of());
+        ListVolumesCmd command = lifecycle.getDockerClient().listVolumesCmd();
+        ListVolumesResponse empty = mock(ListVolumesResponse.class);
+        when(empty.getVolumes()).thenReturn(List.of());
+        when(command.exec()).thenThrow(new IllegalStateException("offline"))
+                .thenThrow(new IllegalStateException("offline"))
+                .thenReturn(empty, empty).thenThrow(new IllegalStateException("offline again"));
+        EcsContainerManager manager = manager(lifecycle, namespacedConfig());
+        List<LogRecord> records = LogCapture.capture(EcsContainerManager.class, () -> {
+            assertFalse(manager.removeLeftoverTaskVolumes("current"));
+            assertFalse(manager.removeLeftoverTaskVolumes("current"));
+            assertTrue(manager.removeLeftoverTaskVolumes("current"));
+            assertFalse(manager.removeLeftoverTaskVolumes("current"));
+        });
+        assertEquals(List.of(Level.WARNING.intValue(), Level.FINE.intValue(), Level.WARNING.intValue()),
+                records.stream().map(record -> record.getLevel().intValue()).toList());
+    }
+
+    private static InspectVolumeResponse leftoverVolume(String name, String owner, String run) {
+        InspectVolumeResponse volume = mock(InspectVolumeResponse.class);
+        when(volume.getName()).thenReturn(name);
+        Map<String, String> labels = new LinkedHashMap<>();
+        labels.put("io.floci.service", "ecs");
+        labels.put("io.floci.owner", owner);
+        if (run != null) {
+            labels.put("io.floci.ecs.run", run);
+        }
+        when(volume.getLabels()).thenReturn(labels);
+        return volume;
+    }
+
+    private static void stubVolumeListing(DockerClient docker, List<InspectVolumeResponse> volumes) {
+        ListVolumesCmd command = mock(ListVolumesCmd.class, RETURNS_SELF);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        when(docker.listVolumesCmd()).thenReturn(command);
+        when(command.exec()).thenReturn(response);
+        when(response.getVolumes()).thenReturn(volumes);
+    }
+
     private static void stubLeftoverListing(ContainerLifecycleManager lifecycleManager,
                                             Map<String, Container> newKeys, Map<String, Container> legacyKeys) {
         DockerClient dockerClient = mock(DockerClient.class);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        stubVolumeListing(dockerClient, List.of());
         ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
         when(dockerClient.listContainersCmd()).thenReturn(listCmd);
         ListContainersCmd byNewKeys = mock(ListContainersCmd.class);

@@ -63,6 +63,7 @@ class FirehoseCompressionDeliveryTest {
      */
     private static final int BUFFERING_INTERVAL_SECONDS = 5;
     private static final long POLL_TIMEOUT_MILLIS = 240_000L;
+    private static final long POLL_INTERVAL_MILLIS = TestFixtures.isRealAws() ? 5_000L : 250L;
 
     private static FirehoseClient firehose;
     private static S3Client s3;
@@ -202,7 +203,7 @@ class FirehoseCompressionDeliveryTest {
             if (!contents.isEmpty()) {
                 return contents.get(0).key();
             }
-            Thread.sleep(5_000L);
+            Thread.sleep(POLL_INTERVAL_MILLIS);
         }
         throw new AssertionError("no object delivered under " + prefix + " within "
                 + POLL_TIMEOUT_MILLIS / 1000 + "s");

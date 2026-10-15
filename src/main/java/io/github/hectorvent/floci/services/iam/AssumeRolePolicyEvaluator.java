@@ -21,9 +21,10 @@ import java.util.regex.Pattern;
  * <p>Trust policies are principal-centric and carry no {@code Resource} element, so they cannot be
  * evaluated by {@link IamPolicyEvaluator} (which is identity/resource oriented). This focused
  * evaluator matches each statement's {@code Action} and {@code Principal} against the caller, hands
- * its {@code Condition} to {@link IamPolicyEvaluator#conditionMatches} with the request's context,
- * and applies AWS precedence: an explicit {@code Deny} wins, otherwise a matching {@code Allow}
- * grants.
+ * its {@code Condition} to {@link IamPolicyEvaluator#conditionMatches} with the request's context
+ * and the document's own {@code Version}, which is what decides whether a {@code ${...}} in a
+ * condition value is a policy variable, and applies AWS precedence: an explicit {@code Deny} wins,
+ * otherwise a matching {@code Allow} grants.
  *
  * <p>Only AWS principals are modeled (account-root, bare account id, exact principal ARN, and
  * {@code "*"}); {@code Service} and {@code Federated} principals never match a SigV4 caller and are
@@ -49,8 +50,36 @@ public class AssumeRolePolicyEvaluator {
     }
 
     /**
+     * How a trust policy answers a caller's {@code sts:AssumeRole}. A {@code Principal} naming an
+     * account, by its id or its root ARN, delegates the decision to that account's own policies
+     * (IAM User Guide, "AWS account principals"), so an Allow through one is told apart from an
+     * Allow naming the caller.
+     */
+    public enum TrustDecision {
+        /** An Allow names the caller, its role or every principal. */
+        ALLOW,
+        /** An Allow names the caller's account and nothing narrower. */
+        ALLOW_ACCOUNT,
+        EXPLICIT_DENY,
+        NEUTRAL
+    }
+
+    private enum PrincipalMatch { NONE, ACCOUNT, CALLER }
+
+    /**
      * Returns true if {@code trustPolicyDocument} allows the caller (identified by
-     * {@code callerArn}, in {@code callerAccount}) to perform {@code sts:AssumeRole}.
+     * {@code callerArn}, in {@code callerAccount}) to perform {@code sts:AssumeRole}, through any
+     * principal: see {@link #decide} for the arguments.
+     */
+    public boolean allows(String trustPolicyDocument, String callerArn, String principalArn,
+                          String callerAccount, Map<String, List<String>> requestContext) {
+        TrustDecision decision = decide(trustPolicyDocument, callerArn, principalArn, callerAccount, requestContext);
+        return decision == TrustDecision.ALLOW || decision == TrustDecision.ALLOW_ACCOUNT;
+    }
+
+    /**
+     * Decides whether {@code trustPolicyDocument} lets the caller (identified by {@code callerArn},
+     * in {@code callerAccount}) perform {@code sts:AssumeRole}, and through which principal.
      *
      * <p>{@code principalArn} is the caller's IAM identity: the user's ARN, or for a role session
      * the role's own ARN, path included, which the session ARN does not carry. A {@code Principal}
@@ -58,40 +87,43 @@ public class AssumeRolePolicyEvaluator {
      * {@code requestContext} holds the other condition keys the request carries, such as
      * {@code sts:ExternalId}; each statement's {@code Condition} is evaluated against both.
      *
-     * <p>A null/blank/unparseable document or one with no matching {@code Allow} denies.
+     * <p>A null/blank/unparseable document or one with no matching statement is
+     * {@link TrustDecision#NEUTRAL}.
      */
-    public boolean allows(String trustPolicyDocument, String callerArn, String principalArn,
-                          String callerAccount, Map<String, List<String>> requestContext) {
+    public TrustDecision decide(String trustPolicyDocument, String callerArn, String principalArn,
+                                String callerAccount, Map<String, List<String>> requestContext) {
         if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
-            return false;
+            return TrustDecision.NEUTRAL;
         }
-        JsonNode statements;
+        JsonNode root;
         try {
-            statements = objectMapper.readTree(trustPolicyDocument).path("Statement");
+            root = objectMapper.readTree(trustPolicyDocument);
         } catch (Exception e) {
             LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
-            return false;
+            return TrustDecision.NEUTRAL;
         }
+        JsonNode statements = root.path("Statement");
         if (!isWellFormed(statements)) {
-            return false;
+            return TrustDecision.NEUTRAL;
         }
+        String version = root.path("Version").asText(null);
         Map<String, List<String>> context = new HashMap<>(requestContext);
         if (principalArn != null) {
             context.put("aws:PrincipalArn", List.of(principalArn));
         }
-        boolean allow = false;
-        if (statements.isArray()) {
-            for (JsonNode stmt : statements) {
-                switch (evaluateStatement(stmt, callerArn, principalArn, callerAccount, context)) {
-                    case DENY -> { return false; }
-                    case ALLOW -> allow = true;
-                    case NO_MATCH -> { }
-                }
+        Iterable<JsonNode> statementList = statements.isArray() ? statements : List.of(statements);
+        TrustDecision decision = TrustDecision.NEUTRAL;
+        for (JsonNode stmt : statementList) {
+            TrustDecision match =
+                    evaluateStatement(stmt, callerArn, principalArn, callerAccount, context, version);
+            if (match == TrustDecision.EXPLICIT_DENY) {
+                return TrustDecision.EXPLICIT_DENY;
             }
-        } else if (statements.isObject()) {
-            return evaluateStatement(statements, callerArn, principalArn, callerAccount, context) == Match.ALLOW;
+            if (match == TrustDecision.ALLOW || decision == TrustDecision.NEUTRAL) {
+                decision = match;
+            }
         }
-        return allow;
+        return decision;
     }
 
     /**
@@ -137,16 +169,18 @@ public class AssumeRolePolicyEvaluator {
         if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
             return false;
         }
-        JsonNode statements;
+        JsonNode root;
         try {
-            statements = objectMapper.readTree(trustPolicyDocument).path("Statement");
+            root = objectMapper.readTree(trustPolicyDocument);
         } catch (Exception e) {
             LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
             return false;
         }
+        JsonNode statements = root.path("Statement");
         if (!isWellFormed(statements)) {
             return false;
         }
+        String version = root.path("Version").asText(null);
         Map<String, List<String>> context = new HashMap<>();
         if (sourceArn != null) {
             context.put("aws:SourceArn", List.of(sourceArn));
@@ -157,14 +191,14 @@ public class AssumeRolePolicyEvaluator {
         boolean allow = false;
         if (statements.isArray()) {
             for (JsonNode statement : statements) {
-                switch (evaluateServiceStatement(statement, servicePrincipal, context)) {
+                switch (evaluateServiceStatement(statement, servicePrincipal, context, version)) {
                     case DENY -> { return false; }
                     case ALLOW -> allow = true;
                     case NO_MATCH -> { }
                 }
             }
         } else if (statements.isObject()) {
-            return evaluateServiceStatement(statements, servicePrincipal, context) == Match.ALLOW;
+            return evaluateServiceStatement(statements, servicePrincipal, context, version) == Match.ALLOW;
         }
         return allow;
     }
@@ -215,18 +249,24 @@ public class AssumeRolePolicyEvaluator {
         return true;
     }
 
-    private Match evaluateStatement(JsonNode stmt, String callerArn, String principalArn,
-                                    String callerAccount, Map<String, List<String>> context) {
+    private TrustDecision evaluateStatement(JsonNode stmt, String callerArn, String principalArn,
+                                            String callerAccount, Map<String, List<String>> context,
+                                            String policyVersion) {
         if (!actionApplies(stmt)) {
-            return Match.NO_MATCH;
+            return TrustDecision.NEUTRAL;
         }
-        if (!matchesPrincipal(stmt.get("Principal"), callerArn, principalArn, callerAccount)) {
-            return Match.NO_MATCH;
+        PrincipalMatch principal = matchPrincipal(stmt.get("Principal"), callerArn, principalArn, callerAccount);
+        if (principal == PrincipalMatch.NONE) {
+            return TrustDecision.NEUTRAL;
         }
-        if (!policyEvaluator.conditionMatches(stmt.get("Condition"), context)) {
-            return Match.NO_MATCH;
+        if (!policyEvaluator.conditionMatches(stmt.get("Condition"), context, policyVersion)) {
+            return TrustDecision.NEUTRAL;
         }
-        return effectOf(stmt);
+        return switch (effectOf(stmt)) {
+            case DENY -> TrustDecision.EXPLICIT_DENY;
+            case ALLOW -> principal == PrincipalMatch.CALLER ? TrustDecision.ALLOW : TrustDecision.ALLOW_ACCOUNT;
+            case NO_MATCH -> TrustDecision.NEUTRAL;
+        };
     }
 
     private Match evaluateServiceStatement(JsonNode stmt, String servicePrincipal) {
@@ -237,11 +277,11 @@ public class AssumeRolePolicyEvaluator {
     }
 
     private Match evaluateServiceStatement(JsonNode stmt, String servicePrincipal,
-                                           Map<String, List<String>> context) {
+                                           Map<String, List<String>> context, String policyVersion) {
         if (!actionApplies(stmt) || !matchesServicePrincipal(stmt.get("Principal"), servicePrincipal)) {
             return Match.NO_MATCH;
         }
-        if (!policyEvaluator.conditionMatches(stmt.get("Condition"), context)) {
+        if (!policyEvaluator.conditionMatches(stmt.get("Condition"), context, policyVersion)) {
             return Match.NO_MATCH;
         }
         return effectOf(stmt);
@@ -315,58 +355,66 @@ public class AssumeRolePolicyEvaluator {
         return false;
     }
 
-    private boolean matchesPrincipal(JsonNode principalNode, String callerArn, String principalArn,
-                                     String callerAccount) {
+    /** The narrowest of the statement's principals that matches the caller wins: the caller over its account. */
+    private PrincipalMatch matchPrincipal(JsonNode principalNode, String callerArn, String principalArn,
+                                          String callerAccount) {
         if (principalNode == null) {
-            return false;
+            return PrincipalMatch.NONE;
         }
         // Principal: "*"
         if (principalNode.isTextual()) {
-            return "*".equals(principalNode.asText());
+            return "*".equals(principalNode.asText()) ? PrincipalMatch.CALLER : PrincipalMatch.NONE;
         }
         if (!principalNode.isObject()) {
-            return false;
+            return PrincipalMatch.NONE;
         }
         // Only the AWS principal type can match a SigV4 caller.
         JsonNode aws = principalNode.get("AWS");
         if (aws == null) {
-            return false;
+            return PrincipalMatch.NONE;
         }
         if (aws.isTextual()) {
-            return matchesAwsPrincipal(aws.asText(), callerArn, principalArn, callerAccount);
+            return matchAwsPrincipal(aws.asText(), callerArn, principalArn, callerAccount);
         }
+        PrincipalMatch match = PrincipalMatch.NONE;
         if (aws.isArray()) {
             for (JsonNode entry : aws) {
-                if (entry.isTextual()
-                        && matchesAwsPrincipal(entry.asText(), callerArn, principalArn, callerAccount)) {
-                    return true;
+                PrincipalMatch entryMatch = entry.isTextual()
+                        ? matchAwsPrincipal(entry.asText(), callerArn, principalArn, callerAccount)
+                        : PrincipalMatch.NONE;
+                if (entryMatch == PrincipalMatch.CALLER) {
+                    return PrincipalMatch.CALLER;
+                }
+                if (entryMatch == PrincipalMatch.ACCOUNT) {
+                    match = PrincipalMatch.ACCOUNT;
                 }
             }
         }
-        return false;
+        return match;
     }
 
-    private boolean matchesAwsPrincipal(String principal, String callerArn, String principalArn,
-                                        String callerAccount) {
+    private PrincipalMatch matchAwsPrincipal(String principal, String callerArn, String principalArn,
+                                             String callerAccount) {
         if (principal == null) {
-            return false;
+            return PrincipalMatch.NONE;
         }
         if ("*".equals(principal)) {
-            return true;
+            return PrincipalMatch.CALLER;
         }
         // Bare 12-digit account id, or an account-root ARN → matches any principal in that account.
         if (principal.matches("\\d{12}")) {
-            return principal.equals(callerAccount);
+            return principal.equals(callerAccount) ? PrincipalMatch.ACCOUNT : PrincipalMatch.NONE;
         }
         Matcher rootMatcher = ACCOUNT_ROOT_ARN.matcher(principal);
         if (rootMatcher.matches()) {
-            return rootMatcher.group(1).equals(callerAccount);
+            return rootMatcher.group(1).equals(callerAccount) ? PrincipalMatch.ACCOUNT : PrincipalMatch.NONE;
         }
         // Otherwise an exact (glob-capable) principal ARN: the caller's own ARN, which for a role
         // session is its assumed-role session ARN, or the role's ARN for a Principal naming the role.
         if (callerArn != null && IamPolicyEvaluator.globMatches(principal, callerArn)) {
-            return true;
+            return PrincipalMatch.CALLER;
         }
-        return principalArn != null && IamPolicyEvaluator.globMatches(principal, principalArn);
+        return principalArn != null && IamPolicyEvaluator.globMatches(principal, principalArn)
+                ? PrincipalMatch.CALLER : PrincipalMatch.NONE;
     }
 }

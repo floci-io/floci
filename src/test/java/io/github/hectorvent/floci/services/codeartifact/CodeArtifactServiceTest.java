@@ -311,6 +311,15 @@ class CodeArtifactServiceTest {
                 bytes, fence);
     }
 
+    /** Same snapshot-then-report shape as {@link #recordBytes}, for readme capture instead. */
+    private void recordReadme(String domain, String repository, String format, String namespace, String packageName,
+            String version, String readme) {
+        long fence = service.currentContainerBackedPackageFence(REGION, domain, null, repository, format, namespace,
+                packageName);
+        service.recordPublishedPackageVersionReadme(REGION, domain, null, repository, format, namespace, packageName,
+                version, readme, fence);
+    }
+
     /**
      * {@code recordContainerBackedAssetBytes} is what each of the three sidecar-backed proxies
      * calls after a real (non-idempotent, non-rejected) write; this is the unit-level proof that
@@ -2119,6 +2128,254 @@ class CodeArtifactServiceTest {
                 "dom", null, "repo", "pypi", null, "my-pkg", "1.0.0", "my_pkg-1.0.0.whl", "not-the-real-revision"));
         assertEquals("ResourceNotFoundException", wrongRevision.getErrorCode());
         assertEquals("package-version", wrongRevision.getExtendedData().get("resourceType"));
+    }
+
+    // ---------------------------------------------------------- GetPackageVersionReadme
+
+    @Test
+    void getPackageVersionReadmeRejectsAFormatAwsDoesNotSupportForThisAction() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        // AWS's own API reference restricts this one action's format parameter to npm/pypi/nuget,
+        // narrower than every other package-version action here, which accepts the full 8-value
+        // set: maven, swift, generic, ruby, and cargo package versions carry no readme in real
+        // CodeArtifact at all, so every one of them is checked here, not just maven.
+        for (String format : new String[] {"maven", "swift", "generic", "ruby", "cargo"}) {
+            AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom",
+                    null, "repo", format, "com.example", "my-artifact", "1.0.0"), format);
+            assertEquals("ValidationException", e.getErrorCode(), format);
+        }
+    }
+
+    /**
+     * npm, like pypi, can only ever be answered from what was captured at publish time: confirmed
+     * directly against a live Verdaccio container that it hoists {@code readme} to the top level
+     * only (the single most-recently-published version), dropping the per-version field a real
+     * npm client's own publish envelope actually sends. See
+     * {@link CodeArtifactNpmDataPlane#forwardSpooled} for where this is captured for real.
+     */
+    @Test
+    void getPackageVersionReadmeReturnsWhatWasCapturedAtNpmPublishTime() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "npm", "myscope", "my-pkg", "1.0.0", "# My Package");
+
+        CodeArtifactService.PackageVersionReadmeResult result = service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "npm", "myscope", "my-pkg", "1.0.0");
+
+        assertEquals("# My Package", result.readme());
+        assertEquals("my-pkg", result.packageName());
+        assertEquals("1.0.0", result.version());
+    }
+
+    @Test
+    void getPackageVersionReadme404sForNpmWhenNeverCaptured() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "npm", null, "my-pkg", "9.9.9"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertEquals("package-version", e.getExtendedData().get("resourceType"));
+    }
+
+    @Test
+    void getPackageVersionReadmeReturnsWhatWasCapturedAtPypiUploadTime() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "pypi", null, "my-pkg", "1.0.0", "Long description in reStructuredText.");
+
+        CodeArtifactService.PackageVersionReadmeResult result = service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "my-pkg", "1.0.0");
+
+        assertEquals("Long description in reStructuredText.", result.readme());
+    }
+
+    @Test
+    void getPackageVersionReadme404sForPypiWhenNeverCaptured() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "never-published", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * nuget is a documented valid format for this action, but nothing in Floci implements the
+     * real NuGet wire protocol, so no nuget package version can ever actually exist here; this
+     * must 404 honestly rather than throwing some other error for a format it otherwise accepts.
+     */
+    @Test
+    void getPackageVersionReadme404sForNugetSinceNothingCanEverPublishOne() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "nuget", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void recordPublishedPackageVersionReadmeSkipsAPackageNameContainingTheEscapeCharacterWithoutCorruptingOthers() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        // The escape character itself can never reach escapeKeySegment's own key building, the
+        // same way validatePackageToken already keeps it out of every JSON-API coordinate: this
+        // call is just dropped, logged, and never throws back into the sidecar upload it reports.
+        recordReadme("dom", "repo", "pypi", null, "bad#name", "1.0.0", "bad text");
+        recordReadme("dom", "repo", "pypi", null, "legit", "1.0.0", "legit text");
+
+        CodeArtifactService.PackageVersionReadmeResult result = service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "legit", "1.0.0");
+        assertEquals("legit text", result.readme());
+    }
+
+    @Test
+    void recordPublishedPackageVersionReadmeAfterTheRepositoryIsAlreadyDeletedIsIgnored() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.deleteRepository(REGION, "dom", null, "repo");
+
+        recordReadme("dom", "repo", "pypi", null, "my-pkg", "1.0.0", "late text");
+
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void deleteRepositoryRemovesItsCapturedPypiReadmesSoARecreatedRepositoryDoesNotInheritThem() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "pypi", null, "my-pkg", "1.0.0", "old text");
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void deletePackageRemovesItsCapturedPypiReadmesSoARepublishedPackageDoesNotInheritThem() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "pypi", null, "my-pkg", "1.0.0", "old text");
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(true);
+
+        service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my-pkg");
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void forgetContainerBackedPackageRemovesItsCapturedNpmReadmeTooSoAReplacedPackageDoesNotInheritIt() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "old text");
+
+        service.forgetContainerBackedPackage(REGION, "dom", null, "repo", "npm", null, "my-pkg");
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "npm", null, "my-pkg", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * {@code getPackageVersionReadmeRejectsAFormatAwsDoesNotSupportForThisAction} above only
+     * covers the format check; a Qodo review found this method's other required-field validation
+     * (domain/repository/package/version) had no regression coverage of its own, nor any proof
+     * that a rejected request leaves a previously captured readme untouched.
+     */
+    @Test
+    void getPackageVersionReadmeRejectsMissingRequiredFieldsWithoutChangingStoredState() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "untouched text");
+
+        AwsException missingDomain = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION,
+                null, null, "repo", "npm", null, "my-pkg", "1.0.0"));
+        assertEquals("ValidationException", missingDomain.getErrorCode());
+        AwsException missingRepository = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(
+                REGION, "dom", null, null, "npm", null, "my-pkg", "1.0.0"));
+        assertEquals("ValidationException", missingRepository.getErrorCode());
+        AwsException missingPackage = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION,
+                "dom", null, "repo", "npm", null, null, "1.0.0"));
+        assertEquals("ValidationException", missingPackage.getErrorCode());
+        AwsException missingVersion = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION,
+                "dom", null, "repo", "npm", null, "my-pkg", null));
+        assertEquals("ValidationException", missingVersion.getErrorCode());
+
+        CodeArtifactService.PackageVersionReadmeResult result = service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "npm", null, "my-pkg", "1.0.0");
+        assertEquals("untouched text", result.readme());
+    }
+
+    /**
+     * Same race {@code recordContainerBackedAssetBytesAfterAConcurrentDeletePackageIsIgnored}
+     * already closes for byte accounting, found again by Qodo review for readme capture: a delayed
+     * npm callback's readme capture must not resurrect a readme for a package a concurrent
+     * {@code DeletePackage} already removed.
+     */
+    @Test
+    void recordPublishedPackageVersionReadmeAfterAConcurrentDeletePackageIsIgnored() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", null, "late");
+        when(verdaccioClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("late")))
+                .thenReturn(true);
+        service.deletePackage(REGION, "dom", null, "repo", "npm", null, "late");
+
+        service.recordPublishedPackageVersionReadme(REGION, "dom", null, "repo", "npm", null, "late", "1.0.0",
+                "too late", fence);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "npm", null, "late", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * Found by Qodo review: pypi readme capture/lookup/deletion all used the package name exactly
+     * as the caller spelled it, while {@code accountingPackageName} (and so byte accounting, the
+     * fence, and sidecar resolution itself) treats case- and {@code -_.}-equivalent spellings as
+     * the same pypi package. A readme captured under one spelling has to be answerable, and
+     * deletable, under any PEP 503-equivalent spelling of the same name.
+     */
+    @Test
+    void getPackageVersionReadmeResolvesPypiSpellingVariantsToTheSameReadme() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "pypi", null, "My_Package", "1.0.0", "the readme");
+
+        CodeArtifactService.PackageVersionReadmeResult result = service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "my-package", "1.0.0");
+
+        assertEquals("the readme", result.readme());
+        // Echoes the caller's own spelling back, not the normalized one used for the lookup.
+        assertEquals("my-package", result.packageName());
+    }
+
+    @Test
+    void deletePackageRemovesAPypiReadmeCapturedUnderADifferentSpelling() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        recordReadme("dom", "repo", "pypi", null, "My.Package", "1.0.0", "the readme");
+        when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-package")))
+                .thenReturn(true);
+
+        service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my-package");
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "pypi", null, "My_Package", "1.0.0"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
     }
 
     @Test

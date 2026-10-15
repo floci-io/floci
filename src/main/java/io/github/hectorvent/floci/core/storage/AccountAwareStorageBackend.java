@@ -308,6 +308,16 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     /**
+     * An unprefixed pre-multi-account entry, read in place (never migrated). Such entries belong
+     * to {@code defaultAccountId}, as in {@link #scanAllAccountEntries}, so any other account
+     * gets empty.
+     */
+    public Optional<V> getLegacyForAccount(String accountId, String key) {
+        return defaultAccountId.equals(accountId) && !hasAccountPrefix(key)
+                ? delegate.get(key) : Optional.empty();
+    }
+
+    /**
      * Returns an explicitly scoped entry, or safely migrates a matching legacy unscoped entry.
      *
      * <p>The caller-supplied predicate must establish that the legacy value belongs to the

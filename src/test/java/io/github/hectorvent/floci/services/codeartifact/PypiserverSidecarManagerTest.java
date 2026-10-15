@@ -2,18 +2,28 @@ package io.github.hectorvent.floci.services.codeartifact;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PerKeyContainerPool;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.lang.reflect.Field;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 /**
  * {@link PypiserverSidecarManager#stopManagedContainers()} is a thin delegation to
@@ -44,6 +54,31 @@ class PypiserverSidecarManagerTest {
 
         verify(lifecycleManager).stopAndRemove("tracked-pypiserver-1", null);
         verify(lifecycleManager).stopAndRemove("tracked-pypiserver-2", null);
+    }
+
+    /**
+     * pypi-server installs no SIGTERM handler, so without an init process as PID 1 it ignores the
+     * stop request and every stop waits out the whole timeout. The start is failed right after the
+     * create, so the test needs neither Docker nor a health endpoint.
+     */
+    @Test
+    void containerRunsUnderAnInitProcessSoAStopEndsItAtOnce() {
+        EmulatorConfig deepConfig = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(deepConfig.services().codeartifact().pypiImage()).thenReturn("pypiserver/pypiserver:v2.4.2");
+        when(deepConfig.services().dockerNetwork()).thenReturn(Optional.empty());
+        when(deepConfig.docker().resourceNamespace()).thenReturn(Optional.empty());
+        when(deepConfig.docker().logMaxSize()).thenReturn("10m");
+        when(deepConfig.docker().logMaxFile()).thenReturn("3");
+        ContainerBuilder realBuilder = new ContainerBuilder(
+                deepConfig, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class));
+        when(lifecycleManager.startCreated(any(), any())).thenThrow(new IllegalStateException("no Docker here"));
+        PypiserverSidecarManager manager = new PypiserverSidecarManager(realBuilder, lifecycleManager, deepConfig);
+
+        assertThrows(IllegalStateException.class, () -> manager.ensureReady("pypi-repo-1", "http://localhost:4566"));
+
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(spec.capture());
+        assertTrue(spec.getValue().init());
     }
 
     @Test

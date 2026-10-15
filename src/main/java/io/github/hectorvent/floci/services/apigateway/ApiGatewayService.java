@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -10,6 +11,8 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
@@ -25,6 +28,7 @@ import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
 import io.github.hectorvent.floci.services.apigateway.model.Deployment;
+import io.github.hectorvent.floci.services.apigateway.model.DeploymentExportSnapshot;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
 import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
 import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
@@ -68,6 +72,7 @@ import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -81,6 +86,12 @@ public class ApiGatewayService implements ResourceProvider {
 
     /** The only partition where API Gateway offers edge-optimized APIs and custom domain names. */
     private static final Set<String> EDGE_OPTIMIZED_PARTITIONS = Set.of("aws");
+
+    /**
+     * The regional hosted zone a custom domain reports in a region with no published one. Only
+     * the two GovCloud regions have a sourced zone ({@link AwsRegionFacts#apiGatewayRegionalHostedZoneId}).
+     */
+    private static final String UNSOURCED_REGIONAL_HOSTED_ZONE_ID = "Z2FDTNDATAQYL2"; // partition-literal: placeholder kept where no per-region source exists
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -98,6 +109,7 @@ public class ApiGatewayService implements ResourceProvider {
     private final StorageBackend<String, RestApi> apiStore;
     private final StorageBackend<String, ApiGatewayResource> resourceStore;
     private final StorageBackend<String, Deployment> deploymentStore;
+    private final StorageBackend<String, Map<String, String>> deploymentModelStore;
     private final StorageBackend<String, Stage> stageStore;
     private final StorageBackend<String, Authorizer> authorizerStore;
     private final StorageBackend<String, ApiKey> apiKeyStore;
@@ -172,6 +184,9 @@ public class ApiGatewayService implements ResourceProvider {
                 new TypeReference<>() {
                 });
         this.deploymentStore = storageFactory.create("apigateway", "apigateway-deployments.json",
+                new TypeReference<>() {
+                });
+        this.deploymentModelStore = storageFactory.create("apigateway", "apigateway-deployment-models.json",
                 new TypeReference<>() {
                 });
         this.stageStore = storageFactory.create("apigateway", "apigateway-stages.json",
@@ -404,6 +419,7 @@ public class ApiGatewayService implements ResourceProvider {
         String prefix = region + "::" + apiId + "::";
         resourceStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(resourceStore::delete);
         deploymentStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(deploymentStore::delete);
+        deploymentModelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(deploymentModelStore::delete);
         stageStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(stageStore::delete);
         modelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(modelStore::delete);
         requestValidatorStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(requestValidatorStore::delete);
@@ -775,7 +791,19 @@ public class ApiGatewayService implements ResourceProvider {
     public Deployment createDeployment(String region, String apiId, Map<String, Object> request) {
         getRestApi(region, apiId);
         String description = (String) request.getOrDefault("description", "");
-        Deployment deployment = new Deployment(shortId(10), description, System.currentTimeMillis() / 1000L);
+        String snapshot;
+        Map<String, String> schemas;
+        try {
+            snapshot = JSON.writeValueAsString(new DeploymentExportSnapshot(getRestApi(region, apiId),
+                    getResources(region, apiId), getModels(region, apiId), getAuthorizers(region, apiId),
+                    getRequestValidators(region, apiId), getGatewayResponses(region, apiId).stream()
+                            .filter(response -> !response.isDefaultResponse()).toList()));
+            schemas = modelSchemas(JSON.readValue(snapshot, DeploymentExportSnapshot.class).models());
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot capture REST API deployment", e);
+        }
+        Deployment deployment = new Deployment(shortId(10), description, System.currentTimeMillis() / 1000L, snapshot);
+        deploymentModelStore.put(deploymentKey(region, apiId, deployment.id()), schemas);
         deploymentStore.put(deploymentKey(region, apiId, deployment.id()), deployment);
         LOG.infov("Created deployment {0} for API {1}", deployment.id(), apiId);
 
@@ -830,6 +858,32 @@ public class ApiGatewayService implements ResourceProvider {
     public void deleteDeployment(String region, String apiId, String deploymentId) {
         getDeployment(region, apiId, deploymentId);
         deploymentStore.delete(deploymentKey(region, apiId, deploymentId));
+        deploymentModelStore.delete(deploymentKey(region, apiId, deploymentId));
+    }
+
+    Map<String, String> getDeploymentModelSchemas(String region, String apiId, String deploymentId) {
+        if (deploymentId != null) {
+            Optional<Map<String, String>> schemas = deploymentModelStore.get(deploymentKey(region, apiId, deploymentId));
+            if (schemas.isPresent()) {
+                return schemas.get();
+            }
+        }
+        // Deployments persisted before model snapshots were introduced retain their existing behavior.
+        return currentModelSchemas(region, apiId);
+    }
+
+    private Map<String, String> currentModelSchemas(String region, String apiId) {
+        return modelSchemas(getModels(region, apiId));
+    }
+
+    private Map<String, String> modelSchemas(List<Model> models) {
+        Map<String, String> schemas = new HashMap<>();
+        for (Model model : models) {
+            if (model.getSchema() != null) {
+                schemas.put(model.getName(), model.getSchema());
+            }
+        }
+        return Map.copyOf(schemas);
     }
 
     public Deployment updateDeployment(String region, String apiId, String deploymentId, List<Map<String, String>> patchOperations) {
@@ -851,11 +905,46 @@ public class ApiGatewayService implements ResourceProvider {
                 }
                 newDescription = value;
             }
-            Deployment updated = new Deployment(existing.id(), newDescription, existing.createdDate());
+            Deployment updated = new Deployment(existing.id(), newDescription, existing.createdDate(), existing.exportSnapshot());
             deploymentStore.put(deploymentKey(region, apiId, deploymentId), updated);
             return updated;
         }
         return existing;
+    }
+
+    public ObjectNode exportRestApi(String region, String apiId, String stageName, String exportType,
+                                    String extensions) {
+        Stage stage = getStage(region, apiId, stageName);
+        if (!"oas30".equals(exportType) && !"swagger".equals(exportType)) {
+            throw new AwsException("BadRequestException", "Invalid export type: " + exportType, 400);
+        }
+        Set<String> selected = extensions == null || extensions.isBlank()
+                ? Set.of() : new HashSet<>(List.of(extensions.split(",")));
+        if (!Set.of("integrations", "authorizers", "apigateway").containsAll(selected)) {
+            throw new AwsException("BadRequestException", "Unsupported export extensions: " + extensions, 400);
+        }
+        Deployment deployment = getDeployment(region, apiId, stage.getDeploymentId());
+        if (deployment.exportSnapshot() == null) {
+            throw new AwsException("BadRequestException",
+                    "This deployment predates export snapshots. Redeploy the API before exporting it.", 400);
+        }
+        try {
+            DeploymentExportSnapshot snapshot = JSON.readValue(deployment.exportSnapshot(), DeploymentExportSnapshot.class);
+            boolean all = selected.contains("apigateway");
+            ObjectNode document = RestApiOpenApiExporter.export(snapshot, "swagger".equals(exportType),
+                    all || selected.contains("integrations"), all || selected.contains("authorizers"), all);
+            String host = apiId + ".execute-api." + region + "." + AwsRegions.dnsSuffixFor(region);
+            if ("swagger".equals(exportType)) {
+                document.put("host", host);
+                document.put("basePath", "/" + stageName);
+                document.putArray("schemes").add("https");
+            } else {
+                document.putArray("servers").addObject().put("url", "https://" + host + "/" + stageName);
+            }
+            return document;
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot read REST API deployment snapshot", e);
+        }
     }
 
     // ──────────────────────────── Stages ────────────────────────────
@@ -2067,7 +2156,8 @@ public class ApiGatewayService implements ResourceProvider {
         domain.setRegionalCertificateName((String) request.get("regionalCertificateName"));
         domain.setRegionalCertificateArn((String) request.get("regionalCertificateArn"));
         domain.setRegionalDomainName(domainName + ".regional.local");
-        domain.setRegionalHostedZoneId("Z2FDTNDATAQYL2"); // partition-literal: no published per-region source for the regional zone
+        domain.setRegionalHostedZoneId(AwsRegionFacts.apiGatewayRegionalHostedZoneId(region)
+                .orElse(UNSOURCED_REGIONAL_HOSTED_ZONE_ID));
         applyEndpointType(domain, endpointType, region);
         domain.setSecurityPolicy((String) request.getOrDefault("securityPolicy", "TLS_1_2"));
         // Nothing is provisioned behind the domain, so it is usable as soon as it exists.
@@ -2120,7 +2210,8 @@ public class ApiGatewayService implements ResourceProvider {
             domain.setDistributionDomainName(null);
             domain.setDistributionHostedZoneId(null);
         } else if (domain.getDistributionDomainName() == null) {
-            CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(region, config.services().cloudfront().domainSuffix());
+            CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(regionResolver.partitionForRegion(region),
+                    config.services().cloudfront().domainSuffix().orElse(null));
             domain.setDistributionDomainName(edge.domainName());
             domain.setDistributionHostedZoneId(edge.hostedZoneId());
         }
@@ -3627,31 +3718,56 @@ public class ApiGatewayService implements ResourceProvider {
         if (openAPI.getPaths() != null) {
             for (Map.Entry<String, PathItem> entry : openAPI.getPaths().entrySet()) {
                 PathItem pathItem = entry.getValue();
+                for (Map.Entry<PathItem.HttpMethod, Operation> operation : pathItem.readOperationsMap().entrySet()) {
+                    addImportedIntegrationWarning(entry.getKey(), operation.getKey().name(),
+                            operation.getValue(), warnings);
+                }
                 Object anyMethod = pathItem.getExtensions() != null
                         ? pathItem.getExtensions().get("x-amazon-apigateway-any-method") : null;
                 if (anyMethod != null) {
                     OpenAPIDeserializer.ParseResult anyResult = new OpenAPIDeserializer.ParseResult();
-                    parseAnyMethodOperation(entry.getKey(), anyMethod, anyResult);
+                    Operation operation = parseAnyMethodOperation(entry.getKey(), anyMethod, anyResult);
                     warnings.addAll(anyResult.getMessages());
+                    addImportedIntegrationWarning(entry.getKey(), "ANY", operation, warnings);
                 }
             }
         }
         if (failOnWarnings && !warnings.isEmpty()) {
-            throw new AwsException("BadRequestException", String.join("; ", warnings), 400);
+            throw new AwsException("BadRequestException",
+                    "Warnings found during import:\n\t" + String.join("\n\t", warnings), 400);
         }
         return new ParsedOpenApi(openAPI, List.copyOf(warnings));
+    }
+
+    private static void addImportedIntegrationWarning(String path, String httpMethod,
+                                                       Operation operation, List<String> warnings) {
+        Object extension = operation.getExtensions() == null
+                ? null : operation.getExtensions().get("x-amazon-apigateway-integration");
+        if (extension instanceof Map<?, ?> integration
+                && integration.get("type") instanceof String type
+                && ApiGatewayIntegrationTypes.canonical(type) == null) {
+            warnings.add("Unknown integration type '" + type + "' for '" + httpMethod + " " + path + "'. Ignoring.");
+        }
     }
 
     private void validateImportedAuthorizers(OpenAPI openAPI) {
         if (openAPI.getComponents() == null || openAPI.getComponents().getSecuritySchemes() == null) {
             return;
         }
-        for (var entry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
+        Set<String> referencedSchemes = referencedSecuritySchemes(openAPI);
+        for (Map.Entry<String, SecurityScheme> entry : openAPI.getComponents().getSecuritySchemes().entrySet()) {
             String schemeName = entry.getKey();
             SecurityScheme scheme = entry.getValue();
-            importedAuthorizationType(scheme, schemeName);
+            String authorizationType = importedAuthorizationType(scheme, schemeName);
             Map<String, Object> authDef = importedAuthorizerDefinition(scheme, schemeName);
             if (authDef == null) {
+                if (referencedSchemes.contains(schemeName)
+                        && ("custom".equalsIgnoreCase(authorizationType)
+                        || "cognito_user_pools".equalsIgnoreCase(authorizationType))) {
+                    throw new AwsException("BadRequestException",
+                            "Missing authorizer definition for security scheme " + schemeName
+                                    + ". Export with extensions=authorizers or extensions=apigateway before importing.", 400);
+                }
                 continue;
             }
             String type = importedAuthorizerType(authDef, schemeName);
@@ -3667,6 +3783,30 @@ public class ApiGatewayService implements ResourceProvider {
                         400);
             }
         }
+    }
+
+    private Set<String> referencedSecuritySchemes(OpenAPI openAPI) {
+        Set<String> schemes = new HashSet<>();
+        if (openAPI.getPaths() == null) {
+            return schemes;
+        }
+        for (Map.Entry<String, PathItem> entry : openAPI.getPaths().entrySet()) {
+            PathItem path = entry.getValue();
+            List<Operation> operations = new ArrayList<>(path.readOperations());
+            Object anyMethod = path.getExtensions() == null
+                    ? null : path.getExtensions().get("x-amazon-apigateway-any-method");
+            if (anyMethod != null) {
+                operations.add(parseAnyMethodOperation(entry.getKey(), anyMethod));
+            }
+            for (Operation operation : operations) {
+                List<SecurityRequirement> requirements = operation.getSecurity() != null
+                        ? operation.getSecurity() : openAPI.getSecurity();
+                if (requirements != null) {
+                    requirements.forEach(requirement -> schemes.addAll(requirement.keySet()));
+                }
+            }
+        }
+        return schemes;
     }
 
     @SuppressWarnings("unchecked")
@@ -3850,6 +3990,16 @@ public class ApiGatewayService implements ResourceProvider {
         String defaultValidatorId = null;
         Map<String, Object> topExtensions = openAPI.getExtensions();
         if (topExtensions != null) {
+            RestApi api = getRestApi(region, apiId);
+            Object binaryTypes = topExtensions.get("x-amazon-apigateway-binary-media-types");
+            if (binaryTypes instanceof List<?> types) {
+                api.setBinaryMediaTypes(types.stream().filter(String.class::isInstance).map(String.class::cast).toList());
+            }
+            Object policy = topExtensions.get("x-amazon-apigateway-policy");
+            if (policy != null) {
+                api.setPolicy(JSON.valueToTree(policy).toString());
+            }
+            apiStore.put(apiKey(region, apiId), api);
             Map<String, Object> validators = (Map<String, Object>) topExtensions
                     .get("x-amazon-apigateway-request-validators");
             if (validators != null) {
@@ -4206,6 +4356,19 @@ public class ApiGatewayService implements ResourceProvider {
         if (integrationExt != null) {
             applyIntegration(region, apiId, resourceId, httpMethod, integrationExt);
         }
+        if (operation.getResponses() != null) {
+            operation.getResponses().forEach((status, response) -> {
+                if (!status.matches("[1-5][0-9]{2}")) {
+                    return;
+                }
+                Map<String, Boolean> headers = new HashMap<>();
+                if (response.getHeaders() != null) {
+                    response.getHeaders().forEach((name, header) ->
+                            headers.put("method.response.header." + name, Boolean.TRUE.equals(header.getRequired())));
+                }
+                putMethodResponse(region, apiId, resourceId, httpMethod, status, Map.of("responseParameters", headers));
+            });
+        }
     }
 
     private static final String PARAMETER_REF_PREFIX = "#/components/parameters/";
@@ -4291,10 +4454,18 @@ public class ApiGatewayService implements ResourceProvider {
     private void applyIntegration(String region, String apiId, String resourceId,
                                   String httpMethod, Map<String, Object> integrationExt) {
         Map<String, Object> integrationRequest = new HashMap<>();
-        integrationRequest.put("type", integrationExt.get("type"));
+        Object integrationType = integrationExt.get("type");
+        if (integrationType instanceof String type) {
+            integrationType = ApiGatewayIntegrationTypes.canonical(type);
+            if (integrationType == null) {
+                return;
+            }
+        }
+        integrationRequest.put("type", integrationType);
         integrationRequest.put("httpMethod", integrationExt.get("httpMethod"));
         integrationRequest.put("uri", integrationExt.get("uri"));
-        integrationRequest.put("passthroughBehavior", integrationExt.get("passthroughBehavior"));
+        Object passthrough = integrationExt.get("passthroughBehavior");
+        integrationRequest.put("passthroughBehavior", passthrough instanceof String behavior ? behavior.toUpperCase(Locale.ROOT) : passthrough);
         for (String field : List.of("contentHandling", "timeoutInMillis", "connectionType",
                 "connectionId", "credentials", "cacheNamespace", "cacheKeyParameters", "tlsConfig",
                 "responseTransferMode")) {
@@ -4325,6 +4496,7 @@ public class ApiGatewayService implements ResourceProvider {
                 irRequest.put("selectionPattern", pattern);
                 irRequest.put("responseParameters", respDef.get("responseParameters"));
                 irRequest.put("responseTemplates", respDef.get("responseTemplates"));
+                irRequest.put("contentHandling", respDef.get("contentHandling"));
 
                 putIntegrationResponse(region, apiId, resourceId, httpMethod, statusCode, irRequest);
 

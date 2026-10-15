@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.IamRoleCf
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.testutil.IamInlinePolicyMock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -49,6 +50,7 @@ class CloudFormationIamAttachmentProvisionerTest {
     @BeforeEach
     void setUp() {
         iamService = mock(IamService.class);
+        IamInlinePolicyMock.configure(iamService);
         provisioner = CfnProvisionerFixture.builder()
                 .iam(iamService)
                 .objectMapper(mapper)
@@ -414,6 +416,8 @@ class CloudFormationIamAttachmentProvisionerTest {
     void inlinePolicyNameChangeFailureRemovesNewNameAndPreservesOldMetadata() {
         String previousPolicyName = "previous-inline-policy";
         String currentPolicyName = "current-inline-policy";
+        String previousDocument = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        when(iamService.getRolePolicy("retained-role", previousPolicyName)).thenReturn(previousDocument);
         doThrow(new AwsException("NoSuchEntity", "missing user", 404))
                 .when(iamService).putUserPolicy("missing-user", currentPolicyName, policyDocument());
 
@@ -433,7 +437,9 @@ class CloudFormationIamAttachmentProvisionerTest {
         assertEquals(previousPolicyName, result.getPhysicalId());
         assertEquals("retained-role", result.getAttributes().get("InlineRoleTargets"));
         verify(iamService).deleteRolePolicy("retained-role", currentPolicyName);
-        verify(iamService, never()).deleteRolePolicy("retained-role", previousPolicyName);
+        verify(iamService).deleteRolePolicy("retained-role", previousPolicyName);
+        verify(iamService).putRolePolicy("retained-role", previousPolicyName, previousDocument);
+        assertEquals("true", result.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
     }
 
     @Test

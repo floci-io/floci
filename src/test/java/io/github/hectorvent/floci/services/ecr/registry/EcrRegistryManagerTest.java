@@ -87,7 +87,7 @@ class EcrRegistryManagerTest {
         builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(containerBuilder.resolveImage(anyString())).thenAnswer(inv -> inv.getArgument(0));
-        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
         when(lifecycleManager.findByName(anyString())).thenReturn(Optional.empty());

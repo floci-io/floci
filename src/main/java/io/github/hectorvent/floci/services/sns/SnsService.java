@@ -5,11 +5,15 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
@@ -29,6 +33,7 @@ import io.github.hectorvent.floci.services.sns.model.PlatformApplication;
 import io.github.hectorvent.floci.services.sns.model.PlatformEndpoint;
 import io.github.hectorvent.floci.services.sns.model.PushNotification;
 import io.github.hectorvent.floci.services.sns.model.SentSms;
+import io.github.hectorvent.floci.services.sns.model.SmsSandboxPhoneNumber;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -46,6 +51,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
@@ -59,6 +65,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -75,6 +82,43 @@ public class SnsService implements Resettable, ResourceProvider {
             "DeliveryStatusIAMRole", "DeliveryStatusSuccessSamplingRate", "DefaultSenderID",
             "DefaultSMSType", "UsageReportS3Bucket");
     private static final Pattern SMS_SENDER_ID = Pattern.compile("(?=.*[A-Za-z])[A-Za-z0-9]{1,11}");
+    /** The format AWS accepts for a number it opts in or checks the opt-out status of. */
+    private static final Pattern E164_PHONE_NUMBER = Pattern.compile("\\+[1-9][0-9]{1,14}");
+    /** A sandbox destination number, as the {@code PhoneNumberString} shape in SNS's model constrains it. */
+    private static final Pattern SANDBOX_PHONE_NUMBER = Pattern.compile("\\+[0-9]{8,}|[0-9]{0,9}");
+    private static final int SANDBOX_PHONE_NUMBER_MAX_LENGTH = 20;
+    /** The {@code OTPCode} shape in SNS's model. */
+    private static final Pattern ONE_TIME_PASSWORD = Pattern.compile("[0-9]{5,8}");
+    /** The {@code LanguageCodeString} enum in SNS's model, the languages a verification text can be sent in. */
+    private static final Set<String> SANDBOX_LANGUAGE_CODES = Set.of("en-US", "en-GB", "es-419", "es-ES",
+            "de-DE", "fr-CA", "fr-FR", "it-IT", "ja-JP", "pt-BR", "kr-KR", "zh-CN", "zh-TW");
+    /** An AWS account ID, the only principal {@code AddPermission} takes. */
+    private static final Pattern ACCOUNT_ID = Pattern.compile("[0-9]{12}");
+    /** The {@code MaxItems} ceiling on {@code ListSMSSandboxPhoneNumbers}, which is also its page size. */
+    private static final int SANDBOX_PAGE_SIZE = 100;
+    /**
+     * The actions a topic policy statement can grant, which are SNS's actions in AWS's service
+     * reference (https://servicereference.us-east-1.amazonaws.com/v1/sns/sns.json).
+     * {@code AddPermission} refuses any other name.
+     */
+    private static final Set<String> SNS_POLICY_ACTIONS = Set.of(
+            "AddPermission", "CheckIfPhoneNumberIsOptedOut", "ConfirmSubscription",
+            "CreatePlatformApplication", "CreatePlatformEndpoint", "CreateSMSSandboxPhoneNumber",
+            "CreateTopic", "DeleteEndpoint", "DeletePlatformApplication", "DeleteSMSSandboxPhoneNumber",
+            "DeleteTopic", "GetDataProtectionPolicy", "GetEndpointAttributes",
+            "GetPlatformApplicationAttributes", "GetSMSAttributes", "GetSMSSandboxAccountStatus",
+            "GetSubscriptionAttributes", "GetTopicAttributes", "ListEndpointsByPlatformApplication",
+            "ListOriginationNumbers", "ListPhoneNumbersOptedOut", "ListPlatformApplications",
+            "ListSMSSandboxPhoneNumbers", "ListSubscriptions", "ListSubscriptionsByTopic",
+            "ListTagsForResource", "ListTopics", "OptInPhoneNumber", "Publish", "PutDataProtectionPolicy",
+            "RemovePermission", "SetEndpointAttributes", "SetPlatformApplicationAttributes",
+            "SetSMSAttributes", "SetSubscriptionAttributes", "SetTopicAttributes", "Subscribe",
+            "TagResource", "Unsubscribe", "UntagResource", "VerifySMSSandboxPhoneNumber");
+    /** What the default statement of a topic's policy grants its owner. */
+    private static final List<String> DEFAULT_TOPIC_POLICY_ACTIONS = List.of(
+            "SNS:GetTopicAttributes", "SNS:SetTopicAttributes", "SNS:AddPermission",
+            "SNS:RemovePermission", "SNS:DeleteTopic", "SNS:Subscribe",
+            "SNS:ListSubscriptionsByTopic", "SNS:Publish");
     /** Includes the original send and two immediate retries for local SQS fan-out. */
     private static final int SQS_SUBSCRIPTION_DELIVERY_ATTEMPTS = 3;
     private static final String SUBSCRIPTION_REDRIVE_POLICY = "RedrivePolicy";
@@ -119,6 +163,8 @@ public class SnsService implements Resettable, ResourceProvider {
     private final Deque<PushNotification> pushCapture = new ConcurrentLinkedDeque<>();
     private final StorageBackend<String, SentSms> smsStore;
     private final StorageBackend<String, Map<String, String>> smsAttributesStore;
+    private final StorageBackend<String, SmsSandboxPhoneNumber> smsSandboxStore;
+    private final SecureRandom random = new SecureRandom();
     private final RegionResolver regionResolver;
     private final SqsService sqsService;
     private final LambdaService lambdaService;
@@ -153,6 +199,9 @@ public class SnsService implements Resettable, ResourceProvider {
                         }),
                 storageFactory.create("sns", "sns-sms-attributes.json",
                         new TypeReference<Map<String, Map<String, String>>>() {
+                        }),
+                storageFactory.create("sns", "sns-sms-sandbox.json",
+                        new TypeReference<Map<String, SmsSandboxPhoneNumber>>() {
                         }),
                 regionResolver,
                 sqsService,
@@ -208,6 +257,7 @@ public class SnsService implements Resettable, ResourceProvider {
         this.platformEndpointStore = platformEndpointStore;
         this.smsStore = new InMemoryStorage<>();
         this.smsAttributesStore = new InMemoryStorage<>();
+        this.smsSandboxStore = new InMemoryStorage<>();
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
@@ -265,12 +315,28 @@ public class SnsService implements Resettable, ResourceProvider {
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService, FirehoseService firehoseService,
                String baseUrl, ObjectMapper objectMapper, SnsMessageSigner messageSigner) {
+        this(topicStore, subscriptionStore, platformAppStore, platformEndpointStore, smsStore,
+                smsAttributesStore, new InMemoryStorage<>(), regionResolver, sqsService,
+                lambdaService, firehoseService, baseUrl, objectMapper, messageSigner);
+    }
+
+    SnsService(StorageBackend<String, Topic> topicStore,
+               StorageBackend<String, Subscription> subscriptionStore,
+               StorageBackend<String, PlatformApplication> platformAppStore,
+               StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+               StorageBackend<String, SentSms> smsStore,
+               StorageBackend<String, Map<String, String>> smsAttributesStore,
+               StorageBackend<String, SmsSandboxPhoneNumber> smsSandboxStore,
+               RegionResolver regionResolver, SqsService sqsService,
+               LambdaService lambdaService, FirehoseService firehoseService,
+               String baseUrl, ObjectMapper objectMapper, SnsMessageSigner messageSigner) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
         this.platformEndpointStore = platformEndpointStore;
         this.smsStore = smsStore;
         this.smsAttributesStore = smsAttributesStore;
+        this.smsSandboxStore = smsSandboxStore;
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
@@ -344,6 +410,148 @@ public class SnsService implements Resettable, ResourceProvider {
             }
         }
         return selected;
+    }
+
+    /**
+     * Whether the account is in the SMS sandbox, where AWS sends SMS only to verified numbers. A
+     * new AWS account starts in it, but Floci delivers SMS to any number, so it answers as an
+     * account that has left the sandbox, which is how it actually behaves. The sandbox numbers
+     * below still work, without the limits AWS lifts on leaving: ten verified numbers, and no
+     * deleting one until 24 hours after its last verification attempt.
+     */
+    public boolean isInSmsSandbox() {
+        return false;
+    }
+
+    /**
+     * Adds a destination number to the SMS sandbox and texts it a one-time password, which
+     * {@code GET /_aws/sns?phone=} then shows, as it does any SMS. The text is Floci's; AWS does
+     * not publish its own. A number already pending gets a fresh password, and one already
+     * verified stays verified with nothing sent. If the text cannot be recorded, the number is
+     * put back as it was, since a password nobody received could never verify it.
+     *
+     * <p>The sandbox edits are synchronized: each reads a number's record, changes it and writes
+     * it back, so two overlapping requests could otherwise lose one's change, or a verification
+     * could write back a number deleted meanwhile.
+     */
+    public synchronized void createSmsSandboxPhoneNumber(String phoneNumber, String languageCode, String region) {
+        requireSandboxPhoneNumber(phoneNumber);
+        if (languageCode != null && !SANDBOX_LANGUAGE_CODES.contains(languageCode)) {
+            throw new AwsException("InvalidParameter", "Invalid parameter: LanguageCode", 400);
+        }
+        String key = smsSandboxKey(region, phoneNumber);
+        SmsSandboxPhoneNumber previous = smsSandboxStore.get(key).orElse(null);
+        if (previous != null && SmsSandboxPhoneNumber.VERIFIED.equals(previous.getStatus())) {
+            return;
+        }
+        String oneTimePassword = String.format("%06d", random.nextInt(1_000_000));
+        smsSandboxStore.put(key,
+                new SmsSandboxPhoneNumber(phoneNumber, SmsSandboxPhoneNumber.PENDING, oneTimePassword));
+        try {
+            recordSms(phoneNumber, "Your verification code is " + oneTimePassword, null, region);
+        } catch (RuntimeException e) {
+            try {
+                if (previous == null) {
+                    smsSandboxStore.delete(key);
+                } else {
+                    smsSandboxStore.put(key, previous);
+                }
+            } catch (RuntimeException restoreFailure) {
+                e.addSuppressed(restoreFailure);
+            }
+            throw e;
+        }
+    }
+
+    /** Verifies a pending sandbox number with the password it was sent. A verified one stays so. */
+    public synchronized void verifySmsSandboxPhoneNumber(String phoneNumber, String oneTimePassword, String region) {
+        requireSandboxPhoneNumber(phoneNumber);
+        if (oneTimePassword == null || !ONE_TIME_PASSWORD.matcher(oneTimePassword).matches()) {
+            throw new AwsException("InvalidParameter", "Invalid parameter: OneTimePassword", 400);
+        }
+        String key = smsSandboxKey(region, phoneNumber);
+        SmsSandboxPhoneNumber number = smsSandboxStore.get(key)
+                .orElseThrow(SnsService::sandboxPhoneNumberNotFound);
+        if (SmsSandboxPhoneNumber.VERIFIED.equals(number.getStatus())) {
+            return;
+        }
+        if (!oneTimePassword.equals(number.getOneTimePassword())) {
+            // Status is a required member of the error and AWS documents no values for it, so it carries
+            // the number's own verification status, which a wrong password leaves Pending: the only
+            // statuses SNS publishes for a sandbox number are Pending and Verified.
+            throw new AwsException("VerificationException",
+                    "The one-time password does not match the one sent to " + phoneNumber + ".", 400,
+                    Map.of("Status", number.getStatus()));
+        }
+        number.setStatus(SmsSandboxPhoneNumber.VERIFIED);
+        number.setOneTimePassword(null);
+        smsSandboxStore.put(key, number);
+    }
+
+    public synchronized void deleteSmsSandboxPhoneNumber(String phoneNumber, String region) {
+        requireSandboxPhoneNumber(phoneNumber);
+        String key = smsSandboxKey(region, phoneNumber);
+        if (smsSandboxStore.get(key).isEmpty()) {
+            throw sandboxPhoneNumberNotFound();
+        }
+        smsSandboxStore.delete(key);
+    }
+
+    public PaginatedResult<SmsSandboxPhoneNumber> listSmsSandboxPhoneNumbers(Integer maxResults,
+                                                                             String nextToken,
+                                                                             String region) {
+        String prefix = smsAttributesKey(region) + "::";
+        return Pagination.paginate(smsSandboxStore.scan(key -> key.startsWith(prefix)),
+                SmsSandboxPhoneNumber::getPhoneNumber, maxResults, nextToken, SANDBOX_PAGE_SIZE,
+                "InvalidParameter");
+    }
+
+    /**
+     * Whether a number has opted out of SMS from this account. AWS opts a number out when its
+     * owner replies STOP, and nothing reaches Floci that way, so no number is ever opted out.
+     */
+    public boolean isPhoneNumberOptedOut(String phoneNumber) {
+        requireE164PhoneNumber(phoneNumber);
+        return false;
+    }
+
+    /** The numbers opted out of SMS from this account, which for the reason above is none. */
+    public List<String> listPhoneNumbersOptedOut() {
+        return List.of();
+    }
+
+    /**
+     * Opts a number back in to SMS. None is ever opted out here, and AWS answers success for a
+     * number that is not opted out, so only the format is checked. AWS's limit of one opt-in per
+     * number every 30 days can therefore never apply.
+     */
+    public void optInPhoneNumber(String phoneNumber) {
+        requireE164PhoneNumber(phoneNumber);
+    }
+
+    private static void requireE164PhoneNumber(String phoneNumber) {
+        if (phoneNumber == null || !E164_PHONE_NUMBER.matcher(phoneNumber).matches()) {
+            throw invalidPhoneNumber();
+        }
+    }
+
+    private static void requireSandboxPhoneNumber(String phoneNumber) {
+        if (phoneNumber == null || phoneNumber.isEmpty()
+                || phoneNumber.length() > SANDBOX_PHONE_NUMBER_MAX_LENGTH
+                || !SANDBOX_PHONE_NUMBER.matcher(phoneNumber).matches()) {
+            throw invalidPhoneNumber();
+        }
+    }
+
+    /** The answer AWS gives {@code OptInPhoneNumber} for a malformed number. */
+    private static AwsException invalidPhoneNumber() {
+        return new AwsException("InvalidParameter",
+                "Invalid parameter: PhoneNumber Reason: input incorrectly formatted", 400);
+    }
+
+    private static AwsException sandboxPhoneNumberNotFound() {
+        return new AwsException("ResourceNotFound",
+                "The phone number is not in the SMS sandbox.", 404);
     }
 
     public Topic createTopic(String name, Map<String, String> attributes,
@@ -431,14 +639,53 @@ public class SnsService implements Resettable, ResourceProvider {
         attrs.putIfAbsent("Owner", regionResolver.getAccountId());
         attrs.putIfAbsent("EffectiveDeliveryPolicy", "{\"http\":{\"defaultHealthyRetryPolicy\":{\"minDelayTarget\":20,\"maxDelayTarget\":20,\"numRetries\":3,\"numMaxDelayRetries\":0,\"numNoDelayRetries\":0,\"numMinDelayRetries\":0,\"backoffFunction\":\"linear\"},\"disableSubscriptionOverrides\":false}}");
         if (!attrs.containsKey("Policy") || attrs.get("Policy") == null || attrs.get("Policy").isBlank()) {
-            String account = regionResolver.getAccountId();
-            attrs.put("Policy", "{\"Version\":\"2012-10-17\",\"Id\":\"__default_policy_ID\",\"Statement\":[{\"Sid\":\"__default_statement_ID\",\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"*\"},\"Action\":[\"SNS:GetTopicAttributes\",\"SNS:SetTopicAttributes\",\"SNS:AddPermission\",\"SNS:RemovePermission\",\"SNS:DeleteTopic\",\"SNS:Subscribe\",\"SNS:ListSubscriptionsByTopic\",\"SNS:Publish\"],\"Resource\":\"" + topicArn + "\",\"Condition\":{\"StringEquals\":{\"AWS:SourceAccount\":\"" + account + "\"}}}]}");
+            attrs.put("Policy", defaultTopicPolicy(topicArn, regionResolver.getAccountId()).toString());
         }
         return attrs;
     }
 
-    public void setTopicAttributes(String topicArn, String attributeName,
-                                   String attributeValue, String region) {
+    /**
+     * The access policy of the topic an ARN names, read in the account and Region the ARN names
+     * rather than the caller's: its {@code Policy} attribute, or the default a new topic has when
+     * that is not set. Empty when there is no such topic.
+     */
+    public Optional<String> findTopicPolicy(String topicArn) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(topicArn);
+        String key = topicKey(arn.region(), topicArn);
+        Optional<Topic> topic = topicStore instanceof AccountAwareStorageBackend<Topic> aware
+                ? aware.getForAccountMigratingLegacy(arn.accountId(), key,
+                        stored -> topicArn.equals(stored.getTopicArn()))
+                : topicStore.get(key);
+        return topic.map(stored -> {
+            String policy = stored.getAttributes().get("Policy");
+            return policy == null || policy.isBlank()
+                    ? defaultTopicPolicy(topicArn, arn.accountId()).toString()
+                    : policy;
+        });
+    }
+
+    /**
+     * The policy a topic has until one is set, as AWS returns it for a new topic: its owner may
+     * manage it, subscribe to it and publish to it.
+     */
+    private ObjectNode defaultTopicPolicy(String topicArn, String ownerAccountId) {
+        ObjectNode policy = objectMapper.createObjectNode();
+        policy.put("Version", "2008-10-17");
+        policy.put("Id", "__default_policy_ID");
+        ObjectNode statement = policy.putArray("Statement").addObject();
+        statement.put("Sid", "__default_statement_ID");
+        statement.put("Effect", "Allow");
+        statement.putObject("Principal").put("AWS", "*");
+        ArrayNode actions = statement.putArray("Action");
+        DEFAULT_TOPIC_POLICY_ACTIONS.forEach(actions::add);
+        statement.put("Resource", topicArn);
+        statement.putObject("Condition").putObject("StringEquals")
+                .put("AWS:SourceOwner", ownerAccountId);
+        return policy;
+    }
+
+    public synchronized void setTopicAttributes(String topicArn, String attributeName,
+                                                String attributeValue, String region) {
         String key = topicKey(region, topicArn);
         Topic topic = topicStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
@@ -448,6 +695,125 @@ public class SnsService implements Resettable, ResourceProvider {
         }
         topic.getAttributes().put(attributeName, attributeValue);
         topicStore.put(key, topic);
+    }
+
+    /**
+     * Adds a statement to the topic's policy granting {@code accountIds} the named SNS actions,
+     * written as AWS writes it: the label is its {@code Sid}, each account becomes its
+     * {@code root} principal, and a single account or action is a string rather than a list of
+     * one. A topic with no policy set gets the statement added to its default one.
+     *
+     * <p>The policy is stored and returned by {@code GetTopicAttributes}. Floci does not evaluate
+     * topic policies when authorizing a request, so the grant has no effect beyond that.
+     *
+     * <p>This, {@link #removePermission} and {@link #setTopicAttributes} are synchronized: each
+     * reads the policy, changes it and writes it back, so overlapping edits would otherwise lose
+     * all but the last, and two grants under one label could both pass the duplicate check.
+     */
+    public synchronized void addPermission(String topicArn, String label, List<String> accountIds,
+                                           List<String> actionNames, String region) {
+        requirePermissionParameter("TopicArn", topicArn != null && !topicArn.isBlank());
+        requirePermissionParameter("Label", label != null && !label.isBlank());
+        requirePermissionParameter("AWSAccountId", accountIds != null && !accountIds.isEmpty()
+                && accountIds.stream().allMatch(id -> id != null && ACCOUNT_ID.matcher(id).matches()));
+        requirePermissionParameter("ActionName", actionNames != null && !actionNames.isEmpty());
+        String key = topicKey(region, topicArn);
+        Topic topic = topicStore.get(key).orElseThrow(SnsService::permissionTopicNotFound);
+        for (String action : actionNames) {
+            if (!SNS_POLICY_ACTIONS.contains(action)) {
+                throw new AwsException("InvalidParameter",
+                        "Invalid parameter: Policy statement action out of service scope!", 400);
+            }
+        }
+        ObjectNode policy = topicPolicy(topic, topicArn);
+        ArrayNode statements = (ArrayNode) policy.get("Statement");
+        for (JsonNode existing : statements) {
+            if (label.equals(existing.path("Sid").asText(null))) {
+                throw new AwsException("InvalidParameter", "Invalid parameter: Statement already exists", 400);
+            }
+        }
+        String partition = AwsRegions.partitionFor(region);
+        ObjectNode statement = statements.addObject();
+        statement.put("Sid", label);
+        statement.put("Effect", "Allow");
+        putOneOrMany(statement.putObject("Principal"), "AWS", accountIds.stream()
+                .map(accountId -> AwsArnUtils.Arn.global(partition, "iam", accountId, "root").toString())
+                .toList());
+        putOneOrMany(statement, "Action", actionNames.stream().map(action -> "SNS:" + action).toList());
+        statement.put("Resource", topicArn);
+        topic.getAttributes().put("Policy", policy.toString());
+        topicStore.put(key, topic);
+    }
+
+    /**
+     * Removes the statement {@code label} names from the topic's policy. A label the policy does
+     * not hold leaves it as it is: AWS's reference names no error for that case and no recording
+     * shows one, so this answers success rather than invent one.
+     */
+    public synchronized void removePermission(String topicArn, String label, String region) {
+        requirePermissionParameter("TopicArn", topicArn != null && !topicArn.isBlank());
+        requirePermissionParameter("Label", label != null && !label.isBlank());
+        String key = topicKey(region, topicArn);
+        Topic topic = topicStore.get(key).orElseThrow(SnsService::permissionTopicNotFound);
+        ObjectNode policy = topicPolicy(topic, topicArn);
+        ArrayNode statements = (ArrayNode) policy.get("Statement");
+        boolean removed = false;
+        for (int i = statements.size() - 1; i >= 0; i--) {
+            if (label.equals(statements.get(i).path("Sid").asText(null))) {
+                statements.remove(i);
+                removed = true;
+            }
+        }
+        if (removed) {
+            topic.getAttributes().put("Policy", policy.toString());
+            topicStore.put(key, topic);
+        }
+    }
+
+    /** The topic's policy as a document to edit, the default one if none is set, with its statements in a list. */
+    private ObjectNode topicPolicy(Topic topic, String topicArn) {
+        String stored = topic.getAttributes().get("Policy");
+        if (stored == null || stored.isBlank()) {
+            return defaultTopicPolicy(topicArn, regionResolver.getAccountId());
+        }
+        JsonNode parsed;
+        try {
+            parsed = objectMapper.readTree(stored);
+        } catch (JsonProcessingException e) {
+            parsed = null;
+        }
+        if (!(parsed instanceof ObjectNode policy)) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Policy Error: the topic's policy is not a JSON object", 400);
+        }
+        JsonNode statement = policy.get("Statement");
+        if (!(statement instanceof ArrayNode)) {
+            ArrayNode statements = objectMapper.createArrayNode();
+            if (statement != null && !statement.isNull()) {
+                statements.add(statement);
+            }
+            policy.set("Statement", statements);
+        }
+        return policy;
+    }
+
+    private static void putOneOrMany(ObjectNode node, String field, List<String> values) {
+        if (values.size() == 1) {
+            node.put(field, values.get(0));
+        } else {
+            values.forEach(node.putArray(field)::add);
+        }
+    }
+
+    private static void requirePermissionParameter(String name, boolean present) {
+        if (!present) {
+            throw new AwsException("InvalidParameter", "Invalid parameter: " + name, 400);
+        }
+    }
+
+    /** What AWS answers {@code AddPermission} and {@code RemovePermission} for a missing topic. */
+    private static AwsException permissionTopicNotFound() {
+        return new AwsException("NotFound", "Topic does not exist", 404);
     }
 
     /**
@@ -683,13 +1049,7 @@ public class SnsService implements Resettable, ResourceProvider {
         // Send SMS
         if (phoneNumber != null) {
             requireWithinMaxMessageSize(payloadSize, DEFAULT_MAX_MESSAGE_SIZE);
-            String messageId = UUID.randomUUID().toString();
-            String effectiveRegion = region != null ? region : regionResolver.getDefaultRegion();
-            SentSms sms = new SentSms(messageId, effectiveRegion, phoneNumber,
-                    message, subject, Instant.now());
-            smsStore.put("sms::" + effectiveRegion + "::" + messageId, sms);
-            LOG.infov("SNS SMS published: messageId={0} phone={1}", messageId, phoneNumber);
-            return messageId;
+            return recordSms(phoneNumber, message, subject, region);
         }
 
         // Send a message to topic or directly to a target ARN
@@ -2341,6 +2701,20 @@ public class SnsService implements Resettable, ResourceProvider {
 
     private String smsAttributesKey(String region) {
         return regionResolver.getAccountId() + "::" + region;
+    }
+
+    private String smsSandboxKey(String region, String phoneNumber) {
+        return smsAttributesKey(region) + "::" + phoneNumber;
+    }
+
+    /** Sends an SMS, which here means storing it for {@code GET /_aws/sns} to read back. */
+    private String recordSms(String phoneNumber, String message, String subject, String region) {
+        String messageId = UUID.randomUUID().toString();
+        String effectiveRegion = region != null ? region : regionResolver.getDefaultRegion();
+        SentSms sms = new SentSms(messageId, effectiveRegion, phoneNumber, message, subject, Instant.now());
+        smsStore.put("sms::" + effectiveRegion + "::" + messageId, sms);
+        LOG.infov("SNS SMS published: messageId={0} phone={1}", messageId, phoneNumber);
+        return messageId;
     }
 
     private static String topicKey(String region, String arn) {

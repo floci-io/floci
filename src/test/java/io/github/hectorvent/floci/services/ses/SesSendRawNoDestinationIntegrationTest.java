@@ -1,12 +1,14 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
@@ -18,6 +20,11 @@ class SesSendRawNoDestinationIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String TO = "success@simulator.amazonses.com";
     private static final String VERIFIED_SENDER = "no-destination-sender@floci.test";
+
+    // The mailbox shows a raw message as RawData only, without the recipients Floci read from its
+    // headers, so the stored record is checked directly.
+    @Inject
+    SesSentEmailService sentEmailService;
 
     private static String rawData(String headers) {
         return Base64.getEncoder().encodeToString(
@@ -52,14 +59,8 @@ class SesSendRawNoDestinationIntegrationTest {
             .body("MessageId", notNullValue())
             .extract().path("MessageId");
 
-        given()
-            .queryParam("id", messageId)
-            .queryParam("email", TO)
-        .when()
-            .get("/_aws/ses")
-        .then()
-            .statusCode(200)
-            .body("messages.Id", contains(messageId));
+        assertThat(sentEmailService.find("us-east-1", messageId).orElseThrow().getToAddresses(),
+                contains(TO));
     }
 
     @Test

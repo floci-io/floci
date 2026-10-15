@@ -27,7 +27,10 @@ background dispatcher fires schedule targets on time. Supported expressions:
 
 - `at(YYYY-MM-DDTHH:mm:ss)`: one-time fire; honors `ScheduleExpressionTimezone`
   (default UTC) and `ActionAfterCompletion=DELETE`.
-- `rate(N unit)`: repeating fire (`minutes`, `hours`, `days`).
+- `rate(N unit)`: repeating fire (`minutes`, `hours`, `days`). The first
+  occurrence uses `StartDate`, or creation time when `StartDate` is omitted,
+  and is delivered on the first eligible dispatcher tick. Later occurrences
+  retain the interval from the previous actual dispatch time.
 - `cron(minute hour day-of-month month day-of-week year)`: AWS 6-field cron;
   honors `ScheduleExpressionTimezone`. Day-of-week is `1-7` or `SUN-SAT`, so
   `2` is Monday and `cron(30 2 ? * 2#1 *)` is the first Monday of the month.
@@ -39,6 +42,12 @@ background dispatcher fires schedule targets on time. Supported expressions:
 `State=DISABLED` schedules and schedules outside their `StartDate`/`EndDate`
 window are skipped. The dispatcher ticks every
 `floci.services.scheduler.tick-interval-seconds` (default `10`).
+
+Rate schedules use the same dispatcher whether created or updated directly or
+through Step Functions. A changed future `StartDate` takes effect before the
+first dispatch. The dispatcher keeps its last-fire state in memory; past dates,
+restart, post-dispatch updates and re-enable timing have not been verified
+against live AWS. Fixed-anchor recurrence is not implemented.
 
 Supported target types: SQS, Lambda, SNS, ECS `RunTask`, EventBridge
 `PutEvents`, and unqualified Step Functions state machine ARNs. Templated
@@ -110,6 +119,38 @@ and `Message`, Step Functions `stateMachineArn` and `input`, EventBridge
 `Entries`, and ECS `cluster`, `taskDefinition`, and `count` with the configured
 launch type, group, and network configuration. Non-JSON input of a universal
 target is encoded as a JSON string field.
+
+## CloudFormation
+
+`AWS::Scheduler::Schedule` creates a real schedule. `Ref` returns its name and
+`Fn::GetAtt Arn` returns its Scheduler ARN. An omitted `Name` is generated once
+and kept on updates. Expression, state, dates, timezone, time window, KMS key and
+target changes update the schedule in place. A `Name` change creates a replacement;
+`GroupName` changes keep the same `Ref` and move the schedule to the requested group.
+The group must already exist or be declared as an `AWS::Scheduler::ScheduleGroup`.
+
+The displaced schedule stays until the stack update commits, then is deleted.
+`UpdateReplacePolicy: Retain` keeps a schedule displaced by a name replacement;
+it does not retain the old address of a group move. A failed stack update restores
+the original schedule configuration and removes a replacement or group-move destination.
+During a group move the old schedule is disabled before creating the destination,
+so the stored schedules are not both enabled. A rollback disables the destination
+before restoring the original state. A name replacement can briefly leave both
+schedules enabled until commit, following the existing replacement lifecycle.
+
+If restoring a failed update also fails, the original configuration snapshot is
+kept. A later schedule update retries that restoration before taking a new snapshot
+or applying its desired configuration. If Floci skips the failed schedule during an
+otherwise unrelated stack update, cleanup preserves the snapshot and leaves the
+stack in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS` with an explicit reason. Further
+updates are blocked, and `DeleteStack` is the available recovery path. This is a
+Floci recovery limitation; AWS requires `ContinueUpdateRollback` to complete a failed
+rollback before accepting another stack update.
+
+Target parameters are limited to those the Scheduler API currently models:
+retry/dead-letter configuration, SQS, ECS and EventBridge parameters. Kinesis and
+SageMaker pipeline parameters are rejected instead of silently discarded.
+Invocation support and time-window limitations are the same as the Scheduler API.
 
 ## Configuration
 

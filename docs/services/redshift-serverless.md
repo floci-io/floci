@@ -25,6 +25,7 @@ For the upstream API shape, see the [Amazon Redshift Serverless API Reference](h
 | `CreateSnapshot` | Create an `AVAILABLE` snapshot of a namespace, dumping the workgroup's database when it is running; a snapshot created in a standby Region stands in for a cross-Region copy |
 | `GetSnapshot` | Return a snapshot by `snapshotName` or `snapshotArn` |
 | `ListSnapshots` | Page through the snapshots in the Region, filtered by `namespaceName`, `namespaceArn`, `ownerAccount` and a `startTime`/`endTime` window |
+| `UpdateSnapshot` | Change a snapshot's `retentionPeriod` (-1 for indefinite); an omitted period leaves it unchanged |
 | `DeleteSnapshot` | Remove a snapshot and return it |
 | `RestoreFromSnapshot` | Restore into an existing namespace and workgroup, replaying the snapshot's dump into the workgroup's database; neither is created |
 | `CreateUsageLimit` | Set a usage limit on a workgroup, defaulting `period` to `monthly` and `breachAction` to `log` |
@@ -68,7 +69,7 @@ Namespace and workgroup state is account and Region scoped and persisted through
 
 ## AWS-compatible failures
 
-Namespace and workgroup names, database names, log export values, ports and workgroup enum members are validated. Floci returns `ValidationException` for a malformed request, `ConflictException` when a namespace or workgroup name is already taken, when a namespace already has a workgroup, or when a namespace being deleted still has one, and `ResourceNotFoundException` for an unknown namespace or workgroup.
+Every request is checked against the AWS model constraints before dispatch: required members, string lengths and patterns (including resource names and tag keys and values), list sizes (including subnets, security groups, and tag lists), number ranges, and enum values. Floci returns `ValidationException` for a malformed request or one breaking these model constraints, `ConflictException` when a namespace or workgroup name is already taken, when a namespace already has a workgroup, or when a namespace being deleted still has one, and `ResourceNotFoundException` for an unknown namespace or workgroup.
 
 AWS also models `AccessDeniedException`, `InternalServerException`, and `ThrottlingException`. Floci does not inject provider-side failures that cannot be derived from the request or emulator state.
 
@@ -109,3 +110,4 @@ aws redshift-serverless delete-workgroup --workgroup-name analytics-wg
 aws redshift-serverless delete-namespace --namespace-name analytics
 ```
 - **Snapshots dump the database.** While the namespace's workgroup is running, `CreateSnapshot` runs `pg_dump` on its container and stores the dump under `<persistent-path>/redshift-serverless-dumps/<account>/<region>/`. `RestoreFromSnapshot` drops every user schema (the catalog bootstrap schema excepted) and replays the dump with `psql`, stopping at the first failing statement, so rows written after the snapshot are gone. The current contents are dumped first and put back if the replay fails, and a restore whose recorded dump file has gone missing fails instead of reporting success. A snapshot taken with no running workgroup is metadata only, and restoring it leaves the database untouched. `DeleteSnapshot` removes the dump. Snapshot ARNs use the snapshot name as their id, snapshot names are 3-255 lowercase letters, digits and hyphens, and `retentionPeriod` is `-1` (indefinite, the default) or 1 to 3653 days. Snapshots are taggable by ARN. `snapshotName` and `snapshotArn` cannot be sent together. Floci's own `floci_internal` bootstrap schema, which feeds the `svv_external_*` views from the Glue catalog, is left out of both the dump and the reset, matching AWS where the Glue catalog is outside a namespace snapshot, so a client schema with that exact name is not captured. A real snapshot expires after its retention period; Floci reports `snapshotRemainingDays` but does not expire snapshots.
+- **`UpdateSnapshot` changes only `retentionPeriod`.** It is validated like `CreateSnapshot` (`-1` or 1 to 3653 days), `-1` makes the snapshot indefinite, and an omitted period leaves the snapshot unchanged. `snapshotRemainingDays` keeps counting from the creation time, because Floci stores no separate retention start.

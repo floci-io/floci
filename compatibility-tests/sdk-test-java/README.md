@@ -62,6 +62,20 @@ Partition Compatibility workflow does exactly that, and tolerates only the failu
 `.github/ci/compat-partition-allowlist-cn-north-1.txt`. Tests that build their own client with an
 explicit region keep that region.
 
+## STS presigned identity checks
+
+`StsPresignedIdentityTest` checks user and role identity over HTTP/1.1 and HTTP/2.
+Valid identity requests run in both modes. Forged signatures and changed bodies are
+sent only when signature checking is enabled. To check signature refusal, start Floci
+with `FLOCI_AUTH_VALIDATE_SIGNATURES=true` and pass the same setting to this test:
+
+```bash
+FLOCI_AUTH_VALIDATE_SIGNATURES=true mvn test -Dtest=StsPresignedIdentityTest
+```
+
+The test setting must match the server setting; it does not configure the server.
+The enabled mode also checks missing and incorrect temporary-session tokens.
+
 ## Metric filter publishing checks
 
 `CloudWatchLogsMetricFilterTest` and `CloudFormationLogsMetricFilterTest` run

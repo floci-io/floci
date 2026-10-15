@@ -191,6 +191,27 @@ class ReplacementCleanupTest {
     }
 
     @Test
+    void committedUpdateStillStopsAfterThreeFailuresAndAbandonsTheExhaustedEntity() {
+        StackResource r = resource("subnet-prior");
+        List<String> attempted = new ArrayList<>();
+        ReplacementCleanup.recordOrphan(r, "subnet-replacement", r.getResourceType(), "us-east-1");
+        ReplacementCleanup.Deleter unavailable = (type, id, region) -> {
+            attempted.add(id);
+            throw new IllegalStateException("still in use");
+        };
+
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            UpdateCleanupResult result = ReplacementCleanup.complete(r, unavailable);
+            assertFalse(result.complete());
+            assertEquals(Math.min(attempt, 3), result.attempts());
+        }
+        assertEquals(3, attempted.size());
+        ReplacementCleanup.clear(r);
+        assertFalse(ReplacementCleanup.hasReplacement(r));
+        assertFalse(ReplacementCleanup.complete(r, unavailable).applicable());
+    }
+
+    @Test
     void mergingNothingLeavesTheTargetUntouched() {
         StackResource previous = resource("subnet-prior");
 
@@ -231,6 +252,62 @@ class ReplacementCleanupTest {
         assertTrue(ReplacementCleanup.rollback(replaced, (type, id, region) -> deleted.add(id)));
         assertEquals("subnet-1", replaced.getPhysicalId());
         assertEquals(List.of("subnet-2"), deleted);
+    }
+
+    /** A retried rollback (ContinueUpdateRollback) re-attempts the delete that failed, then has nothing left to do. */
+    @Test
+    void rollback_afterTheReplacementDeleteFailed_retriesThatDeleteOnTheNextRollback() {
+        StackResource r = failedReplacementRollback();
+        List<String> deleted = new ArrayList<>();
+
+        assertTrue(ReplacementCleanup.rollback(r, (type, id, region) -> deleted.add(type + ":" + id + ":" + region)));
+
+        assertEquals(List.of("AWS::EC2::Subnet:subnet-2:us-east-1"), deleted);
+        assertEquals("subnet-1", r.getPhysicalId());
+        assertFalse(ReplacementCleanup.owedPhysicalIds(r).contains("subnet-2"));
+        assertFalse(ReplacementCleanup.hasReplacement(r));
+        List<String> deletedAgain = new ArrayList<>();
+        assertFalse(ReplacementCleanup.rollback(r, (type, id, region) -> deletedAgain.add(id)));
+        assertEquals(List.of(), deletedAgain);
+    }
+
+    @Test
+    void rollback_retryThatFailsAgain_keepsTheReplacementOwed() {
+        StackResource r = failedReplacementRollback();
+
+        assertThrows(IllegalStateException.class, () -> ReplacementCleanup.rollback(r, (type, id, region) -> {
+            throw new IllegalStateException("DependencyViolation");
+        }));
+
+        assertTrue(ReplacementCleanup.owedPhysicalIds(r).contains("subnet-2"));
+        List<String> deleted = new ArrayList<>();
+        assertTrue(ReplacementCleanup.rollback(r, (type, id, region) -> deleted.add(id)));
+        assertEquals(List.of("subnet-2"), deleted);
+    }
+
+    /** A new provision supersedes the failed rollback; the replacement stays owed to the next cleanup instead. */
+    @Test
+    void record_afterAFailedRollbackDelete_doesNotRetryThatDeleteOnTheNextRollback() {
+        StackResource r = failedReplacementRollback();
+        List<String> deleted = new ArrayList<>();
+
+        ReplacementCleanup.record(r, update("subnet-1"), Map.of("VpcId", "vpc-old"));
+
+        assertFalse(ReplacementCleanup.rollback(r, (type, id, region) -> deleted.add(id)));
+        assertEquals(List.of(), deleted);
+        assertTrue(ReplacementCleanup.owedPhysicalIds(r).contains("subnet-2"));
+    }
+
+    /** Replaces subnet-1 with subnet-2, then rolls back with a delete of subnet-2 that fails. */
+    private static StackResource failedReplacementRollback() {
+        StackResource r = resource("subnet-2");
+        ReplacementCleanup.record(r, update("subnet-1"), Map.of("VpcId", "vpc-old"));
+        assertThrows(IllegalStateException.class, () -> ReplacementCleanup.rollback(r, (type, id, region) -> {
+            throw new IllegalStateException("DependencyViolation");
+        }));
+        assertEquals("subnet-1", r.getPhysicalId());
+        assertTrue(ReplacementCleanup.owedPhysicalIds(r).contains("subnet-2"));
+        return r;
     }
 
     private static ProvisionContext update(String priorPhysicalId) {

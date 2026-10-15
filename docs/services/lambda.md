@@ -84,13 +84,18 @@ part in authorizing calls to the function:
 - An invoke of a function named by a full or partial ARN runs the function in the account in the
   ARN. An invoke of another account's function needs its function policy to allow the caller as
   well as the caller's own identity policy.
+- A Step Functions Lambda task is authorized the same way, as the state machine's execution role or
+  the role the task's `Credentials` name; see
+  [Step Functions](step-functions.md#lambda-tasks-under-iam-enforcement).
 - `GetFunction`, `GetFunctionConfiguration` and `ListDurableExecutionsByFunction`, given a full ARN
   with a version or alias, read the function in the account in the ARN, and need its function
   policy to allow the caller in the same way.
 - Other operations act on the caller's own function of the name the ARN gives, whatever account
   the ARN names, and are authorized against that function. Floci does not serve them on another
   account's function, which AWS allows through a function policy.
-- Within one account, a statement naming the caller grants on its own.
+- Within one account, a statement naming the caller grants on its own. One naming only the
+  account, as `AddPermission --principal <account-id>` writes it, delegates to the account, so the
+  caller's identity policy has to allow the call too.
 - An invoke is authorized against the version or alias it names, in the function name or in
   `Qualifier`. A grant added with `Qualifier` covers that version or alias only, and a grant on the
   function does not cover a qualified invoke. Other operations are authorized against the
@@ -372,6 +377,13 @@ disabled fails with Lambda's error as the resource status reason.
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
+Function URLs are not available in AWS GovCloud (US) or in the China Regions
+([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),
+[China guide](https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html)), so
+`CreateFunctionUrlConfig` is an `InvalidParameterValueException` in those regions, and an
+`AWS::Lambda::Url` in a CloudFormation stack there fails with it. See
+[AWS Partitions](../configuration/partitions.md).
+
 **Versions:** `CreateFunction` and `UpdateFunctionCode` honour `Publish`, publishing a version
 and reporting it in the response's `Version`. The two differ in the ARN they return, matching the
 live service: `CreateFunction` keeps the unqualified `FunctionArn` while `UpdateFunctionCode`
@@ -521,6 +533,10 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 
     Only first-time populates are gated. Warm containers, already-populated volumes, and
     functions under 32 MB are never serialised by this.
+
+    The temporary copy helper is removed without a stop grace period once copying
+    finishes or fails. It runs no Lambda code; actual execution environments retain
+    their normal shutdown and extension-drain behavior.
 
 !!! note "Bounding warm containers"
     After an invocation the container stays warm so the next call skips the cold start, and is

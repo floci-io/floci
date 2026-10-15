@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.opensearch.model.Domain;
+import io.github.hectorvent.floci.services.opensearch.model.VolumeOwnership;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -53,6 +54,23 @@ class OpenSearchServiceTest {
                 "the readiness poller flips Processing once the container answers");
         assertTrue(service.describeDomain("docker-domain").isProcessing());
         verify(domainManager).tryStartDomain(any());
+    }
+
+    /**
+     * The volume name and the ownership marker are persisted at creation, so deletion
+     * acts on what was stamped instead of recomputing ownership from whatever
+     * configuration holds at delete time.
+     */
+    @Test
+    void createDomainStampsManagedVolumeNameAndOwnership() {
+        when(domainManager.tryStartDomain(any())).thenReturn(false);
+
+        Domain domain = service.createDomain("stamped-domain", "OpenSearch_2.11",
+                null, null, null, "us-east-1");
+
+        assertEquals(VolumeOwnership.FLOCI_MANAGED, domain.getVolumeOwnership());
+        assertTrue(domain.getDockerVolumeName().startsWith("floci-aws-opensearch-"),
+                "the stamped name carries the current managed prefix");
     }
 
     @Test

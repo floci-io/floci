@@ -220,9 +220,13 @@ the ones not listed here are not acted on.
 
 For test assertions and debugging, Floci exposes a LocalStack-compatible mailbox endpoint:
 
-- `GET /_aws/ses` lists captured messages
+- `GET /_aws/ses` lists captured messages, oldest first by `Timestamp`
 - `GET /_aws/ses?id=<message-id>` returns a specific captured message
+- `GET /_aws/ses?email=<address>` returns the messages whose `Source` equals that value exactly, so a sender given as `Name <a@example.com>` is matched in that form; with `id` as well, both filters apply
 - `DELETE /_aws/ses` clears the captured mailbox
+- `DELETE /_aws/ses?id=<message-id>` deletes only that message; an unknown id deletes nothing
+
+The `email` filter matches the sender, as on [LocalStack](https://docs.localstack.cloud/aws/services/ses/), not a recipient. Earlier Floci versions matched it against `ToAddresses`; to find the messages sent to an address, list them all and filter on `Destination.ToAddresses`.
 
 Messages are stored locally by Floci and can be persisted when SES storage is backed by persistent or hybrid storage.
 
@@ -507,3 +511,23 @@ does not grant them yet. The other actions the service reference lists for some 
 checked: `ses:TagResource` for the create operations, and `iam:PassRole` (with `iam:PassedToService`
 `ses.amazonaws.com`) for creating or updating an event destination. A v2 `SendEmail` is authorized as
 `ses:SendEmail` whatever its content: `ses:SendRawEmail` is a v1 action.
+
+SES publishes to an SNS topic as `ses.amazonaws.com`, so the topic's policy decides whether it may,
+whatever the sender's own SNS permissions: an event destination's events with the configuration set's
+ARN as `aws:SourceArn`, and an identity's bounce, complaint and delivery notifications with the ARN of
+the identity that names the topic, the sender's own or its domain's. Both carry the sending account as
+`aws:SourceAccount` and `aws:SourceOwner`. The default policy of a topic in the sending account admits
+SES; a topic whose policy was replaced, or a topic in another account, needs a statement for SES like
+the one in the [SES Developer Guide](https://docs.aws.amazon.com/ses/latest/dg/event-publishing-add-event-destination-sns.html).
+Floci checks the topic when SES publishes, not when an event destination is created or a notification
+topic is set. A refused event is not delivered. When a notification cannot be published because the
+topic is gone or its policy refuses SES, Floci does what SES does: it takes the topic out of the
+identity's bounce and complaint settings that name it and turns email feedback forwarding back on,
+while a delivery setting stays. A topic that is gone counts with enforcement off too. SES also emails the account about
+the change, which Floci does not. Floci delivers only to topics in the sending account, so a
+notification another account's topic allows is not delivered either.
+
+`CreateReceiptRule` and `UpdateReceiptRule` check the same way: an action whose `TopicArn` names a
+topic whose policy does not let SES publish for that rule is refused with `InvalidSnsTopic`, as a
+topic that does not exist is, the rule's ARN being the `aws:SourceArn`. The rules still route no
+mail.

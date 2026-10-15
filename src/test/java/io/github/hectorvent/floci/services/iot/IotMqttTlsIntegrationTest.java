@@ -1,13 +1,10 @@
 package io.github.hectorvent.floci.services.iot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.CertificateMetadata;
-import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
-import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import io.github.hectorvent.floci.testing.IotMqttTlsProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
@@ -18,21 +15,19 @@ import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
-import java.io.IOException;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.BlockingQueue;
@@ -57,17 +52,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * broker behaviour as the plaintext listener.
  */
 @QuarkusTest
-@TestProfile(IotMqttTlsIntegrationTest.Profile.class)
+@TestProfile(IotMqttTlsProfile.class)
 class IotMqttTlsIntegrationTest {
 
-    static final Path DATA_DIR = Path.of("target", "floci-iot-mqtt-tls-test").toAbsolutePath();
-    static final Path TLS_DIR = DATA_DIR.resolve("tls");
-    static final int PLAIN_PORT = 18834;
-    static final int TLS_PORT = 18835;
+    static final Path TLS_DIR = Path.of(IotMqttTlsProfile.TLS_DIR);
+    static final int PLAIN_PORT = IotMqttTlsProfile.PLAIN_PORT;
+    static final int TLS_PORT = IotMqttTlsProfile.TLS_PORT;
     static final String LEARNED_HOST = "iot.dev.localhost.floci.io";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-
-    private static IotDeviceIdentity device;
+    private static final String CONNECT_ANY_CLIENT =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"iot:Connect\",\"Resource\":\"arn:aws:iot:*:*:client/*\"}]}";
 
     @Inject
     TlsCertificateManager certificateManager;
@@ -75,25 +69,26 @@ class IotMqttTlsIntegrationTest {
     @Inject
     IotMqttBrokerService broker;
 
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
+    private IotDeviceIdentity device;
+
     /**
      * One registered device with a policy allowing iot:Connect for any client id, shared by the
-     * TLS clients. Provisioned by the first test that needs it: RestAssured is pointed at the
-     * test port before each test, not before the class.
+     * TLS clients of a test and removed after it. Provisioned on first use, since the plaintext
+     * tests need none.
      */
-    private static synchronized IotDeviceIdentity device() {
+    private IotDeviceIdentity device() {
         if (device == null) {
-            IotDeviceIdentity provisioned = IotDeviceIdentity.provision(true);
-            String policy = "tls-roundtrip-" + System.nanoTime();
-            given()
-                    .contentType("application/json")
-                    .body(OBJECT_MAPPER.createObjectNode().put("policyDocument",
-                            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"iot:Connect\",\"Resource\":\"arn:aws:iot:*:*:client/*\"}]}").toString())
-                    .when().post("/policies/" + policy)
-                    .then().statusCode(200);
-            given().queryParam("target", provisioned.certificateArn).when().put("/target-policies/" + policy).then().statusCode(200);
-            device = provisioned;
+            device = IotDeviceIdentity.provision(true, cleanup);
+            device.attachNewPolicy(CONNECT_ANY_CLIENT, cleanup);
         }
         return device;
+    }
+
+    private TlsClient connectTls(String clientId) throws Exception {
+        return TlsClient.connect(clientId, device().sslContext(TLS_DIR));
     }
 
     @Test
@@ -101,9 +96,9 @@ class IotMqttTlsIntegrationTest {
         String topic = "tls/roundtrip/" + System.nanoTime();
         byte[] payload = "hello over 8883".getBytes(StandardCharsets.UTF_8);
 
-        try (TlsClient subscriber = TlsClient.connect("tls-sub-" + System.nanoTime())) {
+        try (TlsClient subscriber = connectTls("tls-sub-" + System.nanoTime())) {
             subscriber.subscribe(topic, 1);
-            try (TlsClient publisher = TlsClient.connect("tls-pub-" + System.nanoTime())) {
+            try (TlsClient publisher = connectTls("tls-pub-" + System.nanoTime())) {
                 publisher.publish(topic, payload, 1);
             }
             assertArrayEquals(payload, subscriber.takePayload());
@@ -132,7 +127,7 @@ class IotMqttTlsIntegrationTest {
     void aRegisteredDeviceIsAdmittedAndTheSessionIsVisibleToTheConnectionApi() throws Exception {
         String clientId = "tls-device-" + System.nanoTime();
 
-        try (TlsClient client = TlsClient.connect(clientId)) {
+        try (TlsClient client = connectTls(clientId)) {
             assertTrue(client.isConnected());
             given()
                 .queryParam("includeSocketInformation", true)
@@ -177,6 +172,7 @@ class IotMqttTlsIntegrationTest {
         assertThrows(SSLHandshakeException.class, () -> handshakeVerifying(LEARNED_HOST),
                 "precondition: a device verifying the custom domain rejects the boot leaf");
 
+        cleanup.register(certificateManager::clear);
         certificateManager.ensureHost(LEARNED_HOST);
 
         Set<String> sans = sans(handshakeVerifying(LEARNED_HOST));
@@ -188,7 +184,7 @@ class IotMqttTlsIntegrationTest {
     void aClientIdReconnectingOnThePlaintextListenerTakesOverTheTlsSession() throws Exception {
         String clientId = "tls-takeover-" + System.nanoTime();
 
-        try (TlsClient first = TlsClient.connect(clientId)) {
+        try (TlsClient first = connectTls(clientId)) {
             MqttClient second = new MqttClient("tcp://127.0.0.1:" + PLAIN_PORT, clientId, new MemoryPersistence());
             try {
                 second.connect();
@@ -204,11 +200,12 @@ class IotMqttTlsIntegrationTest {
     @Test
     void shadowUpdateOverTlsPublishesTheAcceptedResponseOverTls() throws Exception {
         String thing = "tlsThing" + System.nanoTime();
-        try (TlsClient subscriber = TlsClient.connect("tls-shadow-sub-" + System.nanoTime())) {
+        try (TlsClient subscriber = connectTls("tls-shadow-sub-" + System.nanoTime())) {
             subscriber.subscribe("$aws/things/" + thing + "/shadow/update/accepted", 0);
-            try (TlsClient publisher = TlsClient.connect("tls-shadow-pub-" + System.nanoTime())) {
+            try (TlsClient publisher = connectTls("tls-shadow-pub-" + System.nanoTime())) {
                 publisher.publish("$aws/things/" + thing + "/shadow/update",
                         "{\"state\":{\"desired\":{\"color\":\"blue\"}},\"clientToken\":\"tls-token\"}".getBytes(StandardCharsets.UTF_8), 0);
+                cleanup.register(() -> given().when().delete("/things/" + thing + "/shadow").then().statusCode(200));
             }
             String accepted = new String(subscriber.takePayload(), StandardCharsets.UTF_8);
             assertEquals("blue", OBJECT_MAPPER.readTree(accepted).path("state").path("desired").path("color").asText());
@@ -221,9 +218,9 @@ class IotMqttTlsIntegrationTest {
         String topic = "tls/limit/" + System.nanoTime();
         byte[] payload = randomPayload(AWS_MAX_PAYLOAD);
 
-        try (TlsClient subscriber = TlsClient.connect("tls-limit-sub-" + System.nanoTime())) {
+        try (TlsClient subscriber = connectTls("tls-limit-sub-" + System.nanoTime())) {
             subscriber.subscribe(topic, 1);
-            try (TlsClient publisher = TlsClient.connect("tls-limit-pub-" + System.nanoTime())) {
+            try (TlsClient publisher = connectTls("tls-limit-pub-" + System.nanoTime())) {
                 publisher.publish(topic, payload, 1);
             }
             assertArrayEquals(payload, subscriber.takePayload());
@@ -235,13 +232,13 @@ class IotMqttTlsIntegrationTest {
         String topic = "tls/over-limit/" + System.nanoTime();
         byte[] after = "after".getBytes(StandardCharsets.UTF_8);
 
-        try (TlsClient subscriber = TlsClient.connect("tls-over-sub-" + System.nanoTime())) {
+        try (TlsClient subscriber = connectTls("tls-over-sub-" + System.nanoTime())) {
             subscriber.subscribe(topic, 1);
-            try (TlsClient publisher = TlsClient.connect("tls-over-pub-" + System.nanoTime())) {
+            try (TlsClient publisher = connectTls("tls-over-pub-" + System.nanoTime())) {
                 assertThrows(MqttException.class, () -> publisher.publish(topic, randomPayload(AWS_MAX_PAYLOAD + 1), 1));
                 publisher.awaitDisconnected();
             }
-            try (TlsClient next = TlsClient.connect("tls-over-next-" + System.nanoTime())) {
+            try (TlsClient next = connectTls("tls-over-next-" + System.nanoTime())) {
                 next.publish(topic, after, 0);
             }
             assertArrayEquals(after, subscriber.takePayload(), "the oversized publish is never delivered");
@@ -253,7 +250,7 @@ class IotMqttTlsIntegrationTest {
         broker.stop();
         broker.startIfEnabled();
 
-        try (TlsClient client = TlsClient.connect("tls-restart-" + System.nanoTime())) {
+        try (TlsClient client = connectTls("tls-restart-" + System.nanoTime())) {
             assertTrue(client.isConnected());
         }
     }
@@ -296,7 +293,7 @@ class IotMqttTlsIntegrationTest {
             this.client = client;
         }
 
-        static TlsClient connect(String clientId) throws Exception {
+        static TlsClient connect(String clientId, SSLContext deviceContext) throws Exception {
             MqttClient client = new MqttClient("ssl://127.0.0.1:" + TLS_PORT, clientId, new MemoryPersistence());
             client.setTimeToWait(10_000);
             TlsClient tlsClient = new TlsClient(client);
@@ -318,7 +315,7 @@ class IotMqttTlsIntegrationTest {
             options.setCleanSession(true);
             options.setConnectionTimeout(10);
             options.setAutomaticReconnect(false);
-            options.setSocketFactory(device().sslContext(TLS_DIR).getSocketFactory());
+            options.setSocketFactory(deviceContext.getSocketFactory());
             client.connect(options);
             return tlsClient;
         }
@@ -358,50 +355,6 @@ class IotMqttTlsIntegrationTest {
                 client.disconnect();
             }
             client.close();
-        }
-    }
-
-    /**
-     * TLS on with a CA-issued leaf on disk, as TlsConfigSource leaves it in production. The
-     * bootstrap reads system properties, not profile overrides, so the profile lays the files
-     * down itself and points the TLS registry's default entry at them. The leaf carries
-     * {@code 127.0.0.1} so Paho's hostname verification passes against {@code ssl://127.0.0.1}.
-     */
-    public static final class Profile implements QuarkusTestProfile {
-
-        static {
-            try {
-                Files.createDirectories(TLS_DIR);
-                for (String name : List.of("floci-server.crt", "floci-server.key", "floci-server.metadata.json")) {
-                    Files.deleteIfExists(TLS_DIR.resolve(name));
-                }
-                FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
-                List<String> sans = List.of("localhost", "127.0.0.1", "*.localhost.floci.io");
-                CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("localhost", sans, KeyAlgorithm.RSA_2048, null);
-                Files.writeString(TLS_DIR.resolve("floci-server.crt"), leaf.certificatePem());
-                Files.writeString(TLS_DIR.resolve("floci-server.key"), leaf.privateKeyPem());
-                Files.writeString(TLS_DIR.resolve("floci-server.metadata.json"),
-                        OBJECT_MAPPER.writeValueAsString(CertificateMetadata.create(sans, "dev")));
-            } catch (IOException e) {
-                throw new IllegalStateException("could not prepare the TLS fixtures", e);
-            }
-        }
-
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.ofEntries(
-                    Map.entry("floci.tls.enabled", "true"),
-                    Map.entry("floci.tls.self-signed", "true"),
-                    Map.entry("floci.tls.aws-https-port", "0"),
-                    Map.entry("floci.storage.persistent-path", DATA_DIR.toString()),
-                    Map.entry("quarkus.tls.key-store.pem.0.cert", TLS_DIR.resolve("floci-server.crt").toString()),
-                    Map.entry("quarkus.tls.key-store.pem.0.key", TLS_DIR.resolve("floci-server.key").toString()),
-                    Map.entry("quarkus.http.insecure-requests", "enabled"),
-                    Map.entry("floci.services.iot.mqtt.enabled", "true"),
-                    Map.entry("floci.services.iot.mqtt.auto-start", "true"),
-                    Map.entry("floci.services.iot.mqtt.host", "127.0.0.1"),
-                    Map.entry("floci.services.iot.mqtt.port", Integer.toString(PLAIN_PORT)),
-                    Map.entry("floci.services.iot.mqtt.tls-port", Integer.toString(TLS_PORT)));
         }
     }
 }

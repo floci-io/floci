@@ -8,11 +8,15 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
 import io.restassured.path.xml.XmlPath;
+import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -21,6 +25,9 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -256,21 +263,46 @@ class SigV4HeaderSignatureIntegrationTest {
             .body("__type", equalTo("InvalidSignatureException"));
     }
 
-    @Test
+    @ParameterizedTest
+    @CsvSource({"sts, -1200", "sts, 1200", "sts, -840", "sts, 840",
+            "sqs, -1200", "sqs, 1200", "sqs, -840", "sqs, 840",
+            "lambda, -1200", "lambda, 1200", "lambda, -840", "lambda, 840"})
     @Order(10)
-    void signatureOutsideTheClockSkewWindowIsRefused() {
-        given()
-            .filter(AwsRequestSigner.signedAs("test", "test", "sqs")
-                    .signedAt(Instant.now().minus(Duration.ofMinutes(20))))
-            .contentType(JSON_1_0)
-            .header("X-Amz-Target", "AmazonSQS.ListQueues")
-            .body("{}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(403)
-            .body("__type", equalTo("InvalidSignatureException"))
-            .body("message", containsString("Signature expired"));
+    void signatureClockSkewReportsTheDirectionAndCutoff(String service, long offset) {
+        Instant signedAt = Instant.now().plusSeconds(offset).truncatedTo(ChronoUnit.SECONDS);
+        boolean query = "sts".equals(service);
+        boolean rest = "lambda".equals(service);
+        RequestSpecification request = given()
+                .filter(AwsRequestSigner.signedAs("test", "test", service).signedAt(signedAt));
+        if (query) {
+            request.contentType(FORM).body("Action=GetCallerIdentity&Version=2011-06-15");
+        } else if (!rest) {
+            request.contentType(JSON_1_0).header("X-Amz-Target", "AmazonSQS.ListQueues").body("{}");
+        }
+        long cutoffOffset = offset > 0 ? 900 : -900;
+        Instant before = Instant.now().plusSeconds(cutoffOffset).truncatedTo(ChronoUnit.SECONDS);
+        Response response = request.request(rest ? "GET" : "POST", rest ? "/2015-03-31/functions" : "/");
+        Instant after = Instant.now().plusSeconds(cutoffOffset).truncatedTo(ChronoUnit.SECONDS);
+        if (Math.abs(offset) < 900) {
+            response.then().statusCode(200);
+            return;
+        }
+        response.then().statusCode(403);
+        String message;
+        if (query) {
+            response.then().body("ErrorResponse.Error.Code", equalTo("SignatureDoesNotMatch"));
+            message = response.xmlPath().getString("ErrorResponse.Error.Message");
+        } else {
+            response.then().header("X-Amzn-Errortype", equalTo("InvalidSignatureException"));
+            message = response.jsonPath().getString("message");
+        }
+        DateTimeFormatter format = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+        String prefix = offset > 0
+                ? "Signature not yet current: " + format.format(signedAt) + " is still later than "
+                : "Signature expired: " + format.format(signedAt) + " is now earlier than ";
+        assertTrue(message.startsWith(prefix), message);
+        Instant cutoff = Instant.from(format.parse(message.substring(prefix.length())));
+        assertTrue(!cutoff.isBefore(before) && !cutoff.isAfter(after), message);
     }
 
     @Test

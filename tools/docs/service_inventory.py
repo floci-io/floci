@@ -62,6 +62,7 @@ PACKAGE_NOTES = {
     "cloudwatch": "one package, two descriptors: cloudwatchlogs and cloudwatchmetrics",
     "floci": "Floci's own control surface, not an AWS service",
     "lambdamicrovms": "controllers attached to the lambda descriptor",
+    "lambdaweb": "controller attached to the lambda descriptor",
     "resourcegroupstagging": "registered under the AWS signing name, tagging",
     "securityadmin": "shared admin-accounts endpoint over GuardDuty and Macie",
     "signin": "controller attached to the signin descriptor, which is keyed iam",

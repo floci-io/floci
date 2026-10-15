@@ -119,6 +119,31 @@ class SigV4ValidatorTest {
     }
 
     /**
+     * The proxy validates on its own thread, where the implicit account is the default one. A key
+     * held by the account that owns the cache is still found, and one held by another account is
+     * not.
+     */
+    @Test
+    void validateFindsTheOwningAccountsKeyOutsideARequest() throws Exception {
+        IamService iamService = IamServiceTestHelper.iamServiceWithAccessKeyInAccount(
+                "AKIDCACHE", "secret-cache", "111111111111", "000000000000");
+
+        SigV4Validator validator = new SigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createElastiCacheToken(
+                "cache-cluster-01",
+                "default",
+                "AKIDCACHE",
+                "secret-cache",
+                Instant.now().minusSeconds(60),
+                900
+        );
+
+        assertTrue(validator.validate(token, "cache-cluster-01", "default", "111111111111"));
+        assertFalse(validator.validate(token, "cache-cluster-01", "default", "222222222222"));
+        assertFalse(validator.validate(token, "cache-cluster-01", "default", "000000000000"));
+    }
+
+    /**
      * A bare 12-digit access key ID that isn't registered in IAM must be rejected like any
      * other unknown key, not resolved to the well-known "test" secret. That fallback would let
      * a client forge an IAM-auth token for any account number, signed with the public "test"
@@ -245,6 +270,8 @@ class SigV4ValidatorTest {
                 Instant.now().minusSeconds(60), 900, "session-token");
 
         assertTrue(validator.validate(token, "cache-cluster-01", "default"));
+        assertTrue(validator.validate(token, "cache-cluster-01", "default", "111111111111"),
+                "A session is found whichever account issued it, with or without an owner to check");
     }
 
     /** A Lambda execution role's session token carries {@code +}, {@code /} and {@code =}. */

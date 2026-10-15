@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.testing.ValidateSignaturesProfile;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
+import io.github.hectorvent.floci.testutil.StsRequests.Credentials;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
@@ -14,7 +15,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.testutil.StsRequests.request;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -63,7 +64,7 @@ class StsSessionTokenCallerIntegrationTest {
             "GetSessionToken, missing", "GetFederationToken, missing", "AssumeRole, missing",
             "GetSessionToken, wrong", "GetFederationToken, wrong", "AssumeRole, wrong"
     })
-    void temporaryCallerCannotMintAnotherSessionToken(String issuer, String tokenMode) throws Exception {
+    void temporaryCallerCannotMintLongTermOnlyTokens(String issuer, String tokenMode) throws Exception {
         Credentials user = createUser();
         Map<String, String> params = new LinkedHashMap<>();
         if ("GetFederationToken".equals(issuer)) {
@@ -87,21 +88,29 @@ class StsSessionTokenCallerIntegrationTest {
             case "wrong" -> new Credentials(issued.key(), issued.secret(), "wrong-token");
             default -> issued;
         };
-        Response result = request(caller, "sts", "GetSessionToken", Map.of());
-        remember(result, "GetSessionToken");
-        result.then().statusCode(403).body("ErrorResponse.Error.Code",
-                equalTo("valid".equals(tokenMode) ? "AccessDenied" : "InvalidClientTokenId"));
-        request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200);
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            Response result = request(caller, "sts", action, issuanceParams(action));
+            remember(result, action);
+            result.then().statusCode(403).body("ErrorResponse.Error.Code",
+                    equalTo("valid".equals(tokenMode) ? "AccessDenied" : "InvalidClientTokenId"));
+            if ("valid".equals(tokenMode)) {
+                result.then().body("ErrorResponse.Error.Message",
+                        equalTo("Cannot call " + action + " with session credentials"));
+            }
+            request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200);
+        }
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void longTermCallerCanMintSessionToken(boolean user) throws Exception {
+    void longTermCallerCanMintBothTokenTypes(boolean user) throws Exception {
         Credentials caller = user ? createUser() : ROOT;
-        Credentials issued = credentials(request(caller, "sts", "GetSessionToken", Map.of()), "GetSessionToken");
-        assertTrue(issued.key().startsWith("ASIA"));
-        request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
-                .body("GetCallerIdentityResponse.GetCallerIdentityResult.Account", equalTo(ACCOUNT));
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            Credentials issued = credentials(request(caller, "sts", action, issuanceParams(action)), action);
+            assertTrue(issued.key().startsWith("ASIA"));
+            request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
+                    .body("GetCallerIdentityResponse.GetCallerIdentityResult.Account", equalTo(ACCOUNT));
+        }
     }
 
     @ParameterizedTest
@@ -109,9 +118,13 @@ class StsSessionTokenCallerIntegrationTest {
     void blankAuthorizationDoesNotHideTemporaryQueryCredentials(String authorization) throws Exception {
         Credentials user = createUser();
         Credentials issued = credentials(request(user, "sts", "GetSessionToken", Map.of()), "GetSessionToken");
-        Response result = querySessionRequest(authorization, issued).post("/");
-        remember(result, "GetSessionToken");
-        result.then().statusCode(403).body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            Response result = querySessionRequest(authorization, issued, action);
+            remember(result, action);
+            result.then().statusCode(403).body("ErrorResponse.Error.Code", equalTo("AccessDenied"))
+                    .body("ErrorResponse.Error.Message",
+                            equalTo("Cannot call " + action + " with session credentials"));
+        }
     }
 
     @ParameterizedTest
@@ -120,22 +133,33 @@ class StsSessionTokenCallerIntegrationTest {
         Credentials user = createUser();
         String expected = request(user, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
                 .extract().path("GetCallerIdentityResponse.GetCallerIdentityResult.Arn");
-        Credentials issued = credentials(querySessionRequest(authorization, user).post("/"), "GetSessionToken");
-        request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
-                .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", equalTo(expected));
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            Credentials issued = credentials(querySessionRequest(authorization, user, action), action);
+            String expectedArn = "GetFederationToken".equals(action)
+                    ? "arn:aws:sts::" + ACCOUNT + ":federated-user/federated-caller" : expected;
+            request(issued, "sts", "GetCallerIdentity", Map.of()).then().statusCode(200)
+                    .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", equalTo(expectedArn));
+        }
     }
 
-    private RequestSpecification querySessionRequest(String authorization, Credentials caller) {
-        RequestSpecification request = given().queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
-                .queryParam("X-Amz-Credential", caller.key() + "/20261013/us-east-1/sts/aws4_request")
-                .contentType("application/x-www-form-urlencoded").body("Action=GetSessionToken");
-        if (caller.token() != null) {
-            request.queryParam("X-Amz-Security-Token", caller.token());
-        }
+    private static Map<String, String> issuanceParams(String action) {
+        return "GetFederationToken".equals(action) ? Map.of("Name", "federated-caller") : Map.of();
+    }
+
+    private Response querySessionRequest(String authorization, Credentials caller, String action) throws Exception {
+        String body = "Action=" + action
+                + ("GetFederationToken".equals(action) ? "&Name=federated-caller" : "");
+        URI endpoint = URI.create("http://localhost:" + RestAssured.port + "/");
+        Map<String, String> query = caller.token() == null ? Map.of()
+                : Map.of("X-Amz-Security-Token", caller.token());
+        URI signed = AwsRequestSigner.signedAs(caller.key(), caller.secret(), "sts")
+                .presignedUri("POST", endpoint, query, body.getBytes(StandardCharsets.UTF_8));
+        RequestSpecification request = given().urlEncodingEnabled(false)
+                .contentType("application/x-www-form-urlencoded").body(body);
         if (!"absent".equals(authorization)) {
             request.header("Authorization", authorization);
         }
-        return request;
+        return request.post(signed);
     }
 
     private Credentials createUser() throws Exception {
@@ -180,20 +204,4 @@ class StsSessionTokenCallerIntegrationTest {
         }
     }
 
-    private Response request(Credentials caller, String service, String action, Map<String, String> params)
-            throws Exception {
-        StringBuilder body = new StringBuilder("Action=").append(action);
-        params.forEach((name, value) -> body.append('&').append(name).append('=')
-                .append(URLEncoder.encode(value, StandardCharsets.UTF_8)));
-        URI uri = URI.create("http://localhost:" + RestAssured.port + "/");
-        Map<String, String> extra = caller.token() == null ? Map.of()
-                : Map.of("x-amz-security-token", caller.token());
-        Map<String, String> headers = new LinkedHashMap<>(extra);
-        headers.putAll(AwsRequestSigner.signedAs(caller.key(), caller.secret(), service)
-                .headersFor("POST", uri, extra, body.toString().getBytes(StandardCharsets.UTF_8)));
-        return given().headers(headers).contentType("application/x-www-form-urlencoded")
-                .body(body.toString()).post("/");
-    }
-
-    private record Credentials(String key, String secret, String token) {}
 }

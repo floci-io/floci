@@ -194,6 +194,41 @@ By default volumes survive resource deletion, matching real AWS behavior.
 FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true
 ```
 
+### OpenSearch data volume override
+
+`FLOCI_SERVICES_OPENSEARCH_DATA_VOLUME` replaces the derived per-domain volume for
+OpenSearch domains. An absolute path bind-mounts `<path>/<account-id>/<region>/<domain-name>`;
+any other value is a Docker volume name and each domain gets its own
+`<name>-<account-id>-<region>-<domain-name>` volume. Account and Region come from the
+domain's stored ARN, so identical domain names in different accounts or Regions use
+separate storage. When `FLOCI_DOCKER_RESOURCE_NAMESPACE` is set, the layouts become
+`<path>/<namespace>/<account-id>/<region>/<domain-name>` and
+`<name>-<namespace>-<account-id>-<region>-<domain-name>`, separating namespaced deployments
+sharing one Docker daemon as well. Storage named through this variable is
+never removed on domain delete, regardless of storage mode and prune policy: the operator
+named it, so its lifecycle is theirs. A volume Floci creates when absent carries no Floci
+label, so neither a floci-scoped `docker volume prune --filter label=floci=true` nor a
+sweep of Floci-labelled child resources, a testcontainers module reaping a run's labelled
+children, removes it.
+
+Bind paths refer to the Docker daemon's host. Linux paths starting with `/` retain Linux
+path syntax when Floci runs on Windows; native Windows absolute paths retain their native
+handling. Before mounting the directory, a temporary root container using the selected
+OpenSearch image copies ownership from the image's data directory and grants the owner
+write access. Only the directory itself is adjusted; existing files retain their ownership
+and permissions. Preparation failure aborts domain startup.
+
+```bash
+# For domain my-search in account 000000000000 and Region us-east-1:
+FLOCI_SERVICES_OPENSEARCH_DATA_VOLUME=opensearch-data
+# Volume: opensearch-data-000000000000-us-east-1-my-search
+FLOCI_SERVICES_OPENSEARCH_DATA_VOLUME=/srv/floci/opensearch
+# Directory: /srv/floci/opensearch/000000000000/us-east-1/my-search
+# With FLOCI_DOCKER_RESOURCE_NAMESPACE=team-a:
+# Volume: opensearch-data-team-a-000000000000-us-east-1-my-search
+# Directory: /srv/floci/opensearch/team-a/000000000000/us-east-1/my-search
+```
+
 ### Host-path mode (advanced)
 
 Set `FLOCI_STORAGE_HOST_PERSISTENT_PATH` to an **absolute host path** to use bind mounts instead

@@ -86,7 +86,7 @@ class AutoScalingTest {
                 .minSize(0)
                 .maxSize(1)
                 .desiredCapacity(1)
-                .availabilityZones("us-east-1a")
+                .availabilityZones(TestFixtures.availabilityZone())
                 .build()))
                 .isInstanceOfSatisfying(AutoScalingException.class, error -> {
                     assertThat(error.statusCode()).isEqualTo(400);
@@ -179,7 +179,7 @@ class AutoScalingTest {
                 .minSize(0)
                 .maxSize(1)
                 .desiredCapacity(1)
-                .availabilityZones("us-east-1a")
+                .availabilityZones(TestFixtures.availabilityZone())
                 .build());
         autoScaling.attachInstances(AttachInstancesRequest.builder()
                 .autoScalingGroupName(autoScalingGroupName)
@@ -251,7 +251,7 @@ class AutoScalingTest {
                 .minSize(0)
                 .maxSize(4)
                 .desiredCapacity(0)
-                .availabilityZones("us-east-1a")
+                .availabilityZones(TestFixtures.availabilityZone())
                 .serviceLinkedRoleARN(roleArn)
                 .instanceMaintenancePolicy(InstanceMaintenancePolicy.builder()
                         .minHealthyPercentage(90)

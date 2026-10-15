@@ -510,7 +510,7 @@ class SesEventPublishingTest {
             if (!listed.contents().isEmpty()) {
                 break;
             }
-            Thread.sleep(2_000);
+            Thread.sleep(TestFixtures.isRealAws() ? 2_000 : 250);
         }
         assertThat(listed.contents())
                 .as("Firehose should deliver the buffered events within IntervalInSeconds")

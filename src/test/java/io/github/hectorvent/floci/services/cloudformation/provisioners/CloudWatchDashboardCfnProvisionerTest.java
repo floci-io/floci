@@ -30,6 +30,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -487,6 +488,39 @@ class CloudWatchDashboardCfnProvisionerTest {
         assertFalse(r.getAttributes().containsKey(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR),
                 "the snapshot is spent by the unwind");
         assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    /**
+     * A replacement whose rollback could not delete it stays owed. A later update reaches the
+     * dashboard only once ContinueUpdateRollback skipped it, and that update's own unwind restores
+     * its snapshot and leaves the orphan to the cleanup instead of retrying its delete.
+     */
+    @Test
+    void anUnwindAfterASkippedRollbackRestoresTheBodyAndLeavesTheOrphanOwed() {
+        StackResource r = provision("""
+                {"DashboardName": "ops-v2", "DashboardBody": "{}"}
+                """, "ops");
+        doThrow(new AwsException("InternalServiceError", "delete unavailable", 500)).doNothing()
+                .when(dashboards).deleteDashboards(List.of("ops-v2"), REGION);
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        assertEquals("ops", r.getPhysicalId());
+        assertEquals("ops-v2", provisioner.updateCleanupPhysicalId(r));
+        Dashboard before = new Dashboard("ops", arn("ops"), OLD_BODY);
+        before.setTags(new HashMap<>(Map.of("team", "platform")));
+        when(dashboards.getDashboard("ops", REGION)).thenReturn(before);
+        when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("team", "platform"));
+        doThrow(new AwsException("InternalServiceError", "boom", 500))
+                .when(dashboards).untagResource(arn("ops"), List.of("team"), REGION);
+        r.getAttributes().put("FlociDashboardNameMode", "explicit");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"DashboardName": "ops", "DashboardBody": "{}", "Tags": [{"Key": "env", "Value": "dev"}]}
+                """), new ProvisionContext(engine, REGION, ACCOUNT_ID, STACK, "ops")));
+
+        verify(dashboards).putDashboard(eq("ops"), eq(OLD_BODY), anyMap(), eq(REGION));
+        assertEquals("true", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+        verify(dashboards, times(1)).deleteDashboards(List.of("ops-v2"), REGION);
+        assertEquals("ops-v2", provisioner.updateCleanupPhysicalId(r));
     }
 
     /**

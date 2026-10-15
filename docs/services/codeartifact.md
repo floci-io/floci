@@ -43,6 +43,7 @@ the remaining formats (NuGet, etc.) have no real proxy behind them yet.
 | `PutPackageOriginConfiguration` | Sets a package's `publish`/`upstream` origin-control restrictions; can create the package (with no versions) if it doesn't exist yet. |
 | `DescribePackageVersion` | Returns a package version's status, revision, and origin. |
 | `GetPackageVersionAsset` | Downloads one asset from a package version by name, optionally pinned to a specific revision. |
+| `GetPackageVersionReadme` | Returns the readme text for a package version; `npm`, `pypi`, and `nuget` only, matching AWS's own restriction for this action. |
 | `TagResource` | Adds or updates tags on a domain or repository ARN. |
 | `UntagResource` | Removes tags by key from a domain or repository ARN. |
 | `ListTagsForResource` | Lists the tags on a domain or repository ARN. |

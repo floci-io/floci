@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.rdsdata;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.math.BigDecimal;
+import java.sql.Array;
 import java.sql.Blob;
 import java.sql.Date;
 import java.sql.SQLException;
@@ -67,9 +70,47 @@ final class RdsDataFieldMapper {
             case Types.DATE -> field.put("stringValue", formatDate(value));
             case Types.TIME -> field.put("stringValue", formatTime(value));
             case Types.TIMESTAMP, Types.TIMESTAMP_WITH_TIMEZONE -> field.put("stringValue", formatTimestamp(value));
+            case Types.ARRAY -> field.set("arrayValue", mapArray(objectMapper, (Array) value));
             default -> field.put("stringValue", value.toString());
         }
         return field;
+    }
+
+    private static ObjectNode mapArray(ObjectMapper objectMapper, Array array) throws SQLException {
+        try {
+            int baseType = array.getBaseType();
+            // PostgreSQL reports both bool and bit strings as JDBC BIT; decoding bit strings as booleans loses bits.
+            if (baseType == Types.BIT && "bit".equalsIgnoreCase(array.getBaseTypeName())) {
+                throw new AwsException("UnsupportedResultException", "Bit-string arrays are not supported.", 400);
+            }
+            String fieldName = switch (baseType) {
+                case Types.BIGINT, Types.INTEGER, Types.SMALLINT, Types.TINYINT -> "longValue";
+                case Types.BOOLEAN, Types.BIT -> "booleanValue";
+                case Types.FLOAT, Types.REAL, Types.DOUBLE -> "doubleValue";
+                case Types.ARRAY -> throw new AwsException("UnsupportedResultException",
+                        "Multidimensional arrays are not supported.", 400);
+                case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY, Types.BLOB ->
+                        throw new AwsException("UnsupportedResultException", "Binary arrays are not supported.", 400);
+                default -> "stringValue";
+            };
+            Object values = array.getArray();
+            ObjectNode arrayValue = objectMapper.createObjectNode();
+            ArrayNode elements = arrayValue.putArray(fieldName + "s");
+            // Qualify the reflection helper to distinguish it from JDBC's java.sql.Array.
+            for (int index = 0; index < java.lang.reflect.Array.getLength(values); index++) {
+                Object element = java.lang.reflect.Array.get(values, index);
+                if (element == null) {
+                    throw new AwsException("UnsupportedResultException", "Null array elements are not supported.", 400);
+                }
+                if (element instanceof Array || element.getClass().isArray()) {
+                    throw new AwsException("UnsupportedResultException", "Multidimensional arrays are not supported.", 400);
+                }
+                elements.add(toField(objectMapper, element, baseType).get(fieldName));
+            }
+            return arrayValue;
+        } finally {
+            array.free();
+        }
     }
 
     private static String formatDate(Object value) {

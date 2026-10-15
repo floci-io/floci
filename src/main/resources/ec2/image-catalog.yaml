@@ -11,6 +11,7 @@ images:
       - /aws/service/eks/optimized-ami/{k8s-version}/amazon-linux-2/recommended/image_id
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2
     name: amzn2-ami-hvm-2.0.20230404.0-x86_64-gp2
+    rootVolumeType: gp2
     description: Amazon Linux 2 AMI
     ownerId: "137112412989"
     imageOwnerAlias: amazon
@@ -72,6 +73,7 @@ images:
       - ami-ubuntu2404
     dockerImage: public.ecr.aws/docker/library/ubuntu:24.04
     name: ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-20260515
+    rootVolumeType: gp3
     description: Canonical, Ubuntu, 24.04 LTS
     ownerId: "099720109477"
     imageOwnerAlias: canonical
@@ -81,6 +83,7 @@ images:
   - imageId: ami-ubuntu2404-amd64
     dockerImage: public.ecr.aws/docker/library/ubuntu:24.04
     name: ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20260515
+    rootVolumeType: gp3
     description: Canonical, Ubuntu, 24.04 LTS
     ownerId: "099720109477"
     imageOwnerAlias: canonical
@@ -92,6 +95,7 @@ images:
       - ami-ubuntu2404-cloud
     dockerImage: floci/ami-ubuntu:24.04-arm64
     name: ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-20260515
+    rootVolumeType: gp3
     description: Canonical, Ubuntu, 24.04 LTS cloud image
     ownerId: "099720109477"
     imageOwnerAlias: canonical

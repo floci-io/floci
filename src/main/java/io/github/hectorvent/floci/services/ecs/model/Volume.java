@@ -5,14 +5,16 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.Map;
 
 /**
- * A task-level volume in an ECS task definition. Two shapes are modelled:
+ * A task-level volume in an ECS task definition. Three shapes are modelled:
  * <ul>
+ *   <li>A volume without a host source path or external configuration supplies ephemeral
+ *       storage shared by the containers in one task.</li>
  *   <li>EC2-launch-type {@code host} volume: {@code {"name": ..., "host": {"sourcePath": ...}}};
  *       {@code hostSourcePath} is the absolute path on the Docker host that the volume binds to.</li>
  *   <li>{@code efsVolumeConfiguration} volume: {@code {"name": ..., "efsVolumeConfiguration": {...}}};
  *       see {@link EfsVolumeConfiguration}.</li>
  * </ul>
- * The two are mutually exclusive. A container references the volume by {@code name} via a
+ * The configurations are mutually exclusive. A container references the volume by {@code name} via a
  * {@link MountPoint}.
  *
  * <p>{@code unparsed} keeps the volume members Floci backs with nothing, which is the rest of

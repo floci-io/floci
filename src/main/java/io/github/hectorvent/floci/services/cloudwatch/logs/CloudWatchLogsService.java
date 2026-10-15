@@ -424,6 +424,7 @@ public class CloudWatchLogsService implements ResourceProvider {
     public Map<String, String> listTagsLogGroup(String groupName, String region) {
         String key = groupKey(region, groupName);
         LogGroup group = groupStore.get(key)
+                .filter(stored -> groupName.equals(stored.getLogGroupName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
         return group.getTags();
@@ -439,6 +440,7 @@ public class CloudWatchLogsService implements ResourceProvider {
             String accountId, String groupName, String streamName, String region) {
         String groupKey = groupKey(region, groupName);
         getForAccount(groupStore, accountId, groupKey)
+                .filter(stored -> groupName.equals(stored.getLogGroupName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
 
@@ -460,6 +462,8 @@ public class CloudWatchLogsService implements ResourceProvider {
     public void deleteLogStream(String groupName, String streamName, String region) {
         String streamKey = streamKey(region, groupName, streamName);
         streamStore.get(streamKey)
+                .filter(stored -> groupName.equals(stored.getLogGroupName())
+                        && streamName.equals(stored.getLogStreamName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log stream does not exist: " + streamName, 400));
 
@@ -1264,8 +1268,10 @@ public class CloudWatchLogsService implements ResourceProvider {
 
     private void deleteEventsForStream(String region, String groupName, String streamName) {
         String eventPrefix = eventKeyPrefix(region, groupName, streamName);
+        String groupPrefix = streamKeyPrefix(region, groupName);
         List<String> keys = eventStore.keys().stream()
-                .filter(k -> k.startsWith(eventPrefix))
+                .filter(k -> k.startsWith(eventPrefix)
+                        && streamName.equals(streamNameFromEventKey(k, groupPrefix)))
                 .toList();
         keys.forEach(eventStore::delete);
     }

@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -38,6 +40,31 @@ class S3MultipartServiceTest {
     void setUp() {
         s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir, true);
         s3Service.createBucket("test-bucket", "us-east-1");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void expectedObjectSizeUsesSelectedPartsAndPreservesExistingObjectOnMismatch(boolean memory) {
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("size-check"), memory);
+        service.createBucket("sized-bucket", "us-east-1");
+        service.putObject("sized-bucket", "object", "prior".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        MultipartUpload upload = service.initiateMultipartUpload("sized-bucket", "object", null);
+        service.uploadPart("sized-bucket", "object", upload.getUploadId(), 1,
+                "data".getBytes(StandardCharsets.UTF_8));
+        service.uploadPart("sized-bucket", "object", upload.getUploadId(), 2,
+                "unused".getBytes(StandardCharsets.UTF_8));
+        AwsException error = assertThrows(AwsException.class, () -> service.completeMultipartUpload(
+                "sized-bucket", "object", upload.getUploadId(), List.of(1), Map.of(), Map.of(), null, null, 10L));
+        assertEquals("InvalidRequest", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("prior", new String(service.getObject("sized-bucket", "object").getData(),
+                StandardCharsets.UTF_8));
+        S3Object completed = service.completeMultipartUpload("sized-bucket", "object", upload.getUploadId(),
+                List.of(1), Map.of(), Map.of(), null, null, 4L);
+        assertEquals(4, completed.getSize());
+        assertEquals("data", new String(service.getObject("sized-bucket", "object").getData(),
+                StandardCharsets.UTF_8));
     }
 
     @Test
@@ -68,10 +95,15 @@ class S3MultipartServiceTest {
     @Test
     void uploadPartInvalidNumber() {
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "file.bin", null);
-        assertThrows(AwsException.class, () ->
-                s3Service.uploadPart("test-bucket", "file.bin", upload.getUploadId(), 0, new byte[1]));
-        assertThrows(AwsException.class, () ->
-                s3Service.uploadPart("test-bucket", "file.bin", upload.getUploadId(), 10001, new byte[1]));
+        for (int partNumber : new int[] {0, 10001}) {
+            AwsException error = assertThrows(AwsException.class, () ->
+                    s3Service.uploadPart("test-bucket", "file.bin", upload.getUploadId(), partNumber, new byte[1]));
+            assertEquals("InvalidArgument", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+            assertEquals("Part number must be an integer between 1 and 10000, inclusive", error.getMessage());
+            assertEquals(Map.of("ArgumentName", "partNumber", "ArgumentValue", Integer.toString(partNumber)),
+                    error.getExtendedData());
+        }
     }
 
     @Test

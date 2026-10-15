@@ -23,9 +23,10 @@ import java.util.Set;
  * or put back when a later resource fails the update and it rolls back.
  *
  * <p>The record on the resource lists every entity owed a delete, not only the one this update
- * displaced: a replacement whose rollback could not delete it stays listed, so the next committed
- * update or the stack delete removes it instead of it being forgotten. The prior entity's id and
- * attributes are kept beside the list only while this update's replacement can still be rolled back.
+ * displaced: a replacement whose rollback could not delete it stays listed, so a retried rollback,
+ * the next committed update or the stack delete removes it instead of it being forgotten. The prior
+ * entity's id and attributes are kept beside the list only while this update's replacement can
+ * still be rolled back.
  *
  * <p>{@code PipesCfnProvisioner} carries its own richer record because it also snapshots the
  * entity's configuration for in-place rollback; this is the plain version for types without one.
@@ -70,6 +71,7 @@ public final class ReplacementCleanup {
                        boolean replaced) {
         ObjectNode cleanup = readOrEmpty(r);
         cleanup.remove("priorPhysicalId");
+        cleanup.remove("undeletedReplacement");
         cleanup.remove("priorAttributes");
         cleanup.put("region", ctx.region());
         String prior = ctx.priorPhysicalId();
@@ -99,11 +101,28 @@ public final class ReplacementCleanup {
      * standing again, and a resource still owing its delete would put it on the next cleanup's list.
      * A replacement whose delete fails is listed in its place, never retained (a failed update
      * created it), so the next committed update or the stack delete removes it, and the failure
-     * propagates so the stack reports it. Returns false when this update replaced nothing, which
+     * propagates so the stack reports it. A retry (CloudFormation {@code ContinueUpdateRollback})
+     * re-attempts that failed delete. Returns false when this update replaced nothing, which
      * leaves the engine's handling of in-place updates unchanged.
      */
     static boolean rollback(StackResource r, Deleter deleter) {
         ObjectNode cleanup = read(r);
+        String undeleted = cleanup == null ? null : cleanup.path("undeletedReplacement").asText(null);
+        if (undeleted != null) {
+            JsonNode owed = null;
+            for (JsonNode entry : cleanup.path("displaced")) {
+                if (undeleted.equals(entry.path("physicalId").asText(null))) {
+                    owed = entry;
+                }
+            }
+            if (owed == null) {
+                cleanup.remove("undeletedReplacement");
+                write(r, cleanup);
+                return true;
+            }
+            return deleteReplacement(r, cleanup, deleter, owed.path("resourceType").asText(r.getResourceType()),
+                    undeleted);
+        }
         if (cleanup == null || cleanup.path("priorPhysicalId").asText(null) == null) {
             return false;
         }
@@ -125,14 +144,39 @@ public final class ReplacementCleanup {
         if (prior.equals(replacement) && !CfnResourceDispatcher.isStub(prior, r.getAttributes())) {
             return true;
         }
+        return deleteReplacement(r, cleanup, deleter, r.getResourceType(), replacement);
+    }
+
+    /** Deletes a rolled-back replacement; one whose delete throws stays owed and named for the retry. */
+    private static boolean deleteReplacement(StackResource r, ObjectNode cleanup, Deleter deleter,
+                                             String resourceType, String replacement) {
         try {
-            deleter.delete(r.getResourceType(), replacement, region(cleanup));
+            deleter.delete(resourceType, replacement, region(cleanup));
         } catch (RuntimeException deleteFailure) {
-            addDisplaced(cleanup, replacement, r.getResourceType(), region(cleanup), false);
+            addDisplaced(cleanup, replacement, resourceType, region(cleanup), false);
+            cleanup.put("undeletedReplacement", replacement);
             write(r, cleanup);
             throw deleteFailure;
         }
+        removeDisplaced(cleanup, replacement);
+        cleanup.remove("undeletedReplacement");
+        write(r, cleanup);
         return true;
+    }
+
+    /**
+     * Ends the retry a failed rollback left for the replacement it could not delete. Only
+     * ContinueUpdateRollback retries that delete, and a new update reaches the resource only once
+     * one skipped it, so a provisioner calls this as an update starts: otherwise rolling back an
+     * attempt that failed before {@link #record} would retry the earlier delete instead of undoing
+     * the attempt. The replacement stays listed, so the next committed update or the stack delete
+     * still removes it.
+     */
+    static void endRollbackRetry(StackResource r) {
+        ObjectNode cleanup = read(r);
+        if (cleanup != null && cleanup.remove("undeletedReplacement") != null) {
+            write(r, cleanup);
+        }
     }
 
     static boolean hasReplacement(StackResource r) {

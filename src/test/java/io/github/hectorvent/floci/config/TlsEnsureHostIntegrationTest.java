@@ -1,10 +1,6 @@
 package io.github.hectorvent.floci.config;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
-import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -17,16 +13,13 @@ import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManagerFactory;
-import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -44,11 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * handshake can.
  */
 @QuarkusTest
-@TestProfile(TlsEnsureHostIntegrationTest.Profile.class)
+@TestProfile(SelfSignedTlsProfile.class)
 class TlsEnsureHostIntegrationTest {
 
-    static final Path DATA_DIR = Path.of("target", "floci-tls-ensure-host-test").toAbsolutePath();
-    static final Path TLS_DIR = DATA_DIR.resolve("tls");
     static final String NEW_HOST = "api.example.localhost.floci.io";
 
     @ConfigProperty(name = "quarkus.http.test-ssl-port", defaultValue = "0")
@@ -127,7 +118,8 @@ class TlsEnsureHostIntegrationTest {
     private static SSLContext trustOnlyTheCa() throws Exception {
         KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
         trust.load(null, null);
-        trust.setCertificateEntry("floci", FlociCertificateAuthority.loadOrCreate(TLS_DIR).certificate());
+        trust.setCertificateEntry("floci",
+                FlociCertificateAuthority.loadOrCreate(Path.of(SelfSignedTlsProfile.TLS_DIR)).certificate());
         TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
         tmf.init(trust);
         SSLContext ctx = SSLContext.getInstance("TLS");
@@ -141,44 +133,5 @@ class TlsEnsureHostIntegrationTest {
             sans.add(String.valueOf(entry.get(1)));
         }
         return sans;
-    }
-
-    /**
-     * Boots with TLS on and a CA-issued leaf like the one TlsConfigSource writes. TlsConfigSource
-     * itself reads system properties, not profile overrides, so the profile lays the files down
-     * and points the TLS registry's default entry at them. The wildcard covers one label only
-     * (RFC 6125), so the three-label name is genuinely uncovered before ensureHost.
-     */
-    public static final class Profile implements QuarkusTestProfile {
-
-        static {
-            try {
-                Files.createDirectories(TLS_DIR);
-                for (String name : List.of("floci-server.crt", "floci-server.key", "floci-server.metadata.json")) {
-                    Files.deleteIfExists(TLS_DIR.resolve(name));
-                }
-                FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
-                List<String> sans = List.of("localhost", "*.localhost.floci.io");
-                CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("localhost", sans, KeyAlgorithm.RSA_2048, null);
-                Files.writeString(TLS_DIR.resolve("floci-server.crt"), leaf.certificatePem());
-                Files.writeString(TLS_DIR.resolve("floci-server.key"), leaf.privateKeyPem());
-                Files.writeString(TLS_DIR.resolve("floci-server.metadata.json"),
-                        new ObjectMapper().writeValueAsString(CertificateMetadata.create(sans, "dev")));
-            } catch (IOException e) {
-                throw new IllegalStateException("could not prepare the TLS fixtures", e);
-            }
-        }
-
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.tls.enabled", "true",
-                    "floci.tls.self-signed", "true",
-                    "floci.tls.aws-https-port", "0",
-                    "floci.storage.persistent-path", DATA_DIR.toString(),
-                    "quarkus.tls.key-store.pem.0.cert", TLS_DIR.resolve("floci-server.crt").toString(),
-                    "quarkus.tls.key-store.pem.0.key", TLS_DIR.resolve("floci-server.key").toString(),
-                    "quarkus.http.insecure-requests", "enabled");
-        }
     }
 }

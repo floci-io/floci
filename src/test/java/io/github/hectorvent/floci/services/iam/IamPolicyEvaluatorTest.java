@@ -185,6 +185,47 @@ class IamPolicyEvaluatorTest {
     }
 
     @Test
+    void aGrantToTheCallersOwnAccountDelegatesToItsIdentityPolicies() {
+        // IAM User Guide, "AWS account principals": naming an account "delegates authority to the
+        // account", so within it the caller's own policies decide; a grant naming the caller
+        // itself, or anyone, grants on its own.
+        String accountGrant = resourcePolicy("Allow", "\"Principal\":{\"AWS\":\"arn:aws:iam::123456789012:root\"}");
+        String everyoneGrant = resourcePolicy("Allow", "\"Principal\":{\"AWS\":\"*\"}");
+        RequestPrincipal alice = RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice");
+        ResourcePolicyDecision delegated = resourceDecision(accountGrant, alice);
+
+        assertEquals(ResourcePolicyDecision.ALLOW_ACCOUNT, delegated);
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(CallerContext.of(List.of()),
+                delegated, ResourceAccountRelationship.SAME_ACCOUNT, "s3:GetObject", "arn:aws:s3:::b/k", null));
+        assertEquals(Decision.ALLOW, evaluator.evaluateResolvedResourcePolicy(CallerContext.of(List.of(ALLOW_ALL)),
+                delegated, ResourceAccountRelationship.SAME_ACCOUNT, "s3:GetObject", "arn:aws:s3:::b/k", null));
+        assertEquals(Decision.ALLOW, evaluator.evaluateResolvedResourcePolicy(CallerContext.of(List.of()),
+                resourceDecision(everyoneGrant, alice), ResourceAccountRelationship.SAME_ACCOUNT,
+                "s3:GetObject", "arn:aws:s3:::b/k", null));
+    }
+
+    @Test
+    void aGrantToTheCallersAccountIsTheOwnersHalfOfACrossAccountGrant() {
+        assertEquals(Decision.ALLOW, evaluator.evaluateResolvedResourcePolicy(CallerContext.of(List.of(ALLOW_ALL)),
+                ResourcePolicyDecision.ALLOW_ACCOUNT, ResourceAccountRelationship.CROSS_ACCOUNT,
+                "s3:GetObject", "arn:aws:s3:::b/k", null));
+        assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(CallerContext.of(List.of()),
+                ResourcePolicyDecision.ALLOW_ACCOUNT, ResourceAccountRelationship.CROSS_ACCOUNT,
+                "s3:GetObject", "arn:aws:s3:::b/k", null));
+    }
+
+    @Test
+    void aGrantNamingTheCallerWinsOverOneNamingOnlyItsAccount() {
+        String both = resourcePolicy("Allow",
+                "\"Principal\":{\"AWS\":[\"123456789012\",\"arn:aws:iam::123456789012:role/App\"]}");
+
+        assertEquals(ResourcePolicyDecision.ALLOW, resourceDecision(both, RequestPrincipal.roleSession(
+                "arn:aws:sts::123456789012:assumed-role/App/s", "arn:aws:iam::123456789012:role/App")));
+        assertEquals(ResourcePolicyDecision.ALLOW_ACCOUNT, resourceDecision(both, RequestPrincipal.roleSession(
+                "arn:aws:sts::123456789012:assumed-role/Other/s", "arn:aws:iam::123456789012:role/Other")));
+    }
+
+    @Test
     void crossAccountResourceAllowRequiresIdentityAllow() {
         CallerContext caller = CallerContext.of(List.of());
 
@@ -747,7 +788,7 @@ class IamPolicyEvaluatorTest {
                 List.of(rolePolicy), "arn:aws-cn:sts::123456789012:assumed-role/r/sess", "s3:GetObject", "arn:aws-cn:s3:::b/k", null));
         String chinaRootPolicy = """
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws-cn:iam::123456789012:root"},"Action":"s3:*","Resource":"*"}]}""";
-        assertEquals(ResourcePolicyDecision.ALLOW, evaluator.evaluateResourcePolicy(
+        assertEquals(ResourcePolicyDecision.ALLOW_ACCOUNT, evaluator.evaluateResourcePolicy(
                 List.of(chinaRootPolicy), "arn:aws-cn:iam::123456789012:user/alice", "s3:GetObject", "arn:aws-cn:s3:::b/k", null));
         assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateResourcePolicy(
                 List.of(chinaRootPolicy), "arn:aws-cn:iam::999999999999:user/bob", "s3:GetObject", "arn:aws-cn:s3:::b/k", null));
@@ -766,7 +807,7 @@ class IamPolicyEvaluatorTest {
         String rootPolicy = """
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::123456789012:root"},"Action":"s3:*","Resource":"*"}]}""";
         for (String p : List.of(acctPolicy, rootPolicy)) {
-            assertEquals(ResourcePolicyDecision.ALLOW, evaluator.evaluateResourcePolicy(
+            assertEquals(ResourcePolicyDecision.ALLOW_ACCOUNT, evaluator.evaluateResourcePolicy(
                     List.of(p), "arn:aws:iam::123456789012:user/alice", "s3:GetObject", "arn:aws:s3:::b/k", null));
             assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateResourcePolicy(
                     List.of(p), "arn:aws:iam::999999999999:user/bob", "s3:GetObject", "arn:aws:s3:::b/k", null));
@@ -859,9 +900,9 @@ class IamPolicyEvaluatorTest {
         // S3 bucket policies can name an account by its canonical user ID (IAM User Guide, "AWS
         // account principals"); Floci's canonical ID for an account is the account id.
         String canonical = resourcePolicy("Allow", "\"Principal\":{\"CanonicalUser\":\"123456789012\"}");
-        assertEquals(ResourcePolicyDecision.ALLOW,
+        assertEquals(ResourcePolicyDecision.ALLOW_ACCOUNT,
                 resourceDecision(canonical, RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice")));
-        assertEquals(ResourcePolicyDecision.ALLOW, resourceDecision(canonical, RequestPrincipal.roleSession(
+        assertEquals(ResourcePolicyDecision.ALLOW_ACCOUNT, resourceDecision(canonical, RequestPrincipal.roleSession(
                 "arn:aws:sts::123456789012:assumed-role/App/s", "arn:aws:iam::123456789012:role/team/App")));
         assertEquals(ResourcePolicyDecision.NEUTRAL,
                 resourceDecision(canonical, RequestPrincipal.iam("arn:aws:iam::210987654321:user/alice")));
@@ -911,9 +952,10 @@ class IamPolicyEvaluatorTest {
 
     @Test
     void evaluatesResourcePolicyDenyAndNotPrincipal() {
-        // NotPrincipal inversion: anyone NOT alice is denied
+        // NotPrincipal inversion: anyone NOT alice is denied; alice is spared when her account is
+        // named with her (IAM User Guide, "AWS JSON policy elements: NotPrincipal")
         String notPrincipal = """
-            {"Version":"2012-10-17","Statement":[{"Effect":"Deny","NotPrincipal":{"AWS":"arn:aws:iam::123456789012:user/alice"},"Action":"s3:*","Resource":"*"}]}""";
+            {"Version":"2012-10-17","Statement":[{"Effect":"Deny","NotPrincipal":{"AWS":["arn:aws:iam::123456789012:user/alice","arn:aws:iam::123456789012:root"]},"Action":"s3:*","Resource":"*"}]}""";
         assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateResourcePolicy(
                 List.of(notPrincipal), "arn:aws:iam::123456789012:user/alice", "s3:GetObject", "arn:aws:s3:::b/k", null));
         assertEquals(ResourcePolicyDecision.EXPLICIT_DENY, evaluator.evaluateResourcePolicy(
@@ -935,6 +977,54 @@ class IamPolicyEvaluatorTest {
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}""";
         assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateResourcePolicy(
                 List.of(noPrincipal), "arn:aws:iam::123456789012:user/alice", "s3:GetObject", "arn:aws:s3:::b/k", null));
+    }
+
+    @Test
+    void aDenysNotPrincipalSparesAnIamCallerOnlyWhenItNamesItsAccountToo() {
+        // IAM User Guide, "AWS JSON policy elements: NotPrincipal": without the account ARN, "the
+        // policy might deny access to the entire account containing the principal".
+        RequestPrincipal alice = RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice");
+        RequestPrincipal session = RequestPrincipal.roleSession(
+                "arn:aws:sts::123456789012:assumed-role/App/s", "arn:aws:iam::123456789012:role/App");
+        RequestPrincipal root = RequestPrincipal.iam("arn:aws:iam::123456789012:root");
+
+        assertEquals(ResourcePolicyDecision.EXPLICIT_DENY, resourceDecision(resourcePolicy("Deny",
+                "\"NotPrincipal\":{\"AWS\":\"arn:aws:iam::123456789012:user/alice\"}"), alice));
+        assertEquals(ResourcePolicyDecision.EXPLICIT_DENY, resourceDecision(resourcePolicy("Deny",
+                "\"NotPrincipal\":{\"AWS\":\"arn:aws:iam::123456789012:role/App\"}"), session));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(resourcePolicy("Deny",
+                "\"NotPrincipal\":{\"AWS\":[\"arn:aws:iam::123456789012:role/App\",\"123456789012\"]}"), session));
+        assertEquals(ResourcePolicyDecision.EXPLICIT_DENY, resourceDecision(resourcePolicy("Deny",
+                "\"NotPrincipal\":{\"AWS\":\"123456789012\"}"), alice));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(resourcePolicy("Deny",
+                "\"NotPrincipal\":{\"AWS\":\"arn:aws:iam::123456789012:root\"}"), root));
+    }
+
+    @Test
+    void aDenysNotPrincipalNeverSparesACallerWithAPermissionsBoundary() {
+        // IAM User Guide: it "will always deny any IAM principal that has a permissions boundary
+        // policy attached, regardless of the values specified in the NotPrincipal element".
+        String sparesAlice = resourcePolicy("Deny", "\"NotPrincipal\":{\"AWS\":"
+                + "[\"arn:aws:iam::123456789012:user/alice\",\"arn:aws:iam::123456789012:root\"]}");
+        RequestPrincipal alice = RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice");
+
+        assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(sparesAlice, alice));
+        assertEquals(ResourcePolicyDecision.EXPLICIT_DENY,
+                resourceDecision(sparesAlice, new RequestPrincipal(RequestPrincipal.Type.IAM, alice.arn(), null, null, true)));
+    }
+
+    @Test
+    void anAllowsNotPrincipalGrantsEveryoneItDoesNotName() {
+        // Access Analyzer warns that Allow with NotPrincipal "can grant permissions to anonymous
+        // principals"; whoever it names, at any level, is left out.
+        String allButAlice = resourcePolicy("Allow",
+                "\"NotPrincipal\":{\"AWS\":\"arn:aws:iam::123456789012:user/alice\"}");
+
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(allButAlice, RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice")));
+        assertEquals(ResourcePolicyDecision.ALLOW,
+                resourceDecision(allButAlice, RequestPrincipal.iam("arn:aws:iam::123456789012:user/bob")));
+        assertEquals(ResourcePolicyDecision.ALLOW, resourceDecision(allButAlice, RequestPrincipal.anonymous()));
     }
 
     @Test
@@ -1062,7 +1152,7 @@ class IamPolicyEvaluatorTest {
             }]}""";
         ResourcePolicyDecision accountDecision = evaluator.evaluateResourcePolicy(
                 List.of(accountGrantPolicy), "arn:aws:iam::111111111111:user/alice", "s3:GetObject", "arn:aws:s3:::bucket/k", null);
-        assertEquals(ResourcePolicyDecision.ALLOW, accountDecision);
+        assertEquals(ResourcePolicyDecision.ALLOW_ACCOUNT, accountDecision);
         assertEquals(Decision.DENY, evaluator.evaluateResolvedResourcePolicy(
                 caller,
                 accountDecision,

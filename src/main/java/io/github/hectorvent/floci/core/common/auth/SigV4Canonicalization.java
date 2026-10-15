@@ -136,8 +136,9 @@ public final class SigV4Canonicalization {
      *
      * <p>The sentinels ({@code UNSIGNED-PAYLOAD}, the {@code STREAMING-*} forms) mean the caller
      * chose not to sign the body, and are honoured only when {@code x-amz-content-sha256} is itself
-     * in {@code SignedHeaders}: that is, when the choice is covered by the signature. A presigned
-     * request is unsigned-payload by convention; every AWS presigner emits it that way.
+     * in {@code SignedHeaders}: that is, when the choice is covered by the signature. Callers whose
+     * presigning protocol uses an unsigned payload select it explicitly; body-bearing STS
+     * requests from the Java SDK instead carry the actual body hash.
      */
     public static String payloadHash(String declaredContentSha256, String signedHeaders, byte[] body,
                                      boolean presigned) throws Exception {

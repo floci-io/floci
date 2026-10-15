@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testutil.SesMailbox;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
@@ -36,7 +36,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CognitoGetUserAuthFactorsIntegrationTest {
 
-    private static final ObjectMapper JSON = new ObjectMapper();
     private static final Pattern SIX_DIGIT_CODE = Pattern.compile("\\b(\\d{6})\\b");
     private static final String PASSWORD = "Factors1234!";
 
@@ -360,14 +359,7 @@ class CognitoGetUserAuthFactorsIntegrationTest {
     }
 
     private static String fetchLatestSesCode(String recipient) throws Exception {
-        String response = given()
-                .queryParam("email", recipient)
-                .get("/_aws/ses")
-                .then()
-                .statusCode(200)
-                .extract()
-                .asString();
-        JsonNode messages = JSON.readTree(response).path("messages");
+        JsonNode messages = SesMailbox.messagesTo(recipient);
         assertTrue(messages.isArray() && !messages.isEmpty(), "an EMAIL_OTP code should have been sent");
         Matcher matcher = SIX_DIGIT_CODE.matcher(messages.get(0).path("Body").path("text_part").asText());
         assertTrue(matcher.find(), "the EMAIL_OTP message should carry a six-digit code");

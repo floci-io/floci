@@ -48,6 +48,10 @@ public class AwsJsonCborController {
     private static final String GENERIC_CBOR_MEDIA_TYPE = "application/cbor";
     private static final String AWS_CBOR_1_1_MEDIA_TYPE = "application/x-amz-cbor-1.1";
 
+    /** The RPC v2 path parameters {@link IamEnforcementFilter} authorizes, as this endpoint dispatches them. */
+    static final String RPC_V2_SERVICE_PARAMETER = "serviceId";
+    static final String RPC_V2_OPERATION_PARAMETER = "operation";
+
     private final ObjectMapper objectMapper;
     private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
@@ -289,8 +293,8 @@ public class AwsJsonCborController {
     @Consumes({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
     @Produces({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
     public Response handleSmithyRpcV2Cbor(
-            @PathParam("serviceId") String serviceId,
-            @PathParam("operation") String operation,
+            @PathParam(RPC_V2_SERVICE_PARAMETER) String serviceId,
+            @PathParam(RPC_V2_OPERATION_PARAMETER) String operation,
             @Context HttpHeaders httpHeaders,
             byte[] body) {
 

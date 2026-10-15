@@ -25,6 +25,7 @@ import org.mockito.ArgumentCaptor;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -834,6 +835,38 @@ class SnsServiceTest {
         assertFalse(service.topicExists(arn, REGION));
         assertEquals(otherTopic, raw.get(key).orElseThrow());
         assertTrue(raw.get("000000000002/" + key).isEmpty());
+    }
+
+    @Test
+    void findTopicPolicy_readsTheTopicInTheAccountItsArnNames() {
+        String arn = "arn:aws:sns:us-east-1:000000000002:owned-elsewhere";
+        Topic topic = new Topic("owned-elsewhere", arn);
+        topic.getAttributes().put("Policy", "{\"Version\":\"2012-10-17\",\"Statement\":[]}");
+        AccountAwareStorageBackend<Topic> store = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        store.putForAccount("000000000002", "topic::" + REGION + "::" + arn, topic);
+        SnsService service = new SnsService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), null, null);
+
+        assertEquals(Optional.of("{\"Version\":\"2012-10-17\",\"Statement\":[]}"), service.findTopicPolicy(arn));
+    }
+
+    @Test
+    void findTopicPolicy_givesATopicWithoutOneTheDefaultForItsOwnAccount() {
+        String arn = "arn:aws:sns:us-east-1:000000000002:no-policy";
+        AccountAwareStorageBackend<Topic> store = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        store.putForAccount("000000000002", "topic::" + REGION + "::" + arn, new Topic("no-policy", arn));
+        SnsService service = new SnsService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT), null, null);
+
+        String policy = service.findTopicPolicy(arn).orElseThrow();
+
+        assertTrue(policy.contains("\"AWS:SourceOwner\":\"000000000002\""), policy);
+        assertTrue(policy.contains("\"Resource\":\"" + arn + "\""), policy);
+    }
+
+    @Test
+    void findTopicPolicy_isEmptyForATopicThatDoesNotExist() {
+        assertEquals(Optional.empty(), snsService.findTopicPolicy("arn:aws:sns:us-east-1:000000000000:ghost-topic"));
     }
 
     private static Map<String, MessageAttributeValue> attr(String name, String value, String dataType) {

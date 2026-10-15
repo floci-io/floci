@@ -76,6 +76,17 @@ throughout the definition before parsing it. Values come from the request region
 account, so the same definition can be imported across regions and partitions. This
 includes mapping templates and applies to both `ImportRestApi` and `PutRestApi`.
 
+OpenAPI integration types `aws`, `aws_proxy`, `http`, `http_proxy`, and `mock`, including
+uppercase and mixed-case spellings, are
+stored as the public Integration values `AWS`, `AWS_PROXY`, `HTTP`, `HTTP_PROXY`,
+and `MOCK`. Both `GetIntegration` and `GetMethod.methodIntegration` return these
+canonical values after import, merge, or overwrite.
+The accepted type list is generated from Botocore's public API Gateway service model
+and checked by `make aws-data-check`; importing an API requires no AWS SDK or network lookup.
+Unknown integration type strings produce warnings and leave the method without an
+integration. With `failOnWarnings=true`, the import or update is rejected before
+changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not accepted.
+
 ### Supported Operations
 
 | Category | Operations |
@@ -87,7 +98,7 @@ includes mapping templates and applies to both `ImportRestApi` and `PutRestApi`.
 | **Integrations** | PutIntegration, GetIntegration, UpdateIntegration, DeleteIntegration |
 | **Integration Responses** | PutIntegrationResponse, GetIntegrationResponse, UpdateIntegrationResponse, DeleteIntegrationResponse |
 | **Deployments** | CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment |
-| **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage, FlushStageAuthorizersCache |
+| **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage, FlushStageAuthorizersCache, GetExport |
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer |
 | **API Keys** | CreateApiKey, ImportApiKeys, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
 | **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan, GetUsage |
@@ -259,6 +270,21 @@ handling; a hand-rolled signer must include it.
 > signed, known caller is let through. `principalOrgId` and `cognitoIdentity` are always null -
 > Organizations membership and identity-pool federation are not modelled.
 
+### Request Model Validation
+
+Imported OpenAPI and Swagger request models can reference sibling models, including recursive
+references. Body validation resolves these schemas within the same API while preserving inline
+definitions. API Gateway model URLs (`https://apigateway.amazonaws.com/restapis/{api}/models/{name}`)
+also resolve from that deployment's snapshot in every partition, including China.
+Other schema URLs are not fetched.
+
+Rejected bodies return `Invalid request body` by default. Custom gateway responses can access
+the schema validation detail through `$context.error.validationErrorString`.
+
+Each deployment snapshots its model schemas. Updating or deleting a model does not change
+validation for an existing deployment; deploy again to apply those changes. Deployments saved
+before model snapshots were introduced retain their previous behavior until redeployed.
+
 ### Gateway Responses
 
 A REST API's gateway responses customise what the gateway itself answers when it, rather than
@@ -310,7 +336,7 @@ These management-plane operations have no handler in v1. Calls will return `404`
 - Model templates: `GetModelTemplate`
 - Documentation parts and versions (the entire family, 10 operations)
 - Client Certificates (5 operations)
-- `GetExport` / `ImportDocumentationParts`
+- `ImportDocumentationParts`
 
 The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`)
 is implemented separately and is not counted as management-plane operations. A deployed REST
@@ -387,8 +413,46 @@ authorization settings, request parameters and models, method responses, and int
 configuration. Resources without methods omit `resourceMethods`.
 
 For example, `aws apigateway get-resources --rest-api-id <id> --embed methods` lists method
-metadata without a separate `get-method` call for each operation. Stage OpenAPI export
-(`GetExport`) is not implemented.
+metadata without a separate `get-method` call for each operation.
+
+### Stage OpenAPI Export
+
+`GetExport` returns a deployed REST API as OpenAPI 3.0 (`oas30`) or Swagger 2.0 (`swagger`).
+Set `Accept: application/json` (the default) or `application/yaml`. The response contains the
+specification body with `Content-Type` and `Content-Disposition` headers.
+
+```bash
+aws apigateway get-export --rest-api-id <id> --stage-name dev --export-type oas30 \
+  --parameters extensions=apigateway --accepts application/json api.json
+```
+
+By default, integration and authorizer definitions are omitted, while the authorization-type marker
+remains in each security scheme. A protected API exported without authorizer definitions cannot be
+safely re-imported: Floci returns `BadRequestException` before changing resources. For an importable
+protected definition, include `extensions=authorizers` or `extensions=apigateway`.
+Only schemes referenced by an operation's effective security requirements need a definition;
+unused schemes do not prevent re-import. Explicit operation security overrides API-level security,
+including an empty security list that makes the operation public.
+
+Request `extensions=integrations` or `extensions=authorizers` for the respective definitions;
+`extensions=apigateway` includes both, request validators, customized gateway responses, API policy
+and binary media types. Exports include stored methods (including ANY),
+request parameters and JSON models, response headers, security requirements, and supported integration
+settings. Exported integration types and passthrough settings use OpenAPI's lowercase spelling;
+import normalizes them to management API enum values.
+
+New deployments retain an export snapshot. Undeployed edits do not change it, and exporting another
+stage uses that stage's deployment. Deployment description updates preserve the snapshot. Older
+persisted deployments without a snapshot must be redeployed before export; Floci returns an explicit
+`BadRequestException` rather than exporting the live definition.
+
+This exports Floci's stored configuration, not the original uploaded document. Unsupported metadata,
+Postman extensions and full documentation exports are outside this operation's scope. Non-JSON models are rejected. Swagger supports only one body schema per
+operation, so methods using different request models per content type cannot be exported as Swagger;
+use `oas30` instead. Swagger response headers do not retain the method-response required flag.
+Integration responses must have distinct selection patterns to fit OpenAPI's response map. Duplicate
+patterns (including multiple default responses) and the literal regex `default`, which is reserved
+in that map, return `BadRequestException` rather than silently discarding or changing a response.
 
 ### Integration Settings
 

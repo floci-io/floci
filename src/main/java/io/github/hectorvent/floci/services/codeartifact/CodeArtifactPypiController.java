@@ -164,6 +164,7 @@ public class CodeArtifactPypiController {
         }
         MultipartFormParser.ParsedForm form = MultipartFormParser.parse(content, boundary);
         String packageName = form.fields().get("name");
+        String version = form.fields().get("version");
         Optional<MultipartFormParser.FilePart> file = form.file();
         if (packageName == null || packageName.isBlank() || file.isEmpty()) {
             return Response.status(400).entity("Upload must include name and content fields.").build();
@@ -188,9 +189,21 @@ public class CodeArtifactPypiController {
             long fenceSnapshot = service.currentContainerBackedPackageFence(handle.region(), domain, handle.owner(),
                     repository, "pypi", null, packageName);
             Response response = forwardUpload(handle.baseUrl(), contentType, content);
-            if (response.getStatus() == 200 || response.getStatus() == 201) {
+            boolean uploadSucceeded = response.getStatus() == 200 || response.getStatus() == 201;
+            if (uploadSucceeded) {
                 service.recordContainerBackedAssetBytes(handle.region(), domain, handle.owner(), repository,
                         "pypi", null, packageName, file.get().content().length, fenceSnapshot);
+            }
+            // Only for a real new publish, never the byte-identical-retry short-circuit above
+            // (nothing new was written there either): the "description" field is the real PyPI
+            // legacy upload API's form field for a distribution's long description, the only place
+            // this text is ever available (see CodeArtifactService#getPackageVersionReadme's own
+            // javadoc for why pypiserver itself can't answer for it later). A missing/blank version
+            // field means twine never named a version for this upload, so there is no package
+            // version coordinate to record the readme against.
+            if (uploadSucceeded && version != null && !version.isBlank()) {
+                service.recordPublishedPackageVersionReadme(handle.region(), domain, handle.owner(), repository,
+                        "pypi", null, packageName, version, form.fields().get("description"), fenceSnapshot);
             }
             return response;
         }

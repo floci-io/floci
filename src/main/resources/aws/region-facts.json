@@ -3,18 +3,24 @@
     "generator": "tools/aws/regen_region_facts.py",
     "terraform": "terraform-provider-aws internal/service/elb/hosted_zone_id_data_source.go, internal/service/elbv2/hosted_zone_id_data_source.go, internal/service/s3/hosted_zones.go, internal/conns/awsclient.go",
     "cdk": "aws-cdk packages/aws-cdk-lib/region-info/build-tools/fact-tables.ts, packages/aws-cdk-lib/aws-route53-targets/lib/cloudfront-target.ts, packages/aws-cdk-lib/aws-ec2/lib/vpc-endpoint.ts",
+    "docs": "aws-docs/partition-guides (snapshots of the China and GovCloud user guides) cn/cloudfront.md, cn/console.md, gov/configure-account.md, gov/govcloud-abp.md, gov/govcloud-organizations.md",
+    "botocore": "botocore cloudfront/2020-05-31/service-2.json (Distribution$DomainName, DistributionSummary$DomainName)",
     "s3WebsiteConflicts": "terraform wins over the CDK where they disagree (it cites the S3 website-endpoint table)"
   },
   "partitions": {
     "aws": {
       "vpcEndpointServiceNamePrefix": "com.amazonaws.vpce",
       "cloudfrontHostedZoneId": "Z2FDTNDATAQYW2",
-      "samlSignOnUrl": "https://signin.aws.amazon.com/saml"
+      "samlSignOnUrl": "https://signin.aws.amazon.com/saml",
+      "consoleHost": "console.aws.amazon.com",
+      "cloudfrontDomainSuffix": "cloudfront.net"
     },
     "aws-cn": {
       "vpcEndpointServiceNamePrefix": "cn.com.amazonaws.vpce",
       "cloudfrontHostedZoneId": "Z3RFFRIM2A3IF5",
-      "samlSignOnUrl": "https://signin.amazonaws.cn/saml"
+      "samlSignOnUrl": "https://signin.amazonaws.cn/saml",
+      "consoleHost": "console.amazonaws.cn",
+      "cloudfrontDomainSuffix": "cloudfront.cn"
     },
     "aws-eusc": {
       "vpcEndpointServiceNamePrefix": "eu.amazonaws.vpce"
@@ -35,7 +41,8 @@
     },
     "aws-us-gov": {
       "vpcEndpointServiceNamePrefix": "com.amazonaws.vpce",
-      "samlSignOnUrl": "https://signin.amazonaws-us-gov.com/saml"
+      "samlSignOnUrl": "https://signin.amazonaws-us-gov.com/saml",
+      "consoleHost": "console.amazonaws-us-gov.com"
     }
   },
   "regions": {
@@ -382,13 +389,15 @@
       "albHostedZoneId": "Z166TLBEWOO7G0",
       "classicElbHostedZoneId": "Z166TLBEWOO7G0",
       "nlbHostedZoneId": "Z1ZSMQQ6Q24QQ8",
-      "s3WebsiteHostedZoneId": "Z2NIFVYYW2VKV1"
+      "s3WebsiteHostedZoneId": "Z2NIFVYYW2VKV1",
+      "apiGatewayRegionalHostedZoneId": "Z3SE9ATJYCRCZJ"
     },
     "us-gov-west-1": {
       "albHostedZoneId": "Z33AYJ8TM3BH4J",
       "classicElbHostedZoneId": "Z33AYJ8TM3BH4J",
       "nlbHostedZoneId": "ZMG1MZ2THAWF1",
-      "s3WebsiteHostedZoneId": "Z31GFT0UA1I2HV"
+      "s3WebsiteHostedZoneId": "Z31GFT0UA1I2HV",
+      "apiGatewayRegionalHostedZoneId": "Z1K6XKP9SAGWDV"
     },
     "us-iso-east-1": {
       "vpcEndpointExceptionPrefix": "gov.ic.c2s",

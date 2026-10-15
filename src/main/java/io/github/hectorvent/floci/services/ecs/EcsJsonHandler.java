@@ -55,6 +55,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -87,6 +88,10 @@ public class EcsJsonHandler {
     }
 
     public Response handle(String action, JsonNode request, String region) {
+        return handle(action, request, region, null);
+    }
+
+    public Response handle(String action, JsonNode request, String region, URI requestBaseUri) {
         return switch (action) {
             // Clusters
             case "CreateCluster" -> handleCreateCluster(request, region);
@@ -111,7 +116,7 @@ public class EcsJsonHandler {
             case "ListTasks" -> handleListTasks(request, region);
             case "UpdateTaskProtection" -> handleUpdateTaskProtection(request, region);
             case "GetTaskProtection" -> handleGetTaskProtection(request, region);
-            case "ExecuteCommand" -> handleExecuteCommand(request, region);
+            case "ExecuteCommand" -> handleExecuteCommand(request, region, requestBaseUri);
 
             case "CreateService" -> handleCreateService(request, region);
             case "UpdateService" -> handleUpdateService(request, region);
@@ -515,7 +520,7 @@ public class EcsJsonHandler {
         return Response.ok(resp).build();
     }
 
-    private Response handleExecuteCommand(JsonNode req, String region) {
+    private Response handleExecuteCommand(JsonNode req, String region, URI requestBaseUri) {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
         String task = req.path("task").asText();
         String container = req.hasNonNull("container") ? req.path("container").asText() : null;
@@ -535,7 +540,7 @@ public class EcsJsonHandler {
         resp.put("interactive", interactive);
         ObjectNode session = resp.putObject("session");
         session.put("sessionId", result.session().sessionId());
-        session.put("streamUrl", service.execStreamUrl(result.session()));
+        session.put("streamUrl", service.execStreamUrl(result.session(), requestBaseUri));
         session.put("tokenValue", result.session().tokenValue());
         return Response.ok(resp).build();
     }
@@ -1517,12 +1522,16 @@ public class EcsJsonHandler {
     private static final Set<String> VOLUME_CONSUMED = Set.of("name", "efsVolumeConfiguration");
 
     private EfsVolumeConfiguration parseEfsVolumeConfiguration(JsonNode node) {
-        if (node == null || !node.isObject()) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
             return null;
         }
+        if (!node.isObject()) {
+            throw new AwsException("InvalidParameterException", "EFS volume configuration must be an object.", 400);
+        }
         String fileSystemId = node.path("fileSystemId").asText(null);
-        if (fileSystemId == null) {
-            return null;
+        if (fileSystemId == null || fileSystemId.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "EFS volume configuration requires a fileSystemId.", 400);
         }
         Integer transitEncryptionPort = node.path("transitEncryptionPort").isNumber()
                 ? node.path("transitEncryptionPort").asInt() : null;

@@ -71,7 +71,7 @@ class RabbitMqManagerTest {
     private static ContainerBuilder.Builder selfReturningBuilder(ContainerBuilder containerBuilder) {
         ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
         return builder;
     }
 

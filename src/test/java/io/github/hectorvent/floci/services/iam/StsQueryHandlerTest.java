@@ -106,23 +106,32 @@ class StsQueryHandlerTest {
     @CsvSource({"ASIAtemporary, AKIAlongterm", "-, ASIAtemporary", "ASIAtemporary, -",
             "blank, ASIAtemporary", "space, ASIAtemporary"})
     void temporaryHeaderOrQueryCallerIsRejectedBeforeSessionRegistration(String headerKey, String queryKey) {
-        IamService service = mock(IamService.class);
-        StsQueryHandler handler = newHandler(service, new RegionResolver(REGION, "000000000000"));
-        setCaller(handler, headerKey, queryKey);
-        Response response = handler.handle("GetSessionToken", new MultivaluedHashMap<>());
-        assertEquals(403, response.getStatus());
-        assertTrue(response.getEntity().toString().contains("<Code>AccessDenied</Code>"));
-        verifyNoInteractions(service);
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            IamService service = mock(IamService.class);
+            StsQueryHandler handler = newHandler(service, new RegionResolver(REGION, "000000000000"));
+            setCaller(handler, headerKey, queryKey);
+            Response response = handler.handle(action, new MultivaluedHashMap<>());
+            assertEquals(403, response.getStatus());
+            assertTrue(response.getEntity().toString().contains("<Code>AccessDenied</Code>"));
+            assertTrue(response.getEntity().toString().contains("Cannot call " + action + " with session credentials"));
+            verifyNoInteractions(service);
+        }
     }
 
     @ParameterizedTest
     @CsvSource({"AKIAlongterm, ASIAtemporary", "-, AKIAlongterm", "-, -",
             "blank, AKIAlongterm", "space, AKIAlongterm", "blank, -", "space, -"})
     void longTermAndAnonymousCompatibilityCallsKeepExistingIssuance(String headerKey, String queryKey) {
-        StsQueryHandler handler = newHandler();
-        setCaller(handler, headerKey, queryKey);
-        Response response = handler.handle("GetSessionToken", new MultivaluedHashMap<>());
-        assertEquals(200, response.getStatus());
+        for (String action : new String[]{"GetSessionToken", "GetFederationToken"}) {
+            StsQueryHandler handler = newHandler();
+            setCaller(handler, headerKey, queryKey);
+            MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+            if ("GetFederationToken".equals(action)) {
+                params.putSingle("Name", "caller");
+            }
+            Response response = handler.handle(action, params);
+            assertEquals(200, response.getStatus());
+        }
     }
 
     private static void setCaller(StsQueryHandler handler, String headerKey, String queryKey) {

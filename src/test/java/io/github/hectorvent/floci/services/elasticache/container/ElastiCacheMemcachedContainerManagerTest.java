@@ -54,7 +54,7 @@ class ElastiCacheMemcachedContainerManagerTest {
             ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
             ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             EmulatorConfig config = mock(EmulatorConfig.class);
             EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -96,7 +96,7 @@ class ElastiCacheMemcachedContainerManagerTest {
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);

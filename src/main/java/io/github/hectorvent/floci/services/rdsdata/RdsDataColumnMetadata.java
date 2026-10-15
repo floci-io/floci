@@ -18,9 +18,9 @@ import java.sql.SQLException;
  *
  * <p>{@code type} is a {@link java.sql.Types} code and {@code typeName} is the
  * engine's own type name, exactly as AWS reports them (for example {@code 4}
- * and {@code int4} for a PostgreSQL integer). {@code arrayBaseColumnType} is
- * always {@code 0} because array columns are not mapped to {@code arrayValue}
- * fields yet.
+ * and {@code int4} for a PostgreSQL integer). {@code arrayBaseColumnType} starts
+ * at {@code 0}: the result mapper fills it from non-null JDBC array values,
+ * because {@code ResultSetMetaData} does not expose the array element type.
  */
 final class RdsDataColumnMetadata {
 

@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.opensearch.model.DomainEndpointOption
 import io.github.hectorvent.floci.services.opensearch.model.EbsOptions;
 import io.github.hectorvent.floci.services.opensearch.model.EncryptionAtRestOptions;
 import io.github.hectorvent.floci.services.opensearch.model.NodeToNodeEncryptionOptions;
+import io.github.hectorvent.floci.services.opensearch.model.VolumeOwnership;
 import io.github.hectorvent.floci.services.opensearch.model.VpcOptions;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -136,6 +137,10 @@ public class OpenSearchService implements ResourceProvider {
         // recomputed later. Only records predating this field fall back to the legacy name.
         domain.setDockerVolumeName(ContainerStorageHelper.resourceName(
                 config, "opensearch", domain.getVolumeId(), domain.getDomainName()));
+        // The ownership marker travels with the name, so deletion removes what was persisted
+        // instead of recomputing ownership against whatever configuration holds at delete time.
+        // A configured data volume overwrites both when startDomain mounts operator storage.
+        domain.setVolumeOwnership(VolumeOwnership.FLOCI_MANAGED);
 
         if (clusterConfig != null) {
             domain.setClusterConfig(clusterConfig);

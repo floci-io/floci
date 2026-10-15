@@ -594,6 +594,13 @@ public class Ec2QueryHandler {
                 }
             }
         }
+        if (tags.stream().anyMatch(tag -> Ec2Service.isAwsTagKey(tag.getKey()))) {
+            String code = switch (resourceType) {
+                case "vpc", "subnet", "security-group-rule", "spot-instances-request" -> "InvalidParameter";
+                default -> "InvalidParameterValue";
+            };
+            throw new AwsException(code, "Tag keys starting with 'aws:' are reserved for internal use", 400);
+        }
         return tags;
     }
 
@@ -620,8 +627,7 @@ public class Ec2QueryHandler {
 
     // Apply tags supplied inline on a create call (TagSpecification) to the resource, so
     // they round-trip on the next Describe* — otherwise the provider sees phantom tag drift.
-    private void applyResourceTags(MultivaluedMap<String, String> p, String region, String resourceType, String resourceId) {
-        List<Tag> tagList = parseTagsForResource(p, resourceType);
+    private void applyResourceTags(List<Tag> tagList, String region, String resourceId) {
         if (!tagList.isEmpty()) {
             service.createTags(region, List.of(resourceId), tagList);
         }
@@ -629,9 +635,7 @@ public class Ec2QueryHandler {
 
     // Each rule gets its own copy so mutating one rule's tag list can never leak into the
     // others authorized in the same batch, and the copy also feeds the response XML.
-    private void applySecurityGroupRuleTags(MultivaluedMap<String, String> p, String region,
-                                            List<SecurityGroupRule> rules) {
-        List<Tag> ruleTags = parseTagsForResource(p, "security-group-rule");
+    private void applySecurityGroupRuleTags(List<Tag> ruleTags, String region, List<SecurityGroupRule> rules) {
         if (ruleTags.isEmpty()) {
             return;
         }
@@ -784,33 +788,21 @@ public class Ec2QueryHandler {
         // Parse TagSpecifications. AWS applies each specification to exactly the resource
         // type it names, so the interfaces RunInstances creates are tagged only by a
         // ResourceType=network-interface specification - never by the instance's own tags.
-        List<Tag> instanceTags = new ArrayList<>();
-        List<Tag> networkInterfaceTags = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
-            if (resType == null) break;
-            List<Tag> target = switch (resType) {
-                case "instance" -> instanceTags;
-                case "network-interface" -> networkInterfaceTags;
-                default -> null;
-            };
-            if (target != null) {
-                for (int j = 1; ; j++) {
-                    String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
-                    if (k == null) break;
-                    String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    target.add(creationTag(k, v));
-                }
-            }
-        }
+        List<Tag> instanceTags = parseTagsForResource(p, "instance");
+        List<Tag> networkInterfaceTags = parseTagsForResource(p, "network-interface");
 
         // Absent fields stay null so the launch default, or the launch template's value, applies.
         LaunchTemplateData.MetadataOptions metadataOptions = parseMetadataOptions(p, "MetadataOptions.");
         String creditSpecificationCpuCredits = p.getFirst("CreditSpecification.CpuCredits");
 
+        List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings =
+                parseLaunchTemplateBlockDeviceMappings(p, "");
+
         LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(
                 p, region, userDataEncoded == null || userDataEncoded.isBlank());
         if (launchTemplateData != null) {
+            blockDeviceMappings = LaunchTemplateData.BlockDeviceMapping.merge(
+                    launchTemplateData.getBlockDeviceMappings(), blockDeviceMappings);
             if (launchTemplateData.getMetadataOptions() != null) {
                 metadataOptions = LaunchTemplateData.MetadataOptions.merge(
                         launchTemplateData.getMetadataOptions(), metadataOptions);
@@ -844,7 +836,7 @@ public class Ec2QueryHandler {
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")),
-                p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"));
+                p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings);
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -968,7 +960,8 @@ public class Ec2QueryHandler {
                         null,
                         null,
                         0,
-                        launch.availabilityZone(), null, null, launch.encodedUserData());
+                        launch.availabilityZone(), null, null, launch.encodedUserData(), false,
+                        null, null, launch.blockDeviceMappings());
                 Instance instance = reservation.getInstances().get(0);
                 launchedInstanceIds.add(instance.getInstanceId());
                 results.add(new FleetLaunchResult(instance, launch));
@@ -1126,7 +1119,8 @@ public class Ec2QueryHandler {
                 template.getEncodedUserData(),
                 service.iamInstanceProfileArn(template),
                 template.effectiveSecurityGroupIds(),
-                new ArrayList<>(tags.values()));
+                new ArrayList<>(tags.values()),
+                template.getBlockDeviceMappings());
     }
 
     /**
@@ -1171,7 +1165,8 @@ public class Ec2QueryHandler {
     private record FleetLaunch(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
                                String instanceType, String imageId, String subnetId, String availabilityZone,
                                String keyName, String userData, String encodedUserData, String iamInstanceProfileArn,
-                               List<String> securityGroupIds, List<Tag> instanceTags) {}
+                               List<String> securityGroupIds, List<Tag> instanceTags,
+                               List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings) {}
 
     private record FleetLaunchKey(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
                                   String instanceType, String imageId, String subnetId, String availabilityZone) {
@@ -1567,23 +1562,9 @@ public class Ec2QueryHandler {
     private Response handleCreateVpc(MultivaluedMap<String, String> p, String region) {
         String cidrBlock = p.getFirst("CidrBlock");
         boolean amazonProvidedIpv6 = "true".equalsIgnoreCase(p.getFirst("AmazonProvidedIpv6CidrBlock"));
+        List<Tag> vpcTags = parseTagsForResource(p, "vpc");
         Vpc vpc = service.createVpc(region, cidrBlock, false, amazonProvidedIpv6, p.getFirst("InstanceTenancy"));
-        List<Tag> vpcTags = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
-            if (resType == null) break;
-            if ("vpc".equals(resType)) {
-                for (int j = 1; ; j++) {
-                    String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
-                    if (k == null) break;
-                    String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    vpcTags.add(creationTag(k, v));
-                }
-            }
-        }
-        if (!vpcTags.isEmpty()) {
-            service.createTags(region, List.of(vpc.getVpcId()), vpcTags);
-        }
+        applyResourceTags(vpcTags, region, vpc.getVpcId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3150,11 +3131,12 @@ public class Ec2QueryHandler {
     // ─── Security Group handlers ───────────────────────────────────────────────
 
     private Response handleCreateSecurityGroup(MultivaluedMap<String, String> p, String region) {
+        List<Tag> resourceTags = parseTagsForResource(p, "security-group");
         String groupName = requireParameter(p, "GroupName");
         String description = requireParameter(p, "GroupDescription");
         String vpcId = p.getFirst("VpcId");
         SecurityGroup sg = service.createSecurityGroup(region, groupName, description, vpcId);
-        applyResourceTags(p, region, "security-group", sg.getGroupId());
+        applyResourceTags(resourceTags, region, sg.getGroupId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSecurityGroupResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3221,10 +3203,11 @@ public class Ec2QueryHandler {
     }
 
     private Response handleAuthorizeSecurityGroupIngress(MultivaluedMap<String, String> p, String region) {
+        List<Tag> ruleTags = parseTagsForResource(p, "security-group-rule");
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<SecurityGroupRule> rules = service.authorizeSecurityGroupIngress(region, groupId, perms);
-        applySecurityGroupRuleTags(p, region, rules);
+        applySecurityGroupRuleTags(ruleTags, region, rules);
         XmlBuilder xml = new XmlBuilder()
                 .start("AuthorizeSecurityGroupIngressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3238,10 +3221,11 @@ public class Ec2QueryHandler {
     }
 
     private Response handleAuthorizeSecurityGroupEgress(MultivaluedMap<String, String> p, String region) {
+        List<Tag> ruleTags = parseTagsForResource(p, "security-group-rule");
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<SecurityGroupRule> rules = service.authorizeSecurityGroupEgress(region, groupId, perms);
-        applySecurityGroupRuleTags(p, region, rules);
+        applySecurityGroupRuleTags(ruleTags, region, rules);
         XmlBuilder xml = new XmlBuilder()
                 .start("AuthorizeSecurityGroupEgressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3745,8 +3729,9 @@ public class Ec2QueryHandler {
     // ─── Internet Gateway handlers ────────────────────────────────────────────
 
     private Response handleCreateInternetGateway(MultivaluedMap<String, String> p, String region) {
+        List<Tag> resourceTags = parseTagsForResource(p, "internet-gateway");
         InternetGateway igw = service.createInternetGateway(region);
-        applyResourceTags(p, region, "internet-gateway", igw.getInternetGatewayId());
+        applyResourceTags(resourceTags, region, igw.getInternetGatewayId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateInternetGatewayResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3788,9 +3773,10 @@ public class Ec2QueryHandler {
     // ─── Route Table handlers ─────────────────────────────────────────────────
 
     private Response handleCreateRouteTable(MultivaluedMap<String, String> p, String region) {
+        List<Tag> resourceTags = parseTagsForResource(p, "route-table");
         String vpcId = p.getFirst("VpcId");
         RouteTable rt = service.createRouteTable(region, vpcId);
-        applyResourceTags(p, region, "route-table", rt.getRouteTableId());
+        applyResourceTags(resourceTags, region, rt.getRouteTableId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateRouteTableResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4128,6 +4114,7 @@ public class Ec2QueryHandler {
     // ─── Capacity Reservation handlers ────────────────────────────────────────
 
     private Response handleCreateCapacityReservation(MultivaluedMap<String, String> p, String region) {
+        List<Tag> resourceTags = parseTagsForResource(p, "capacity-reservation");
         CapacityReservation reservation = service.createCapacityReservation(
                 region,
                 p.getFirst("InstanceType"),
@@ -4143,7 +4130,7 @@ public class Ec2QueryHandler {
                 p.getFirst("InstanceMatchCriteria"),
                 p.getFirst("OutpostArn"),
                 p.getFirst("PlacementGroupArn"));
-        applyResourceTags(p, region, "capacity-reservation", reservation.getCapacityReservationId());
+        applyResourceTags(resourceTags, region, reservation.getCapacityReservationId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateCapacityReservationResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4212,6 +4199,7 @@ public class Ec2QueryHandler {
     // ─── Dedicated Host handlers ──────────────────────────────────────────────
 
     private Response handleAllocateHosts(MultivaluedMap<String, String> p, String region) {
+        List<Tag> resourceTags = parseTagsForResource(p, "dedicated-host");
         List<String> assetIds = getList(p, "AssetId");
         List<Host> allocated = service.allocateHosts(
                 region,
@@ -4229,7 +4217,7 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("hostIdSet");
         for (Host host : allocated) {
-            applyResourceTags(p, region, "dedicated-host", host.getHostId());
+            applyResourceTags(resourceTags, region, host.getHostId());
             xml.elem("item", host.getHostId());
         }
         xml.end("hostIdSet").end("AllocateHostsResponse");
@@ -4346,8 +4334,9 @@ public class Ec2QueryHandler {
     // ─── Elastic IP handlers ──────────────────────────────────────────────────
 
     private Response handleAllocateAddress(MultivaluedMap<String, String> p, String region) {
+        List<Tag> resourceTags = parseTagsForResource(p, "elastic-ip");
         Address addr = service.allocateAddress(region);
-        applyResourceTags(p, region, "elastic-ip", addr.getAllocationId());
+        applyResourceTags(resourceTags, region, addr.getAllocationId());
         XmlBuilder xml = new XmlBuilder()
                 .start("AllocateAddressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5759,7 +5748,8 @@ public class Ec2QueryHandler {
             MultivaluedMap<String, String> p, String prefix) {
         List<LaunchTemplateData.BlockDeviceMapping> mappings = new ArrayList<>();
         for (int i = 1; ; i++) {
-            String base = prefix + ".BlockDeviceMapping." + i;
+            // An empty prefix reads RunInstances' own top-level BlockDeviceMapping.N members.
+            String base = (prefix.isEmpty() ? "" : prefix + ".") + "BlockDeviceMapping." + i;
             if (!anyParamStartsWith(p, base + ".")) {
                 break;
             }
@@ -5834,6 +5824,11 @@ public class Ec2QueryHandler {
                 String key = p.getFirst(base + ".Tag." + j + ".Key");
                 if (key == null) {
                     break;
+                }
+                if (key.startsWith("aws:")) {
+                    throw new AwsException("InvalidTagKey.Malformed",
+                            "The tag key ‘" + key + "’ is not valid. "
+                                    + "Tag keys starting with 'aws:' are reserved for internal use.", 400);
                 }
                 tagList.add(creationTag(key, p.getFirst(base + ".Tag." + j + ".Value")));
             }
@@ -6052,19 +6047,7 @@ public class Ec2QueryHandler {
 
         String snapshotId = p.getFirst("SnapshotId");
 
-        List<Tag> volumeTags = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
-            if (resType == null) break;
-            if ("volume".equals(resType)) {
-                for (int j = 1; ; j++) {
-                    String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
-                    if (k == null) break;
-                    String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    volumeTags.add(creationTag(k, v));
-                }
-            }
-        }
+        List<Tag> volumeTags = parseTagsForResource(p, "volume");
 
         Volume vol = service.createVolume(region, availabilityZone, volumeType, size,
                 encrypted, iops, throughput, snapshotId, volumeTags);
@@ -6321,28 +6304,8 @@ public class Ec2QueryHandler {
         String userData = Ec2UserDataDecoder.decode(userDataEncoded);
         String iamInstanceProfileArn = p.getFirst("LaunchSpecification.IamInstanceProfile.Arn");
 
-        // Parse TagSpecifications
-        List<Tag> spotRequestTags = new ArrayList<>();
-        List<Tag> instanceTags = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
-            if (resType == null) break;
-            if ("spot-instances-request".equals(resType)) {
-                for (int j = 1; ; j++) {
-                    String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
-                    if (k == null) break;
-                    String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    spotRequestTags.add(creationTag(k, v));
-                }
-            } else if ("instance".equals(resType)) {
-                for (int j = 1; ; j++) {
-                    String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
-                    if (k == null) break;
-                    String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
-                    instanceTags.add(creationTag(k, v));
-                }
-            }
-        }
+        List<Tag> spotRequestTags = parseTagsForResource(p, "spot-instances-request");
+        List<Tag> instanceTags = parseTagsForResource(p, "instance");
 
         List<SpotInstanceRequest> requests = service.requestSpotInstances(region, spotPrice, instanceCount,
                 type, productDescription, imageId, instanceType, keyName, subnetId, securityGroupIds, userData, iamInstanceProfileArn,

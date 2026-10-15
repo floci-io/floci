@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.core.common.AwsProtocolClaimFilter;
+import io.github.hectorvent.floci.core.common.ProtocolClaim;
+import io.github.hectorvent.floci.core.common.WireProtocol;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -8,6 +11,7 @@ import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvFileSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 
 import java.io.ByteArrayInputStream;
@@ -30,6 +34,32 @@ import static org.mockito.Mockito.when;
 class IamActionRegistryTest {
 
     private final IamActionRegistry registry = new IamActionRegistry();
+
+    @Test
+    void cloudWatchGetUsesQueryActionAndOperationPrecedence() {
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("Action", "GetMetricStatistics");
+        query.add("Operation", "ListMetrics");
+        query.add("Version", "2010-08-01");
+        ContainerRequestContext ctx = mockCtx("GET", "/", query, null, "");
+        when(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                .thenReturn(new ProtocolClaim(WireProtocol.AWS_QUERY, null, "GetMetricStatistics", null));
+        assertEquals("monitoring:GetMetricStatistics", registry.resolve("monitoring", ctx));
+        assertEquals("GetMetricStatistics", registry.queryAction(ctx));
+        assertEquals("2010-08-01", registry.queryVersion(ctx));
+        query.remove("Action");
+        assertEquals("monitoring:ListMetrics", registry.resolve("monitoring", ctx));
+    }
+
+    @Test
+    void getRequiresTheQueryClaimRatherThanQueryParametersAlone() {
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("Action", "ListMetrics");
+        ContainerRequestContext ctx = mockCtx("GET", "/", query, null, "");
+        assertEquals(false, IamActionRegistry.isQueryRequest(ctx));
+        when(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY)).thenReturn(new ProtocolClaim(WireProtocol.REST, null, null, null));
+        assertEquals(false, IamActionRegistry.isQueryRequest(ctx));
+    }
 
     @Test
     void resolvesActionFromFormEncodedBody() {
@@ -226,6 +256,32 @@ class IamActionRegistryTest {
         assertEquals("lambda:SendDurableExecutionCallbackSuccess", lambdaAction("POST", callback + "/succeed"));
         assertEquals("lambda:SendDurableExecutionCallbackFailure", lambdaAction("POST", callback + "/fail"));
         assertEquals("lambda:SendDurableExecutionCallbackHeartbeat", lambdaAction("POST", callback + "/heartbeat"));
+    }
+
+    @Test
+    void lambdaWebRoutesResolveToTheirActions() {
+        String arn = "arn%3Aaws%3Alambda%3Aus-east-1%3A000000000000%3Aweb-function%2Fapp";
+        assertEquals("lambda:CreateWebFunction", lambdaAction("PUT", "/2025-03-07/web-functions"));
+        assertEquals("lambda:ListWebFunctions", lambdaAction("POST", "/2025-03-07/web-functions"));
+        assertEquals("lambda:GetWebFunction", lambdaAction("GET", "/2025-03-07/web-functions/" + arn));
+        assertEquals("lambda:DeleteWebFunction", lambdaAction("DELETE", "/2025-03-07/web-functions/app"));
+        assertEquals("lambda:CreateWebFunctionRevision", lambdaAction("POST", "/2025-03-07/web-functions/app/revisions"));
+        assertEquals("lambda:ListWebFunctionRevisions", lambdaAction("POST", "/2025-03-07/web-functions/app/list-revisions"));
+        assertEquals("lambda:GetWebFunctionRevision", lambdaAction("GET", "/2025-03-07/web-functions/app/revisions/rev-aaaaa"));
+        assertEquals("lambda:DeleteWebFunctionRevision",
+                lambdaAction("DELETE", "/2025-03-07/web-functions/app/revisions/rev-aaaaa"));
+        assertEquals("lambda:CreateWebFunctionEndpoint", lambdaAction("PUT", "/2025-03-07/web-functions/app/endpoints"));
+        assertEquals("lambda:ListWebFunctionEndpoints", lambdaAction("POST", "/2025-03-07/web-functions/app/list-endpoints"));
+        assertEquals("lambda:GetWebFunctionEndpoint", lambdaAction("GET", "/2025-03-07/web-functions/app/endpoints/dev"));
+        assertEquals("lambda:UpdateWebFunctionEndpoint", lambdaAction("PATCH", "/2025-03-07/web-functions/app/endpoints/dev"));
+        assertEquals("lambda:DeleteWebFunctionEndpoint", lambdaAction("DELETE", "/2025-03-07/web-functions/app/endpoints/dev"));
+        assertEquals("lambda:GetWebAccountSettings", lambdaAction("GET", "/2025-03-07/web-account-settings"));
+        assertEquals("lambda:ListTags", lambdaAction("GET", "/2025-03-07/tags/" + arn));
+        assertEquals("lambda:TagResource", lambdaAction("POST", "/2025-03-07/tags/" + arn));
+        assertEquals("lambda:UntagResource", lambdaAction("DELETE", "/2025-03-07/tags/" + arn));
+        assertEquals("lambda:PutResourcePolicy", lambdaAction("PUT", "/2025-03-07/resource-policy/" + arn));
+        assertEquals("lambda:GetResourcePolicy", lambdaAction("GET", "/2025-03-07/resource-policy/" + arn));
+        assertEquals("lambda:DeleteResourcePolicy", lambdaAction("DELETE", "/2025-03-07/resource-policy/" + arn));
     }
 
     private String lambdaAction(String method, String path) {

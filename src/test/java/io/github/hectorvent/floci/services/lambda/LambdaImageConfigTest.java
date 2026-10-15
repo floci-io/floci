@@ -239,13 +239,15 @@ class LambdaImageConfigTest {
             when(config.docker()).thenReturn(docker);
             when(docker.logMaxSize()).thenReturn("10m");
             when(docker.logMaxFile()).thenReturn("3");
-            when(config.baseUrl()).thenReturn("http://localhost:4566");
+            lenient().when(config.baseUrl()).thenReturn("http://localhost:4566");
+            lenient().when(config.port()).thenReturn(4566);
+            lenient().when(config.tls()).thenReturn(mock(EmulatorConfig.TlsConfig.class));
             lenient().when(config.hostname()).thenReturn(Optional.empty());
             when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
 
             ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
             ContainerReachableEndpoint reachableEndpoint =
-                    new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer);
+                    new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
             LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
             launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                     runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,

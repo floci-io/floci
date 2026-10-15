@@ -246,6 +246,65 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
         assertEquals(SENDER, bounce.path("mail").path("source").asText());
     }
 
+    /**
+     * SES Developer Guide, "Configuring Amazon SNS notifications for Amazon SES": when a publish fails
+     * "because the topic has been deleted", SES removes a bounce or complaint topic from the identity
+     * and re-enables email feedback forwarding. That holds with IAM enforcement off too.
+     */
+    @Test
+    @Order(10)
+    void aDeletedBounceTopicIsTakenOutOfTheIdentityAndForwardingTurnsBackOn() {
+        String gone = "id-notif-gone@floci.test";
+        verifyEmailIdentity(gone);
+        String goneTopic = given()
+                .contentType(JSON_10)
+                .header("Authorization", SNS_AUTH)
+                .header("X-Amz-Target", "SNS_20100331.CreateTopic")
+                .body("{\"Name\":\"ses-id-notif-gone-topic\"}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .extract().jsonPath().getString("TopicArn");
+        setIdentityNotificationTopic(gone, "Bounce", goneTopic);
+        setIdentityNotificationTopic(gone, "Complaint", goneTopic);
+        given()
+                .contentType(FORM)
+                .header("Authorization", SES_AUTH)
+                .body("Action=SetIdentityFeedbackForwardingEnabled&Identity="
+                        + URLEncoder.encode(gone, StandardCharsets.UTF_8)
+                        + "&ForwardingEnabled=false&Version=2010-12-01")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+        given()
+                .contentType(JSON_10)
+                .header("Authorization", SNS_AUTH)
+                .header("X-Amz-Target", "SNS_20100331.DeleteTopic")
+                .body("{\"TopicArn\":\"" + goneTopic + "\"}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        sendEmail(gone, "bounce@simulator.amazonses.com", "id-notif-gone");
+
+        String attributes = given()
+                .contentType(FORM)
+                .header("Authorization", SES_AUTH)
+                .body("Action=GetIdentityNotificationAttributes&Identities.member.1="
+                        + URLEncoder.encode(gone, StandardCharsets.UTF_8) + "&Version=2010-12-01")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .extract().asString();
+        assertTrue(attributes.contains("<BounceTopic></BounceTopic>"), attributes);
+        assertTrue(attributes.contains("<ComplaintTopic></ComplaintTopic>"), attributes);
+        assertTrue(attributes.contains("<ForwardingEnabled>true</ForwardingEnabled>"), attributes);
+    }
+
     private void verifyEmailIdentity(String email) {
         given()
                 .contentType(FORM)

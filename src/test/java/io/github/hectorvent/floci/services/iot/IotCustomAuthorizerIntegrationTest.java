@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.testing.IotMqttTlsProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -17,6 +19,7 @@ import org.eclipse.paho.mqttv5.client.MqttAsyncClient;
 import org.eclipse.paho.mqttv5.client.MqttConnectionOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -51,7 +54,7 @@ import static org.mockito.Mockito.when;
  * received is asserted as the event.
  */
 @QuarkusTest
-@TestProfile(IotMqttWebSocketIntegrationTest.Profile.class)
+@TestProfile(IotMqttTlsProfile.class)
 class IotCustomAuthorizerIntegrationTest {
 
     private static final String FUNCTION_ARN = "arn:aws:lambda:us-east-1:000000000000:function:it-custom-auth";
@@ -66,6 +69,9 @@ class IotCustomAuthorizerIntegrationTest {
 
     @InjectMock
     LambdaService lambdaService;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     private final BlockingQueue<JsonNode> events = new LinkedBlockingQueue<>();
     private String authorizer;
@@ -91,6 +97,13 @@ class IotCustomAuthorizerIntegrationTest {
             .body("{\"authorizerFunctionArn\": \"" + FUNCTION_ARN + "\", \"signingDisabled\": true, \"status\": \"ACTIVE\"}")
         .when().post("/authorizer/" + authorizer)
         .then().statusCode(200);
+        String created = authorizer;
+        cleanup.register(() -> {
+            given().contentType("application/json").body("{\"status\": \"INACTIVE\"}")
+                .when().put("/authorizer/" + created)
+                .then().statusCode(200);
+            given().when().delete("/authorizer/" + created).then().statusCode(200);
+        });
     }
 
     @Test
@@ -326,7 +339,7 @@ class IotCustomAuthorizerIntegrationTest {
     }
 
     private static String tcp() {
-        return "tcp://127.0.0.1:" + IotMqttWebSocketIntegrationTest.PLAIN_PORT;
+        return "tcp://127.0.0.1:" + IotMqttTlsProfile.PLAIN_PORT;
     }
 
     private JsonNode takeEvent() throws InterruptedException {

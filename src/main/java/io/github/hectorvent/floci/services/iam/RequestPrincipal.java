@@ -13,19 +13,22 @@ package io.github.hectorvent.floci.services.iam;
  *                         which a {@code Principal} naming the role identifies; null otherwise
  * @param servicePrincipal a service caller's principal name, such as {@code sns.amazonaws.com};
  *                         null for the other kinds
+ * @param permissionsBoundary whether an IAM caller has a permissions boundary attached, which a
+ *                         Deny's {@code NotPrincipal} never spares
  */
-public record RequestPrincipal(Type type, String arn, String roleArn, String servicePrincipal) {
+public record RequestPrincipal(Type type, String arn, String roleArn, String servicePrincipal,
+                               boolean permissionsBoundary) {
 
     public enum Type { IAM, SERVICE, ANONYMOUS }
 
     /** An IAM user, account root or federated user, or a role session without its role's ARN. */
     public static RequestPrincipal iam(String arn) {
-        return new RequestPrincipal(Type.IAM, arn, null, null);
+        return new RequestPrincipal(Type.IAM, arn, null, null, false);
     }
 
     /** A role session, matched by its session ARN and by the ARN of the role that was assumed. */
     public static RequestPrincipal roleSession(String sessionArn, String roleArn) {
-        return new RequestPrincipal(Type.IAM, sessionArn, roleArn, null);
+        return new RequestPrincipal(Type.IAM, sessionArn, roleArn, null, false);
     }
 
     /**
@@ -38,18 +41,19 @@ public record RequestPrincipal(Type type, String arn, String roleArn, String ser
         if (callerArns == null) {
             return anonymous();
         }
-        return callerArns.callerArn().equals(callerArns.principalArn())
-                ? iam(callerArns.callerArn())
-                : roleSession(callerArns.callerArn(), callerArns.principalArn());
+        return new RequestPrincipal(Type.IAM, callerArns.callerArn(),
+                callerArns.callerArn().equals(callerArns.principalArn()) ? null : callerArns.principalArn(),
+                null, callerArns.permissionsBoundary());
     }
 
     /** An AWS service acting on its own behalf, such as SNS delivering to a queue. */
     public static RequestPrincipal service(String servicePrincipal) {
-        return new RequestPrincipal(Type.SERVICE, null, null, servicePrincipal);
+        return new RequestPrincipal(Type.SERVICE, null, null, servicePrincipal, false);
     }
 
     /** A caller with no credentials. */
     public static RequestPrincipal anonymous() {
-        return new RequestPrincipal(Type.ANONYMOUS, null, null, null);
+        return new RequestPrincipal(Type.ANONYMOUS, null, null, null, false);
     }
+
 }

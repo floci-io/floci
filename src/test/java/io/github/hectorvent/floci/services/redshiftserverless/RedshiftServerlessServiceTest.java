@@ -1026,6 +1026,49 @@ class RedshiftServerlessServiceTest {
         assertEquals("ResourceNotFoundException", missing.getErrorCode());
     }
 
+    @Test
+    void updateSnapshotChangesOnlyTheRetentionPeriod() {
+        create("upd-snap-ns");
+        service.createSnapshot("upd-snap", "upd-snap-ns", 30, Map.of("env", "dev"), REGION);
+
+        RedshiftServerlessSnapshot updated = service.updateSnapshot("upd-snap", 90, REGION);
+
+        assertEquals(90, updated.getRetentionPeriod());
+        assertEquals(90, service.getSnapshot("upd-snap", REGION).getRetentionPeriod());
+        assertEquals("upd-snap-ns", updated.getNamespaceName());
+        assertEquals(Map.of("env", "dev"), service.listTagsForResource(updated.getSnapshotArn(), REGION));
+    }
+
+    @Test
+    void updateSnapshotAcceptsIndefiniteRetentionAndLeavesAnOmittedPeriodAlone() {
+        create("upd-indef-ns");
+        service.createSnapshot("upd-indef", "upd-indef-ns", 30, null, REGION);
+
+        assertEquals(30, service.updateSnapshot("upd-indef", null, REGION).getRetentionPeriod());
+        assertNull(service.updateSnapshot("upd-indef", -1, REGION).getRetentionPeriod());
+        assertNull(service.getSnapshot("upd-indef", REGION).getRetentionPeriod());
+    }
+
+    @Test
+    void updateSnapshotRejectsAnInvalidRetentionWithoutChangingTheSnapshot() {
+        create("upd-bad-ns");
+        service.createSnapshot("upd-bad", "upd-bad-ns", 30, null, REGION);
+
+        for (int bad : new int[] {0, 3654, -2}) {
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.updateSnapshot("upd-bad", bad, REGION));
+            assertEquals("ValidationException", rejected.getErrorCode());
+        }
+        assertEquals(30, service.getSnapshot("upd-bad", REGION).getRetentionPeriod());
+    }
+
+    @Test
+    void updateSnapshotOfAnUnknownSnapshotIsNotFound() {
+        AwsException missing = assertThrows(AwsException.class, () -> service.updateSnapshot("nope-snap", 5, REGION));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+        assertThrows(AwsException.class, () -> service.updateSnapshot(null, 5, REGION));
+    }
+
     private Namespace create(String namespaceName) {
         return service.createNamespace(namespaceName, "admin", null, null, null, null, null, Map.of(), REGION);
     }

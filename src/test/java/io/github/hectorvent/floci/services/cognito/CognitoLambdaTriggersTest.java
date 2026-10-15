@@ -51,6 +51,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -467,7 +468,7 @@ class CognitoLambdaTriggersTest {
 
     @Test
     void postConfirmationFiresOnConfirmForgotPassword() throws Exception {
-        VerificationCodeService verificationCodes = mock(VerificationCodeService.class);
+        VerificationCodeService verificationCodes = inlineMock(VerificationCodeService.class);
         CognitoService svc = createServiceWithMessaging(
                 mock(SesService.class), mock(SnsService.class), verificationCodes);
         UserPool pool = svc.createUserPool(Map.of(
@@ -2145,7 +2146,7 @@ class CognitoLambdaTriggersTest {
     @Test
     void customMessageOverridesSignUpVerificationEmail() {
         SesService ses = mock(SesService.class);
-        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
         when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
                 .thenReturn("246962");
         CognitoService svc = createServiceWithMessaging(ses, mock(SnsService.class), verificationCodeService);
@@ -2170,7 +2171,7 @@ class CognitoLambdaTriggersTest {
     @Test
     @SuppressWarnings("unchecked")
     void customMessageSignUpTriggerReceivesCodeParameterAndUsername() throws Exception {
-        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
         when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
                 .thenReturn("246962");
         CognitoService svc = createServiceWithMessaging(mock(SesService.class), mock(SnsService.class),
@@ -2199,7 +2200,7 @@ class CognitoLambdaTriggersTest {
     @Test
     void customMessageLambdaErrorFallsBackToDefaultSignUpMessage() {
         SesService ses = mock(SesService.class);
-        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
         when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
                 .thenReturn("246962");
         CognitoService svc = createServiceWithMessaging(ses, mock(SnsService.class), verificationCodeService);
@@ -2223,7 +2224,7 @@ class CognitoLambdaTriggersTest {
     @Test
     void customMessageDoesNotFireWhenNotConfigured() {
         SesService ses = mock(SesService.class);
-        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
         when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
                 .thenReturn("246962");
         CognitoService svc = createServiceWithMessaging(ses, mock(SnsService.class), verificationCodeService);
@@ -2243,7 +2244,7 @@ class CognitoLambdaTriggersTest {
     @Test
     @SuppressWarnings("unchecked")
     void customMessageFiresWithResendCodeTriggerSourceOnResendConfirmationCode() throws Exception {
-        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
         when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
                 .thenReturn("111222");
         CognitoService svc = createServiceWithMessaging(mock(SesService.class), mock(SnsService.class),
@@ -2270,7 +2271,7 @@ class CognitoLambdaTriggersTest {
     @Test
     @SuppressWarnings("unchecked")
     void customMessageFiresWithForgotPasswordTriggerSourceOnForgotPassword() throws Exception {
-        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        VerificationCodeService verificationCodeService = inlineMock(VerificationCodeService.class);
         when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.PASSWORD_RESET), any()))
                 .thenReturn("333444");
         CognitoService svc = createServiceWithMessaging(mock(SesService.class), mock(SnsService.class),
@@ -2299,7 +2300,7 @@ class CognitoLambdaTriggersTest {
     void customMessageOverridesTheAdminCreateUserInvitation() {
         SesService ses = mock(SesService.class);
         CognitoService svc = createServiceWithMessaging(ses, mock(SnsService.class),
-                mock(VerificationCodeService.class));
+                inlineMock(VerificationCodeService.class));
         UserPool pool = svc.createUserPool(Map.of(
                 "PoolName", "trigger-pool",
                 "LambdaConfig", Map.of("CustomMessage", "arn:aws:lambda:::custom-message")), "us-east-1");
@@ -2319,7 +2320,7 @@ class CognitoLambdaTriggersTest {
     @SuppressWarnings("unchecked")
     void customMessageAdminCreateUserTriggerReceivesPlaceholdersAndClientMetadata() throws Exception {
         CognitoService svc = createServiceWithMessaging(mock(SesService.class), mock(SnsService.class),
-                mock(VerificationCodeService.class));
+                inlineMock(VerificationCodeService.class));
         UserPool pool = svc.createUserPool(Map.of(
                 "PoolName", "trigger-pool",
                 "LambdaConfig", Map.of("CustomMessage", "arn:aws:lambda:::custom-message")), "us-east-1");
@@ -2343,7 +2344,7 @@ class CognitoLambdaTriggersTest {
     @Test
     void customMessageDoesNotFireForAnInvitationWithNowhereToGo() {
         CognitoService svc = createServiceWithMessaging(mock(SesService.class), mock(SnsService.class),
-                mock(VerificationCodeService.class));
+                inlineMock(VerificationCodeService.class));
         UserPool pool = svc.createUserPool(Map.of(
                 "PoolName", "trigger-pool",
                 "LambdaConfig", Map.of("CustomMessage", "arn:aws:lambda:::custom-message")), "us-east-1");

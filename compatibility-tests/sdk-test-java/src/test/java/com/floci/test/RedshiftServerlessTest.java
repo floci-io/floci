@@ -188,6 +188,9 @@ class RedshiftServerlessTest {
 
                 assertThat(client.getSnapshot(request -> request.snapshotArn(created.snapshotArn())).snapshot()
                         .snapshotName()).isEqualTo(snapshotName);
+                assertThat(client.updateSnapshot(request -> request
+                        .snapshotName(snapshotName).retentionPeriod(30)).snapshot().snapshotRetentionPeriod())
+                        .isEqualTo(30);
                 assertThat(client.listSnapshots(request -> request.namespaceName(namespaceName)).snapshots())
                         .extracting(Snapshot::snapshotName)
                         .containsExactly(snapshotName);

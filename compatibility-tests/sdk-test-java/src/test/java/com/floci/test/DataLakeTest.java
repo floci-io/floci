@@ -118,7 +118,7 @@ class DataLakeTest {
                 // The bucket itself is only created on the first delivery.
             }
             if (!delivered) {
-                Thread.sleep(2_000);
+                Thread.sleep(TestFixtures.isRealAws() ? 2_000 : 250);
             }
         }
         assertThat(delivered)

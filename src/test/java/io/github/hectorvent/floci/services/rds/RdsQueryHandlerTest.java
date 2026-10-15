@@ -733,6 +733,29 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void createDbClusterDeletesTheClusterWhenItsRolesAreRefused() {
+        DbCluster cluster = makeCluster("mycluster");
+        when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), anyBoolean()))
+                .thenReturn(cluster);
+        // Another request associated the role between the create and the roles being added.
+        when(service.addRolesToNewDbCluster(any(), eq("mycluster"), anyList()))
+                .thenThrow(new AwsException("DBClusterRoleAlreadyExists", "already associated", 400));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("Engine", "aurora-postgresql");
+        p.add("MasterUsername", "admin");
+        p.add("AssociatedRoles.DBClusterAssociatedRole.1.RoleArn", "arn:aws:iam::000000000000:role/s3");
+        Response response = handler.handle("CreateDBCluster", p);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>DBClusterRoleAlreadyExists</Code>"));
+        verify(service).deleteDbCluster(eq("mycluster"), any());
+    }
+
+    @Test
     void modifyDbClusterPassesManagedMasterUserSecretOptions() {
         DbCluster cluster = makeCluster("mycluster");
         when(service.modifyDbCluster(eq("mycluster"), isNull(), isNull(),
@@ -987,6 +1010,22 @@ class RdsQueryHandlerTest {
         assertEquals(200, response.getStatus());
         assertTrue(body.contains("<OrderableDBInstanceOption>"));
         assertTrue(body.contains("<DBInstanceClass>db.t4g.medium</DBInstanceClass>"));
+    }
+
+    @Test
+    void describeOrderableDbInstanceOptions_auroraMysqlReportsGeneralPublicLicense() {
+        when(service.describeOrderableDbInstanceOptions("aurora-mysql", null, null))
+                .thenReturn(List.of(Map.of(
+                        "engine", "aurora-mysql",
+                        "engineVersion", "8.0.mysql_aurora.3.05.2",
+                        "dbInstanceClass", "db.r5.large")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Engine", "aurora-mysql");
+        String body = (String) handler.handle("DescribeOrderableDBInstanceOptions", p).getEntity();
+
+        assertTrue(body.contains("<LicenseModel>general-public-license</LicenseModel>"));
+        assertFalse(body.contains("postgresql-license"));
     }
 
     // ──────────────────────────── DBParameterGroups XML tag ──────────────────────

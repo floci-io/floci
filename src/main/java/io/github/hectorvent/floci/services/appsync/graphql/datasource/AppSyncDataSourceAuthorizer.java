@@ -5,8 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
 import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
@@ -93,7 +93,7 @@ public class AppSyncDataSourceAuthorizer {
         if (!roleArn.equals(role.get().getArn())) {
             throw denied(dataSource, "service role does not exist");
         }
-        String servicePrincipal = "appsync." + AwsRegions.dnsSuffixFor(region);
+        String servicePrincipal = ServicePrincipals.of("appsync");
         if (!trustEvaluator.allowsService(role.get().getAssumeRolePolicyDocument(),
                 servicePrincipal, sourceArn, sourceAccount)) {
             throw denied(dataSource, "service role does not trust " + servicePrincipal);

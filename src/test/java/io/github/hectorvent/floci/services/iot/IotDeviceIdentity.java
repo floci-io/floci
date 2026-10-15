@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.iot;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.restassured.path.json.JsonPath;
 
 import javax.net.ssl.KeyManagerFactory;
@@ -21,6 +23,7 @@ import static io.restassured.RestAssured.given;
 final class IotDeviceIdentity {
 
     private static final char[] PASSWORD = "device".toCharArray();
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     final String certificateId;
     final String certificateArn;
@@ -46,6 +49,41 @@ final class IotDeviceIdentity {
                 created.getString("certificateArn"),
                 Pem.parseCertificate(created.getString("certificatePem")),
                 Pem.parsePrivateKey(created.getString("keyPair.PrivateKey")));
+    }
+
+    /**
+     * Provisions a device as {@link #provision(boolean)} does, and has {@code cleanup} deactivate
+     * and delete its certificate after the test, once whatever was attached to it is detached.
+     */
+    static IotDeviceIdentity provision(boolean active, PartitionCleanup cleanup) {
+        IotDeviceIdentity device = provision(active);
+        cleanup.register(device::delete);
+        return device;
+    }
+
+    /**
+     * Creates a policy of {@code document} under a fresh name and attaches it to this device's
+     * certificate; {@code cleanup} detaches and deletes it after the test. Returns the policy name.
+     */
+    String attachNewPolicy(String document, PartitionCleanup cleanup) {
+        String policy = "device-policy-" + System.nanoTime();
+        given()
+                .contentType("application/json")
+                .body(OBJECT_MAPPER.createObjectNode().put("policyDocument", document).toString())
+                .when().post("/policies/" + policy)
+                .then().statusCode(200);
+        cleanup.register(() -> {
+            given().queryParam("target", certificateArn).when().post("/target-policies/" + policy).then().statusCode(200);
+            given().when().delete("/policies/" + policy).then().statusCode(200);
+        });
+        given().queryParam("target", certificateArn).when().put("/target-policies/" + policy).then().statusCode(200);
+        return policy;
+    }
+
+    /** IoT Core deletes only an inactive certificate with nothing attached. */
+    private void delete() {
+        given().queryParam("newStatus", "INACTIVE").when().put("/certificates/" + certificateId).then().statusCode(200);
+        given().when().delete("/certificates/" + certificateId).then().statusCode(200);
     }
 
     /** A certificate the Floci CA signed but IoT Core never registered. */

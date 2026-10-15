@@ -199,6 +199,36 @@ class NpmPublishEnvelopeScannerTest {
         assertInvalid("[1,2,3]");
     }
 
+    /**
+     * Found by Qodo review: before this field was read at all, any shape here fell to the default
+     * branch's plain {@code skipChildren()}; once it became a tracked field (for readme capture),
+     * a value sent as anything but a string (a real client never would, but a hand-built or buggy
+     * one might) must keep that same tolerance, not reject the whole envelope over one best-effort
+     * field. {@code dist.integrity} on the same version, a field this scanner does require, proves
+     * the rest of the version is still read correctly when {@code readme} is skipped.
+     */
+    @Test
+    void aNonStringPerVersionReadmeIsToleratedRatherThanRejectingTheWholeEnvelope() throws Exception {
+        String json = "{\"versions\":{\"1.0.0\":{\"readme\":null,\"dist\":{\"tarball\":\"x/y-1.0.0.tgz\","
+                + "\"integrity\":\"sha512-abc\"}}}}";
+
+        NpmPublishEnvelopeScanner.Envelope envelope = scan(json);
+
+        NpmPublishEnvelopeScanner.Version version = envelope.versions().get("1.0.0");
+        assertNull(version.readme());
+        assertEquals("sha512-abc", version.integrity());
+    }
+
+    @Test
+    void anObjectShapedPerVersionReadmeIsToleratedTheSameWay() throws Exception {
+        String json = "{\"versions\":{\"1.0.0\":{\"readme\":{\"not\":\"a string\"},\"dist\":{\"tarball\":"
+                + "\"x/y-1.0.0.tgz\",\"integrity\":\"sha512-abc\"}}}}";
+
+        NpmPublishEnvelopeScanner.Envelope envelope = scan(json);
+
+        assertNull(envelope.versions().get("1.0.0").readme());
+    }
+
     private static NpmPublishEnvelopeScanner.Envelope scan(String json) throws IOException {
         InputStream in = new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8));
         return NpmPublishEnvelopeScanner.scan(in);

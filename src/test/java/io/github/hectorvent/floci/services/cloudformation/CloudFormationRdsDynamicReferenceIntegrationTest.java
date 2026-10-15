@@ -1,13 +1,21 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RdsMockProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+import static io.github.hectorvent.floci.testing.RdsRequests.rds;
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -34,6 +42,65 @@ class CloudFormationRdsDynamicReferenceIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"MasterUsername", "MasterUserPassword"})
+    void memberCreationRejectsExplicitCredentialsAndAllowsOmittedRetry(String credential) throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String clusterId = "cfn-credential-cluster-" + suffix;
+        String memberId = "cfn-credential-member-" + suffix;
+        String rejectedStack = "cfn-member-input-" + suffix;
+        String validStack = rejectedStack + "-valid";
+        rds("CreateDBCluster").formParam("DBClusterIdentifier", clusterId)
+                .formParam("Engine", "aurora-postgresql").formParam("MasterUsername", "clusteradmin")
+                .formParam("MasterUserPassword", "ClusterPassword!").post("/").then().statusCode(200);
+        boolean rejectedCreated = false;
+        boolean validCreated = false;
+        try {
+            Map<String, Object> properties = new LinkedHashMap<>();
+            properties.put("DBInstanceIdentifier", memberId);
+            properties.put("DBClusterIdentifier", clusterId);
+            properties.put("Engine", "aurora-postgresql");
+            properties.put("DBInstanceClass", "db.serverless");
+            properties.put(credential, "MasterUsername".equals(credential) ? "clusteradmin" : "ClusterPassword!");
+            ObjectMapper mapper = new ObjectMapper();
+            createStack(rejectedStack, mapper.writeValueAsString(Map.of("Resources", Map.of("Member",
+                    Map.of("Type", "AWS::RDS::DBInstance", "Properties", properties)))));
+            rejectedCreated = true;
+            assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(rejectedStack, CFN_AUTH).status());
+            String events = given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                    .formParam("Action", "DescribeStackEvents").formParam("StackName", rejectedStack)
+                    .post("/").then().statusCode(200).extract().asString();
+            assertTrue(events.contains("will be a member of a DB Cluster"), events);
+            rds("DescribeDBInstances").formParam("DBInstanceIdentifier", memberId)
+                    .post("/").then().statusCode(404);
+            properties.remove(credential);
+            createStack(validStack, mapper.writeValueAsString(Map.of("Resources", Map.of("Member",
+                    Map.of("Type", "AWS::RDS::DBInstance", "Properties", properties)))));
+            validCreated = true;
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(validStack, CFN_AUTH).status());
+            assertEquals("clusteradmin", rds("DescribeDBInstances").formParam("DBInstanceIdentifier", memberId)
+                    .post("/").then().statusCode(200).extract().xmlPath()
+                    .getString("DescribeDBInstancesResponse.DescribeDBInstancesResult.DBInstances.DBInstance.MasterUsername"));
+        } finally {
+            try {
+                try {
+                    if (validCreated) {
+                        deleteStack(validStack);
+                        CfnStackWaits.awaitStackDeleted(validStack);
+                    }
+                } finally {
+                    if (rejectedCreated) {
+                        deleteStack(rejectedStack);
+                        CfnStackWaits.awaitStackDeleted(rejectedStack);
+                    }
+                }
+            } finally {
+                rds("DeleteDBCluster").formParam("DBClusterIdentifier", clusterId).formParam("SkipFinalSnapshot", true)
+                        .post("/").then().statusCode(200);
+            }
+        }
     }
 
     /**

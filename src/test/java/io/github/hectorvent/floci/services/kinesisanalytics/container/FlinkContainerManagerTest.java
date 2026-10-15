@@ -189,7 +189,7 @@ class FlinkContainerManagerTest {
         ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");

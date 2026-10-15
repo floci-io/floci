@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.Digests;
@@ -3050,7 +3052,27 @@ public class LambdaService implements ResourceProvider {
 
     // ──────────────────────────── Function URL Config ────────────────────────────
 
+    /** The partitions where AWS documents Lambda function URLs as not available. */
+    private static final Set<String> FUNCTION_URL_UNAVAILABLE_PARTITIONS = Set.of("aws-us-gov", "aws-cn");
+
+    /**
+     * Function URLs are not available in AWS GovCloud (US) or in the China Regions: "AWS Lambda
+     * Function URLs is not available"
+     * (https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html) and "Amazon
+     * Lambda Function URLs is not available in the China Regions"
+     * (https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html). No source shows AWS's
+     * message for the refusal, so the wording is Floci's own.
+     */
+    private static void requireFunctionUrlsAvailable(String region) {
+        AwsPartition partition = AwsPartitions.forRegionOrCommercial(region);
+        if (FUNCTION_URL_UNAVAILABLE_PARTITIONS.contains(partition.id())) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Function URLs are not available in partition " + partition.id() + ".", 400);
+        }
+    }
+
     public LambdaUrlConfig createFunctionUrlConfig(String region, String functionName, String qualifier, Map<String, Object> request) {
+        requireFunctionUrlsAvailable(region);
         validateFunctionUrlQualifier(qualifier);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
         functionName = ref.name();

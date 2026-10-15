@@ -30,6 +30,16 @@ The management plane allows you to create and manage applications, environments,
 - `StartDeployment`
 - `GetDeployment`
 - `ListDeployments` (`GET /applications/{ApplicationId}/environments/{EnvironmentId}/deployments`)
+- `GetConfiguration` (deprecated by AWS in favor of the [data plane](#data-plane))
+
+`GetConfiguration` accepts application, environment and configuration profile names or IDs, and requires
+`client_id`. It returns the deployed version's content with its `Content-Type` and `Configuration-Version`;
+feature flags are resolved as on the [data plane](#data-plane), including Ion for a caller that accepts it.
+A `client_configuration_version` equal to the deployed version returns HTTP 200 with an empty body.
+A missing or undeployed environment returns `BadRequestException`; an unknown application or configuration profile
+returns `ResourceNotFoundException`.
+Only hosted configurations are served: a deployed version with no hosted configuration version behind it,
+such as one from an S3 or SSM source, returns `ResourceNotFoundException`.
 
 ## Data Plane (AppConfigData) {#data-plane}
 

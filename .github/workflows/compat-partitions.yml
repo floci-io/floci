@@ -2,11 +2,11 @@ name: Partition Compatibility
 
 # The Java SDK suite against a Floci deployed in a non-commercial partition, so
 # the SDK's own partition logic (arn:aws-cn: ARNs, China signing scopes, the
-# LocationConstraint S3 CreateBucket sends) has to round-trip end to end. Part
-# of #4272.
+# LocationConstraint S3 CreateBucket sends) has to round-trip end to end. One leg
+# per partition family: China, GovCloud and EUSC. Part of #4272.
 #
 # Runs after each Nightly against the image it just published, not per PR: it
-# is one more ~15 minute native suite, and the per-PR legs already queue for
+# is three more ~15 minute native suites, and the per-PR legs already queue for
 # the shared runner pools (see compatibility.yml). Known failures live in
 # .github/ci/compat-partition-allowlist-<region>.txt (a region without one has
 # none); a failure missing from it, or an entry that no longer fails, fails the
@@ -22,8 +22,8 @@ on:
         description: Floci image to test
         default: floci/floci:nightly
       region:
-        description: Region Floci and the SDK clients default to
-        default: cn-north-1
+        description: Run this one region only (any region Floci serves); blank runs every nightly leg
+        default: ''
 
 permissions:
   contents: read
@@ -34,15 +34,22 @@ concurrency:
 
 jobs:
   sdk-test-java:
-    name: sdk-test-java / ${{ inputs.region || 'cn-north-1' }}
+    name: sdk-test-java / ${{ matrix.region }}
     if: >-
       !github.event.repository.fork
       && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # One region per partition family that takes its own code path: China (IAM signs
+        # cn-north-1), GovCloud (IAM signs us-gov-west-1, no CloudFront) and EUSC (no global
+        # endpoints at all). A dispatch that names a region runs that region alone.
+        region: ${{ fromJSON(inputs.region && format('["{0}"]', inputs.region) || '["cn-north-1", "us-gov-west-1", "eusc-de-east-1"]') }}
     env:
       IMAGE: ${{ inputs.image || 'floci/floci:nightly' }}
-      REGION: ${{ inputs.region || 'cn-north-1' }}
+      REGION: ${{ matrix.region }}
 
     steps:
       # The tag is mutable, so the suite and allowlist are checked out at the commit this exact
@@ -149,7 +156,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: compat-partition-results-${{ env.REGION }}
           path: test-results/

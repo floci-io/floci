@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -14,6 +15,7 @@ import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
@@ -33,6 +35,11 @@ class ServiceQuotasIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @BeforeEach
+    void resetState() {
+        given().post("/_floci/state/reset").then().statusCode(200);
     }
 
     @Test
@@ -212,7 +219,7 @@ class ServiceQuotasIntegrationTest {
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "ServiceQuotasV20190624.ListRequestedServiceQuotaChangeHistoryByQuota")
             .header("Authorization", AUTH_HEADER)
-            .body("{\"ServiceCode\":\"organizations\",\"QuotaCode\":\"L-E619E033\"}")
+            .body("{\"ServiceCode\":\"vpc\",\"QuotaCode\":\"L-FE5A380F\"}")
         .when()
             .post("/")
         .then()
@@ -226,7 +233,7 @@ class ServiceQuotasIntegrationTest {
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "ServiceQuotasV20190624.ListRequestedServiceQuotaChangeHistoryByQuota")
             .header("Authorization", AUTH_HEADER)
-            .body("{\"ServiceCode\":\"organizations\",\"QuotaCode\":\"L-E619E033\",\"NextToken\":\"MQ\"}")
+            .body("{\"ServiceCode\":\"vpc\",\"QuotaCode\":\"L-FE5A380F\",\"NextToken\":\"MQ\"}")
         .when()
             .post("/")
         .then()
@@ -262,6 +269,117 @@ class ServiceQuotasIntegrationTest {
             .body("RequestedQuota.ServiceCode", equalTo("organizations"))
             .body("RequestedQuota.QuotaCode", equalTo("L-E619E033"))
             .body("RequestedQuota.GlobalQuota", equalTo(true));
+    }
+
+    @Test
+    void getRequestedServiceQuotaChangeReturnsStoredRequest() {
+        String requestId =
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"ServiceCode\":\"codebuild\",\"QuotaCode\":\"L-2DC20C30\",\"DesiredValue\":9000}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("RequestedQuota.Id");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.GetRequestedServiceQuotaChange")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"RequestId\":\"" + requestId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RequestedQuota.Id", equalTo(requestId))
+            .body("RequestedQuota.ServiceCode", equalTo("codebuild"))
+            .body("RequestedQuota.QuotaCode", equalTo("L-2DC20C30"))
+            .body("RequestedQuota.DesiredValue", notNullValue())
+            .body("RequestedQuota.Status", equalTo("PENDING"));
+    }
+
+    @Test
+    void getRequestedServiceQuotaChange_unknownId_returnsNoSuchResource() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.GetRequestedServiceQuotaChange")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"RequestId\":\"DEADBEEF\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchResourceException"));
+    }
+
+    @Test
+    void getRequestedServiceQuotaChange_emptyRequestId_returnsIllegalArgument() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.GetRequestedServiceQuotaChange")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"RequestId\":\"\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("IllegalArgumentException"));
+    }
+
+    @Test
+    void requestedIncreaseAppearsInHistoryForItsQuota() {
+        String requestId =
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"ServiceCode\":\"vpc\",\"QuotaCode\":\"L-2AEEBF1A\",\"DesiredValue\":40}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("RequestedQuota.Id");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListRequestedServiceQuotaChangeHistoryByQuota")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"vpc\",\"QuotaCode\":\"L-2AEEBF1A\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RequestedQuotas.find { it.Id == '" + requestId + "' }.QuotaCode", equalTo("L-2AEEBF1A"))
+            .body("RequestedQuotas.find { it.Id == '" + requestId + "' }.ServiceCode", equalTo("vpc"));
+    }
+
+    @Test
+    void repeatedRequestsForSameQuotaReturnResourceAlreadyExists() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"lambda\",\"QuotaCode\":\"L-B99A9384\",\"DesiredValue\":7000}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.RequestServiceQuotaIncrease")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"lambda\",\"QuotaCode\":\"L-B99A9384\",\"DesiredValue\":8000}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceAlreadyExistsException"));
     }
 
     @Test

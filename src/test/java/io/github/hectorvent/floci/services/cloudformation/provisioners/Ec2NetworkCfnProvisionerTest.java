@@ -602,7 +602,8 @@ class Ec2NetworkCfnProvisionerTest {
     @Test
     void aReusedSubnetDropsTheTagKeysTheTemplateRemovedAndWritesTheRest() {
         Subnet current = subnet();
-        current.setTags(List.of(new Tag("Name", "old"), new Tag("team", "net")));
+        current.setTags(List.of(new Tag("Name", "old"), new Tag("team", "net"),
+                new Tag("aws:cloudformation:stack-id", "stack"), new Tag("AWS:service", "owner")));
         when(ec2.describeSubnets(REGION, List.of(SUBNET_ID), Map.of())).thenReturn(List.of(current));
         StackResource r = prior("AWS::EC2::Subnet", "Subnet", SUBNET_ID, Map.of("SubnetId", SUBNET_ID));
         ObjectNode props = withTags(mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.0/24"), "Name", "new");
@@ -621,7 +622,8 @@ class Ec2NetworkCfnProvisionerTest {
         RouteTable rt = new RouteTable();
         rt.setRouteTableId(RTB_ID);
         rt.setVpcId(VPC_ID);
-        rt.setTags(List.of(new Tag("Name", "old"), new Tag("team", "net")));
+        rt.setTags(List.of(new Tag("Name", "old"), new Tag("team", "net"),
+                new Tag("aws:cloudformation:stack-id", "stack")));
         when(ec2.describeRouteTables(REGION, List.of(RTB_ID), Map.of())).thenReturn(List.of(rt));
         StackResource r = prior("AWS::EC2::RouteTable", "Rtb", RTB_ID, Map.of("RouteTableId", RTB_ID));
 

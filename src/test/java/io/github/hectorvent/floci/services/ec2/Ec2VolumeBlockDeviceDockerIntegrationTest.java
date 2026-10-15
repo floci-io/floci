@@ -161,7 +161,9 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         ContainerSpec spec = containerBuilder.newContainer("alpine:3.21")
                 .withName(containerName)
                 .withPrivileged(true)
-                .withEntrypoint(List.of("sleep", "3600"))
+                // PID 1 gets no default SIGTERM handler, so a bare "sleep 3600" sits out the whole
+                // grace period of every stop: 30 seconds when stopInstances stops it, 2 in cleanup.
+                .withEntrypoint(List.of("sh", "-c", "trap 'exit 0' TERM; sleep 3600 & wait"))
                 .build();
 
         String containerId = lifecycleManager.createAndStart(spec).containerId();
@@ -337,7 +339,8 @@ class Ec2VolumeBlockDeviceDockerIntegrationTest {
         ContainerSpec spec = containerBuilder.newContainer("alpine:3.21")
                 .withName(containerName)
                 .withPrivileged(true)
-                .withEntrypoint(List.of("sleep", "3600"))
+                // As in createRunningTestInstance: lets cleanup's stop return at once.
+                .withEntrypoint(List.of("sh", "-c", "trap 'exit 0' TERM; sleep 3600 & wait"))
                 .build();
 
         String containerId = lifecycleManager.createAndStart(spec).containerId();

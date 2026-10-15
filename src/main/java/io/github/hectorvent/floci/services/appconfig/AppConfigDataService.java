@@ -130,7 +130,9 @@ public class AppConfigDataService {
         byte[] content = new byte[0];
         String contentType = "application/octet-stream";
         if (version != null) {
-            ResolvedContent resolved = resolveContent(session, version, accept);
+            ConfigurationProfile profile = appConfigService.getConfigurationProfile(
+                    session.getApplicationId(), session.getConfigurationProfileId());
+            ResolvedContent resolved = resolveContent(profile, version, accept);
             content = resolved.bytes();
             contentType = resolved.contentType();
         }
@@ -140,10 +142,54 @@ public class AppConfigDataService {
                 pollInterval);
     }
 
-    private ResolvedContent resolveContent(ConfigurationSession session, HostedConfigurationVersion version,
+    public LegacyConfiguration getConfiguration(String application, String environment, String configuration,
+                                                 String clientId, String clientVersion, String accept) {
+        for (String identifier : new String[]{application, environment, configuration, clientId}) {
+            requireIdentifier(identifier, "Configuration identifier or client_id");
+            if (identifier.length() > 64) {
+                throw new AwsException("BadRequestException", "Identifiers must not exceed 64 characters", 400);
+            }
+        }
+        if (clientVersion != null && (clientVersion.isEmpty() || clientVersion.length() > 1024)) {
+            throw new AwsException("BadRequestException", "Invalid client_configuration_version", 400);
+        }
+        Application app = appConfigService.resolveApplication(application);
+        Environment env;
+        try {
+            env = appConfigService.resolveEnvironment(app.getId(), environment);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            // AWS answers a missing environment as it does an undeployed one; an unknown application or
+            // profile stays ResourceNotFoundException.
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+        ConfigurationProfile profile = appConfigService.resolveConfigurationProfile(app.getId(), configuration);
+        String active = appConfigService.getActiveVersion(env.getId(), profile.getId());
+        if (active == null) {
+            throw new AwsException("BadRequestException", "No configuration is deployed", 400);
+        }
+        HostedConfigurationVersion version = appConfigService.getHostedConfigurationVersion(
+                app.getId(), profile.getId(), hostedVersionNumber(active));
+        if (active.equals(clientVersion)) {
+            return new LegacyConfiguration(new byte[0], version.getContentType(), active);
+        }
+        ResolvedContent content = resolveContent(profile, version, accept);
+        return new LegacyConfiguration(content.bytes(), content.contentType(), active);
+    }
+
+    /** A deployed version that is not a version number names no hosted configuration version. */
+    private static int hostedVersionNumber(String deployedVersion) {
+        try {
+            return Integer.parseInt(deployedVersion);
+        } catch (NumberFormatException e) {
+            throw new AwsException("ResourceNotFoundException", "Hosted configuration version not found", 404);
+        }
+    }
+
+    private ResolvedContent resolveContent(ConfigurationProfile profile, HostedConfigurationVersion version,
                                            String accept) {
-        ConfigurationProfile profile = appConfigService.getConfigurationProfile(
-                session.getApplicationId(), session.getConfigurationProfileId());
         if (!"AWS.AppConfig.FeatureFlags".equals(profile.getType())) {
             return new ResolvedContent(version.getContent(), version.getContentType());
         }
@@ -179,7 +225,7 @@ public class AppConfigDataService {
                 String name = parameter[0].trim();
                 String value = parameter[1].trim();
                 if (name.equalsIgnoreCase("type")) {
-                    featureFlags = "AWS.AppConfig.FeatureFlags".equalsIgnoreCase(value);
+                    featureFlags = "AWS.AppConfig.FeatureFlags".equalsIgnoreCase(parameterValue(value));
                 } else if (name.equalsIgnoreCase("q")) {
                     acceptable = !value.matches("0(\\.0+)?");
                 }
@@ -189,6 +235,33 @@ public class AppConfigDataService {
             }
         }
         return false;
+    }
+
+    /**
+     * A media-type parameter value as RFC 9110 section 5.6.6 defines it: a token as is, or a quoted-string without its
+     * DQUOTEs and with each quoted-pair read as the character after its backslash (section 5.6.4). {@code null} for a
+     * quoted-string with no closing DQUOTE or with anything after it.
+     */
+    private static String parameterValue(String value) {
+        if (!value.startsWith("\"")) {
+            return value;
+        }
+        StringBuilder unquoted = new StringBuilder();
+        boolean escaped = false;
+        for (int i = 1; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (escaped) {
+                unquoted.append(c);
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                return i == value.length() - 1 ? unquoted.toString() : null;
+            } else {
+                unquoted.append(c);
+            }
+        }
+        return null;
     }
 
     static byte[] transformFeatureFlags(byte[] content, ObjectMapper objectMapper) {
@@ -250,6 +323,8 @@ public class AppConfigDataService {
     }
 
     private record ResolvedContent(byte[] bytes, String contentType) {}
+
+    public record LegacyConfiguration(byte[] content, String contentType, String configurationVersion) {}
 
     public record ConfigurationData(byte[] content, String contentType, String configurationVersion,
                                     String nextPollConfigurationToken, int nextPollIntervalInSeconds) {}

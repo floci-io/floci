@@ -151,10 +151,14 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         String entityId = prior.path("entityId").asText();
         if (prior.has("tags")) {
             Map<String, String> priorTags = new LinkedHashMap<>();
-            prior.get("tags").fields().forEachRemaining(f -> priorTags.put(f.getKey(), f.getValue().asText()));
+            prior.get("tags").fields().forEachRemaining(f -> {
+                if (!Ec2Service.isAwsTagKey(f.getKey())) {
+                    priorTags.put(f.getKey(), f.getValue().asText());
+                }
+            });
             List<Tag> added = new ArrayList<>();
             prior.path("appliedKeys").forEach(key -> {
-                if (!priorTags.containsKey(key.asText())) {
+                if (!Ec2Service.isAwsTagKey(key.asText()) && !priorTags.containsKey(key.asText())) {
                     added.add(new Tag(key.asText(), null));
                 }
             });
@@ -176,7 +180,8 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             String prefixList = text(target, "destinationPrefixListId");
             String egressOnly = text(target, "egressOnlyInternetGatewayId");
             if (egressOnly != null) {
-                ec2Service.deleteRoute(region, routeTableId, cidr, ipv6, prefixList);
+                CfnDeletes.safeDelete("route", routeTableId, () -> ec2Service.deleteRoute(region, routeTableId, cidr,
+                        ipv6, prefixList), "InvalidRoute.NotFound");
                 ec2Service.createRoute(region, routeTableId, cidr, ipv6, prefixList, null, null, egressOnly, null);
             } else {
                 ec2Service.replaceRoute(region, routeTableId, cidr, ipv6, prefixList,
@@ -279,7 +284,9 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> desired = ctx.resolveTags(props, "Tags");
         Map<String, String> currentTags = new LinkedHashMap<>();
         for (Tag tag : current == null ? List.<Tag>of() : current) {
-            currentTags.put(tag.getKey(), tag.getValue());
+            if (!Ec2Service.isAwsTagKey(tag.getKey())) {
+                currentTags.put(tag.getKey(), tag.getValue());
+            }
         }
         List<String> stale = ProvisionContext.staleTagKeys(currentTags, desired);
         if (reused && ctx.isUpdate() && (!stale.isEmpty() || !desired.equals(currentTags))) {

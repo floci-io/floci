@@ -635,8 +635,8 @@ class EcsCfnProvisionerTest {
         assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
         assertEquals(TASK_DEF_ARN, r.getPhysicalId());
 
-        // A rollback with no replacement of its own deletes nothing and keeps the orphan owed.
-        assertFalse(provisioner.rollbackUpdate(r));
+        // A retried rollback (ContinueUpdateRollback) re-attempts the failed delete; failing again, the orphan stays owed.
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
         assertTrue(provisioner.hasReplacementUpdate(r));
 
         // The next update registers revision 5: revision 3 (the prior) joins the orphan on the list

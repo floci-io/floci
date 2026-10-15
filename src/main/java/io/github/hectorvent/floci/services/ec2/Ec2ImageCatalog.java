@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.eks.EksClusterManager;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -203,6 +205,8 @@ public class Ec2ImageCatalog {
         public String architecture;
         public String rootDeviceType;
         public String rootDeviceName;
+        /** Root EBS volume type, set only where the AMI name states it; answers block-device-mapping.volume-type. */
+        public String rootVolumeType;
         public String virtualizationType;
         public String hypervisor;
         public String platform;
@@ -330,6 +334,20 @@ public class Ec2ImageCatalog {
                 image.setImageOwnerAlias(imageOwnerAlias);
             }
             image.setCreationDate(creationDate);
+            if (rootVolumeType != null) {
+                // Same value the volume-type filter matches on, so the returned image shows
+                // the mapping it was selected by and a CopyImage keeps that type.
+                EbsBlockDevice ebs = new EbsBlockDevice();
+                // No SnapshotId: it is optional in EbsBlockDevice, and an invented one would not
+                // resolve through DescribeSnapshots.
+                ebs.setVolumeSize(8);
+                ebs.setVolumeType(rootVolumeType);
+                ebs.setDeleteOnTermination(true);
+                BlockDeviceMapping mapping = new BlockDeviceMapping();
+                mapping.setDeviceName(image.getRootDeviceName());
+                mapping.setEbs(ebs);
+                image.setBlockDeviceMappings(List.of(mapping));
+            }
             return image;
         }
     }

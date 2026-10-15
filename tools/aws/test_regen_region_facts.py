@@ -102,25 +102,65 @@ TS_VPCE = '''
     return VPC_ENDPOINT_SERVICE_EXCEPTIONS[region]?.includes(name) ? '.cn' : '';
   }
 '''
+GUIDE_COMMERCIAL = """
+From the management account of your organization in the commercial Region, sign in to the Organizations console at https://console.aws.amazon.com/organizations
+"""
+GUIDE_CHINA = """
+The Amazon Web Services Management Console is available in both Chinese and English and can be accessed at https://console.amazonaws.cn . The console is dedicated to the China Regions.
+"""
+GUIDE_GOVCLOUD = """
+Sign in to the AWS GovCloud (US) console and open the IAM console at https://console.amazonaws-us-gov.com/iam.
+
+IAM users can now use either the account alias or account number.
+
+Sign in to the AWS GovCloud (US) console and open the IAM console at https://console.amazonaws-us-gov.com/iam.
+"""
+# the same sentence in the Markdown AWS serves at .../userguide/console.md
+GUIDE_CHINA_MARKDOWN = """
+The Amazon Web Services Management Console is available in both Chinese and English and can be accessed at [https://console.amazonaws.cn](https://console.amazonaws.cn). The Amazon Web Services Management Console is dedicated to the China Regions.
+"""
+GUIDES = {"aws": GUIDE_COMMERCIAL, "aws-cn": GUIDE_CHINA, "aws-us-gov": GUIDE_GOVCLOUD}
+GUIDE_CHINA_CLOUDFRONT = """
+You can\u2019t use the default CloudFront domain, *.cloudfront.cn, to serve content. You must add an alternate domain name.
+"""
+GUIDE_GOVCLOUD_APIGATEWAY = (
+    "Amazon API Gateway edge-optimized API and edge-optimized custom domain name are not available.\n\n"
+    "The Amazon Route\u00a053 Hosted Zone ID for the regional endpoint in the AWS GovCloud (US-West) Region is"
+    " Z1K6XKP9SAGWDV. The Amazon Route\u00a053 Hosted Zone ID for the regional endpoint in the AWS GovCloud (US-East)"
+    " Region is Z3SE9ATJYCRCZJ.\n")
+BOTOCORE_CLOUDFRONT = json.dumps({"shapes": {
+    "Distribution": {"members": {"DomainName": {"shape": "string", "documentation":
+        "<p>The distribution's CloudFront domain name. For example: <code>d111111abcdef8.cloudfront.net</code>.</p>"}}},
+    "DistributionSummary": {"members": {"DomainName": {"shape": "string", "documentation":
+        "<p>The domain name that corresponds to the distribution, for example,"
+        " <code>d111111abcdef8.cloudfront.net</code>.</p>"}}},
+}})
 PARTITIONS = {"partitions": [
     {"id": "aws", "dnsSuffix": "amazonaws.com", "regions": [{"id": "us-east-1"}, {"id": "af-south-1"}]},
     {"id": "aws-cn", "dnsSuffix": "amazonaws.com.cn", "regions": [{"id": "cn-north-1"}, {"id": "cn-northwest-1"}]},
-    {"id": "aws-us-gov", "dnsSuffix": "amazonaws.com", "regions": [{"id": "us-gov-east-1"}]},
+    {"id": "aws-us-gov", "dnsSuffix": "amazonaws.com", "regions": [
+        {"id": "us-gov-east-1", "description": "AWS GovCloud (US-East)"},
+        {"id": "us-gov-west-1", "description": "AWS GovCloud (US-West)"}]},
     {"id": "aws-iso-f", "dnsSuffix": "csp.hci.ic.gov", "regions": [{"id": "us-isof-south-1"}]},
 ]}
 
 
-def write_sources(tmp_path: Path) -> tuple[Path, Path]:
+def write_sources(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     tf = tmp_path / "terraform"
     cdk = tmp_path / "cdk"
+    guides = tmp_path / "guides"
+    botocore = tmp_path / "botocore"
     for root, rel, body in [
         (tf, r.TF_ELB, GO_ELB), (tf, r.TF_ELBV2, GO_ELBV2), (tf, r.TF_S3, GO_S3), (tf, r.TF_CLIENT, GO_CLIENT),
         (cdk, r.CDK_FACT_TABLES, TS_FACTS), (cdk, r.CDK_CLOUDFRONT_TARGET, TS_CLOUDFRONT), (cdk, r.CDK_VPC_ENDPOINT, TS_VPCE),
-    ]:
+        (guides, r.CLOUDFRONT_SUFFIX_SENTENCES["aws-cn"][0], GUIDE_CHINA_CLOUDFRONT),
+        (guides, r.APIGATEWAY_REGIONAL_ZONE_PAGE, GUIDE_GOVCLOUD_APIGATEWAY),
+        (botocore, r.BOTOCORE_CLOUDFRONT, BOTOCORE_CLOUDFRONT),
+    ] + [(guides, r.CONSOLE_HOST_SENTENCES[partition][0], body) for partition, body in GUIDES.items()]:
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(body)
-    return tf, cdk
+        path.write_text(body, encoding="utf-8")
+    return tf, cdk, guides, botocore
 
 
 @pytest.mark.parametrize("camel,region", [
@@ -159,9 +199,74 @@ def test_vpc_endpoint_exceptions_are_per_region_and_service():
     assert cn_suffix == {"cn-north-1": ["transcribe"], "cn-northwest-1": ["transcribe"]}
 
 
+def test_console_hosts_come_from_the_guide_sentences(tmp_path):
+    _, _, guides, _ = write_sources(tmp_path)
+    assert r.parse_console_hosts(guides) == {"aws": "console.aws.amazon.com", "aws-cn": "console.amazonaws.cn",
+                                             "aws-us-gov": "console.amazonaws-us-gov.com"}
+    assert r.guides_present(guides)
+    assert not r.guides_present(tmp_path / "nowhere")
+
+
+def test_the_china_cloudfront_suffix_parses_from_the_markdown_escaped_form():
+    page, sentence = r.CLOUDFRONT_SUFFIX_SENTENCES["aws-cn"]
+    markdown = GUIDE_CHINA_CLOUDFRONT.replace("*.cloudfront.cn", "\\*.cloudfront.cn")
+    assert "\\*.cloudfront.cn" in markdown
+    assert r.parse_guide_sentence(markdown, sentence, page) == "cloudfront.cn"
+
+
+def test_the_china_console_host_parses_from_the_markdown_link_form():
+    page, sentence = r.CONSOLE_HOST_SENTENCES["aws-cn"]
+    assert r.parse_guide_sentence(GUIDE_CHINA_MARKDOWN, sentence, page) == "console.amazonaws.cn"
+
+
+def test_a_guide_page_without_its_sentence_or_with_two_hosts_is_an_error():
+    page, sentence = r.CONSOLE_HOST_SENTENCES["aws-us-gov"]
+    with pytest.raises(ValueError, match="configure-account"):
+        r.parse_guide_sentence("Sign in to the AWS GovCloud (US) console.", sentence, page)
+    with pytest.raises(ValueError, match="console.example.com"):
+        r.parse_guide_sentence(GUIDE_GOVCLOUD + GUIDE_GOVCLOUD.replace("console.amazonaws-us-gov.com", "console.example.com"),
+                             sentence, page)
+    # the China guide's other spelling sits in a different sentence and is not picked up
+    page, sentence = r.CONSOLE_HOST_SENTENCES["aws-cn"]
+    with pytest.raises(ValueError, match="console.md"):
+        r.parse_guide_sentence("a graphical user interface that you access online at https://console.www.amazonaws.cn .",
+                             sentence, page)
+
+
+def test_cloudfront_suffixes_come_from_the_model_example_and_the_china_guide(tmp_path):
+    _, _, guides, botocore = write_sources(tmp_path)
+    assert r.parse_cloudfront_suffixes(botocore, guides) == {"aws": "cloudfront.net", "aws-cn": "cloudfront.cn"}
+    with pytest.raises(ValueError, match="disagree"):
+        r.parse_botocore_cloudfront_suffix(BOTOCORE_CLOUDFRONT.replace("cloudfront.net", "cloudfront.example", 1))
+    with pytest.raises(ValueError, match="DistributionSummary"):
+        r.parse_botocore_cloudfront_suffix(BOTOCORE_CLOUDFRONT.replace(
+            "for example, <code>d111111abcdef8.cloudfront.net</code>", "a CloudFront name"))
+    page, sentence = r.CLOUDFRONT_SUFFIX_SENTENCES["aws-cn"]
+    with pytest.raises(ValueError, match="cloudfront.md"):
+        r.parse_guide_sentence("CloudFront is available in the China Regions.", sentence, page)
+
+
+def test_api_gateway_regional_zones_resolve_the_region_by_its_description():
+    assert r.parse_apigateway_regional_zones(GUIDE_GOVCLOUD_APIGATEWAY, PARTITIONS) == {
+        "us-gov-west-1": "Z1K6XKP9SAGWDV", "us-gov-east-1": "Z3SE9ATJYCRCZJ"}
+    with pytest.raises(ValueError, match="no regional endpoint hosted zone"):
+        r.parse_apigateway_regional_zones("Portals are not available.", PARTITIONS)
+    with pytest.raises(ValueError, match="not a region description"):
+        r.parse_apigateway_regional_zones(GUIDE_GOVCLOUD_APIGATEWAY.replace("(US-West)", "(US-North)"), PARTITIONS)
+    with pytest.raises(ValueError, match="two regional hosted zones for us-gov-east-1"):
+        r.parse_apigateway_regional_zones(GUIDE_GOVCLOUD_APIGATEWAY.replace("(US-West)", "(US-East)"), PARTITIONS)
+    # a page that loses one region's sentence is refused rather than dropping that zone
+    west_only = GUIDE_GOVCLOUD_APIGATEWAY.replace(
+        " The Amazon Route\u00a053 Hosted Zone ID for the regional endpoint in the AWS GovCloud (US-East)"
+        " Region is Z3SE9ATJYCRCZJ.", "")
+    assert "(US-West)" in west_only and "(US-East)" not in west_only
+    with pytest.raises(ValueError, match="no regional endpoint hosted zone for us-gov-east-1"):
+        r.parse_apigateway_regional_zones(west_only, PARTITIONS)
+
+
 def test_build_merges_sources_with_terraform_winning_the_s3_conflicts(tmp_path):
-    tf, cdk = write_sources(tmp_path)
-    document = r.build(tf, cdk, PARTITIONS)
+    tf, cdk, guides, botocore = write_sources(tmp_path)
+    document = r.build(tf, cdk, guides, botocore, PARTITIONS)
     regions = document["regions"]
     assert regions["us-east-1"] == {"albHostedZoneId": "Z35SXDOTRQ7X7K", "classicElbHostedZoneId": "Z35SXDOTRQ7X7K",
                                     "nlbHostedZoneId": "Z26RNL4JYFTOTI", "s3WebsiteHostedZoneId": "Z3AQBSTGFYJSTF"}
@@ -174,23 +279,32 @@ def test_build_merges_sources_with_terraform_winning_the_s3_conflicts(tmp_path):
     partitions = document["partitions"]
     assert partitions["aws-cn"] == {"vpcEndpointServiceNamePrefix": "cn.com.amazonaws.vpce",
                                     "cloudfrontHostedZoneId": "Z3RFFRIM2A3IF5",
-                                    "samlSignOnUrl": "https://signin.amazonaws.cn/saml"}
+                                    "samlSignOnUrl": "https://signin.amazonaws.cn/saml",
+                                    "consoleHost": "console.amazonaws.cn",
+                                    "cloudfrontDomainSuffix": "cloudfront.cn"}
+    assert partitions["aws"]["cloudfrontDomainSuffix"] == "cloudfront.net"
+    assert partitions["aws-us-gov"] == {"vpcEndpointServiceNamePrefix": "com.amazonaws.vpce",
+                                        "consoleHost": "console.amazonaws-us-gov.com"}
+    assert regions["us-gov-west-1"] == {"apiGatewayRegionalHostedZoneId": "Z1K6XKP9SAGWDV"}
+    assert regions["us-gov-east-1"]["apiGatewayRegionalHostedZoneId"] == "Z3SE9ATJYCRCZJ"
+    assert "apiGatewayRegionalHostedZoneId" not in regions["us-east-1"]
     assert partitions["aws-iso-f"] == {"vpcEndpointServiceNamePrefix": "gov.ic.hci.csp.vpce"}
 
 
 def test_build_refuses_a_region_the_partition_data_does_not_publish(tmp_path):
-    tf, cdk = write_sources(tmp_path)
+    tf, cdk, guides, botocore = write_sources(tmp_path)
     with pytest.raises(ValueError, match="af-south-1"):
-        r.build(tf, cdk, {"partitions": [p for p in PARTITIONS["partitions"] if p["id"] != "aws"]
+        r.build(tf, cdk, guides, botocore, {"partitions": [p for p in PARTITIONS["partitions"] if p["id"] != "aws"]
                           + [{"id": "aws", "dnsSuffix": "amazonaws.com", "regions": [{"id": "us-east-1"}]}]})
 
 
 def test_cli_write_check_and_self_check(tmp_path, capsys):
-    tf, cdk = write_sources(tmp_path)
+    tf, cdk, guides, botocore = write_sources(tmp_path)
     partitions = tmp_path / "partitions.json"
     partitions.write_text(json.dumps(PARTITIONS))
     output = tmp_path / "out" / "region-facts.json"
-    common = ["--terraform", str(tf), "--cdk", str(cdk), "--partitions", str(partitions), "--output", str(output)]
+    common = ["--terraform", str(tf), "--cdk", str(cdk), "--guides", str(guides), "--botocore-data", str(botocore),
+              "--partitions", str(partitions), "--output", str(output)]
     assert r.main(["--check"] + common) == 1
     assert r.main(common) == 0
     assert r.main(["--check"] + common) == 0
@@ -199,23 +313,31 @@ def test_cli_write_check_and_self_check(tmp_path, capsys):
     assert r.main(["--check", "--terraform", str(tmp_path / "nowhere"), "--cdk", str(tmp_path / "nowhere"),
                    "--partitions", str(partitions), "--output", str(output)]) == 0
     assert "shape verified only" in capsys.readouterr().out
+    # nor with the checkouts but without the guide snapshots, or without the botocore model
+    for absent in ("--guides", "--botocore-data"):
+        partial = [str(tmp_path / "nowhere") if previous == absent else argument
+                   for previous, argument in zip([""] + common, common)]
+        assert r.main(["--check"] + partial) == 0, absent
+        assert "shape verified only" in capsys.readouterr().out
     output.write_text('{"partitions": {}, "regions": {"us-east-1": {"albHostedZoneId": "nope"}}}')
     assert r.main(["--check", "--terraform", str(tmp_path / "nowhere"), "--cdk", str(tmp_path / "nowhere"),
                    "--partitions", str(partitions), "--output", str(output)]) == 1
 
 
 def test_repo_file_matches_the_local_checkouts_when_present():
-    if not (r.LOCAL_TERRAFORM / r.TF_ELB).exists() or not (r.LOCAL_CDK / r.CDK_FACT_TABLES).exists():
+    if (not (r.LOCAL_TERRAFORM / r.TF_ELB).exists() or not (r.LOCAL_CDK / r.CDK_FACT_TABLES).exists()
+            or not r.guides_present(r.LOCAL_GUIDES)
+            or not (r.LOCAL_BOTOCORE_DATA / r.BOTOCORE_CLOUDFRONT).exists()):
         pytest.skip("local/aws checkouts not present")
-    document = r.build(r.LOCAL_TERRAFORM, r.LOCAL_CDK, json.loads(r.PARTITIONS.read_text(encoding="utf-8")))
+    document = r.build(r.LOCAL_TERRAFORM, r.LOCAL_CDK, r.LOCAL_GUIDES, r.LOCAL_BOTOCORE_DATA, json.loads(r.PARTITIONS.read_text(encoding="utf-8")))
     assert r.strip_source(r.render(document)) == r.strip_source(r.OUTPUT.read_text(encoding="utf-8"))
 
 
 def test_self_check_holds_the_values_to_what_partitions_json_publishes(tmp_path):
     partitions = tmp_path / "partitions.json"
     partitions.write_text(json.dumps(PARTITIONS))
-    tf, cdk = write_sources(tmp_path)
-    good = r.build(tf, cdk, PARTITIONS)
+    tf, cdk, guides, botocore = write_sources(tmp_path)
+    good = r.build(tf, cdk, guides, botocore, PARTITIONS)
     output = tmp_path / "region-facts.json"
 
     def problems(mutate):
@@ -238,6 +360,22 @@ def test_self_check_holds_the_values_to_what_partitions_json_publishes(tmp_path)
             vpcEndpointServiceNamePrefix="com.example.vpce"),
         "plain-http SAML URL": lambda d: d["partitions"][partition].update(
             samlSignOnUrl="http://signin.example/saml"),
+        "console host with a scheme": lambda d: d["partitions"][partition].update(
+            consoleHost="https://console.aws.amazon.com"),
+        "console host that is not a console": lambda d: d["partitions"][partition].update(consoleHost="example.com"),
+        "missing China console host": lambda d: d["partitions"]["aws-cn"].pop("consoleHost"),
+        "missing GovCloud console host": lambda d: d["partitions"]["aws-us-gov"].pop("consoleHost"),
+        "missing commercial console host": lambda d: d["partitions"]["aws"].pop("consoleHost"),
+        "missing commercial CloudFront suffix": lambda d: d["partitions"]["aws"].pop("cloudfrontDomainSuffix"),
+        "missing China CloudFront suffix": lambda d: d["partitions"]["aws-cn"].pop("cloudfrontDomainSuffix"),
+        "missing us-gov-west-1 API Gateway zone": lambda d: d["regions"]["us-gov-west-1"].pop(
+            "apiGatewayRegionalHostedZoneId"),
+        "missing us-gov-east-1 API Gateway zone": lambda d: d["regions"]["us-gov-east-1"].pop(
+            "apiGatewayRegionalHostedZoneId"),
+        "CloudFront suffix that is a whole name": lambda d: d["partitions"][partition].update(
+            cloudfrontDomainSuffix="d111111abcdef8.cloudfront.net"),
+        "API Gateway zone that is not a zone id": lambda d: d["regions"][region].update(
+            apiGatewayRegionalHostedZoneId="regional"),
         "missing partition": lambda d: d["partitions"].pop(partition),
         "partition entry not an object": lambda d: d["partitions"].update({partition: "invalid"}),
         "region entry not an object": lambda d: d["regions"].update({region: ["invalid"]}),

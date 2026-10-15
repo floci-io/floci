@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator.TrustDecision;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -386,6 +388,81 @@ class AssumeRolePolicyEvaluatorTest {
                 "arn:aws:appsync:us-east-1:000000000000:apis/example", "000000000000"));
         assertFalse(evaluator.allowsService(doc, "appsync.amazonaws.com",
                 "arn:aws:appsync:us-east-1:111111111111:apis/example", "111111111111"));
+    }
+
+    /**
+     * A trust policy is a resource policy, and those take policy variables too. The caller's own
+     * account is one of the keys the request carries, so a session name can be held to it.
+     */
+    @Test
+    void aTrustConditionResolvesAPolicyVariable() {
+        String doc = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
+               "Condition":{"StringLike":{"sts:RoleSessionName":"${aws:PrincipalAccount}-*"}}}]}
+            """;
+        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+                sessionNamed(CALLER_ACCOUNT + "-build")));
+        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+                sessionNamed("222222222222-build")));
+    }
+
+    /** The same condition under the version that predates variables compares the text itself. */
+    @Test
+    void aTrustConditionVariableStaysLiteralWithoutTheVersion() {
+        String doc = """
+            {"Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
+               "Condition":{"StringLike":{"sts:RoleSessionName":"${aws:PrincipalAccount}-*"}}}]}
+            """;
+        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+                sessionNamed(CALLER_ACCOUNT + "-build")));
+        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+                sessionNamed("${aws:PrincipalAccount}-build")));
+    }
+
+    private static Map<String, List<String>> sessionNamed(String sessionName) {
+        return Map.of("aws:PrincipalAccount", List.of(CALLER_ACCOUNT),
+                "sts:RoleSessionName", List.of(sessionName));
+    }
+
+    @Test
+    void aGrantNamingTheCallerIsToldApartFromAGrantToItsAccount() {
+        assertEquals(TrustDecision.ALLOW, evaluator.decide(trust("{\"AWS\":\"" + CALLER_ARN + "\"}"),
+                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertEquals(TrustDecision.ALLOW, evaluator.decide(trust("\"*\""),
+                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertEquals(TrustDecision.ALLOW_ACCOUNT, evaluator.decide(trust("{\"AWS\":\"arn:aws:iam::111111111111:root\"}"),
+                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertEquals(TrustDecision.ALLOW_ACCOUNT, evaluator.decide(trust("{\"AWS\":\"111111111111\"}"),
+                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+    }
+
+    @Test
+    void aStatementNamingBothTheAccountAndTheCallerGrantsToTheCaller() {
+        String doc = trust("{\"AWS\":[\"111111111111\",\"" + CALLER_ARN + "\"]}");
+        assertEquals(TrustDecision.ALLOW, evaluator.decide(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+
+        String twoStatements = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"%1$s"},"Action":"sts:AssumeRole"},
+              {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole"}]}
+            """.formatted(CALLER_ARN);
+        assertEquals(TrustDecision.ALLOW,
+                evaluator.decide(twoStatements, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+    }
+
+    @Test
+    void aDenyOrASilentPolicyIsReportedAsSuch() {
+        String deny = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"%1$s"},"Action":"sts:AssumeRole"},
+              {"Effect":"Deny","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole"}]}
+            """.formatted(CALLER_ARN);
+        assertEquals(TrustDecision.EXPLICIT_DENY, evaluator.decide(deny, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertEquals(TrustDecision.NEUTRAL, evaluator.decide(trust("{\"AWS\":\"222222222222\"}"),
+                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertEquals(TrustDecision.NEUTRAL, evaluator.decide(null, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test

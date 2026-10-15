@@ -956,6 +956,14 @@ class S3AuthEnforcementIntegrationTest {
             .statusCode(403)
             .body(containsString("AccessDenied"));
 
+        given()
+            .body("part data")
+        .when()
+            .put("/" + WRITE_BUCKET + "/multipart.txt?uploadId=" + uploadId + "&partNumber=0")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
         String eTag = given()
             .filter(LOCAL_SIGNER)
             .body("part data")

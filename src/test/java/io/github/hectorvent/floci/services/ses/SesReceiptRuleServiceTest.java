@@ -2,7 +2,10 @@ package io.github.hectorvent.floci.services.ses;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ses.model.ReceiptAction;
@@ -42,6 +45,7 @@ class SesReceiptRuleServiceTest {
     private S3Service s3Service;
     private SnsService snsService;
     private LambdaService lambdaService;
+    private ServiceCallAuthorizer serviceCallAuthorizer;
 
     @BeforeEach
     void setUp() {
@@ -51,8 +55,12 @@ class SesReceiptRuleServiceTest {
         when(s3Service.bucketExists(anyString())).thenReturn(true);
         when(snsService.topicExists(anyString(), anyString())).thenReturn(true);
         when(lambdaService.functionExists(anyString(), anyString())).thenReturn(true);
+        serviceCallAuthorizer = mock(ServiceCallAuthorizer.class);
+        when(serviceCallAuthorizer.authorize(anyString(), anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(Decision.ALLOW);
         service = new SesReceiptRuleService(new InMemoryStorage<>(), new InMemoryStorage<>(),
-                s3Service, snsService, lambdaService, Clock.systemUTC());
+                s3Service, snsService, lambdaService, serviceCallAuthorizer,
+                new RegionResolver(REGION, "000000000000"), Clock.systemUTC());
     }
 
     private static ReceiptFilter filter(String name, String policy, String cidr) {
@@ -365,6 +373,26 @@ class SesReceiptRuleServiceTest {
                 rule("r1", action("SNSAction", "TopicArn", arn)), null, REGION, ANY_SENDER_VERIFIED);
         assertEquals("UTF-8",
                 service.describeReceiptRule("rules-a", "r1", REGION).getActions().get(0).property("Encoding"));
+    }
+
+    @Test
+    void aTopicWhosePolicyRefusesSesForTheRuleIsNotPublishable() {
+        service.createReceiptRuleSet("rules-a", REGION);
+        String arn = "arn:aws:sns:us-east-1:000000000000:topic";
+        when(serviceCallAuthorizer.authorize("ses", "sns:Publish", arn,
+                "arn:aws:ses:us-east-1:000000000000:receipt-rule-set/rules-a:receipt-rule/r1", "000000000000"))
+                .thenReturn(Decision.DENY);
+
+        AwsException create = assertThrows(AwsException.class, () -> service.createReceiptRule("rules-a",
+                rule("r1", action("SNSAction", "TopicArn", arn)), null, REGION, ANY_SENDER_VERIFIED));
+        service.createReceiptRule("rules-a", rule("r1"), null, REGION, ANY_SENDER_VERIFIED);
+        AwsException update = assertThrows(AwsException.class, () -> service.updateReceiptRule("rules-a",
+                rule("r1", action("S3Action", "BucketName", "inbox", "TopicArn", arn)), REGION, ANY_SENDER_VERIFIED));
+
+        for (AwsException e : List.of(create, update)) {
+            assertEquals("InvalidSnsTopic", e.getErrorCode());
+            assertEquals("Could not publish to SNS topic: " + arn, e.getMessage());
+        }
     }
 
     @Test

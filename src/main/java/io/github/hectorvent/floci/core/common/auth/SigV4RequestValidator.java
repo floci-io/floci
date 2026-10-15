@@ -73,6 +73,21 @@ public final class SigV4RequestValidator {
      */
     public boolean validate(String rawQuery, String canonicalHostHeaderValue, String identityParamName,
                              boolean identityRequired, String expectedIdentityValue, String logLabel) {
+        return validate(rawQuery, canonicalHostHeaderValue, identityParamName, identityRequired,
+                expectedIdentityValue, logLabel, null);
+    }
+
+    /**
+     * As above, for a caller that knows which account owns the target: a long-term access key is
+     * accepted only when that account holds it. A proxy checks tokens on its own thread, outside
+     * any request, where the plain lookup sees the default account rather than the owner's.
+     *
+     * @param ownerAccountId the account that owns the target, or null to look the key up in the
+     *                       calling request's account
+     */
+    public boolean validate(String rawQuery, String canonicalHostHeaderValue, String identityParamName,
+                             boolean identityRequired, String expectedIdentityValue, String logLabel,
+                             String ownerAccountId) {
         try {
             List<QueryParameter> parameters = decodeQuery(rawQuery);
             String action = findParam(parameters, "Action");
@@ -116,8 +131,8 @@ public final class SigV4RequestValidator {
             if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
                 secretKey = LEGACY_SECRET_KEY;
             } else {
-                Optional<String> registeredSecretKey = iamService.findSecretKey(
-                        accessKeyId, findParam(parameters, "X-Amz-Security-Token"));
+                Optional<String> registeredSecretKey = registeredSecretKey(
+                        accessKeyId, findParam(parameters, "X-Amz-Security-Token"), ownerAccountId);
                 if (registeredSecretKey.isEmpty()) {
                     LOG.debugv("{0} references unregistered access key={1}", logLabel, sanitizeForLog(accessKeyId));
                     return false;
@@ -151,6 +166,19 @@ public final class SigV4RequestValidator {
             LOG.debugv("{0} validation error: {1}", logLabel, e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * A temporary key's owner is null: its session is found whichever account issued it, as
+     * {@link IamService#findSecretKey(String, String)} finds it.
+     */
+    private Optional<String> registeredSecretKey(String accessKeyId, String sessionToken, String ownerAccountId) {
+        if (ownerAccountId == null) {
+            return iamService.findSecretKey(accessKeyId, sessionToken);
+        }
+        return iamService.findSecretKeyInAnyAccount(accessKeyId, sessionToken)
+                .filter(key -> key.accountId() == null || ownerAccountId.equals(key.accountId()))
+                .map(IamService.OwnedSecretKey::secretAccessKey);
     }
 
     private record QueryParameter(String name, String value) {}

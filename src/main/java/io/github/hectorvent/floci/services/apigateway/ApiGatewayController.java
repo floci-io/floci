@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.io.JsonStringEncoder;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService.StoredMapping;
@@ -272,6 +274,35 @@ public class ApiGatewayController {
         ArrayNode items = root.putArray("item");
         auths.forEach(a -> items.add(toAuthorizerNode(a)));
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/stages/{stageName}/exports/{exportType}")
+    @Produces({MediaType.APPLICATION_JSON, "application/yaml"})
+    public Response getExport(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                              @PathParam("stageName") String stageName, @PathParam("exportType") String exportType,
+                              @QueryParam("extensions") String extensions) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode document = service.exportRestApi(region, apiId, stageName, exportType, extensions);
+        String contentType = MediaType.APPLICATION_JSON;
+        for (MediaType acceptable : headers.getAcceptableMediaTypes()) {
+            if (acceptable.isCompatible(MediaType.APPLICATION_JSON_TYPE)) {
+                break;
+            }
+            if (acceptable.isCompatible(MediaType.valueOf("application/yaml"))) {
+                contentType = "application/yaml";
+                break;
+            }
+        }
+        try {
+            String body = "application/yaml".equals(contentType)
+                    ? new YAMLMapper().writeValueAsString(document) : document.toString();
+            return Response.ok(body).type(contentType)
+                    .header("Content-Disposition", "attachment; filename=\"" + apiId + "-" + exportType
+                            + ("application/yaml".equals(contentType) ? ".yaml" : ".json") + "\"").build();
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot serialize API export", e);
+        }
     }
 
     @GET

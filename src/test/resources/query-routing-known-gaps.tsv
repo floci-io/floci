@@ -7,19 +7,17 @@
 # and the Version the request declares, and AwsQueryServiceResolver backs
 # IamEnforcementFilter too, so an entry here is also authorized under the wrong namespace.
 #
-# Nearly every entry is a name missing from its own service's routing set, and adding it
-# there is the fix, as #5032 did for IAM. The third column only says where the request
-# goes meanwhile: sqs when no set holds the name, since that is the default, or the
-# service whose set does. A name two services define needs nothing more than being in
-# both sets, because the Version a request carries decides between them.
+# Every entry is a name missing from its own service's routing set, and adding it there
+# is the fix, as #5032 did for IAM. The third column only says where the request goes
+# meanwhile: sqs when no set holds the name, since that is the default, or the service
+# whose set does. A name two services define needs nothing more than being in both sets,
+# because the Version a request carries decides between them.
 #
-# The exception is a request without a Version, which only a hand-rolled client sends.
-# A name two services define then goes to the one tried first, which is a gap only when
-# that one does not handle it. SNS defines AddPermission and RemovePermission, but its
-# handler does not implement them, so SQS's reach SNS that way. Implementing them in SNS
-# is the fix.
+# A request without a Version, which only a hand-rolled client sends, is the one other
+# way to land here. A name two services define then goes to the one tried first, which
+# is a gap when that one does not handle the name.
 #
-# 173 entries: 171 unrouted, 2 claimed by another service.
+# 171 entries: 171 unrouted, 0 claimed by another service.
 #
 # Shrink this file, never grow it. Removing a line is the point; adding one needs a
 # reason in the PR that adds it. AwsQueryActionRoutingParityTest fails on an entry that
@@ -211,7 +209,3 @@ redshift	DescribeOrderableClusterOptions	sqs
 redshift	DisableLogging	sqs
 redshift	EnableLogging	sqs
 redshift	ModifyClusterIamRoles	sqs
-
-# sqs: 2 (0 unrouted, 2 claimed elsewhere)
-sqs	AddPermission	sns
-sqs	RemovePermission	sns

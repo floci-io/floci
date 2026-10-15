@@ -82,6 +82,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -104,6 +105,95 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2ServiceTest {
+
+    @ParameterizedTest
+    @CsvSource({
+            "false, aws:autoscaling:groupName", "true, aws:autoscaling:groupName",
+            "false, AWS:custom", "true, AWS:custom",
+            "false, aWs:custom", "true, aWs:custom"
+    })
+    void userTagMutationsRejectAwsKeysBeforeChangingAnyResource(boolean delete, String key) {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        List<Tag> original = List.of(new Tag("aws:autoscaling:groupName", "group"), new Tag("env", "original"));
+        List<String> ids = service.runInstances("us-east-1", "ami-test", "t3.micro",
+                        2, 2, null, List.of(), null, null, original, null, null)
+                .getInstances().stream().map(Instance::getInstanceId).toList();
+        List<Tag> changes = List.of(new Tag("env", delete ? null : "changed"), new Tag(key, "spoofed"));
+
+        AwsException error = assertThrows(AwsException.class, () -> {
+            if (delete) {
+                service.deleteTags("us-east-1", ids, changes);
+            } else {
+                service.createTags("us-east-1", ids, changes);
+            }
+        });
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("Value ( " + key + " ) for parameter key is invalid. "
+                + "Tag keys starting with 'aws:' are reserved for internal use", error.getMessage());
+        for (Reservation reservation : service.describeInstances("us-east-1", ids, Map.of())) {
+            for (Instance instance : reservation.getInstances()) {
+                assertEquals(original, instance.getTags());
+            }
+        }
+    }
+
+    @Test
+    void deletingAllUserTagsPreservesTheAutoscalingMembershipTag() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Tag membership = new Tag("aws:autoscaling:groupName", "group");
+        String id = service.runInstances("us-east-1", "ami-test", "t3.micro",
+                        1, 1, null, List.of(), null, null,
+                        List.of(membership, new Tag("env", "original")), null, null)
+                .getInstances().getFirst().getInstanceId();
+
+        service.createTags("us-east-1", List.of(id), List.of(new Tag("env", "updated")));
+        service.deleteTags("us-east-1", List.of(id), List.of());
+
+        Instance instance = service.describeInstances("us-east-1", List.of(id), Map.of())
+                .getFirst().getInstances().getFirst();
+        assertEquals(List.of(membership), instance.getTags());
+    }
+
+
+    @Test
+    void subnetAvailableAddressesTrackAllocationsAndRelease() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.97.0.0/16", false).getVpcId();
+        Subnet small = service.createSubnet(region, vpcId, "10.97.0.0/28", region + "a");
+        Subnet large = service.createSubnet(region, vpcId, "10.97.1.0/24", region + "a");
+        assertEquals(11, small.getAvailableIpAddressCount());
+        assertEquals(251, large.getAvailableIpAddressCount());
+
+        NetworkInterface eni = service.createNetworkInterface(region, small.getSubnetId(), "count-probe",
+                "10.97.0.4", List.of("10.97.0.4", "10.97.0.5"), List.of(), List.of());
+        assertEquals(9, service.describeSubnets(region, List.of(small.getSubnetId()), Map.of())
+                .getFirst().getAvailableIpAddressCount());
+        Reservation reservation = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), small.getSubnetId(), null, List.of(), null, null);
+        assertEquals(8, service.describeSubnets(region, List.of(small.getSubnetId()), Map.of())
+                .getFirst().getAvailableIpAddressCount());
+
+        service.terminateInstances(region, List.of(reservation.getInstances().getFirst().getInstanceId()));
+        service.deleteNetworkInterface(region, eni.getNetworkInterfaceId());
+        assertEquals(11, service.describeSubnets(region, List.of(small.getSubnetId()), Map.of())
+                .getFirst().getAvailableIpAddressCount());
+        assertEquals(251, service.describeSubnets(region, List.of(large.getSubnetId()), Map.of())
+                .getFirst().getAvailableIpAddressCount());
+        // Legacy records can contain invalid addresses; they do not consume usable subnet space.
+        service.createNetworkInterface(region, small.getSubnetId(), "legacy-addresses",
+                "10.98.0.4", List.of("10.97.0.0", "10.97.0.15"), List.of(), List.of());
+        assertEquals(11, service.describeSubnets(region, List.of(small.getSubnetId()), Map.of())
+                .getFirst().getAvailableIpAddressCount());
+    }
 
     @Test
     void createAndDescribeVpcsDoNotContactDockerEvenOnFirstUse() {
@@ -252,6 +342,36 @@ class Ec2ServiceTest {
         service.deleteVpc(region, vpcId);
         assertTrue(service.describeVpcs(region, List.of(), Map.of()).stream()
                 .noneMatch(vpc -> vpcId.equals(vpc.getVpcId())));
+    }
+
+    @Test
+    void deleteRouteRefusesTheLocalRouteAndReportsMissingDestinations() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.86.0.0/16", false).getVpcId();
+        String routeTableId = service.createRouteTable(region, vpcId).getRouteTableId();
+        service.createRoute(region, routeTableId, "0.0.0.0/0", null, null, "igw-route0test0000000",
+                null, null, null);
+
+        AwsException local = assertThrows(AwsException.class,
+                () -> service.deleteRoute(region, routeTableId, "10.86.0.0/16", null, null));
+        assertEquals("InvalidParameterValue", local.getErrorCode());
+        assertTrue(local.getMessage().contains("10.86.0.0/16"), local.getMessage());
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.deleteRoute(region, routeTableId, "203.0.113.0/24", null, null));
+        assertEquals("InvalidRoute.NotFound", missing.getErrorCode());
+        assertTrue(missing.getMessage().contains("203.0.113.0/24"), missing.getMessage());
+
+        service.deleteRoute(region, routeTableId, "0.0.0.0/0", null, null);
+
+        assertEquals(1, service.describeRouteTables(region, List.of(routeTableId), Map.of())
+                .getFirst().getRoutes().size(), "the local route survives");
+        assertEquals("CreateRouteTable", service.describeRouteTables(region, List.of(routeTableId), Map.of())
+                .getFirst().getRoutes().getFirst().getOrigin());
     }
 
     @Test
@@ -1629,6 +1749,130 @@ class Ec2ServiceTest {
                 "us-east-1", List.of(), List.of("canonical"), Map.of());
         assertTrue(unsupportedAlias.isEmpty(),
                 "catalog imageOwnerAlias values must not turn arbitrary owner strings into Owners selectors");
+    }
+
+    @Test
+    void describeImagesFiltersCatalogImagesByBlockDeviceMappingVolumeType() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        assertTrue(service.describeImages("us-east-1", List.of(), List.of(),
+                Map.of("block-device-mapping.volume-type", List.of("bogus"))).isEmpty());
+        assertEquals(List.of("ami-0abcdef1234567890"), service.describeImages("us-east-1", List.of(), List.of(),
+                Map.of("block-device-mapping.volume-type", List.of("gp2"))).stream().map(Image::getImageId).toList());
+        assertEquals(Set.of("ami-ubuntu2404-arm64", "ami-ubuntu2404-amd64", "ami-ubuntu2404-cloud-arm64"),
+                service.describeImages("us-east-1", List.of(), List.of(),
+                        Map.of("block-device-mapping.volume-type", List.of("gp3"))).stream()
+                        .map(Image::getImageId).collect(Collectors.toSet()));
+    }
+
+    @Test
+    void catalogImageSelectedByVolumeTypeReturnsAndCopiesThatMapping() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Image found = service.describeImages("us-east-1", List.of(), List.of(),
+                Map.of("block-device-mapping.volume-type", List.of("gp2"))).get(0);
+        assertEquals("gp2", found.getBlockDeviceMappings().get(0).getEbs().getVolumeType());
+
+        Image copy = service.copyImage("us-east-1", "us-east-1", found.getImageId(), "copy", null);
+        assertEquals("gp2", copy.getBlockDeviceMappings().get(0).getEbs().getVolumeType());
+    }
+
+    @Test
+    void catalogImageSnapshotIdsResolveThroughDescribeSnapshots() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Image catalog = service.describeImages("us-east-1", List.of("ami-0abcdef1234567890"), List.of(), Map.of())
+                .getFirst();
+        for (BlockDeviceMapping mapping : catalog.getBlockDeviceMappings()) {
+            String snapshotId = mapping.getEbs().getSnapshotId();
+            if (snapshotId != null) {
+                assertDoesNotThrow(() -> service.describeSnapshots("us-east-1", List.of(snapshotId), null, Map.of()),
+                        "catalog AMI advertises snapshot " + snapshotId + " that DescribeSnapshots cannot find");
+            }
+        }
+
+        // A copy's root is still backed by a real snapshot record.
+        Image copy = service.copyImage("us-east-1", "us-east-1", catalog.getImageId(), "copy", null);
+        String copySnapshot = copy.getBlockDeviceMappings().getFirst().getEbs().getSnapshotId();
+        assertEquals(1, service.describeSnapshots("us-east-1", List.of(copySnapshot), null, Map.of()).size());
+    }
+
+    @Test
+    void runInstancesRootVolumeTakesTheAmiRootVolumeType() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Instance gp2 = service.runInstances("us-east-1", "ami-0abcdef1234567890", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        assertEquals("gp2", service.describeVolumes("us-east-1", List.of(gp2.getRootVolumeId()), Map.of())
+                .getFirst().getVolumeType());
+
+        Instance gp3 = service.runInstances("us-east-1", "ami-ubuntu2404-amd64", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        assertEquals("gp3", service.describeVolumes("us-east-1", List.of(gp3.getRootVolumeId()), Map.of())
+                .getFirst().getVolumeType());
+    }
+
+    @Test
+    void createImageRecordsTheInstanceRootVolumeTypeNotTheSourceAmis() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+        ebs.setVolumeType("gp3");
+        LaunchTemplateData.BlockDeviceMapping root = new LaunchTemplateData.BlockDeviceMapping();
+        root.setDeviceName("/dev/xvda");
+        root.setEbs(ebs);
+
+        // ami-0abcdef1234567890 declares a gp2 root; the launch asked for gp3.
+        Instance instance = service.runInstances("us-east-1", "ami-0abcdef1234567890", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null, null, null, 0, null, null, null,
+                null, false, null, null, List.of(root)).getInstances().getFirst();
+        String imageId = service.createImage("us-east-1", instance.getInstanceId(), "gp3-capture", null, true)
+                .getImageId();
+
+        Image captured = service.describeImages("us-east-1", List.of(imageId), List.of(), Map.of()).getFirst();
+        BlockDeviceMapping capturedRoot = captured.getBlockDeviceMappings().stream()
+                .filter(m -> "/dev/xvda".equals(m.getDeviceName()))
+                .findFirst().orElseThrow();
+        assertEquals("gp3", capturedRoot.getEbs().getVolumeType());
+    }
+
+    @Test
+    void describeImagesFiltersRegisteredImagesByBlockDeviceMappingVolumeType() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setVolumeType("io2");
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName("/dev/sda1");
+        mapping.setEbs(ebs);
+        Image io2 = service.registerImage("us-east-1", "io2-image", null, null, null, List.of(mapping));
+        service.registerImage("us-east-1", "no-ebs-image", null, null, null, List.of());
+
+        assertEquals(List.of(io2.getImageId()), service.describeImages("us-east-1", List.of(), List.of(),
+                Map.of("block-device-mapping.volume-type", List.of("io2"))).stream().map(Image::getImageId).toList());
+        assertTrue(service.describeImages("us-east-1", List.of(), List.of(),
+                Map.of("block-device-mapping.volume-type", List.of("gp3"))).isEmpty());
     }
 
     @Test
@@ -5841,7 +6085,7 @@ class Ec2ServiceTest {
 
         AwsException e = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
                 "ami-ubuntu2404-amd64", "m5.large", 1, 1, null, List.of(), null, null, List.of(), null, null,
-                null, null, 0, null, null, null, null, false, hostId[0], null));
+                null, null, 0, null, null, null, null, false, hostId[0], null, null));
 
         assertTrue(released[0], "the hook must have released the host between the two checks");
         assertEquals("InvalidHostID.NotFound", e.getErrorCode());

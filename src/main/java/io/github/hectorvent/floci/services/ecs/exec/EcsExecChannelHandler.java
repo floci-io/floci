@@ -419,7 +419,8 @@ public class EcsExecChannelHandler {
         public void onNext(Frame frame) {
             byte[] payload = frame.getPayload();
             if (payload != null && payload.length > 0) {
-                channel.sendOutput(payload);
+                // docker-java reuses full-size buffers before the queued context write runs.
+                channel.sendOutput(payload.clone());
             }
         }
 

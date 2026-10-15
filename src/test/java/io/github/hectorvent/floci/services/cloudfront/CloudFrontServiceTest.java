@@ -127,6 +127,7 @@ class CloudFrontServiceTest {
         return serviceWithDomainSuffix(domainSuffix, "us-east-1");
     }
 
+    /** A null {@code domainSuffix} is {@code floci.services.cloudfront.domain-suffix} left unset. */
     private CloudFrontService serviceWithDomainSuffix(String domainSuffix, String region) {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
@@ -143,7 +144,7 @@ class CloudFrontServiceTest {
         when(dnsConfig.extraSuffixes()).thenReturn(Optional.empty());
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.cloudfront()).thenReturn(cloudFrontConfig);
-        when(cloudFrontConfig.domainSuffix()).thenReturn(domainSuffix);
+        when(cloudFrontConfig.domainSuffix()).thenReturn(Optional.ofNullable(domainSuffix));
 
         return new CloudFrontService(storageFactory, config, new RegionResolver(region, ACCOUNT));
     }
@@ -323,7 +324,7 @@ class CloudFrontServiceTest {
 
     @Test
     void createDistributionUsesDefaultDomainSuffix() {
-        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        CloudFrontService service = serviceWithDomainSuffix(null);
 
         Distribution dist = service.createDistribution(new Distribution(), Map.of());
 
@@ -359,6 +360,33 @@ class CloudFrontServiceTest {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.local");
 
         Distribution dist = service.createDistribution(new Distribution(), Map.of());
+
+        assertTrue(dist.getDomainName().endsWith(".cloudfront.local"),
+                "Expected configured suffix, got: " + dist.getDomainName());
+    }
+
+    /**
+     * China's distributions are named under {@code cloudfront.cn}; GovCloud has no CloudFront and
+     * so no suffix of its own, and keeps the commercial one.
+     */
+    @Test
+    void anUnconfiguredDomainSuffixFollowsTheRequestsPartition() {
+        CloudFrontService china = serviceWithDomainSuffix(null, "cn-north-1");
+        CloudFrontService govCloud = serviceWithDomainSuffix(null, "us-gov-west-1");
+
+        Distribution dist = china.createDistribution(new Distribution(), Map.of());
+        StreamingDistribution streaming = china.createStreamingDistribution(new StreamingDistribution());
+
+        assertEquals(dist.getId().toLowerCase(Locale.ROOT) + ".cloudfront.cn", dist.getDomainName());
+        assertEquals(streaming.getId().toLowerCase(Locale.ROOT) + ".cloudfront.cn", streaming.getDomainName());
+        assertTrue(govCloud.createDistribution(new Distribution(), Map.of()).getDomainName().endsWith(".cloudfront.net"));
+    }
+
+    @Test
+    void aConfiguredDomainSuffixWinsOverThePartitions() {
+        CloudFrontService china = serviceWithDomainSuffix("cloudfront.local", "cn-north-1");
+
+        Distribution dist = china.createDistribution(new Distribution(), Map.of());
 
         assertTrue(dist.getDomainName().endsWith(".cloudfront.local"),
                 "Expected configured suffix, got: " + dist.getDomainName());

@@ -2,8 +2,9 @@ package io.github.hectorvent.floci.services.iot;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.testing.IotMqttTlsProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
@@ -15,13 +16,13 @@ import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.BlockingQueue;
@@ -36,16 +37,18 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(IotMqttEnabledIntegrationTest.EnabledMqttProfile.class)
+@TestProfile(IotMqttTlsProfile.class)
 class IotMqttEnabledIntegrationTest {
 
     static final int AWS_MAX_PAYLOAD = 128 * 1024;
-    private static final int PORT = 18831;
-    private static final String BROKER_URI = "tcp://127.0.0.1:" + PORT;
+    private static final String BROKER_URI = "tcp://127.0.0.1:" + IotMqttTlsProfile.PLAIN_PORT;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Inject
     IotPublishEventRecorder eventRecorder;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @BeforeEach
     void clearEvents() {
@@ -260,6 +263,7 @@ class IotMqttEnabledIntegrationTest {
             try (MqttTestClient publisher = connectMqtt("phase7-update-pub")) {
                 publisher.publish("$aws/things/phase7Thing/shadow/update",
                         json("{\"state\":{\"desired\":{\"color\":\"blue\"}},\"clientToken\":\"token-1\"}"));
+                removeShadowAfterTheTest("phase7Thing");
             }
 
             MqttPublish accepted = subscriber.takePublish();
@@ -278,6 +282,7 @@ class IotMqttEnabledIntegrationTest {
             try (Mqtt5TestClient publisher = connectMqtt5("phase7-mqtt5-update-pub")) {
                 publisher.publish("$aws/things/phase7Mqtt5Thing/shadow/update",
                         json("{\"state\":{\"desired\":{\"color\":\"purple\"}},\"clientToken\":\"mqtt5-token\"}"));
+                removeShadowAfterTheTest("phase7Mqtt5Thing");
             }
 
             MqttPublish accepted = subscriber.takePublish();
@@ -341,6 +346,7 @@ class IotMqttEnabledIntegrationTest {
             try (MqttTestClient publisher = connectMqtt("phase7-docs-delta-pub")) {
                 publisher.publish("$aws/things/phase7Documents/shadow/update",
                         json("{\"state\":{\"reported\":{\"color\":\"red\"}}}"));
+                removeShadowAfterTheTest("phase7Documents");
                 subscriber.takePublish();
 
                 publisher.publish("$aws/things/phase7Documents/shadow/update",
@@ -377,6 +383,8 @@ class IotMqttEnabledIntegrationTest {
             try (MqttTestClient publisher = connectMqtt("phase7-named-pub")) {
                 publisher.publish(updateTopic,
                         json("{\"state\":{\"desired\":{\"mode\":\"auto\"}},\"clientToken\":\"named-update\"}"));
+                cleanup.register(() -> given().queryParam("name", "settings")
+                        .when().delete("/things/" + thingName + "/shadow").then().statusCode(200));
                 MqttPublish updateAccepted = subscriber.takePublish();
                 JsonNode updatePayload = readJson(updateAccepted.payload());
                 assertEquals(updateTopic + "/accepted", updateAccepted.topic());
@@ -416,6 +424,7 @@ class IotMqttEnabledIntegrationTest {
             .put("/rules/phase8MqttRepublishRule")
         .then()
             .statusCode(200);
+        cleanup.register(() -> given().when().delete("/rules/phase8MqttRepublishRule").then().statusCode(200));
 
         try (MqttTestClient subscriber = connectMqtt("phase8-republish-sub")) {
             subscriber.subscribe("devices/phase8/mqtt/target");
@@ -453,6 +462,7 @@ class IotMqttEnabledIntegrationTest {
             .put("/rules/phase8MqttClientIdRule")
         .then()
             .statusCode(200);
+        cleanup.register(() -> given().when().delete("/rules/phase8MqttClientIdRule").then().statusCode(200));
 
         try (MqttTestClient subscriber = connectMqtt("phase8-clientid-sub")) {
             subscriber.subscribe("devices/phase8/mqtt/clientid-target");
@@ -482,6 +492,10 @@ class IotMqttEnabledIntegrationTest {
 
     private Mqtt5TestClient connectMqtt5(String clientId) throws org.eclipse.paho.mqttv5.common.MqttException {
         return Mqtt5TestClient.connect(uniqueClientId(clientId));
+    }
+
+    private void removeShadowAfterTheTest(String thingName) {
+        cleanup.register(() -> given().when().delete("/things/" + thingName + "/shadow").then().statusCode(200));
     }
 
     static byte[] randomPayload(int size) {
@@ -682,18 +696,6 @@ class IotMqttEnabledIntegrationTest {
             options.setKeepAliveInterval(60);
             options.setAutomaticReconnect(false);
             return options;
-        }
-    }
-
-    public static final class EnabledMqttProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.iot.mqtt.enabled", "true",
-                    "floci.services.iot.mqtt.auto-start", "true",
-                    "floci.services.iot.mqtt.host", "127.0.0.1",
-                    "floci.services.iot.mqtt.port", Integer.toString(PORT)
-            );
         }
     }
 }

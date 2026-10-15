@@ -17,20 +17,20 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.Stream;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class SpectrumMaterializerTest {
 
     @Test
     void materializesThroughBackendSqlWithoutBufferingRowsInTheCaller() throws Exception {
-        SpectrumS3Reader reader = mock(SpectrumS3Reader.class);
+        SpectrumS3Reader reader = inlineMock(SpectrumS3Reader.class);
         when(reader.read(any(SpectrumSession.class),
                 any(SpectrumExternalSchema.class),
                 any(SpectrumExternalTable.class)))
@@ -56,7 +56,7 @@ class SpectrumMaterializerTest {
 
     @Test
     void copyFailureDropsTemporaryTableAndPreservesBackendSqlState() {
-        SpectrumS3Reader reader = mock(SpectrumS3Reader.class);
+        SpectrumS3Reader reader = inlineMock(SpectrumS3Reader.class);
         when(reader.read(any(SpectrumSession.class),
                 any(SpectrumExternalSchema.class),
                 any(SpectrumExternalTable.class)))
@@ -77,7 +77,7 @@ class SpectrumMaterializerTest {
 
     @Test
     void rowReadFailurePreservesSqlStateAndDropsTemporaryTable() {
-        SpectrumS3Reader reader = mock(SpectrumS3Reader.class);
+        SpectrumS3Reader reader = inlineMock(SpectrumS3Reader.class);
         SpectrumReadException rowFailure = new SpectrumReadException("22000", "bad CSV row");
         when(reader.read(any(SpectrumSession.class),
                 any(SpectrumExternalSchema.class),
@@ -103,7 +103,7 @@ class SpectrumMaterializerTest {
         try (ServerSocket listener = new ServerSocket(0); Socket backend = new Socket("localhost", listener.getLocalPort())) {
             ExecutorService executor = Executors.newSingleThreadExecutor();
             Future<byte[]> captured = executor.submit(() -> serve(listener));
-            SpectrumS3Reader reader = mock(SpectrumS3Reader.class);
+            SpectrumS3Reader reader = inlineMock(SpectrumS3Reader.class);
             when(reader.read(any(), any()))
                     .thenReturn(Stream.of(new SpectrumRow(Arrays.asList("1", null)),
                             new SpectrumRow(List.of("two", "x")),

@@ -6,6 +6,8 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testutil.IamInlinePolicyMock;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -33,6 +35,11 @@ class IamPolicyCfnProvisionerTest {
     private final IamService iam = mock(IamService.class);
     private final IamPolicyCfnProvisioner provisioner = new IamPolicyCfnProvisioner(iam);
     private final ObjectMapper mapper = new ObjectMapper();
+
+    @BeforeEach
+    void configureInlinePolicyChanges() {
+        IamInlinePolicyMock.configure(iam);
+    }
 
     @Test
     void embedsThePolicyIntoEachPrincipalAndRefIsTheName() throws Exception {

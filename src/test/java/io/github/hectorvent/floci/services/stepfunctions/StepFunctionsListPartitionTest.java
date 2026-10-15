@@ -44,7 +44,8 @@ class StepFunctionsListPartitionTest {
         // aslExecutor stays null: neither CreateStateMachine nor CreateActivity reaches it, and
         // AslExecutor cannot be class-loaded in this sandbox because it needs Vert.x.
         return new StepFunctionsService(factory, new RegionResolver("us-east-1", ACCOUNT), null,
-                new ObjectMapper(), mock(SfnMockLoader.class));
+                new ObjectMapper(), mock(SfnMockLoader.class),
+                mock(StepFunctionsEventPublisher.class));
     }
 
     private static final String DEFINITION =

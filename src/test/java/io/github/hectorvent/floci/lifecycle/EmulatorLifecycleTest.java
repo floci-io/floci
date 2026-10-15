@@ -47,6 +47,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
+import org.mockito.MockMakers;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -488,7 +489,8 @@ class EmulatorLifecycleTest {
                 .when(initializationHooksRunner).run(InitializationHook.START);
 
         Thread.interrupted();
-        try (MockedStatic<Quarkus> quarkus = Mockito.mockStatic(Quarkus.class)) {
+        try (MockedStatic<Quarkus> quarkus = Mockito.mockStatic(Quarkus.class,
+                Mockito.withSettings().mockMaker(MockMakers.INLINE))) {
             try {
                 emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566)));
 

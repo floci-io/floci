@@ -1,10 +1,8 @@
 package io.github.hectorvent.floci.config;
 
 import io.github.hectorvent.floci.core.common.Digests;
-import io.github.hectorvent.floci.services.acm.CertificateGenerator.GeneratedCertificate;
-import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
@@ -17,18 +15,12 @@ import io.vertx.core.net.PemTrustOptions;
 import io.vertx.core.net.SocketAddress;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.GeneralSecurityException;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -42,7 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * of the regional wildcard SANs and regression coverage for plain HTTP.
  */
 @QuarkusTest
-@TestProfile(EcrTlsDataPlaneDockerIntegrationTest.Profile.class)
+@TestProfile(SelfSignedTlsProfile.class)
 class EcrTlsDataPlaneDockerIntegrationTest {
 
     @ConfigProperty(name = "quarkus.http.test-ssl-port", defaultValue = "0")
@@ -56,19 +48,7 @@ class EcrTlsDataPlaneDockerIntegrationTest {
 
     @BeforeAll
     static void requireDocker() {
-        Assumptions.assumeTrue(isDockerAvailable(), "Docker daemon must be available for ECR data plane tests");
-    }
-
-    private static boolean isDockerAvailable() {
-        try {
-            Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
-                    .redirectErrorStream(true)
-                    .start();
-            int exit = process.waitFor();
-            return exit == 0;
-        } catch (Exception e) {
-            return false;
-        }
+        SidecarContainersProfile.requireDockerAndImage("floci.services.ecr.registry-image");
     }
 
     @Test
@@ -78,7 +58,8 @@ class EcrTlsDataPlaneDockerIntegrationTest {
                 .setSsl(true)
                 .setForceSni(true)
                 .setTrustOptions(new PemTrustOptions().addCertPath(
-                        FlociCertificateAuthority.loadOrCreate(Profile.TLS_DIR).certificatePath().toString()))
+                        FlociCertificateAuthority.loadOrCreate(Path.of(SelfSignedTlsProfile.TLS_DIR))
+                                .certificatePath().toString()))
                 .setVerifyHost(true));
 
         try {
@@ -183,6 +164,11 @@ class EcrTlsDataPlaneDockerIntegrationTest {
             } finally {
                 httpClient.close();
             }
+
+            // 9. Delete the manifest over TLS, since every class on this profile shares one application
+            SimpleResponse deleteManifest = execute(tlsClient, HttpMethod.DELETE, sslPort, tlsHost,
+                    "/v2/tls-repo/manifests/" + manifestDigest, null, null, null);
+            assertEquals(202, deleteManifest.statusCode());
         } finally {
             tlsClient.close();
         }
@@ -221,41 +207,6 @@ class EcrTlsDataPlaneDockerIntegrationTest {
     private record SimpleResponse(int statusCode, MultiMap headers, Buffer body) {
         String header(String name) {
             return headers.get(name);
-        }
-    }
-
-    public static final class Profile implements QuarkusTestProfile {
-
-        static final Path DATA_DIR = Path.of("target", "floci-ecr-tls-dataplane-test").toAbsolutePath();
-        static final Path TLS_DIR = DATA_DIR.resolve("tls");
-        static final Path CERT_FILE = TLS_DIR.resolve("floci-server.crt");
-        static final Path KEY_FILE = TLS_DIR.resolve("floci-server.key");
-
-        static {
-            try {
-                Files.createDirectories(TLS_DIR);
-                FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
-                List<String> sans = new ArrayList<>(TlsConfigSource.DEFAULT_SAN_HOSTNAMES);
-                GeneratedCertificate leaf = ca.issueServerCertificate("localhost", sans, KeyAlgorithm.RSA_2048, null);
-                Files.writeString(CERT_FILE, leaf.certificatePem());
-                Files.writeString(KEY_FILE, leaf.privateKeyPem());
-                ContainerCaBundle.write(TLS_DIR, ca.certificatePath());
-            } catch (IOException | GeneralSecurityException e) {
-                throw new IllegalStateException("Failed to prepare TLS test files", e);
-            }
-        }
-
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.tls.enabled", "true",
-                    "floci.tls.self-signed", "true",
-                    "floci.tls.aws-https-port", "0",
-                    "floci.storage.persistent-path", DATA_DIR.toString(),
-                    "quarkus.tls.key-store.pem.0.cert", CERT_FILE.toString(),
-                    "quarkus.tls.key-store.pem.0.key", KEY_FILE.toString(),
-                    "quarkus.http.insecure-requests", "enabled"
-            );
         }
     }
 }

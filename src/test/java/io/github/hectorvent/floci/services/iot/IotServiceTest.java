@@ -36,6 +36,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -111,7 +112,7 @@ class IotServiceTest {
                 lambda,
                 firehose,
                 logs,
-                mock(io.github.hectorvent.floci.config.FlociCertificateAuthority.class),
+                inlineMock(io.github.hectorvent.floci.config.FlociCertificateAuthority.class),
                 new io.github.hectorvent.floci.services.iam.IamPolicyEvaluator(mapper));
     }
 

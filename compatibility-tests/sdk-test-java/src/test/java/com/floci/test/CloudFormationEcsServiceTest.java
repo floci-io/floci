@@ -7,6 +7,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudformation.model.DescribeStacksRequest;
 import software.amazon.awssdk.services.cloudformation.model.Parameter;
 import software.amazon.awssdk.services.cloudformation.model.StackStatus;
 import software.amazon.awssdk.services.ec2.Ec2Client;
@@ -91,8 +92,8 @@ class CloudFormationEcsServiceTest {
     void cleanup() {
         if (stackCreated) {
             cfn.deleteStack(r -> r.stackName(stackName));
-            cfn.waiter().waitUntilStackDeleteComplete(r -> r.stackName(stackName),
-                    w -> w.waitTimeout(Duration.ofMinutes(5)));
+            cfn.waiter().waitUntilStackDeleteComplete(DescribeStacksRequest.builder().stackName(stackName).build(),
+                    TestFixtures.waiterOverride(Duration.ofMinutes(5)));
         }
     }
 
@@ -109,8 +110,9 @@ class CloudFormationEcsServiceTest {
         cfn.createStack(r -> r.stackName(stackName).templateBody(TEMPLATE).parameters(
                 parameter("Name", stackName), parameter("Subnet", defaultSubnet())));
         stackCreated = true;
-        StackStatus status = cfn.waiter().waitUntilStackCreateComplete(r -> r.stackName(stackName),
-                        w -> w.waitTimeout(Duration.ofMinutes(10)))
+        StackStatus status = cfn.waiter().waitUntilStackCreateComplete(
+                        DescribeStacksRequest.builder().stackName(stackName).build(),
+                        TestFixtures.waiterOverride(Duration.ofMinutes(10)))
                 .matched().response().orElseThrow().stacks().get(0).stackStatus();
         assertThat(status).isEqualTo(StackStatus.CREATE_COMPLETE);
 

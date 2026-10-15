@@ -60,7 +60,7 @@ public class AppSyncService {
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final String baseUrl;
-    private final String cloudFrontDomainSuffix;
+    private final String configuredCloudFrontDomainSuffix;
     private final LambdaAuthorizerCache lambdaAuthorizerCache;
 
     @Inject
@@ -90,7 +90,7 @@ public class AppSyncService {
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.baseUrl = trimTrailingSlash(config.effectiveBaseUrl());
-        this.cloudFrontDomainSuffix = config.services().cloudfront().domainSuffix();
+        this.configuredCloudFrontDomainSuffix = config.services().cloudfront().domainSuffix().orElse(null);
         this.lambdaAuthorizerCache = lambdaAuthorizerCache;
     }
 
@@ -761,7 +761,8 @@ public class AppSyncService {
      * Gateway domain gets.
      */
     private void applyCloudFrontFront(DomainName dn, String region) {
-        CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(region, cloudFrontDomainSuffix);
+        CloudFrontEdgeDomain edge = CloudFrontEdgeDomain.create(regionResolver.partitionForRegion(region),
+                configuredCloudFrontDomainSuffix);
         dn.setAppsyncDomainName(edge.domainName());
         dn.setHostedZoneId(edge.hostedZoneId());
     }

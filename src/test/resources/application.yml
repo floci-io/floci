@@ -255,13 +255,14 @@ floci:
       list-shards-next-token-ttl-millis: 300000
     firehose:
       enabled: true
-      tick-interval-seconds: 10
+      tick-interval-seconds: 1
       flush-record-count: 0
       staging-bucket: floci-firehose-staging
     kms:
       enabled: true
     cognito:
       enabled: true
+      enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
       allow-plaintext-http: true

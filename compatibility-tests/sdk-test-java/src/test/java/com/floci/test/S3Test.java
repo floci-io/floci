@@ -6,10 +6,14 @@ import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.BucketLocationConstraint;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
+import software.amazon.awssdk.services.s3.model.CompletedPart;
 import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
 import software.amazon.awssdk.services.s3.model.CopyObjectResponse;
 import software.amazon.awssdk.services.s3.model.CreateBucketConfiguration;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.Delete;
 import software.amazon.awssdk.services.s3.model.DeleteBucketRequest;
 import software.amazon.awssdk.services.s3.model.DeleteBucketTaggingRequest;
@@ -40,10 +44,12 @@ import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectTaggingRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.Tagging;
+import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.zip.GZIPOutputStream;
 
 import static org.assertj.core.api.Assertions.*;
@@ -56,9 +62,11 @@ class S3Test {
     private static final String BUCKET = "sdk-test-bucket";
     private static final String LOCATED_BUCKET = "sdk-test-bucket-located";
     // Only the us-east-1 endpoint creates a bucket in another region; any other endpoint takes its own.
-    private static final BucketLocationConstraint LOCATION = TestFixtures.region().id().equals("us-east-1")
-            ? BucketLocationConstraint.EU_CENTRAL_1
-            : BucketLocationConstraint.fromValue(TestFixtures.region().id());
+    // A string, not the SDK enum: the enum has no value for the ISO and EUSC regions, and an unknown
+    // one would be sent as the literal "null".
+    private static final String LOCATION = TestFixtures.region().id().equals("us-east-1")
+            ? "eu-central-1"
+            : TestFixtures.region().id();
     private static final String KEY = "test-file.txt";
     private static final String CONTENT = "Hello from AWS SDK v2!";
 
@@ -106,7 +114,7 @@ class S3Test {
         GetBucketLocationResponse response = s3.getBucketLocation(
                 GetBucketLocationRequest.builder().bucket(LOCATED_BUCKET).build());
 
-        assertThat(response.locationConstraint()).isEqualTo(LOCATION);
+        assertThat(response.locationConstraintAsString()).isEqualTo(LOCATION);
     }
 
     @Test
@@ -548,6 +556,59 @@ class S3Test {
             try {
                 s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
             } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(34)
+    void getObjectPartRoundTripsThroughSdk() throws Exception {
+        String bucket = TestFixtures.uniqueName("part-sdk-bucket");
+        String key = "parts.bin";
+        byte[] firstPart = new byte[5 * 1024 * 1024];
+        Arrays.fill(firstPart, (byte) 'a');
+        String secondPart = "test content 123";
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+        // Closed in reverse order: the object, then its bucket.
+        try (AutoCloseable deleteBucket = () ->
+                    s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+                AutoCloseable deleteObject = () ->
+                    s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build())) {
+            String uploadId = s3.createMultipartUpload(CreateMultipartUploadRequest.builder()
+                    .bucket(bucket).key(key).build()).uploadId();
+            String firstETag = s3.uploadPart(UploadPartRequest.builder()
+                    .bucket(bucket).key(key).uploadId(uploadId).partNumber(1).build(),
+                    RequestBody.fromBytes(firstPart)).eTag();
+            String secondETag = s3.uploadPart(UploadPartRequest.builder()
+                    .bucket(bucket).key(key).uploadId(uploadId).partNumber(2).build(),
+                    RequestBody.fromString(secondPart)).eTag();
+            s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                    .bucket(bucket).key(key).uploadId(uploadId)
+                    .multipartUpload(CompletedMultipartUpload.builder().parts(
+                            CompletedPart.builder().partNumber(1).eTag(firstETag).build(),
+                            CompletedPart.builder().partNumber(2).eTag(secondETag).build()).build())
+                    .build());
+            long size = firstPart.length + secondPart.length();
+
+            ResponseBytes<GetObjectResponse> part = s3.getObjectAsBytes(GetObjectRequest.builder()
+                    .bucket(bucket).key(key).partNumber(2).build());
+
+            assertThat(part.asUtf8String()).isEqualTo(secondPart);
+            assertThat(part.response().partsCount()).isEqualTo(2);
+            assertThat(part.response().contentLength()).isEqualTo(16);
+            assertThat(part.response().contentRange()).isEqualTo("bytes 5242880-5242895/" + size);
+
+            HeadObjectResponse head = s3.headObject(HeadObjectRequest.builder()
+                    .bucket(bucket).key(key).partNumber(1).build());
+
+            assertThat(head.partsCount()).isEqualTo(2);
+            assertThat(head.contentLength()).isEqualTo(firstPart.length);
+
+            assertThatThrownBy(() -> s3.getObjectAsBytes(GetObjectRequest.builder()
+                    .bucket(bucket).key(key).partNumber(3).build()))
+                    .isInstanceOfSatisfying(S3Exception.class, e -> {
+                        assertThat(e.statusCode()).isEqualTo(416);
+                        assertThat(e.awsErrorDetails().errorCode()).isEqualTo("InvalidPartNumber");
+                    });
         }
     }
 

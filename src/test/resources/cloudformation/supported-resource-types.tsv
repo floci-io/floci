@@ -160,12 +160,14 @@ AWS::Route53::HostedZone	Route53CfnProvisioner
 AWS::Route53::RecordSet	Route53CfnProvisioner
 AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
+AWS::SES::EmailIdentity	SesCfnProvisioner
 AWS::SNS::Subscription	SnsCfnProvisioner
 AWS::SNS::Topic	SnsCfnProvisioner
 AWS::SNS::TopicPolicy	SnsCfnProvisioner
 AWS::SQS::Queue	SqsCfnProvisioner
 AWS::SQS::QueuePolicy	SqsCfnProvisioner
 AWS::SSM::Parameter	SsmCfnProvisioner
+AWS::Scheduler::Schedule	SchedulerScheduleCfnProvisioner
 AWS::Scheduler::ScheduleGroup	SchedulerScheduleGroupCfnProvisioner
 AWS::SecretsManager::Secret	SecretsManagerCfnProvisioner
 AWS::SecretsManager::SecretTargetAttachment	SecretTargetAttachmentCfnProvisioner

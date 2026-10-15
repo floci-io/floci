@@ -85,6 +85,7 @@ import java.util.concurrent.Future;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -382,7 +383,7 @@ class EksClusterManagerTest {
         ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
@@ -423,7 +424,7 @@ class EksClusterManagerTest {
         ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
@@ -455,7 +456,7 @@ class EksClusterManagerTest {
         ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
                 Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
@@ -512,7 +513,7 @@ class EksClusterManagerTest {
             ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
             ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
             portAllocator = Mockito.mock(PortAllocator.class);
             dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
@@ -2050,7 +2051,7 @@ class EksClusterManagerTest {
             ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
             builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             regionResolver = Mockito.mock(RegionResolver.class);
             when(regionResolver.getAccountId()).thenReturn("000000000000");
@@ -2879,7 +2880,7 @@ class EksClusterManagerTest {
             containerBuilder = Mockito.mock(ContainerBuilder.class);
             builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             portAllocator = Mockito.mock(PortAllocator.class);
             when(portAllocator.allocate(6500, 6599)).thenReturn(6500);
@@ -3149,7 +3150,7 @@ class EksClusterManagerTest {
             ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
             ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             DockerHostResolver dockerHostResolver = Mockito.mock(DockerHostResolver.class);
             when(dockerHostResolver.resolve()).thenReturn("host.docker.internal");
@@ -3160,7 +3161,7 @@ class EksClusterManagerTest {
             when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
                     "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
 
-            FlociCertificateAuthority certificateAuthority = Mockito.mock(FlociCertificateAuthority.class);
+            FlociCertificateAuthority certificateAuthority = inlineMock(FlociCertificateAuthority.class);
             when(certificateAuthority.caPem()).thenReturn(CA_PEM);
 
             manager = new EksClusterManager(
@@ -3282,7 +3283,7 @@ class EksClusterManagerTest {
             ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
             builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             PortAllocator portAllocator = Mockito.mock(PortAllocator.class);
             when(portAllocator.allocate(6440, 6499)).thenReturn(6443);
@@ -3712,7 +3713,7 @@ class EksClusterManagerTest {
             containerBuilder = Mockito.mock(ContainerBuilder.class);
             builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
             when(regionResolver.getAccountId()).thenReturn("000000000000");
@@ -3837,7 +3838,7 @@ class EksClusterManagerTest {
                     Mockito.mock(PortAllocator.class), Mockito.mock(DockerHostResolver.class),
                     Mockito.mock(EcrRegistryManager.class), config, new RegionResolver("us-east-1", "000000000000"),
                     Mockito.mock(Ec2MetadataServer.class), Mockito.mock(EksOidcService.class),
-                    Mockito.mock(FlociCertificateAuthority.class), Mockito.mock(ContainerLogStreamer.class),
+                    inlineMock(FlociCertificateAuthority.class), Mockito.mock(ContainerLogStreamer.class),
                     new InMemoryStorage<>()));
         }
 

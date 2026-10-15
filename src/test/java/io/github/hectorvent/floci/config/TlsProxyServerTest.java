@@ -133,14 +133,14 @@ class TlsProxyServerTest {
     @Test
     @Timeout(20)
     void bindsBothPorts_andRoutesByFirstByte() throws Exception {
-        int httpBe = FreePorts.anyInterfacePort();
-        int httpsBe = FreePorts.anyInterfacePort();
-        int publicPort = FreePorts.anyInterfacePort();
-        int awsHttpsPort = FreePorts.anyInterfacePort();
-        httpBackend = startMarkerBackend(httpBe, "PLAIN");
-        httpsBackend = startMarkerBackend(httpsBe, "TLS");
+        httpBackend = startMarkerBackend("PLAIN");
+        httpsBackend = startMarkerBackend("TLS");
+        int[] ports = FreePorts.anyInterfacePorts(2);
+        int publicPort = ports[0];
+        int awsHttpsPort = ports[1];
 
-        proxy = new TlsProxyServer(vertx, configWith(true, publicPort, awsHttpsPort), "127.0.0.1", httpBe, httpsBe);
+        proxy = new TlsProxyServer(vertx, configWith(true, publicPort, awsHttpsPort), "127.0.0.1",
+                httpBackend.actualPort(), httpsBackend.actualPort());
 
         // Public port: TLS ClientHello → HTTPS backend; anything else → HTTP backend.
         assertEquals("TLS", roundTrip(publicPort, TLS_HANDSHAKE));
@@ -160,11 +160,11 @@ class TlsProxyServerTest {
 
     // ---- helpers ----
 
-    private NetServer startMarkerBackend(int port, String marker) throws Exception {
+    private NetServer startMarkerBackend(String marker) throws Exception {
         NetServer server = vertx.createNetServer();
         server.connectHandler(sock -> sock.write(marker));
         CompletableFuture<Void> started = new CompletableFuture<>();
-        server.listen(port, "127.0.0.1").onComplete(ar -> {
+        server.listen(0, "127.0.0.1").onComplete(ar -> {
             if (ar.succeeded()) {
                 started.complete(null);
             } else {

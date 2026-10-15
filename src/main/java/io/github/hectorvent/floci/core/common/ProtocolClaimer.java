@@ -15,10 +15,11 @@ import java.util.regex.Pattern;
  * first protocol whose "identification for claiming" signals match claims the
  * request.
  * <p>
- * Claiming uses non-payload signals only (method, path, headers) so it is safe
+ * Claiming uses non-payload signals only (method, path, headers, query parameters) so it is safe
  * to run in a pre-matching filter without touching the entity stream. As a
- * consequence the awsQuery claim is narrowed to POST {@code /} with the form
- * content type; the spec's body-level {@code Action}/{@code Version} checks
+ * consequence the awsQuery claim covers POST {@code /} with the form
+ * content type and the CloudWatch GET requests the dispatcher accepts.
+ * The spec's body-level {@code Action}/{@code Version} checks
  * stay downstream in {@code AwsQueryController}, which already rejects a
  * missing {@code Action} with the AWS {@code MissingAction} error. Nothing
  * below awsQuery in the precision order claims such requests, so the narrowed
@@ -90,6 +91,14 @@ public class ProtocolClaimer {
         // clients post CBOR to the rpcv2 path without the Smithy-Protocol header.
         if (post && rpcV2PathMatches && isCbor(mediaType)) {
             return Optional.of(rpcV2Claim(WireProtocol.RPCV2_CBOR, rpcV2Path));
+        }
+
+        if ("GET".equalsIgnoreCase(signals.method()) && isRootPath(path)
+                && AwsQueryController.isCloudWatchQueryGet(signals.authorization(),
+                signals.xAmzTarget(), signals.accept(), signals.queryParameters())) {
+            ServiceDescriptor service = catalog.byCredentialScope("monitoring").orElse(null);
+            return Optional.of(new ProtocolClaim(WireProtocol.AWS_QUERY, service,
+                    AwsQueryServiceResolver.action(signals.queryParameters()), null));
         }
 
         if (post && isRootPath(path)) {

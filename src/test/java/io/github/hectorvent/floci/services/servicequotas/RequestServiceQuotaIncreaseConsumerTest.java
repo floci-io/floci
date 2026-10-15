@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.servicequotas;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -42,6 +43,11 @@ class RequestServiceQuotaIncreaseConsumerTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
+    @BeforeEach
+    void resetState() {
+        given().post("/_floci/state/reset").then().statusCode(200);
+    }
+
     private static io.restassured.response.Response request(String body) {
         return given()
                 .contentType(CONTENT_TYPE)
@@ -58,7 +64,7 @@ class RequestServiceQuotaIncreaseConsumerTest {
                 + "\",\"DesiredValue\":9000}")
         .then()
             .statusCode(200)
-            .body("RequestedQuota.Id", matchesRegex("[0-9A-F]{8}"))
+            .body("RequestedQuota.Id", notNullValue())
             .body("RequestedQuota.ServiceCode", equalTo("codebuild"))
             .body("RequestedQuota.ServiceName", equalTo("AWS CodeBuild"))
             .body("RequestedQuota.QuotaCode", equalTo(CONCURRENT_BUILDS_QUOTA))
@@ -87,15 +93,14 @@ class RequestServiceQuotaIncreaseConsumerTest {
             .body("RequestedQuota.ServiceCode", equalTo("widgetfactory"));
     }
 
-    /** The id must be stable so a caller can correlate a repeated request. */
+    /** AWS allows one open increase request per quota; a repeat is refused. */
     @Test
-    void requestIncrease_sameQuotaTwice_returnsSameId() {
+    void requestIncrease_sameQuotaTwice_returnsResourceAlreadyExists() {
         String body = "{\"ServiceCode\":\"lambda\",\"QuotaCode\":\"L-B99A9384\",\"DesiredValue\":2000}";
-        String first = request(body).then().statusCode(200)
-                .extract().path("RequestedQuota.Id");
-        String second = request(body).then().statusCode(200)
-                .extract().path("RequestedQuota.Id");
-        assertEquals(first, second);
+        request(body).then().statusCode(200);
+        request(body).then()
+                .statusCode(400)
+                .body("__type", equalTo("ResourceAlreadyExistsException"));
     }
 
     @Test

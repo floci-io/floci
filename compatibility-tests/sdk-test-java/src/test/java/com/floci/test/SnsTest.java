@@ -1,34 +1,60 @@
 package com.floci.test;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.sns.SnsClient;
+import software.amazon.awssdk.services.sns.model.AddPermissionRequest;
+import software.amazon.awssdk.services.sns.model.CheckIfPhoneNumberIsOptedOutRequest;
+import software.amazon.awssdk.services.sns.model.CreateSmsSandboxPhoneNumberRequest;
 import software.amazon.awssdk.services.sns.model.CreateTopicRequest;
 import software.amazon.awssdk.services.sns.model.CreateTopicResponse;
+import software.amazon.awssdk.services.sns.model.DeleteSmsSandboxPhoneNumberRequest;
 import software.amazon.awssdk.services.sns.model.DeleteTopicRequest;
 import software.amazon.awssdk.services.sns.model.GetSmsAttributesRequest;
 import software.amazon.awssdk.services.sns.model.GetSmsAttributesResponse;
+import software.amazon.awssdk.services.sns.model.GetSmsSandboxAccountStatusRequest;
 import software.amazon.awssdk.services.sns.model.GetTopicAttributesRequest;
 import software.amazon.awssdk.services.sns.model.GetTopicAttributesResponse;
+import software.amazon.awssdk.services.sns.model.InvalidParameterException;
+import software.amazon.awssdk.services.sns.model.LanguageCodeString;
+import software.amazon.awssdk.services.sns.model.ListPhoneNumbersOptedOutRequest;
+import software.amazon.awssdk.services.sns.model.ListSmsSandboxPhoneNumbersRequest;
 import software.amazon.awssdk.services.sns.model.ListSubscriptionsByTopicRequest;
 import software.amazon.awssdk.services.sns.model.ListSubscriptionsByTopicResponse;
 import software.amazon.awssdk.services.sns.model.ListTopicsResponse;
 import software.amazon.awssdk.services.sns.model.MessageAttributeValue;
+import software.amazon.awssdk.services.sns.model.OptInPhoneNumberRequest;
 import software.amazon.awssdk.services.sns.model.PublishBatchRequest;
 import software.amazon.awssdk.services.sns.model.PublishBatchRequestEntry;
 import software.amazon.awssdk.services.sns.model.PublishBatchResponse;
 import software.amazon.awssdk.services.sns.model.PublishRequest;
 import software.amazon.awssdk.services.sns.model.PublishResponse;
+import software.amazon.awssdk.services.sns.model.RemovePermissionRequest;
+import software.amazon.awssdk.services.sns.model.SMSSandboxPhoneNumber;
+import software.amazon.awssdk.services.sns.model.SMSSandboxPhoneNumberVerificationStatus;
 import software.amazon.awssdk.services.sns.model.SetSmsAttributesRequest;
 import software.amazon.awssdk.services.sns.model.SetSubscriptionAttributesRequest;
 import software.amazon.awssdk.services.sns.model.SubscribeRequest;
 import software.amazon.awssdk.services.sns.model.SubscribeResponse;
 import software.amazon.awssdk.services.sns.model.UnsubscribeRequest;
+import software.amazon.awssdk.services.sns.model.VerificationException;
+import software.amazon.awssdk.services.sns.model.VerifySmsSandboxPhoneNumberRequest;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.*;
 
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("SNS Simple Notification Service")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -600,5 +626,114 @@ class SnsTest {
                 .build());
         assertThat(sns.getSMSAttributes().attributes())
                 .doesNotContainKeys("DefaultSMSType", "MonthlySpendLimit");
+    }
+
+    @Test
+    @Order(18)
+    void topicPermissionsAreAddedToAndRemovedFromThePolicy() throws Exception {
+        String permissionTopic = sns.createTopic(CreateTopicRequest.builder()
+                .name(TestFixtures.uniqueName("sns-permission")).build()).topicArn();
+        try {
+            String account = permissionTopic.split(":")[4];
+            sns.addPermission(AddPermissionRequest.builder()
+                    .topicArn(permissionTopic).label("compat-grant")
+                    .awsAccountIds(account).actionNames("Publish").build());
+
+            JsonNode granted = statementWithSid(permissionTopic, "compat-grant");
+            assertThat(granted).isNotNull();
+            assertThat(granted.path("Principal").path("AWS").asText())
+                    .isEqualTo(TestFixtures.globalArn("iam", account, "root"));
+            assertThat(granted.path("Action").asText()).isEqualTo("SNS:Publish");
+            assertThat(granted.path("Resource").asText()).isEqualTo(permissionTopic);
+
+            assertThatThrownBy(() -> sns.addPermission(AddPermissionRequest.builder()
+                    .topicArn(permissionTopic).label("compat-grant")
+                    .awsAccountIds(account).actionNames("Subscribe").build()))
+                    .isInstanceOf(InvalidParameterException.class);
+
+            sns.removePermission(RemovePermissionRequest.builder()
+                    .topicArn(permissionTopic).label("compat-grant").build());
+            assertThat(statementWithSid(permissionTopic, "compat-grant")).isNull();
+        } finally {
+            sns.deleteTopic(DeleteTopicRequest.builder().topicArn(permissionTopic).build());
+        }
+    }
+
+    @Test
+    @Order(19)
+    void smsSandboxNumbersAreVerifiedWithTheTextedCode() throws Exception {
+        assumeFalse(TestFixtures.isRealAws(), "Reads the code from Floci's SMS inspection endpoint");
+        assertThat(sns.getSMSSandboxAccountStatus(GetSmsSandboxAccountStatusRequest.builder().build())
+                .isInSandbox()).isFalse();
+
+        String phoneNumber = String.format("+1555%07d", ThreadLocalRandom.current().nextInt(10_000_000));
+        sns.createSMSSandboxPhoneNumber(CreateSmsSandboxPhoneNumberRequest.builder()
+                .phoneNumber(phoneNumber).languageCode(LanguageCodeString.EN_US).build());
+        try {
+            assertThat(sandboxStatus(phoneNumber)).isEqualTo(SMSSandboxPhoneNumberVerificationStatus.PENDING);
+
+            String code = textedCode(phoneNumber);
+            String wrong = String.format("%06d", (Integer.parseInt(code) + 1) % 1_000_000);
+            assertThatThrownBy(() -> sns.verifySMSSandboxPhoneNumber(VerifySmsSandboxPhoneNumberRequest.builder()
+                    .phoneNumber(phoneNumber).oneTimePassword(wrong).build()))
+                    .isInstanceOfSatisfying(VerificationException.class,
+                            e -> assertThat(e.status()).isEqualTo("Pending"));
+
+            sns.verifySMSSandboxPhoneNumber(VerifySmsSandboxPhoneNumberRequest.builder()
+                    .phoneNumber(phoneNumber).oneTimePassword(code).build());
+
+            assertThat(sandboxStatus(phoneNumber)).isEqualTo(SMSSandboxPhoneNumberVerificationStatus.VERIFIED);
+        } finally {
+            sns.deleteSMSSandboxPhoneNumber(DeleteSmsSandboxPhoneNumberRequest.builder()
+                    .phoneNumber(phoneNumber).build());
+        }
+    }
+
+    @Test
+    @Order(20)
+    void noNumberIsOptedOutAndOptingInChecksTheFormat() {
+        assumeFalse(TestFixtures.isRealAws(), "A real account's opt-out list is whatever its recipients sent");
+        assertThat(sns.checkIfPhoneNumberIsOptedOut(CheckIfPhoneNumberIsOptedOutRequest.builder()
+                .phoneNumber("+4411111111").build()).isOptedOut()).isFalse();
+        assertThat(sns.listPhoneNumbersOptedOut(ListPhoneNumbersOptedOutRequest.builder().build())
+                .phoneNumbers()).isEmpty();
+
+        sns.optInPhoneNumber(OptInPhoneNumberRequest.builder().phoneNumber("+4411111111").build());
+        assertThatThrownBy(() -> sns.optInPhoneNumber(OptInPhoneNumberRequest.builder()
+                .phoneNumber("invalid").build()))
+                .isInstanceOf(InvalidParameterException.class);
+    }
+
+    private static JsonNode statementWithSid(String topic, String sid) throws Exception {
+        String policy = sns.getTopicAttributes(GetTopicAttributesRequest.builder().topicArn(topic).build())
+                .attributes().get("Policy");
+        for (JsonNode statement : new ObjectMapper().readTree(policy).path("Statement")) {
+            if (sid.equals(statement.path("Sid").asText())) {
+                return statement;
+            }
+        }
+        return null;
+    }
+
+    private static SMSSandboxPhoneNumberVerificationStatus sandboxStatus(String phoneNumber) {
+        return sns.listSMSSandboxPhoneNumbersPaginator(ListSmsSandboxPhoneNumbersRequest.builder().build())
+                .phoneNumbers().stream()
+                .filter(number -> phoneNumber.equals(number.phoneNumber()))
+                .map(SMSSandboxPhoneNumber::status)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(phoneNumber + " is not in the SMS sandbox list"));
+    }
+
+    private static String textedCode(String phoneNumber) throws Exception {
+        URI uri = URI.create(TestFixtures.endpoint() + "/_aws/sns?phone="
+                + URLEncoder.encode(phoneNumber, StandardCharsets.UTF_8));
+        HttpResponse<String> response = TestFixtures.emulatorHttpClient().send(
+                HttpRequest.newBuilder(uri).GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).isEqualTo(200);
+        JsonNode messages = new ObjectMapper().readTree(response.body()).path("messages");
+        assertThat(messages).hasSize(1);
+        Matcher code = Pattern.compile("[0-9]{6}").matcher(messages.get(0).path("Message").asText());
+        assertThat(code.find()).isTrue();
+        return code.group();
     }
 }

@@ -1,17 +1,18 @@
 name: IAM Data Drift
 
-# Checks the two vendored files that come from AWS's live service reference rather than from a
-# pinned dependency: the IAM service namespace list, and the map of which resource each IAM action
-# is authorized against. That needs the live service reference index, so unlike every other check here it can
+# Checks the three vendored files that come from AWS's live service reference rather than from a
+# pinned dependency: the IAM service namespace list, the map of which resource each IAM action is
+# authorized against, and the map of operations AWS authorizes as an action of another name. That
+# needs the live service reference index, so unlike every other check here it can
 # fail without anything in the repository having changed: an AWS outage, or a namespace AWS has
 # retired. It therefore runs on its own, never as part of a job that ordinary changes trigger.
 #
 # Two triggers, for two different failures:
 #
-#   - On a pull request that touches either vendored file or its generator, which is where a
+#   - On a pull request that touches a vendored file or its generator, which is where a
 #     hand-typed or mistyped entry would enter the repository. A pull request that does not touch
 #     them cannot introduce one, so it does not run and cannot be failed by an outage.
-#   - Weekly, because both files also go stale without anyone touching them: AWS ships services
+#   - Weekly, because the files also go stale without anyone touching them: AWS ships services
 #     and actions, and occasionally retires them. Tying the only upstream check to pull request
 #     activity would mean a quiet month is a month with no drift detection at all.
 #
@@ -32,6 +33,9 @@ on:
       - 'tools/aws/test_regen_service_namespaces.py'
       - 'tools/aws/regen_iam_action_resources.py'
       - 'tools/aws/test_regen_iam_action_resources.py'
+      - 'src/main/resources/aws/iam-authorized-actions.json'
+      - 'tools/aws/regen_iam_authorized_actions.py'
+      - 'tools/aws/test_regen_iam_authorized_actions.py'
       - '.github/workflows/iam-data-drift.yml'
   schedule:
     # Mondays at 06:00 UTC, before the working week rather than during it.

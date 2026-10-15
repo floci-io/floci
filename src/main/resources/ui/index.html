@@ -3,287 +3,859 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Floci — local AWS emulator</title>
+  <title>floci-aws: local AWS emulator</title>
+  <script>
+    // One file, two views: the dashboard, and the "starting Floci UI" wait page served at /_floci/ui.
+    document.documentElement.dataset.view =
+            /\/_(floci|localstack)\/ui\/?$/.test(location.pathname) ? "starting" : "dashboard";
+    // The theme is set before the stylesheet paints, so a light page never flashes dark: the stored
+    // choice, or the OS preference when there is none.
+    (function () {
+      var stored = null;
+      try { stored = localStorage.getItem("floci.theme"); } catch (e) { /* storage blocked: follow the OS */ }
+      var light = window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches;
+      document.documentElement.dataset.theme = stored === "light" || stored === "dark" ? stored : (light ? "light" : "dark");
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Sora:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Sora:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
       color-scheme: dark;
       --bg: #070B14;
       --bg2: #161E2E;
       --bg3: #0F1520;
-      --border: #2A3142;
+      --border: #222A3A;
       --border-bright: #3D4559;
       --text: #F8FAFC;
+      --text-body: #C4CDE0;
       --text-muted: #94A3B8;
-      --text-dim: #64748B;
-      --accent: #7A7FD6;
+      --text-dim: #8090A6;
+      --accent: #9AA0E6;
       --accent-deep: #5559A7;
       --accent-mid: #6368C2;
-      --accent-dim: rgba(85,89,167,.12);
+      --accent-dim: rgba(122,127,214,.14);
       --green: #22c55e;
+      --amber: #e0b341;
+      --red: #f87171;
+      --green-soft: rgba(34,197,94,.45);
+      --logo-dot: #7A7FD6;
+      --on-accent: #fff;
+      --code-text: #CFD3F5;
+      --error-text: #F5C2C2;
+      --radius: 8px;
+      --pad: 28px;
       --sans: "Sora", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       --mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #F7F8FB;
+      --bg2: #EDEFF5;
+      --bg3: #FFFFFF;
+      --border: #E1E5EE;
+      --border-bright: #C5CCDA;
+      --text: #0F172A;
+      --text-body: #334155;
+      --text-muted: #556070;
+      --text-dim: #5E6978;
+      --accent: #4C52B5;
+      --accent-deep: #4C52B5;
+      --accent-mid: #5A60C6;
+      --accent-dim: rgba(85,89,167,.12);
+      --green: #15803D;
+      --amber: #A16207;
+      --red: #DC2626;
+      --green-soft: rgba(21,128,61,.45);
+      --logo-dot: #5A60C6;
+      --code-text: #2E3470;
+      --error-text: #B42318;
+    }
     * { box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
-      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
-      font-family: var(--sans);
-      background:
-        radial-gradient(900px 480px at 50% -12%, rgba(122,127,214,0.18) 0%, rgba(85,89,167,0.06) 38%, transparent 70%),
-        var(--bg);
-      color: var(--text);
+      margin: 0; font-family: var(--sans); font-size: 14px; line-height: 1.55;
+      background: var(--bg); color: var(--text-body);
       -webkit-font-smoothing: antialiased;
+      display: flex; flex-direction: column;
     }
-    .card {
-      width: min(640px, 92vw); padding: 44px 46px; border-radius: 20px;
-      background: linear-gradient(180deg, var(--bg2), var(--bg3));
-      border: 1px solid var(--border);
-      box-shadow: 0 30px 90px rgba(0,0,0,0.55);
+    h1, h2, h3, p, dl, dd, ol, ul { margin: 0; padding: 0; }
+    ul, ol { list-style: none; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+    [hidden] { display: none !important; }
+    .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+    /* ── Top bar ─────────────────────────────────────────── */
+    .top {
+      flex: none; display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+      padding: 14px var(--pad); border-bottom: 1px solid var(--border); background: var(--bg3);
     }
-    .logo-wrap { display: flex; align-items: center; gap: 14px; margin: 0 0 10px; }
-    .floci-logo { height: 40px; width: auto; display: block; }
-    .floci-text { fill: var(--text); }
-    .floci-cloud { fill: var(--text); }
-    .floci-dot { fill: var(--accent); }
-    .status {
-      display: inline-flex; align-items: center; gap: 8px; margin-left: auto;
-      font-family: var(--mono); font-size: 12px; color: var(--text-muted);
-      padding: 5px 11px; border-radius: 999px;
-      background: var(--bg3); border: 1px solid var(--border);
+    .floci-logo { height: 30px; width: auto; display: block; }
+    .floci-text, .floci-cloud { fill: var(--text); }
+    .floci-dot { fill: var(--logo-dot); }
+    .status { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: var(--text); }
+    .status .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-dim); }
+    .status.ready .dot { background: var(--green); }
+    .status.starting .dot { background: var(--amber); }
+    .status.offline .dot { background: transparent; border: 1.5px solid var(--text-dim); }
+    .status.failed .dot { background: var(--red); }
+    .home { display: block; }
+    .back { font-size: 13px; }
+    [data-view="dashboard"] :is(.launch, .progress, .back),
+    [data-view="starting"] :is(.layout, .build, #ui-link) { display: none; }
+    .build {
+      padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border-bright);
+      font-family: var(--mono); font-size: 12px; color: var(--text);
     }
-    .status .dot {
-      width: 9px; height: 9px; border-radius: 50%; flex: none;
-      background: var(--text-dim); box-shadow: 0 0 0 0 transparent;
-      transition: background .2s ease, box-shadow .2s ease;
+    .build:empty { display: none; }
+    .emulator { font-family: var(--mono); font-size: 12.5px; color: var(--text-muted); }
+    .top-end { margin-left: auto; display: flex; align-items: center; gap: 20px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px;
+      border-radius: var(--radius); border: 1px solid transparent;
+      background: var(--accent-deep); color: var(--on-accent); font-weight: 600; font-size: 13.5px;
+      transition: background .15s ease, transform .16s ease;
     }
-    .status.ready .dot { background: var(--green); box-shadow: 0 0 0 4px rgba(34,197,94,0.18); }
-    .status.starting .dot { background: #e0b341; box-shadow: 0 0 0 4px rgba(224,179,65,0.18); }
-    .status.offline .dot { background: var(--text-dim); }
-    .tag {
-      margin: 0 0 26px; color: var(--text-muted); font-size: 15px; font-weight: 400;
+    .btn:hover { background: var(--accent-mid); text-decoration: none; }
+    .btn:active { transform: scale(.97); }
+    .btn-quiet {
+      background: transparent; border-color: var(--border-bright); color: var(--text); font-weight: 500;
     }
-    p { line-height: 1.65; color: #c4cde0; font-size: 15px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; margin: 24px 0 30px; }
-    .grid div { font-size: 13px; color: var(--text-muted); }
-    .grid b { color: var(--text); font-weight: 600; letter-spacing: -0.01em; }
-    .svc { margin: 0 0 28px; }
-    .svc-head {
-      display: flex; align-items: baseline; gap: 12px; margin: 0 0 12px;
+    .btn-quiet:hover { background: var(--bg2); }
+    .theme-toggle {
+      display: inline-grid; place-items: center; width: 34px; height: 34px; padding: 0;
+      border-radius: var(--radius); border: 1px solid var(--border-bright); background: transparent;
+      color: var(--text-muted); transition: color .15s ease, background .15s ease;
     }
-    .svc-head h2 {
-      margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.04em;
-      text-transform: uppercase; color: var(--text-muted);
+    .theme-toggle:hover { color: var(--text); background: var(--bg2); }
+    .theme-toggle svg { width: 16px; height: 16px; display: block; }
+    [data-theme="light"] .theme-toggle .icon-sun,
+    [data-theme="dark"] .theme-toggle .icon-moon { display: none; }
+
+    /* ── Layout ──────────────────────────────────────────── */
+    .layout { flex: 1; display: grid; grid-template-columns: 1fr; }
+    .col { padding: 24px var(--pad) 32px; min-width: 0; }
+    .col + .col { border-top: 1px solid var(--border); }
+    .col h2 { font-size: 16px; font-weight: 600; color: var(--text); letter-spacing: -0.01em; }
+    .block + .block { margin-top: 32px; }
+    .lede { margin-top: 6px; color: var(--text-muted); font-size: 13px; }
+
+    @media (min-width: 900px) {
+      body { height: 100dvh; overflow: hidden; }
+      .layout {
+        min-height: 0;
+        grid-template-columns: 350px minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr) auto;
+        grid-template-areas: "connect services" "connect news";
+      }
+      .col { overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border-bright) transparent; }
+      .col + .col { border-top: 0; }
+      .connect { grid-area: connect; border-right: 1px solid var(--border); }
+      .services { grid-area: services; }
+      .news { grid-area: news; max-height: 38dvh; border-top: 1px solid var(--border) !important; }
     }
-    .svc-count { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
-    .svc-count b { color: var(--green); font-weight: 700; }
-    .svc-search {
-      width: 100%; margin: 0 0 12px; padding: 9px 13px; border-radius: 10px;
-      background: var(--bg); border: 1px solid var(--border); color: var(--text);
-      font-family: var(--mono); font-size: 12.5px; outline: none;
+    @media (min-width: 1360px) {
+      .layout {
+        grid-template-columns: minmax(320px, 380px) minmax(0, 1fr) minmax(320px, 400px);
+        grid-template-rows: minmax(0, 1fr);
+        grid-template-areas: "connect services news";
+      }
+      .news { max-height: none; border-top: 0 !important; border-left: 1px solid var(--border); }
+    }
+
+    /* ── Connect ─────────────────────────────────────────── */
+    .facts { margin-top: 16px; }
+    .facts > div {
+      display: grid; grid-template-columns: 68px minmax(0, 1fr) auto; align-items: center; gap: 8px;
+      padding: 9px 0; border-bottom: 1px solid var(--border);
+    }
+    .facts dt { font-size: 12.5px; color: var(--text-muted); }
+    .facts dd { font-family: var(--mono); font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+    .facts dd.plain { font-family: var(--sans); font-size: 13px; }
+    .copy {
+      min-height: 24px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border-bright);
+      background: transparent; font-size: 11.5px; color: var(--text-muted);
+      transition: color .15s ease, border-color .15s ease;
+    }
+    .copy:hover { color: var(--text); border-color: var(--text-dim); }
+    .copy.done { color: var(--green); border-color: var(--green-soft); }
+
+    .tabs { display: flex; gap: 18px; margin-top: 22px; border-bottom: 1px solid var(--border); }
+    .tab {
+      padding: 0 0 8px; margin-bottom: -1px; background: none; border: 0;
+      border-bottom: 2px solid transparent; font-size: 13px; color: var(--text-muted);
+    }
+    .tab:hover { color: var(--text); }
+    .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+    .tabs .copy { margin: 0 0 6px auto; align-self: center; }
+    .snippet { margin-top: 12px; }
+    .snippet pre {
+      margin: 0; padding: 14px 14px 16px; border-radius: var(--radius); background: var(--bg3);
+      border: 1px solid var(--border); overflow-x: auto;
+      font-family: var(--mono); font-size: 12px; line-height: 1.7; color: var(--code-text);
+    }
+
+    .stages { margin-top: 14px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+    .stage { padding-top: 9px; border-top: 2px solid var(--border-bright); }
+    .stage b { display: block; font-size: 13px; font-weight: 500; color: var(--text-muted); }
+    .stage span { display: block; font-size: 12px; color: var(--text-dim); }
+    .stage.done { border-top-color: var(--green); }
+    .stage.done b { color: var(--text); }
+    .stage.now { border-top-color: var(--amber); }
+    .stage.now b { color: var(--text); }
+    .scripts { margin-top: 12px; font-size: 12.5px; color: var(--text-muted); }
+    .scripts li { font-family: var(--mono); font-size: 12px; padding: 3px 0; display: flex; gap: 10px; justify-content: space-between; }
+
+    /* ── Services ────────────────────────────────────────── */
+    .svc-head { display: flex; align-items: center; gap: 12px 20px; flex-wrap: wrap; }
+    .svc-count { font-size: 13px; color: var(--text-muted); }
+    .svc-count b { color: var(--text); font-weight: 600; }
+    .svc-tools { margin-left: auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .search { position: relative; }
+    .search input {
+      width: 260px; max-width: 100%; padding: 8px 34px 8px 12px; border-radius: var(--radius);
+      background: var(--bg3); border: 1px solid var(--border-bright); color: var(--text);
+      font-family: var(--sans); font-size: 13px; outline: none;
       transition: border-color .15s ease, box-shadow .15s ease;
     }
-    .svc-search::placeholder { color: var(--text-dim); }
-    .svc-search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
-    .svc-list {
-      display: grid; grid-template-columns: repeat(auto-fill, minmax(135px, 1fr)); gap: 7px;
-      max-height: 188px; overflow-y: auto; padding: 4px;
-      border: 1px solid var(--border); border-radius: 12px; background: var(--bg3);
+    .search input::placeholder { color: var(--text-dim); }
+    .search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+    .search kbd {
+      position: absolute; right: 9px; top: 50%; transform: translateY(-50%);
+      font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+      border: 1px solid var(--border-bright); border-radius: 4px; padding: 0 5px; pointer-events: none;
     }
-    .svc-list::-webkit-scrollbar { width: 9px; }
-    .svc-list::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 9px; border: 2px solid var(--bg3); }
-    .badge {
-      display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 9px;
-      font-family: var(--mono); font-size: 12px; color: var(--text-muted);
-      background: var(--bg2); border: 1px solid transparent;
+    .search input:focus + kbd { display: none; }
+    .seg { display: inline-flex; border: 1px solid var(--border-bright); border-radius: var(--radius); overflow: hidden; }
+    .seg button { padding: 7px 12px; background: transparent; border: 0; font-size: 12.5px; color: var(--text-muted); }
+    .seg button + button { border-left: 1px solid var(--border-bright); }
+    .seg button[aria-pressed="true"] { background: var(--bg2); color: var(--text); }
+
+    .groups { margin-top: 22px; columns: 210px; column-gap: 32px; }
+    .group { break-inside: avoid; padding-bottom: 22px; }
+    .group h3 {
+      display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+      font-size: 13px; font-weight: 600; color: var(--text);
+      padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--border);
     }
-    .badge .b-dot {
-      width: 8px; height: 8px; border-radius: 50%; flex: none;
-      border: 1.5px solid var(--text-dim); background: transparent;
+    .group h3 span { font-family: var(--mono); font-size: 11.5px; font-weight: 400; color: var(--text-dim); }
+    .group li {
+      display: flex; align-items: center; gap: 9px; padding: 2.5px 0;
+      font-family: var(--mono); font-size: 12px; color: var(--text-body);
     }
-    .badge.running { color: var(--text); border-color: rgba(122,127,214,0.28); background: var(--accent-dim); }
-    .badge.running .b-dot { background: var(--accent); border-color: var(--accent); }
-    .badge .b-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .svc-empty { padding: 16px; font-family: var(--mono); font-size: 12px; color: var(--text-dim); text-align: center; }
-    code {
-      font-family: var(--mono);
-      background: var(--accent-dim); color: #cfd3f5;
-      padding: 2px 7px; border-radius: 6px; font-size: 12.5px;
-      border: 1px solid rgba(122,127,214,0.18);
+    .group li i { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--green); }
+    .group li.idle { color: var(--text-dim); }
+    .group li.idle i { background: transparent; border: 1.5px solid var(--text-dim); }
+    .group li mark { background: var(--accent-dim); color: var(--text); border-radius: 3px; }
+    .empty { margin-top: 28px; color: var(--text-muted); font-size: 13.5px; max-width: 52ch; }
+    .empty b { color: var(--text); font-weight: 600; }
+
+    /* ── News ────────────────────────────────────────────── */
+    .news-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .linkish { background: none; border: 0; padding: 4px 0; font-size: 12.5px; color: var(--text-muted); }
+    .linkish:hover { color: var(--text); text-decoration: underline; }
+    .gate { margin-top: 10px; max-width: 46ch; }
+    .gate p { font-size: 13px; color: var(--text-muted); }
+    .gate p + p { margin-top: 10px; }
+    .gate code { font-family: var(--mono); font-size: 12px; color: var(--text); }
+    .gate .btn { margin-top: 16px; }
+    .release-note { margin-top: 8px; font-size: 13px; color: var(--text-muted); }
+    .release-note b { color: var(--text); font-weight: 600; }
+    .feed { margin-top: 10px; }
+    .feed li { padding: 14px 0; border-bottom: 1px solid var(--border); }
+    .feed li:last-child { border-bottom: 0; }
+    .feed .meta { font-size: 12px; color: var(--text-dim); }
+    .feed a { display: inline-block; margin-top: 2px; font-size: 14px; font-weight: 600; color: var(--text); }
+    .feed a:hover { color: var(--accent); text-decoration: none; }
+    .feed p { margin-top: 3px; font-size: 13px; color: var(--text-muted); max-width: 62ch; }
+    @media (min-width: 900px) and (max-width: 1359px) {
+      .feed { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); column-gap: 32px; }
+      .feed li:last-child { border-bottom: 1px solid var(--border); }
     }
-    .btn {
-      display: inline-flex; align-items: center; gap: 9px; text-decoration: none;
-      background: linear-gradient(180deg, var(--accent), var(--accent-deep)); color: #fff;
-      font-family: var(--sans); font-weight: 600; font-size: 15px;
-      padding: 13px 22px; border-radius: 12px; border: 1px solid rgba(122,127,214,0.35);
-      transition: transform .08s ease, box-shadow .15s ease;
-      box-shadow: 0 8px 26px rgba(85,89,167,0.45);
+
+    /* ── Starting Floci UI (the /_floci/ui wait view) ────── */
+    .progress { flex: none; height: 2px; background: var(--border); overflow: hidden; }
+    .progress i { display: block; width: 30%; height: 100%; background: var(--accent); animation: slide 1.6s ease-in-out infinite; }
+    .progress.stopped i { animation: none; width: 0; }
+    .progress.ready i { animation: none; width: 100%; background: var(--green); }
+    @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(334%); } }
+    .launch { flex: 1; min-height: 0; overflow-y: auto; display: grid; place-items: center; padding: 40px var(--pad) 12vh; }
+    .wait { width: min(560px, 100%); }
+    .launch h1 { font-size: 26px; font-weight: 600; line-height: 1.25; letter-spacing: -0.02em; color: var(--text); }
+    .launch .lede { margin-top: 10px; font-size: 15px; max-width: 52ch; }
+    .launch .facts { margin-top: 28px; border-top: 1px solid var(--border); }
+    .launch .facts > div { grid-template-columns: 96px minmax(0, 1fr); }
+    .error {
+      margin: 20px 0 0; padding: 14px; border-radius: var(--radius); background: var(--bg3);
+      border: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere;
+      font-family: var(--mono); font-size: 12px; line-height: 1.7; color: var(--error-text);
     }
-    .btn:hover { transform: translateY(-1px); box-shadow: 0 12px 32px rgba(85,89,167,0.6); }
-    .foot { margin-top: 24px; font-size: 12px; color: var(--text-dim); font-family: var(--mono); }
-    .foot a { color: var(--accent); text-decoration: none; }
-    .foot a:hover { color: #9aa0e6; }
+    .actions { margin-top: 24px; display: flex; gap: 12px; flex-wrap: wrap; }
+
+    @media (max-width: 560px) {
+      .launch h1 { font-size: 22px; }
+      :root { --pad: 18px; }
+      .svc-tools { margin-left: 0; width: 100%; }
+      .search, .search input { width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; }
+      .progress i { animation: none; width: 100%; opacity: .5; }
+    }
   </style>
 </head>
 <body>
-  <main class="card">
-    <div class="logo-wrap">
-      <svg class="floci-logo" viewBox="0 0 531.25 156.71" xmlns="http://www.w3.org/2000/svg" aria-label="floci" role="img">
-        <g style="isolation:isolate"><g style="isolation:isolate">
-          <path class="floci-text" d="M305.44,141.35h-15.94V39.04h-17.08c-13.18,0-16.75,7.81-16.59,17.4v8.95h17.4v13.34h-17.4v62.62h-15.94v-62.62h-14.64v-13.34h14.64v-7.16c0-20.66,8.95-34.16,29.6-34.16h35.95v117.28Z"></path>
-          <path class="floci-text" d="M324.31,103.29c0-24.07,18.22-39.85,39.85-39.85s40.01,15.78,40.01,39.85-18.38,40.01-40.01,40.01-39.85-15.94-39.85-40.01ZM388.24,103.29c0-14.64-11.06-24.89-24.07-24.89s-23.91,10.25-23.91,24.89,10.9,25.05,23.91,25.05,24.07-10.25,24.07-25.05Z"></path>
-          <path class="floci-text" d="M418,103.29c0-24.07,19.03-39.85,40.99-39.85,12.36,0,22.93,5.04,29.6,13.01l-10.57,9.92c-4.39-4.88-11.06-7.97-18.71-7.97-14.15,0-25.38,10.41-25.38,24.89s11.22,25.05,25.38,25.05c7.65,0,14.31-3.09,18.71-7.97l10.57,9.92c-6.67,7.97-17.24,13.01-29.6,13.01-21.96,0-40.99-15.94-40.99-40.01Z"></path>
-          <path class="floci-text" d="M502.91,37.74c0-5.86,5.04-10.25,10.9-10.25s10.9,4.39,10.9,10.25-4.88,10.25-10.9,10.25-10.9-4.39-10.9-10.25ZM505.84,141.35v-75.96h15.94v75.96h-15.94Z"></path>
-        </g></g>
-        <g>
-          <path class="floci-cloud" d="M44.46,52.16l-1.44,9.05c-.1.64-35.57,8.08-30.51,43.05,2.04,14.08,14.69,31.06,31.94,31.22l84.34.78c3.64.03,7.49.5,9.97,2.81,1.69,1.57,1.95,6.1-.29,9.22l-83.49.43c-22.68.12-43.45-11.19-51.76-32.9-8.64-22.56.61-49.48,22.58-59.54,5.11-2.34,7.7-4,8.39-9.37l10.28,5.24h-.01Z"></path>
-          <path class="floci-cloud" d="M44.46,52.16l-10.28-5.24c1.94-15.09,10.61-28.25,23.15-36.38C74.85-.82,94.57-3.69,115.01,5.35c14.93,6.6,26.96,21.97,32.12,39.33,26.07,3.63,46.19,26.18,40.75,53.8-3.06.86-9.18-1.15-11.34-3.72,1.28-12.11-3.1-22.27-10.75-29.43-8.19-7.67-17.88-9.28-30.09-8.04-.09-25.91-19.81-43.97-43.82-45.33-22.91-1.29-43.59,16.13-47.42,40.2h0Z"></path>
-          <ellipse class="floci-dot" cx="173.57" cy="127.13" rx="20.36" ry="20.4"></ellipse>
-          <ellipse class="floci-dot" cx="513.02" cy="37.71" rx="13.22" ry="13.25"></ellipse>
-        </g>
-      </svg>
-      <span class="status offline" id="status" title="Emulator status">
-        <span class="dot"></span><span id="status-label">connecting…</span>
-      </span>
-    </div>
-    <p class="tag">Any cloud. Locally. — a local AWS emulator speaking real AWS wire protocols.</p>
-    <p>You've reached the Floci endpoint. Point your AWS SDK or CLI here with
-       <code>--endpoint-url http://localhost:4566</code> and it behaves like AWS.</p>
-    <div class="grid">
-      <div><b>Endpoint</b><br>http://localhost:4566</div>
-      <div><b>Region</b><br>us-east-1 (default)</div>
-      <div><b>Account</b><br>000000000000</div>
-      <div><b>Version</b><br><span id="version">…</span></div>
-    </div>
-    <section class="svc">
-      <div class="svc-head">
-        <h2>Services</h2>
-        <span class="svc-count" id="svc-count"><b>—</b> running · — available</span>
+<header class="top">
+  <a href="/" class="home" aria-label="Floci dashboard">
+    <svg class="floci-logo" viewBox="0 0 531.25 156.71" xmlns="http://www.w3.org/2000/svg" aria-label="floci" role="img">
+      <g style="isolation:isolate"><g style="isolation:isolate">
+        <path class="floci-text" d="M305.44,141.35h-15.94V39.04h-17.08c-13.18,0-16.75,7.81-16.59,17.4v8.95h17.4v13.34h-17.4v62.62h-15.94v-62.62h-14.64v-13.34h14.64v-7.16c0-20.66,8.95-34.16,29.6-34.16h35.95v117.28Z"></path>
+        <path class="floci-text" d="M324.31,103.29c0-24.07,18.22-39.85,39.85-39.85s40.01,15.78,40.01,39.85-18.38,40.01-40.01,40.01-39.85-15.94-39.85-40.01ZM388.24,103.29c0-14.64-11.06-24.89-24.07-24.89s-23.91,10.25-23.91,24.89,10.9,25.05,23.91,25.05,24.07-10.25,24.07-25.05Z"></path>
+        <path class="floci-text" d="M418,103.29c0-24.07,19.03-39.85,40.99-39.85,12.36,0,22.93,5.04,29.6,13.01l-10.57,9.92c-4.39-4.88-11.06-7.97-18.71-7.97-14.15,0-25.38,10.41-25.38,24.89s11.22,25.05,25.38,25.05c7.65,0,14.31-3.09,18.71-7.97l10.57,9.92c-6.67,7.97-17.24,13.01-29.6,13.01-21.96,0-40.99-15.94-40.99-40.01Z"></path>
+        <path class="floci-text" d="M502.91,37.74c0-5.86,5.04-10.25,10.9-10.25s10.9,4.39,10.9,10.25-4.88,10.25-10.9,10.25-10.9-4.39-10.9-10.25ZM505.84,141.35v-75.96h15.94v75.96h-15.94Z"></path>
+      </g></g>
+      <g>
+        <path class="floci-cloud" d="M44.46,52.16l-1.44,9.05c-.1.64-35.57,8.08-30.51,43.05,2.04,14.08,14.69,31.06,31.94,31.22l84.34.78c3.64.03,7.49.5,9.97,2.81,1.69,1.57,1.95,6.1-.29,9.22l-83.49.43c-22.68.12-43.45-11.19-51.76-32.9-8.64-22.56.61-49.48,22.58-59.54,5.11-2.34,7.7-4,8.39-9.37l10.28,5.24h-.01Z"></path>
+        <path class="floci-cloud" d="M44.46,52.16l-10.28-5.24c1.94-15.09,10.61-28.25,23.15-36.38C74.85-.82,94.57-3.69,115.01,5.35c14.93,6.6,26.96,21.97,32.12,39.33,26.07,3.63,46.19,26.18,40.75,53.8-3.06.86-9.18-1.15-11.34-3.72,1.28-12.11-3.1-22.27-10.75-29.43-8.19-7.67-17.88-9.28-30.09-8.04-.09-25.91-19.81-43.97-43.82-45.33-22.91-1.29-43.59,16.13-47.42,40.2h0Z"></path>
+        <ellipse class="floci-dot" cx="173.57" cy="127.13" rx="20.36" ry="20.4"></ellipse>
+        <ellipse class="floci-dot" cx="513.02" cy="37.71" rx="13.22" ry="13.25"></ellipse>
+      </g>
+    </svg>
+  </a>
+  <!-- Which Floci emulator serves this page; the other emulators reuse the page with their own name. -->
+  <span class="emulator" id="emulator">floci-aws</span>
+  <span class="status offline" id="status" role="status">
+      <span class="dot"></span><span id="status-label">Connecting…</span>
+    </span>
+  <span class="build" id="build" title="floci-aws version"></span>
+  <div class="top-end">
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme" title="Switch theme">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+    <a class="btn" href="/_floci/ui" id="ui-link">Open Floci UI &rarr;</a>
+    <a class="home back" href="/">Back to dashboard</a>
+  </div>
+</header>
+<div class="progress" id="progress"><i></i></div>
+
+<main class="layout">
+  <section class="col connect" aria-labelledby="h-connect">
+    <div class="block">
+      <h2 id="h-connect">Connect</h2>
+      <p class="lede">Point any AWS SDK or CLI at this endpoint and it behaves like AWS. Any credentials work.</p>
+      <dl class="facts">
+        <div><dt>Endpoint</dt><dd id="f-endpoint"></dd><dd class="plain"><button class="copy" data-copy="f-endpoint">Copy</button></dd></div>
+        <div><dt>Region</dt><dd id="f-region">us-east-1</dd><dd class="plain"><button class="copy" data-copy="f-region">Copy</button></dd></div>
+        <div><dt>Account</dt><dd id="f-account">000000000000</dd><dd class="plain"><button class="copy" data-copy="f-account">Copy</button></dd></div>
+      </dl>
+      <div class="tabs" role="tablist" aria-label="Connection snippets">
+        <button class="tab" role="tab" aria-selected="true" data-snippet="shell">Shell</button>
+        <button class="tab" role="tab" aria-selected="false" data-snippet="cli">AWS CLI</button>
+        <button class="tab" role="tab" aria-selected="false" data-snippet="boto3">boto3</button>
+        <button class="copy" data-copy="snippet">Copy</button>
       </div>
-      <input class="svc-search" id="svc-search" type="text" placeholder="filter services…"
-             autocomplete="off" autocapitalize="off" spellcheck="false" disabled />
-      <div class="svc-list" id="svc-list">
-        <div class="svc-empty">Loading services…</div>
+      <div class="snippet">
+        <pre id="snippet" tabindex="0"></pre>
       </div>
-    </section>
-    <a class="btn" href="/_floci/ui">
-      Open Floci UI &rarr;
-    </a>
-    <p class="foot">The UI launches on demand as a sidecar container the first time you open it.
-       &nbsp;·&nbsp; <a href="/_floci/health">health</a> · <a href="/_floci/info">info</a></p>
-  </main>
+    </div>
 
-  <script>
-    (function () {
-      var statusEl = document.getElementById("status");
-      var statusLabel = document.getElementById("status-label");
-      var versionEl = document.getElementById("version");
-      var countEl = document.getElementById("svc-count");
-      var listEl = document.getElementById("svc-list");
-      var searchEl = document.getElementById("svc-search");
+    <div class="block">
+      <h2>Startup</h2>
+      <p class="lede" id="init-lede">Init hooks run once at each stage.</p>
+      <ol class="stages" id="stages"></ol>
+      <ul class="scripts" id="scripts"></ul>
+    </div>
 
-      var services = []; // [{ name, running }]
-      var filter = "";
+    <div class="block">
+      <h2>Runtime</h2>
+      <dl class="facts" id="runtime">
+        <div><dt>Version</dt><dd id="r-version">-</dd></div>
+        <div><dt>Edition</dt><dd id="r-edition">-</dd></div>
+        <div><dt>DynamoDB</dt><dd id="r-ddb">-</dd></div>
+        <div><dt>Floci UI</dt><dd class="plain" id="r-ui">-</dd></div>
+      </dl>
+    </div>
+  </section>
 
-      function setStatus(state, label) {
-        statusEl.className = "status " + state;
-        statusLabel.textContent = label;
-      }
+  <section class="col services" aria-labelledby="h-services">
+    <div class="svc-head">
+      <h2 id="h-services">Services</h2>
+      <span class="svc-count" id="svc-count" aria-live="polite"></span>
+      <div class="svc-tools">
+        <div class="seg" id="seg" role="group" aria-label="Show services" hidden>
+          <button aria-pressed="true" data-show="all">All</button>
+          <button aria-pressed="false" data-show="running">Running</button>
+          <button aria-pressed="false" data-show="idle">Available</button>
+        </div>
+        <label class="search">
+          <span class="sr">Filter services</span>
+          <input id="svc-search" type="search" placeholder="Filter services" autocomplete="off" autocapitalize="off" spellcheck="false" disabled />
+          <kbd aria-hidden="true">/</kbd>
+        </label>
+      </div>
+    </div>
+    <div id="svc-body"><p class="empty">Loading services…</p></div>
+  </section>
 
-      function renderCount() {
-        var running = services.filter(function (s) { return s.running; }).length;
-        var available = services.length - running;
-        countEl.innerHTML = "<b>" + running + "</b> running · " + available + " available";
-      }
+  <section class="col news" aria-labelledby="h-news">
+    <div class="news-head">
+      <h2 id="h-news">News</h2>
+      <button class="linkish" id="news-off" hidden>Turn off</button>
+    </div>
+    <div id="news-body"></div>
+  </section>
+</main>
 
-      function renderList() {
-        var q = filter.trim().toLowerCase();
-        var shown = services.filter(function (s) { return !q || s.name.toLowerCase().indexOf(q) !== -1; });
-        if (!services.length) {
-          listEl.innerHTML = '<div class="svc-empty">No services reported.</div>';
-          return;
-        }
-        if (!shown.length) {
-          listEl.innerHTML = '<div class="svc-empty">No services match "' + escapeHtml(q) + '".</div>';
-          return;
-        }
-        listEl.innerHTML = shown.map(function (s) {
-          return '<span class="badge ' + (s.running ? "running" : "") + '" title="' +
-            escapeHtml(s.name) + " — " + (s.running ? "running" : "available") + '">' +
-            '<span class="b-dot"></span><span class="b-name">' + escapeHtml(s.name) + "</span></span>";
-        }).join("");
-      }
+<main class="launch">
+  <div class="wait">
+    <h1 id="launch-title">Starting Floci UI…</h1>
+    <p class="lede" id="launch-msg">Floci is launching the UI as a sidecar container. The first run pulls the image, which can take a few minutes. This page opens the UI as soon as it's ready.</p>
+    <dl class="facts" id="launch-facts">
+      <div><dt>Waiting</dt><dd id="elapsed">0s</dd></div>
+      <div><dt>Last check</dt><dd id="last">Not checked yet</dd></div>
+    </dl>
+    <pre class="error" id="launch-error" hidden></pre>
+    <div class="actions" id="launch-actions" hidden>
+      <button class="btn" id="retry">Try again</button>
+      <a class="btn btn-quiet home" href="/">Back to dashboard</a>
+    </div>
+  </div>
+</main>
 
-      function escapeHtml(str) {
-        return String(str).replace(/[&<>"]/g, function (c) {
-          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
-        });
-      }
+<script>
+  (function () {
+    // One feed for every Floci emulator: { items: [{ kind, product?, version?, date, title, summary, url }] }
+    // An item with a product is for that emulator only; one without is for all of them.
+    var NEWS_URL = "https://floci.io/news.json";
+    var NEWS_PRODUCT = "aws";
+    var NEWS_KEY = "floci.news";
 
-      function sortServices(map) {
-        return Object.keys(map).map(function (name) {
-          return { name: name, running: map[name] === "running" };
-        }).sort(function (a, b) {
-          if (a.running !== b.running) { return a.running ? -1 : 1; }
-          return a.name.localeCompare(b.name);
-        });
-      }
+    var startingView = document.documentElement.dataset.view === "starting";
+    var endpoint = location.origin;
 
-      function getJson(path) {
-        return fetch(path, { headers: { Accept: "application/json" } }).then(function (r) {
-          if (!r.ok) { throw new Error(path + " -> " + r.status); }
-          return r.json();
-        });
-      }
+    var CATEGORIES = [
+      ["Compute", "lambda ec2 ecs eks ecr batch lightsail elasticbeanstalk autoscaling application-autoscaling"],
+      ["Storage", "s3 s3vectors s3tables efs backup dlm datasync transfer"],
+      ["Databases", "dynamodb rds rds-data neptune docdb redshift redshift-data redshift-serverless elasticache memorydb timestream-influxdb dms"],
+      ["Messaging and integration", "sqs sns events scheduler pipes states swf kafka mq kinesis firehose email apigateway apigatewayv2 appsync connect app-integrations iot iotdata"],
+      ["Analytics", "athena glue elasticmapreduce emr-serverless kinesisanalytics es lakeformation mwaa"],
+      ["AI and machine learning", "bedrock bedrock-runtime bedrock-agentcore bedrock-agentcore-control sagemaker textract comprehend rekognition transcribe translate"],
+      ["Networking", "route53 route53resolver cloudfront elasticloadbalancing elb globalaccelerator network-firewall servicediscovery"],
+      ["Security and identity", "iam kms secretsmanager acm cognito-idp cognito-identity sso sso-oidc identitystore organizations account ram access-analyzer macie2 guardduty inspector2 securityhub detective cloudhsmv2 verifiedpermissions wafv2"],
+      ["Management", "cloudformation cloudcontrol ssm logs monitoring config cloudtrail appconfig appconfigdata tagging servicequotas resource-explorer-2 fis oam rum aps servicecatalog controlcatalog controltower marketplace"],
+      ["Developer tools", "codebuild codedeploy codepipeline codeartifact codeguru-reviewer"],
+      ["Billing", "budgets ce cur pricing bcm-pricing-calculator bcm-data-exports"]
+    ];
+    var OTHER = "Other";
+    var categoryOf = {};
+    CATEGORIES.forEach(function (c) { c[1].split(" ").forEach(function (n) { categoryOf[n] = c[0]; }); });
 
-      var refreshing = false;
-      function refresh() {
-        if (refreshing) { return; }
-        refreshing = true;
-        Promise.allSettled([getJson("/_floci/health"), getJson("/_floci/init")])
-          .then(function (results) {
-            var health = results[0].status === "fulfilled" ? results[0].value : null;
-            var init = results[1].status === "fulfilled" ? results[1].value : null;
-
-            if (!health) {
-              setStatus("offline", "offline");
-              if (!services.length) {
-                listEl.innerHTML = '<div class="svc-empty">Couldn\'t reach Floci. Retrying…</div>';
-              }
-              return;
-            }
-
-            if (health.version) { versionEl.textContent = health.version; }
-            if (health.edition) {
-              versionEl.textContent = (health.version || "—") + " · " + health.edition;
-            }
-
-            services = sortServices(health.services || {});
-            renderCount();
-            renderList();
-            if (searchEl.disabled) { searchEl.disabled = false; }
-
-            var completed = (init && init.completed) || {};
-            if (completed.ready || completed.start) {
-              setStatus("ready", "ready");
-            } else if (completed.boot) {
-              setStatus("starting", "starting…");
-            } else {
-              setStatus("ready", "online");
-            }
-          })
-          .finally(function () { refreshing = false; });
-      }
-
-      searchEl.addEventListener("input", function () {
-        filter = searchEl.value;
-        renderList();
+    function $(id) { return document.getElementById(id); }
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"]/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
       });
+    }
+    function getJson(path) {
+      return fetch(path, { headers: { Accept: "application/json" } }).then(function (r) {
+        if (!r.ok) { throw new Error(path + " -> " + r.status); }
+        return r.json();
+      });
+    }
 
+    // ── Connect ──────────────────────────────────────────
+    var SNIPPETS = {
+      shell: "export AWS_ENDPOINT_URL=" + endpoint + "\nexport AWS_ACCESS_KEY_ID=test\nexport AWS_SECRET_ACCESS_KEY=test\nexport AWS_DEFAULT_REGION=us-east-1",
+      cli: "aws --endpoint-url " + endpoint + " s3 mb s3://demo\naws --endpoint-url " + endpoint + " s3 ls",
+      boto3: 'import boto3\n\ns3 = boto3.client(\n    "s3",\n    endpoint_url="' + endpoint + '",\n    region_name="us-east-1",\n    aws_access_key_id="test",\n    aws_secret_access_key="test",\n)'
+    };
+    $("f-endpoint").textContent = endpoint;
+    $("snippet").textContent = SNIPPETS.shell;
+
+    document.querySelectorAll(".tab").forEach(function (tab) {
+      tab.addEventListener("click", function () {
+        document.querySelectorAll(".tab").forEach(function (t) { t.setAttribute("aria-selected", String(t === tab)); });
+        $("snippet").textContent = SNIPPETS[tab.dataset.snippet];
+      });
+    });
+
+    function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) { return navigator.clipboard.writeText(text); }
+      return new Promise(function (resolve, reject) {
+        var ta = document.createElement("textarea");
+        ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select();
+        var ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        ok ? resolve() : reject(new Error("copy failed"));
+      });
+    }
+    document.addEventListener("click", function (e) {
+      var btn = e.target.closest(".copy");
+      if (!btn) { return; }
+      copyText($(btn.dataset.copy).textContent).then(function () {
+        btn.textContent = "Copied"; btn.classList.add("done");
+        setTimeout(function () { btn.textContent = "Copy"; btn.classList.remove("done"); }, 1400);
+      }, function () { btn.textContent = "Press ⌘C"; });
+    });
+
+    // ── Status, startup, runtime ─────────────────────────
+    var STAGES = ["boot", "start", "ready", "shutdown"];
+    var version = null;
+
+    function setStatus(state, label) {
+      $("status").className = "status " + state;
+      $("status-label").textContent = label;
+    }
+
+    function renderInit(init) {
+      var completed = (init && init.completed) || {};
+      var scripts = (init && init.scripts) || {};
+      var current = null;
+      STAGES.slice(0, 3).forEach(function (s) { if (current === null && !completed[s]) { current = s; } });
+      $("stages").innerHTML = STAGES.map(function (s) {
+        var n = (scripts[s] || []).length;
+        // /init sets shutdown when shutdown starts, not when it ends
+        var state = s === "shutdown" ? (completed[s] ? "now" : "") : completed[s] ? "done" : s === current && init ? "now" : "";
+        var word = !init ? "Unknown" : state === "done" ? "Done" : state === "now" ? "Running" : "Not yet";
+        return '<li class="stage ' + state + '"><b>' + s.charAt(0).toUpperCase() + s.slice(1) + "</b>" +
+                "<span>" + word + "</span><span>" + (!init ? "" : n ? n + (n === 1 ? " script" : " scripts") : "No scripts") + "</span></li>";
+      }).join("");
+      var rows = [];
+      STAGES.forEach(function (s) {
+        (scripts[s] || []).forEach(function (sc) {
+          var name = typeof sc === "string" ? sc : sc.script || sc.name || sc.path || JSON.stringify(sc);
+          var st = typeof sc === "object" && sc.state ? String(sc.state).toLowerCase() : "";
+          rows.push("<li><span>" + escapeHtml(s + "/" + name) + "</span><span>" + escapeHtml(st) + "</span></li>");
+        });
+      });
+      $("scripts").innerHTML = rows.join("");
+    }
+
+    function renderRuntime(health, info, ui) {
+      var src = health || info || {};
+      if (src.version) {
+        version = src.version;
+        $("r-version").textContent = src.version;
+        $("build").textContent = (/^\d/.test(src.version) ? "v" : "") + src.version;
+      }
+      if (src.edition) { $("r-edition").textContent = src.edition; }
+      if (info && info.dynamodb_backend) { $("r-ddb").textContent = info.dynamodb_backend + " backend"; }
+      if (ui) {
+        $("r-ui").innerHTML = ui.error ? "Failed to start: " + escapeHtml(ui.error)
+                : ui.ready && ui.url ? 'Running at <a href="' + escapeHtml(ui.url) + '">' + escapeHtml(ui.url) + "</a>"
+                        : "Not started. Opens as a sidecar container the first time you use it.";
+        if (ui.ready && ui.url) { $("ui-link").href = ui.url; }
+      }
+    }
+
+    // ── Services ─────────────────────────────────────────
+    var services = [];   // [{ name, running, category }]
+    var servicesKey = "";
+    var filter = "";
+    var show = "all";
+    var searchEl = $("svc-search");
+
+    function renderServices() {
+      var running = services.filter(function (s) { return s.running; }).length;
+      var idle = services.length - running;
+      $("svc-count").innerHTML = services.length
+              ? "<b>" + running + "</b> running" + (idle ? " · <b>" + idle + "</b> available, not started" : "")
+              : "";
+      $("seg").hidden = !idle || !running;
+
+      var q = filter.trim().toLowerCase();
+      var shown = services.filter(function (s) {
+        if (show === "running" && !s.running) { return false; }
+        if (show === "idle" && s.running) { return false; }
+        return !q || s.name.indexOf(q) !== -1 || s.category.toLowerCase().indexOf(q) !== -1;
+      });
+      if (!services.length) {
+        $("svc-body").innerHTML = '<p class="empty">The emulator reported no services.</p>';
+        return;
+      }
+      if (!shown.length) {
+        $("svc-body").innerHTML = '<p class="empty">No service matches <b>' + escapeHtml(q || show) +
+                "</b>. Floci lists services by their AWS endpoint prefix, such as <b>states</b> for Step Functions or <b>monitoring</b> for CloudWatch.</p>";
+        return;
+      }
+      var order = CATEGORIES.map(function (c) { return c[0]; }).concat(OTHER);
+      $("svc-body").innerHTML = '<div class="groups">' + order.map(function (cat) {
+        var items = shown.filter(function (s) { return s.category === cat; });
+        if (!items.length) { return ""; }
+        return '<div class="group"><h3>' + cat + " <span>" + items.length + "</span></h3><ul>" +
+                items.map(function (s) {
+                  var name = escapeHtml(s.name);
+                  var at = q ? s.name.indexOf(q) : -1;
+                  if (at !== -1) {
+                    name = escapeHtml(s.name.slice(0, at)) + "<mark>" + escapeHtml(s.name.slice(at, at + q.length)) +
+                            "</mark>" + escapeHtml(s.name.slice(at + q.length));
+                  }
+                  return '<li class="' + (s.running ? "" : "idle") + '"><i></i><span>' + name + "</span>" +
+                          '<span class="sr">' + (s.running ? ", running" : ", available, not started") + "</span></li>";
+                }).join("") + "</ul></div>";
+      }).join("") + "</div>";
+    }
+
+    function setServices(map) {
+      var key = JSON.stringify(map);
+      if (key === servicesKey) { return; }   // unchanged: keep scroll position and selection
+      servicesKey = key;
+      services = Object.keys(map).map(function (name) {
+        return { name: name, running: map[name] === "running", category: categoryOf[name] || OTHER };
+      }).sort(function (a, b) { return a.name.localeCompare(b.name); });
+      renderServices();
+    }
+
+    searchEl.addEventListener("input", function () { filter = searchEl.value; renderServices(); });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "/" && !/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) && !searchEl.disabled) {
+        e.preventDefault(); searchEl.focus(); searchEl.select();
+      } else if (e.key === "Escape" && document.activeElement === searchEl) {
+        searchEl.value = ""; filter = ""; renderServices(); searchEl.blur();
+      }
+    });
+    document.querySelectorAll("#seg button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        show = btn.dataset.show;
+        document.querySelectorAll("#seg button").forEach(function (b) { b.setAttribute("aria-pressed", String(b === btn)); });
+        renderServices();
+      });
+    });
+
+    // ── Polling ──────────────────────────────────────────
+    var refreshing = false;
+    function refresh() {
+      if (refreshing) { return; }
+      refreshing = true;
+      Promise.allSettled([getJson("/_floci/health"), getJson("/_floci/init"), getJson("/_floci/info"), getJson("/_floci/ui/status")])
+              .then(function (results) {
+                var v = results.map(function (r) { return r.status === "fulfilled" ? r.value : null; });
+                var health = v[0], init = v[1];
+
+                if (!health) {
+                  setStatus("offline", "Offline");
+                  if (!services.length) {
+                    $("svc-body").innerHTML = '<p class="empty">Can\'t reach the emulator at <b>' + escapeHtml(endpoint) +
+                            "</b>. Start it with <b>floci start</b>; this page retries every 5 seconds.</p>";
+                  }
+                  return;
+                }
+
+                renderRuntime(health, v[2], v[3]);
+                renderInit(init);
+                setServices(health.services || {});
+                if (searchEl.disabled) { searchEl.disabled = false; }
+
+                var completed = (init && init.completed) || {};
+                if (completed.shutdown) { setStatus("starting", "Shutting down…"); }
+                else if (completed.ready || completed.start) { setStatus("ready", "Ready"); }
+                else if (completed.boot) { setStatus("starting", "Starting…"); }
+                else { setStatus("ready", "Online"); }
+                renderReleaseNote();
+              })
+              .finally(function () { refreshing = false; });
+    }
+
+    // ── Theme (follows the OS until the user picks one) ──
+    var THEME_KEY = "floci.theme";
+    var themeButton = $("theme-toggle");
+    var themeChosen = false;   // a click this page view, which wins over the OS even when storage is blocked
+    function storedTheme() {
+      try { var t = localStorage.getItem(THEME_KEY); return t === "light" || t === "dark" ? t : null; }
+      catch (e) { return null; /* storage blocked: the choice lasts for this page view */ }
+    }
+    function applyTheme(theme) {
+      document.documentElement.dataset.theme = theme;
+      var label = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
+      themeButton.setAttribute("aria-label", label);
+      themeButton.title = label;
+    }
+    applyTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
+    themeButton.addEventListener("click", function () {
+      var next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+      themeChosen = true;
+      applyTheme(next);
+      try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* storage blocked: lasts for this page view */ }
+    });
+    if (window.matchMedia) {
+      var osLight = matchMedia("(prefers-color-scheme: light)");
+      var onOsChange = function (event) { if (!themeChosen && !storedTheme()) { applyTheme(event.matches ? "light" : "dark"); } };
+      if (osLight.addEventListener) { osLight.addEventListener("change", onOsChange); } else if (osLight.addListener) { osLight.addListener(onOsChange); }
+    }
+
+    // ── News (off until the user turns it on) ────────────
+    var newsItems = null;
+    var newsHost = NEWS_URL.replace(/^https?:\/\//, "").split("/")[0];
+
+    var newsOn = false;   // the choice for this page view; storage only remembers it for the next one
+    try { newsOn = localStorage.getItem(NEWS_KEY) === "on"; } catch (e) { /* storage blocked: stays off */ }
+
+    function newsAllowed() { return newsOn; }
+    function setNewsAllowed(on) {
+      newsOn = on;
+      try { on ? localStorage.setItem(NEWS_KEY, "on") : localStorage.removeItem(NEWS_KEY); } catch (e) { /* storage blocked: lasts for this page view */ }
+    }
+    function cmpVersion(a, b) {
+      var x = String(a).split("."), y = String(b).split(".");
+      for (var i = 0; i < 3; i++) {
+        var d = (parseInt(x[i], 10) || 0) - (parseInt(y[i], 10) || 0);
+        if (d) { return d; }
+      }
+      return 0;
+    }
+    function formatDate(iso) {
+      if (typeof iso !== "string" || !iso) { return ""; }
+      var d = new Date(iso + (iso.length === 10 ? "T00:00:00" : ""));
+      return isNaN(d) ? iso : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    }
+
+    function renderNewsGate() {
+      $("news-off").hidden = true;
+      $("news-body").innerHTML = '<div class="gate">' +
+              "<p>News is off. This page fetches nothing from <code>" + escapeHtml(newsHost) + "</code> until you turn it on.</p>" +
+              "<p>Turning it on fetches release notes and announcements each time you open this page. " +
+              "Nothing about your emulator is sent.</p>" +
+              '<button class="btn btn-quiet" id="news-on">Turn on news</button></div>';
+      $("news-on").addEventListener("click", function () { setNewsAllowed(true); loadNews(true); });
+    }
+
+    function renderReleaseNote() {
+      var el = $("release-note");
+      if (!el || !newsItems || !version) { return; }
+      var latest = newsItems.filter(function (n) { return n.version; })
+              .sort(function (a, b) { return cmpVersion(b.version, a.version); })[0];
+      if (!latest) { el.textContent = ""; return; }
+      el.innerHTML = cmpVersion(latest.version, version) > 0
+              ? "<b>" + escapeHtml(latest.version) + " is out.</b> You're running " + escapeHtml(version) + ". Pull the new image and restart: with the Floci CLI, <b>floci stop</b>, then <b>floci start --pull always</b>."
+              : "You're running the latest release, " + escapeHtml(version) + ".";
+    }
+
+    function renderNews(focus) {
+      $("news-off").hidden = false;
+      if (!newsItems.length) {
+        $("news-body").innerHTML = '<p class="release-note">Nothing new yet.</p>';
+        return;
+      }
+      $("news-body").innerHTML = '<p class="release-note" id="release-note"></p><ul class="feed">' +
+              newsItems.map(function (n) {
+                var kind = n.kind ? String(n.kind).charAt(0).toUpperCase() + String(n.kind).slice(1) : "";
+                var meta = [kind, formatDate(n.date)].filter(Boolean).join(" · ");
+                return "<li>" + (meta ? '<div class="meta">' + escapeHtml(meta) + "</div>" : "") +
+                        '<a href="' + escapeHtml(n.url) + '" target="_blank" rel="noopener">' + escapeHtml(n.title) + "</a>" +
+                        (n.summary ? "<p>" + escapeHtml(n.summary) + "</p>" : "") + "</li>";
+              }).join("") + "</ul>";
+      renderReleaseNote();
+      if (focus) { $("news-off").focus(); }
+    }
+
+    function loadNews(focus) {
+      $("news-off").hidden = false;
+      $("news-body").innerHTML = '<p class="release-note">Loading news…</p>';
+      getJson(NEWS_URL).then(function (feed) {
+        if (!newsAllowed()) { return; }
+        newsItems = ((feed && feed.items) || []).filter(function (n) {
+          return n && n.title && /^https?:\/\//.test(n.url || "") && (!n.product || n.product === NEWS_PRODUCT);
+        });
+        renderNews(focus);
+      }).catch(function () {
+        if (!newsAllowed()) { return; }
+        $("news-body").innerHTML = '<p class="release-note">Couldn\'t load news from ' + escapeHtml(newsHost) +
+                '. Check your connection and try again.</p><button class="btn btn-quiet" id="news-retry" style="margin-top:14px">Try again</button>';
+        $("news-retry").addEventListener("click", function () { loadNews(true); });
+      });
+    }
+
+    $("news-off").addEventListener("click", function () {
+      setNewsAllowed(false); newsItems = null; renderNewsGate(); $("news-on").focus();
+    });
+
+    // ── Starting Floci UI ────────────────────────────────
+    // /_floci/ui launches the sidecar and serves this view; poll until the UI answers, then go there.
+    var MAX_ATTEMPTS = 150; // ~5 min at 2s
+
+    function launch() {
+      var attempts = 0;
+      var startedAt = Date.now();
+      var timer = setInterval(function () {
+        var s = Math.floor((Date.now() - startedAt) / 1000);
+        $("elapsed").textContent = s < 60 ? s + "s" : Math.floor(s / 60) + "m " + (s % 60) + "s";
+      }, 1000);
+
+      function fail(heading, text, detail) {
+        clearInterval(timer);
+        setStatus("failed", "Not running");
+        $("progress").className = "progress stopped";
+        document.title = heading;
+        $("launch-title").textContent = heading;
+        $("launch-msg").textContent = text;
+        $("launch-facts").hidden = true;
+        $("launch-error").hidden = !detail;
+        $("launch-error").textContent = detail || "";
+        $("launch-actions").hidden = false;
+        $("retry").focus();
+      }
+
+      function open(url) {
+        clearInterval(timer);
+        setStatus("ready", "Ready");
+        $("progress").className = "progress ready";
+        document.title = "Opening Floci UI…";
+        $("launch-title").textContent = "Opening Floci UI…";
+        $("launch-msg").innerHTML = 'The UI is running. If nothing happens, <a id="go">open it yourself</a>.';
+        $("go").href = url;
+        $("launch-facts").hidden = true;
+        window.location.replace(url);
+      }
+
+      function poll() {
+        attempts++;
+        fetch("/_floci/ui/status", { headers: { Accept: "application/json" } })
+                .then(function (r) { return r.json(); })
+                .then(function (s) {
+                  $("last").textContent = "Container not ready yet";
+                  if (s.ready && s.url) { open(s.url); return; }
+                  if (s.error) {
+                    fail("Floci UI couldn't start", "The emulator reported this error while launching the UI container:", s.error);
+                    return;
+                  }
+                  if (attempts > MAX_ATTEMPTS) {
+                    fail("Floci UI is taking too long", "The UI container wasn't ready after 5 minutes. Check that Docker is running and the image can be pulled, then try again.");
+                    return;
+                  }
+                  setTimeout(poll, 2000);
+                })
+                .catch(function () {
+                  $("last").textContent = "Couldn't reach the emulator, retrying";
+                  if (attempts > MAX_ATTEMPTS) {
+                    fail("Can't reach Floci", "The emulator stopped answering. Start it with floci start, then try again.");
+                    return;
+                  }
+                  setTimeout(poll, 2000);
+                });
+      }
+
+      document.title = "Starting Floci UI…";
+      setStatus("starting", "Starting Floci UI…");
+      $("retry").addEventListener("click", function () { location.reload(); });
+      poll();
+    }
+
+    // ── Start ────────────────────────────────────────────
+    function start() {
+      if (startingView) { launch(); return; }
+      renderInit(null);
+      newsAllowed() ? loadNews(false) : renderNewsGate();
       refresh();
       setInterval(refresh, 5000);
-    })();
-  </script>
+    }
+    start();
+  })();
+</script>
 </body>
 </html>

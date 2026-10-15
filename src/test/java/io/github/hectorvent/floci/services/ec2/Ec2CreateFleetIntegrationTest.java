@@ -185,6 +185,52 @@ class Ec2CreateFleetIntegrationTest {
                         equalTo(CONTRACT_IMAGE_ID));
     }
 
+    @Test
+    @Order(6)
+    void createFleetRootVolumeTakesTheLaunchTemplateRootMappingType() {
+        // ami-0abcdef1234567890 is gp2-rooted at /dev/xvda; the template asks for gp3.
+        String templateId = given()
+                .formParam("Action", "CreateLaunchTemplate")
+                .formParam("LaunchTemplateName", "create-fleet-gp3-root")
+                .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+                .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+                .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+                .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+                .header("Authorization", AUTH_HEADER)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        String instanceId = given()
+                .formParam("Action", "CreateFleet")
+                .formParam("Type", "instant")
+                .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", templateId)
+                .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
+                .formParam("TargetCapacitySpecification.TotalTargetCapacity", "1")
+                .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
+                .header("Authorization", AUTH_HEADER)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item");
+
+        given()
+                .formParam("Action", "DescribeVolumes")
+                .formParam("Filter.1.Name", "attachment.instance-id")
+                .formParam("Filter.1.Value.1", instanceId)
+                .header("Authorization", AUTH_HEADER)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("DescribeVolumesResponse.volumeSet.item.volumeType", equalTo("gp3"));
+    }
+
     private static String createLaunchTemplate() {
         return given()
                 .formParam("Action", "CreateLaunchTemplate")

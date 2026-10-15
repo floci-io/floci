@@ -22,9 +22,12 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class CloudWatchLogsHandler {
+
+    private static final Pattern LOG_GROUP_NAME = Pattern.compile("[._/#A-Za-z0-9-]+");
 
     private final CloudWatchLogsService logsService;
     private final CloudWatchLogsCrossAccountService crossAccountService;
@@ -248,6 +251,7 @@ public class CloudWatchLogsHandler {
     private Response handleCreateLogStream(JsonNode request, String region) {
         String groupName = request.path("logGroupName").asText();
         String streamName = request.path("logStreamName").asText();
+        requireLogStreamNames(groupName, streamName);
         logsService.createLogStream(groupName, streamName, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -255,8 +259,19 @@ public class CloudWatchLogsHandler {
     private Response handleDeleteLogStream(JsonNode request, String region) {
         String groupName = request.path("logGroupName").asText();
         String streamName = request.path("logStreamName").asText();
+        requireLogStreamNames(groupName, streamName);
         logsService.deleteLogStream(groupName, streamName, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private static void requireLogStreamNames(String group, String stream) {
+        if (group.isEmpty() || group.length() > 512 || !LOG_GROUP_NAME.matcher(group).matches()) {
+            throw new AwsException("InvalidParameterException", "Invalid logGroupName.", 400);
+        }
+        int streamLength = stream.codePointCount(0, stream.length());
+        if (streamLength < 1 || streamLength > 512 || stream.indexOf(':') >= 0 || stream.indexOf('*') >= 0) {
+            throw new AwsException("InvalidParameterException", "Invalid logStreamName.", 400);
+        }
     }
 
     private Response handleDescribeLogStreams(JsonNode request, String region) {

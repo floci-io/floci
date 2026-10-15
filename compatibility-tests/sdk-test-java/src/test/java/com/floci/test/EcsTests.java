@@ -1,7 +1,6 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
-import software.amazon.awssdk.core.waiters.WaiterOverrideConfiguration;
 import software.amazon.awssdk.core.waiters.WaiterResponse;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.*;
@@ -853,9 +852,7 @@ class EcsTests {
                         .cluster(clusterName)
                         .services(serviceName)
                         .build(),
-                WaiterOverrideConfiguration.builder()
-                        .waitTimeout(Duration.ofSeconds(30))
-                        .build());
+                TestFixtures.waiterOverride(Duration.ofSeconds(30)));
 
         assertThat(response.matched().response()).isPresent();
         assertThat(response.matched().response().get().services().get(0).deployments()).hasSize(1);

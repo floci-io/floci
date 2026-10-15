@@ -9,16 +9,20 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
+import io.github.hectorvent.floci.services.ecs.container.EcsTaskLaunchException;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.Closeable;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -33,6 +37,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -46,6 +51,127 @@ import static org.mockito.Mockito.when;
 class EcsServiceTeardownTest {
 
     private static final String REGION = "us-east-1";
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void stoppedTaskKeepsItsHandleUntilEphemeralVolumeCleanupSucceeds(boolean exitsNaturally) {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsContainerManager manager = mock(EcsContainerManager.class);
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of(),
+                null, null, REGION, Map.of(), Set.of("task-volume"));
+        when(manager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
+        when(manager.getExitCodeIfStopped("docker-id")).thenReturn(0);
+        AtomicInteger attempts = new AtomicInteger();
+        doAnswer(ignored -> {
+            attempts.incrementAndGet();
+            handle.recordContainerRemoved("app");
+            return null;
+        }).when(manager).cleanupStoppedTask(handle);
+        when(manager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
+            handle.recordContainerRemoved("app");
+            if (attempts.incrementAndGet() > 1) {
+                handle.recordTaskVolumeRemoved("task-volume");
+            }
+            return Map.of("app", 0);
+        });
+        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), manager, config,
+                mock(EcsLoadBalancerRegistrar.class), new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("app");
+        definition.setImage("app:latest");
+        service.registerTaskDefinition("volume-retry", List.of(definition), null, null, null,
+                null, null, List.of(), REGION);
+        String taskArn = service.runTask(null, "volume-retry", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION).getFirst().getTaskArn();
+
+        if (exitsNaturally) {
+            service.reconcile();
+        } else {
+            service.stopTask(null, taskArn, null, REGION);
+        }
+        assertEquals("STOPPED", service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus());
+        assertTrue(handle.hasTaskVolumes());
+
+        service.reconcile();
+        assertFalse(handle.hasTaskVolumes());
+        service.reconcile();
+        assertEquals(2, attempts.get(), "cleanup stops retrying after the volume is removed");
+    }
+
+    @Test
+    void failedLaunchCleanupIsRetriedByStoppedTaskReconciliation() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsContainerManager manager = mock(EcsContainerManager.class);
+        EcsTaskHandle partial = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of(),
+                null, null, REGION, Map.of(), Set.of("task-volume"));
+        when(manager.startTask(any(), any(), any(), anyString()))
+                .thenThrow(new EcsTaskLaunchException(new IllegalStateException("launch failed"), partial));
+        when(manager.stopTaskAndCollectExitCodes(partial)).thenAnswer(ignored -> {
+            partial.recordContainerRemoved("app");
+            partial.recordTaskVolumeRemoved("task-volume");
+            return Map.of("app", 137);
+        });
+        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), manager, config,
+                mock(EcsLoadBalancerRegistrar.class), new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("app");
+        definition.setImage("busybox:stable");
+        service.registerTaskDefinition("failed-volume-launch", List.of(definition), null, null, null,
+                null, null, List.of(), REGION);
+        EcsTask task = service.runTask(null, "failed-volume-launch", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION).getFirst();
+        assertEquals("STOPPED", task.getLastStatus());
+        assertEquals("Failed to start: launch failed", task.getStoppedReason());
+        assertTrue(partial.hasTaskVolumes());
+        service.reconcile();
+        assertFalse(partial.hasTaskVolumes());
+        service.reconcile();
+        verify(manager, times(1)).stopTaskAndCollectExitCodes(partial);
+        service.stopManagedContainers();
+    }
+
+    @Test
+    void shutdownRetriesVolumeRemovalAndRetainsPendingCleanupAfterReset() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsContainerManager manager = mock(EcsContainerManager.class);
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of(),
+                null, null, REGION, Map.of(), Set.of("task-volume"));
+        when(manager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
+        doAnswer(ignored -> {
+            handle.recordContainerRemoved("app");
+            return null;
+        }).when(manager).stopTask(handle);
+        when(manager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
+            handle.recordTaskVolumeRemoved("task-volume");
+            return Map.of("app", 0);
+        });
+        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), manager, config,
+                mock(EcsLoadBalancerRegistrar.class), new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("app");
+        definition.setImage("busybox:stable");
+        service.registerTaskDefinition("shutdown-volume", List.of(definition), null, null, null,
+                null, null, List.of(), REGION);
+        service.runTask(null, "shutdown-volume", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION);
+        service.stopManagedContainers();
+        verify(manager, times(2)).cleanupStoppedTask(handle);
+        assertTrue(handle.hasTaskVolumes());
+        service.clear();
+        service.afterReset();
+        service.reconcile();
+        assertFalse(handle.hasTaskVolumes());
+        service.stopManagedContainers();
+    }
 
     @Test
     void startupTransitionWaitsForTheTaskLock() throws Exception {
@@ -175,9 +301,12 @@ class EcsServiceTeardownTest {
             task.setContainers(List.of(container));
             return original;
         });
+        when(containerManager.taskVolumeNames(any(), any())).thenReturn(Set.of("recovered-volume"));
         when(containerManager.stopTaskAndCollectExitCodes(any())).thenAnswer(invocation -> {
             EcsTaskHandle stoppingHandle = invocation.getArgument(0);
+            assertEquals(Set.of("recovered-volume"), stoppingHandle.getTaskVolumeNames());
             stoppingHandle.recordContainerRemoved("app");
+            stoppingHandle.recordTaskVolumeRemoved("recovered-volume");
             return Map.of("app", 0);
         });
 
@@ -200,6 +329,7 @@ class EcsServiceTeardownTest {
 
         verify(containerManager).stopTaskAndCollectExitCodes(argThat(
                 handle -> "docker-id".equals(handle.getContainerIds().get("app"))));
+        verify(containerManager).taskVolumeNames(any(), any());
         assertEquals("STOPPED", service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus());
         service.stopManagedContainers();
     }

@@ -139,7 +139,7 @@ class NodeAppSyncJsRuntimeTest {
         ContainerBuilder.Builder builder =
                 mock(ContainerBuilder.Builder.class, withSettings().defaultAnswer(org.mockito.Answers.RETURNS_SELF));
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         Set<String> created = ConcurrentHashMap.newKeySet();
         Set<String> stopped = ConcurrentHashMap.newKeySet();

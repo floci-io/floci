@@ -10,6 +10,8 @@ import software.amazon.awssdk.services.iam.model.LimitExceededException;
 import software.amazon.awssdk.services.iam.model.ListRolePoliciesRequest;
 import software.amazon.awssdk.services.iam.model.PutRolePolicyRequest;
 
+import static com.floci.test.IamInlinePolicyTestHelper.policyWithNonWhitespaceLength;
+import static com.floci.test.IamInlinePolicyTestHelper.removeCountedWhitespace;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -101,16 +103,4 @@ class IamRoleInlinePolicyQuotaTest {
         iam.deleteRole(DeleteRoleRequest.builder().roleName(roleName).build());
     }
 
-    private static String policyWithNonWhitespaceLength(int targetLength) {
-        String prefix = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"";
-        String suffix = "\",\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
-        return prefix + "x".repeat(targetLength - prefix.length() - suffix.length()) + suffix;
-    }
-
-    private static String removeCountedWhitespace(String policyDocument) {
-        return policyDocument.replace(" ", "")
-                .replace("\t", "")
-                .replace("\n", "")
-                .replace("\r", "");
-    }
 }

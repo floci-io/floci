@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common.docker;
 
 import com.github.dockerjava.transport.DockerHttpClient;
 import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
+import org.apache.hc.core5.util.TimeValue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -33,6 +34,16 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FlociDockerHttpClientTest {
+
+    @Test
+    void staleConnectionValidationOnlyUsesSocketsThatHonorReadTimeouts() {
+        assertEquals(TimeValue.ofSeconds(1), FlociDockerHttpClient.staleConnectionValidationFor(
+                URI.create("unix:///var/run/docker.sock")));
+        assertEquals(TimeValue.ofSeconds(1), FlociDockerHttpClient.staleConnectionValidationFor(
+                URI.create("tcp://127.0.0.1:2375")));
+        assertEquals(TimeValue.NEG_ONE_MILLISECOND, FlociDockerHttpClient.staleConnectionValidationFor(
+                URI.create("npipe:////./pipe/docker_engine")));
+    }
 
     // Catches: a full pool making a call wait out httpclient5's three-minute default instead of
     // failing after the configured lease timeout.

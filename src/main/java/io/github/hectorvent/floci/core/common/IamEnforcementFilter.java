@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
+import io.github.hectorvent.floci.services.iam.IamAuthorizedActions;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
@@ -13,6 +14,7 @@ import io.github.hectorvent.floci.services.iam.IamService.PresignedScope;
 import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyProviders;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
@@ -62,6 +64,9 @@ import java.util.regex.Pattern;
  *   <li>The action is {@code sts:GetCallerIdentity}, which AWS allows without permissions. The
  *       key itself is still checked.</li>
  * </ul>
+ *
+ * <p>Authenticated temporary callers of {@code sts:GetFederationToken} are refused here with
+ * the same operation-specific error as the handler, before policy evaluation.
  *
  * <p>Evaluates the caller's identity policies, optional session policy, and optional
  * permissions boundary, as well as applicable resource policies via {@link ResourcePolicyProvider}.
@@ -283,6 +288,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (!config.services().iam().enforcementEnabled()) {
             return;
         }
+        ProtocolClaim rpcV2Route = rpcV2RouteClaim(ctx);
+        if (rpcV2Route != null) {
+            // The claim filter runs before routing and can leave a call this endpoint serves
+            // unclaimed, as an unrecognised smithy-protocol value does. Every check below that reads
+            // the claim has to see the call that runs: unclaimed, an unsigned one would pass as REST.
+            ctx.setProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY, rpcV2Route);
+        }
 
         String auth = ctx.getHeaderString("Authorization");
         boolean emptyHeader = auth != null && auth.isBlank();
@@ -365,6 +377,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return; // AWS returns caller identity even when an identity policy explicitly denies it
         }
 
+        if ("sts:GetFederationToken".equals(action) && IamService.isTemporaryAccessKey(akid)) {
+            ctx.abortWith(queryXmlAccessDenied(IamService.FEDERATION_TOKEN_SESSION_MESSAGE));
+            return;
+        }
+
         // Service control policies from the caller's organization, when the Organizations
         // service is present and SCP enforcement is enabled. Resolved lazily via Instance
         // to avoid a hard IAM → Organizations dependency.
@@ -399,7 +416,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         List<String> resources = resolveResourceArns(credentialScope,
-                arnBuilder.buildResources(credentialScope, ctx, region, accountId));
+                "logs".equals(credentialScope)
+                        ? arnBuilder.buildLogStreamResources(action, ctx, region, accountId, requestPartition())
+                        : arnBuilder.buildResources(credentialScope, ctx, region, accountId));
 
         Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);
         if (presignedScope.isPresent()) {
@@ -464,17 +483,33 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (callerArns.isPresent()) {
             caller = caller.withPrincipalArn(callerArns.get().callerArn());
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
-            conditionContext.put("aws:PrincipalArn", List.of(callerArns.get().principalArn()));
+            callerArns.get().putPrincipalKeys(conditionContext);
         }
         List<Map<String, List<String>>> targetContexts = new ArrayList<>();
         targetContexts.add(conditionContext);
         for (Map<String, List<String>> target : remainingTargets) {
             Map<String, List<String>> targetContext = new HashMap<>(target);
-            callerArns.ifPresent(arns -> targetContext.put("aws:PrincipalArn", List.of(arns.principalArn())));
+            callerArns.ifPresent(arns -> arns.putPrincipalKeys(targetContext));
             targetContexts.add(targetContext);
         }
 
         RequestPrincipal principal = RequestPrincipal.caller(callerArns.orElse(null));
+        List<IamConditionContextResolver.DynamoDbTransactionItem> transactionItems =
+                "dynamodb".equals(credentialScope)
+                        ? conditionContextResolver.dynamoDbTransactionItems(action, ctx, region, accountId)
+                        : List.of();
+        if (!transactionItems.isEmpty()) {
+            for (IamConditionContextResolver.DynamoDbTransactionItem item : transactionItems) {
+                Map<String, List<String>> itemContext = new HashMap<>(item.context());
+                callerArns.ifPresent(arns -> arns.putPrincipalKeys(itemContext));
+                if (abortIfDenied(ctx, caller, principal, item.action(), credentialScope,
+                        resolveResourceArns(credentialScope, List.of(item.resource())), List.of(itemContext),
+                        region, accountId, akid)) {
+                    return;
+                }
+            }
+            return;
+        }
         if (abortIfDenied(ctx, caller, principal, action, credentialScope, resources, targetContexts,
                 region, accountId, akid)) {
             return;
@@ -521,13 +556,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /**
      * Resolves both the IAM namespace and action from the service that will actually handle the
-     * request. Query traffic shares the dispatch resolver with {@link AwsQueryController}; REST
-     * traffic uses the JAX-RS resource class that won route matching.
+     * request. Query traffic shares the dispatch resolver with {@link AwsQueryController}; an RPC v2
+     * call takes the service and operation its route dispatches; REST traffic uses the JAX-RS
+     * resource class that won route matching.
      */
     private ResolvedAuthorization resolveAuthorization(String auth, String claimedScope,
                                                         ContainerRequestContext ctx) {
         Object claimValue = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY);
-        // Authorization must not depend on the pre-matching claim filter running first.
+        // Form POSTs are also recognized without a claim; GET dispatch requires the Query claim.
         if (IamActionRegistry.isQueryRequest(ctx)) {
             String queryAction = actionRegistry.queryAction(ctx);
             if (queryAction == null || queryAction.isBlank()) {
@@ -537,7 +573,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             String servingScope = catalog.byExternalKey(service)
                     .map(descriptor -> iamServiceScope(descriptor, claimedScope))
                     .orElseGet(() -> catalog.canonicalCredentialScope(service));
-            return new ResolvedAuthorization(servingScope, servingScope + ":" + queryAction);
+            return new ResolvedAuthorization(servingScope,
+                    IamAuthorizedActions.actionFor(servingScope, queryAction));
+        }
+
+        // Read from the route rather than the claim: a path the claim filter takes for RPC v2 can
+        // reach another route, and an X-Amz-Target header names an operation this endpoint ignores.
+        ProtocolClaim rpcV2Route = rpcV2RouteClaim(ctx);
+        if (rpcV2Route != null) {
+            if (rpcV2Route.service() == null) {
+                return new ResolvedAuthorization(claimedScope, null); // no service: the endpoint answers 404
+            }
+            String servingScope = iamServiceScope(rpcV2Route.service(), claimedScope);
+            return new ResolvedAuthorization(servingScope,
+                    IamAuthorizedActions.actionFor(servingScope, rpcV2Route.operation()));
         }
 
         ResolvedAuthorization routeAuthorization = restRouteAuthorization(ctx);
@@ -551,6 +600,25 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         return new ResolvedAuthorization(servingScope, rest
                 ? actionRegistry.resolveRoute(servingScope, ctx)
                 : actionRegistry.resolve(servingScope, ctx));
+    }
+
+    /**
+     * The claim of a call JAX-RS routed to the Smithy RPC v2 endpoint, made from the service and
+     * operation in the route's path parameters, which are what that endpoint dispatches. Null for
+     * any other request.
+     */
+    private ProtocolClaim rpcV2RouteClaim(ContainerRequestContext ctx) {
+        if (resourceInfo == null || !AwsJsonCborController.class.equals(resourceInfo.getResourceClass())) {
+            return null;
+        }
+        MultivaluedMap<String, String> parameters = ctx.getUriInfo().getPathParameters();
+        String serviceId = parameters.getFirst(AwsJsonCborController.RPC_V2_SERVICE_PARAMETER);
+        String operation = parameters.getFirst(AwsJsonCborController.RPC_V2_OPERATION_PARAMETER);
+        if (serviceId == null || operation == null) {
+            return null;
+        }
+        return new ProtocolClaim(WireProtocol.RPCV2_CBOR, catalog.byCborSdkServiceId(serviceId).orElse(null),
+                operation, null);
     }
 
     /**
@@ -656,7 +724,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /** Floci's account-root principal, which is both the caller and the request's aws:PrincipalArn. */
     private CallerArns accountRootArns(String accountId) {
         String rootArn = AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString();
-        return new CallerArns(rootArn, rootArn);
+        return new CallerArns(rootArn, rootArn, CallerArns.TYPE_ACCOUNT, accountId, null);
     }
 
     /**
@@ -684,6 +752,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             for (Map<String, List<String>> targetContext : targetContexts) {
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
                         targetContext, resource, region, accountId, resourceOwnerAccountId);
+                if ("logs".equals(credentialScope)
+                        && ("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action))) {
+                    effectiveContext.put("aws:ResourceAccount", List.of(accountId));
+                }
                 if ("dynamodb".equals(credentialScope)) {
                     Map<String, List<String>> batchContext =
                             conditionContextResolver.dynamoDbBatchConditionContext(action, ctx, resource);
@@ -748,7 +820,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // Sorting the rest keeps the choice stable, since credentialScopes is a Set.of whose
         // iteration order changes per JVM run.
         if (descriptor.credentialScopes().contains(descriptor.externalKey())) {
-            return descriptor.externalKey();
+            return catalog.canonicalCredentialScope(descriptor.externalKey());
         }
         return descriptor.credentialScopes().stream()
                 .filter(scope -> scope.equals(catalog.canonicalCredentialScope(scope)))
@@ -918,7 +990,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             if (callerArns.isPresent()) {
                 caller = caller.withPrincipalArn(callerArns.get().callerArn());
                 conditionContext = new HashMap<>();
-                conditionContext.put("aws:PrincipalArn", List.of(callerArns.get().principalArn()));
+                callerArns.get().putPrincipalKeys(conditionContext);
             }
 
             ResourcePolicyDecision effectiveDecision = resourcePolicyDecision;
@@ -1151,17 +1223,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     private List<ResourcePolicyProvider.ResourcePolicy> resolveResourcePolicies(String credentialScope, String resourceArn) {
-        if (resourcePolicyProviders == null || resourcePolicyProviders.isUnsatisfied()) {
-            return List.of();
-        }
-        List<ResourcePolicyProvider.ResourcePolicy> policies = new ArrayList<>();
-        for (ResourcePolicyProvider provider : resourcePolicyProviders) {
-            List<ResourcePolicyProvider.ResourcePolicy> providerPolicies = provider.getResourcePolicies(credentialScope, resourceArn);
-            if (providerPolicies != null && !providerPolicies.isEmpty()) {
-                policies.addAll(providerPolicies);
-            }
-        }
-        return policies;
+        return ResourcePolicyProviders.policiesFor(resourcePolicyProviders, credentialScope, resourceArn);
     }
 
     /**
@@ -1379,7 +1441,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /** Whether the operation this request names is one AWS serves without credentials. */
     private boolean servesWithoutCredentials(ProtocolClaim claim, ContainerRequestContext ctx) {
         if (claim.protocol() == WireProtocol.AWS_QUERY) {
-            return NO_AUTH_QUERY_OPERATIONS.contains(queryOperation(ctx));
+            String operation = queryOperation(ctx);
+            return operation != null && NO_AUTH_QUERY_OPERATIONS.contains(operation);
         }
         if (claim.service() == null || claim.operation() == null) {
             // Nothing names the operation, so there is nothing to match against the list. Refusing
@@ -1394,12 +1457,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /**
      * The {@code Action} a Query request names, via the registry so the form body is read and put
-     * back the one way this codebase already does it. The scope passed in is a placeholder: for a
-     * Query request the registry returns {@code <scope>:<Action>} and only the suffix is wanted.
+     * back the one way this codebase already does it.
      */
     private String queryOperation(ContainerRequestContext ctx) {
-        String resolved = actionRegistry.resolve("", ctx);
-        return resolved == null ? null : resolved.substring(resolved.indexOf(':') + 1);
+        return actionRegistry.queryAction(ctx);
     }
 
     /**
@@ -1429,7 +1490,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (isCbor(protocol)) {
             return cborError(ctx, code, message, status);
         }
-        if (isFormEncoded(ctx.getMediaType())) {
+        if (protocol == WireProtocol.AWS_QUERY || isFormEncoded(ctx.getMediaType())) {
             return queryXmlError(queryCode, message, status);
         }
         return jsonError(code, message, status);

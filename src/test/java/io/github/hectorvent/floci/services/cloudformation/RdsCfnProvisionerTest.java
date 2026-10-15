@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbRoleAssociation;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
@@ -155,6 +156,30 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbInstance("mydb", "postgres", "16", "admin", "secret",
                 "appdb", "db.t3.small", 50, false, null, null, null,
                 null, false, false, null, Map.of(), "us-east-1");
+    }
+
+    @Test
+    void deletesANewDbInstanceWhoseAssociatedRolesAreRefused() {
+        DbInstance instance = mock(DbInstance.class);
+        when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
+        when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
+                any(), anyMap(), nullable(String.class))).thenReturn(instance);
+        when(rdsService.addRoleToDbInstance("us-east-1", "mydb", "arn:aws:iam::000000000000:role/a", "s3Import"))
+                .thenReturn(instance);
+        when(rdsService.addRoleToDbInstance("us-east-1", "mydb", "arn:aws:iam::000000000000:role/b", "s3Import"))
+                .thenThrow(new AwsException("InvalidParameterValue", "s3Import is not supported here", 400));
+
+        StackResource r = provision("Db", "AWS::RDS::DBInstance", """
+                {"DBInstanceIdentifier":"mydb","Engine":"postgres","MasterUsername":"admin",
+                 "MasterUserPassword":"secret","AssociatedRoles":[
+                   {"RoleArn":"arn:aws:iam::000000000000:role/a","FeatureName":"s3Import"},
+                   {"RoleArn":"arn:aws:iam::000000000000:role/b","FeatureName":"s3Import"}]}
+                """);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("s3Import is not supported here"), r.getStatusReason());
+        verify(rdsService).deleteDbInstance("mydb", "us-east-1");
     }
 
     @Test
@@ -1450,6 +1475,92 @@ class RdsCfnProvisionerTest {
         verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
         assertFalse(provisioner.hasReplacementUpdate(r), "nothing is owed to the cleanup");
         assertFalse(provisioner.rollbackUpdate(r), "there is no replacement to undo");
+    }
+
+    @Test
+    void rolledBackDbClusterReplacementPutsTheRolesRecordBack() {
+        // The replacement records its template's roles; rolling it back to the prior cluster must
+        // bring back the prior record too, or the next update removes roles by the wrong list.
+        priorUnnamedCluster("provisioned", false);
+        createDbClusterEchoesRequestedId();
+        when(rdsService.addRolesToNewDbCluster(any(), any(), anyList())).thenAnswer(invocation -> {
+            DbCluster withRoles = mock(DbCluster.class);
+            doReturn(invocation.getArgument(1)).when(withRoles).getDbClusterIdentifier();
+            return withRoles;
+        });
+        String priorRecord = "[{\"RoleArn\":\"arn:aws:iam::000000000000:role/prior\"}]";
+        StackResource r = provisionExisting("Cluster", "AWS::RDS::DBCluster", """
+                {"Engine":"aurora-postgresql","EngineMode":"serverless",
+                 "AssociatedRoles":[{"RoleArn":"arn:aws:iam::000000000000:role/replacement"}]}
+                """, "us-east-1", PRIOR_CLUSTER,
+                Map.of("DBClusterIdentifier", PRIOR_CLUSTER, "__FlociAssociatedRoles", priorRecord));
+        assertNotEquals(PRIOR_CLUSTER, r.getPhysicalId());
+        assertTrue(r.getAttributes().get("__FlociAssociatedRoles").contains("role/replacement"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(priorRecord, r.getAttributes().get("__FlociAssociatedRoles"));
+    }
+
+    @Test
+    void failedDbInstanceRoleUpdateUndoesItsOwnChanges() {
+        // The update removes the declared s3Import role, adds a Lambda role, then the next add is
+        // refused: the Lambda role comes off again and the s3Import role goes back on.
+        String old = "arn:aws:iam::000000000000:role/old";
+        String lambda = "arn:aws:iam::000000000000:role/lambda";
+        String refused = "arn:aws:iam::000000000000:role/refused";
+        DbInstance before = mock(DbInstance.class);
+        when(before.getDbInstanceIdentifier()).thenReturn("mydb");
+        when(before.getAssociatedRoles()).thenReturn(List.of(new DbRoleAssociation(old, "s3Import")));
+        DbInstance withoutOld = mock(DbInstance.class);
+        when(withoutOld.getDbInstanceIdentifier()).thenReturn("mydb");
+        DbInstance withLambda = mock(DbInstance.class);
+        when(withLambda.getDbInstanceIdentifier()).thenReturn("mydb");
+        when(withLambda.getAssociatedRoles()).thenReturn(List.of(new DbRoleAssociation(lambda, "Lambda")));
+        when(rdsService.getDbInstance("mydb")).thenReturn(before);
+        when(rdsService.modifyDbInstance(eq("mydb"), any(), any(), any())).thenReturn(before);
+        when(rdsService.removeRoleFromDbInstance("us-east-1", "mydb", old, "s3Import")).thenReturn(withoutOld);
+        when(rdsService.addRoleToDbInstance("us-east-1", "mydb", lambda, "Lambda")).thenReturn(withLambda);
+        when(rdsService.addRoleToDbInstance("us-east-1", "mydb", refused, "s3Export"))
+                .thenThrow(new AwsException("InvalidDBInstanceState", "not available", 400));
+
+        StackResource r = provisionExisting("Db", "AWS::RDS::DBInstance", """
+                {"DBInstanceIdentifier":"mydb","Engine":"postgres","MasterUsername":"admin",
+                 "MasterUserPassword":"secret","AssociatedRoles":[
+                   {"RoleArn":"arn:aws:iam::000000000000:role/lambda","FeatureName":"Lambda"},
+                   {"RoleArn":"arn:aws:iam::000000000000:role/refused","FeatureName":"s3Export"}]}
+                """, "us-east-1", "mydb", Map.of("DBInstanceIdentifier", "mydb",
+                "__FlociAssociatedRoles", "[{\"RoleArn\":\"" + old + "\",\"FeatureName\":\"s3Import\"}]"));
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        InOrder undo = inOrder(rdsService);
+        undo.verify(rdsService).removeRoleFromDbInstance("us-east-1", "mydb", lambda, "Lambda");
+        undo.verify(rdsService).addRoleToDbInstance("us-east-1", "mydb", old, "s3Import");
+        verify(rdsService, never()).deleteDbInstance(any(), any());
+    }
+
+    @Test
+    void renamedDbInstanceKeepsItsPredecessorWhenTheNewRolesAreRefused() {
+        // The roles go on before the renamed instance's predecessor is deleted, so a refused list
+        // costs only the new instance.
+        DbInstance renamed = mock(DbInstance.class);
+        when(renamed.getDbInstanceIdentifier()).thenReturn("newdb");
+        when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+                anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
+                any(), anyMap(), nullable(String.class))).thenReturn(renamed);
+        when(rdsService.addRoleToDbInstance(any(), eq("newdb"), any(), any()))
+                .thenThrow(new AwsException("InvalidParameterValue", "feature not supported", 400));
+
+        StackResource r = provisionExisting("Db", "AWS::RDS::DBInstance", """
+                {"DBInstanceIdentifier":"newdb","Engine":"postgres","MasterUsername":"admin",
+                 "MasterUserPassword":"secret",
+                 "AssociatedRoles":[{"RoleArn":"arn:aws:iam::000000000000:role/a","FeatureName":"s3Import"}]}
+                """, "us-east-1", "olddb", Map.of("DBInstanceIdentifier", "olddb"));
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        verify(rdsService).deleteDbInstance("newdb", "us-east-1");
+        verify(rdsService, never()).deleteDbInstance("olddb");
+        verify(rdsService, never()).deleteDbInstance("olddb", "us-east-1");
     }
 
     @Test

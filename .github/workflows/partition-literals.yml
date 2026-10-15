@@ -108,6 +108,11 @@ jobs:
       - name: Check the vendored IAM action resource map is well-formed
         run: make iam-action-resources-check
 
+      # And for the map of operations AWS authorizes under another action's name: a malformed
+      # entry would authorize a request as an action AWS does not check for it.
+      - name: Check the vendored map of operations to their IAM actions is well-formed
+        run: make iam-authorized-actions-check
+
       # Also offline: the service-linked role table is checked against the vendored managed
       # policy documents in the repository, never against AWS. The half that comes from a
       # recorded create cannot be re-derived without the snapshot, which is why every row in

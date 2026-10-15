@@ -143,27 +143,16 @@ class OpenSearchTest {
 
     @Test
     @Order(7)
-    void domainEndpointReachable() {
+    void domainEndpointReachable() throws InterruptedException {
         if (domainEndpoint == null || domainEndpoint.isBlank()) {
             // Mock mode: endpoint is empty — skip HTTP probe
             return;
         }
 
-        // Wait for domain to be ready (processing = false)
-        long start = System.currentTimeMillis();
-        boolean ready = false;
-        while (System.currentTimeMillis() - start < 180000) { // 3 minutes timeout
-            DescribeDomainResponse response = opensearch.describeDomain(DescribeDomainRequest.builder()
-                    .domainName(DOMAIN_NAME)
-                    .build());
-            if (!response.domainStatus().processing()) {
-                ready = true;
-                break;
-            }
-            try { Thread.sleep(5000); } catch (InterruptedException e) {}
-        }
-
-        assertThat(ready).as("Domain did not become ready in time").isTrue();
+        TestFixtures.await(() -> !opensearch.describeDomain(DescribeDomainRequest.builder()
+                        .domainName(DOMAIN_NAME)
+                        .build()).domainStatus().processing(),
+                DOMAIN_NAME, "processing to finish", 180_000_000_000L, TestFixtures.isRealAws() ? 5_000 : 250);
 
         try {
             HttpURLConnection conn = (HttpURLConnection)

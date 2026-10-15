@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
@@ -14,6 +15,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.MediaType;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -43,6 +45,9 @@ public class ResourceArnBuilder {
 
     /** What a service-linked role deletion task identifier starts with; see its resolver. */
     private static final String DELETION_TASK_PREFIX = "task" + ServiceLinkedRoles.PATH;
+
+    /** Reads the CBOR bodies the RPC v2 and {@code x-amz-cbor-1.1} paths carry. */
+    private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
 
     private final ObjectMapper objectMapper;
     /**
@@ -90,6 +95,23 @@ public class ResourceArnBuilder {
             case "iam"            -> buildIamArns(ctx, region, accountId);
             default               -> List.of("*");
         };
+    }
+
+    /** Uses the serving operation, not an independently parsed target header. */
+    public List<String> buildLogStreamResources(String action, ContainerRequestContext ctx,
+                                                 String region, String accountId, String partition) {
+        if (!("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action))) {
+            return List.of("*");
+        }
+        JsonNode body = readJsonBody(ctx);
+        if (body == null) {
+            return List.of("*");
+        }
+        // Match the handler's coercion and raw names, including whitespace and numeric values.
+        String group = body.path("logGroupName").asText();
+        String stream = body.path("logStreamName").asText();
+        return List.of(new AwsArnUtils.Arn(partition, "logs", region, accountId,
+                "log-group:" + group + ":log-stream:" + stream).toString());
     }
 
     // ── IAM ─────────────────────────────────────────────────────────────────────
@@ -443,7 +465,7 @@ public class ResourceArnBuilder {
         if (accessKeyId == null || accessKeyId.isBlank() || iamService == null) {
             return List.of("*");
         }
-        return iamService.get().findUserNameByAccessKeyId(accessKeyId)
+        return iamService.get().findAccessKeyOwnerInThisAccount(accessKeyId)
                 .flatMap(userName -> storedIamEntity("user", userName, accountId))
                 .map(stored -> List.of(stored.arn()))
                 .orElse(List.of("*"));
@@ -574,6 +596,10 @@ public class ResourceArnBuilder {
      * given.
      */
     private String buildLambdaArn(String path, ContainerRequestContext ctx, String region, String accountId) {
+        String webFunctionArn = webFunctionArn(path, region, accountId);
+        if (webFunctionArn != null) {
+            return webFunctionArn;
+        }
         String executionArn = durableExecutionArn(path);
         if (executionArn == null) {
             executionArn = durableCallbackExecutionArn(path);
@@ -607,6 +633,51 @@ public class ResourceArnBuilder {
             // A reference Lambda refuses, which its handler answers with a 400 before acting on anything.
             return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name).toString();
         }
+    }
+
+    /**
+     * The resource of a Lambda Web Functions route. An action on a revision or an endpoint is evaluated
+     * against that child's ARN; an action on the function, a create of a revision or endpoint, the list of
+     * either, and the tag and resource-policy routes against the function's (Lambda Developer Guide,
+     * "Lambda Web Function permissions"). ListWebFunctions, GetWebAccountSettings and CreateWebFunction
+     * name no resource. Null for every other Lambda route.
+     */
+    private static String webFunctionArn(String path, String region, String accountId) {
+        if (!path.startsWith("/2025-03-07/")) {
+            return null;
+        }
+        String rest = path.substring("/2025-03-07/".length());
+        if (rest.startsWith("tags/") || rest.startsWith("resource-policy/")) {
+            String arn = rest.substring(rest.indexOf('/') + 1);
+            return arn.startsWith("arn:") ? arn : "*";
+        }
+        if (!rest.startsWith("web-functions/")) {
+            return "*";
+        }
+        List<String> segments = new ArrayList<>(List.of(rest.substring("web-functions/".length()).split("/")));
+        if (segments.isEmpty() || segments.getFirst().isEmpty()) {
+            return "*";
+        }
+        String functionArn;
+        if (segments.getFirst().startsWith("arn:") && segments.size() > 1) {
+            // A function ARN carries one slash: arn:...:web-function/<name>.
+            functionArn = segments.get(0) + "/" + segments.get(1);
+            segments.subList(0, 2).clear();
+        } else {
+            functionArn = AwsArnUtils.Arn.of("lambda", region, accountId,
+                    "web-function/" + segments.getFirst()).toString();
+            segments.removeFirst();
+        }
+        if (segments.size() >= 2 && ("revisions".equals(segments.get(0)) || "endpoints".equals(segments.get(0)))) {
+            String child = "revisions".equals(segments.get(0)) ? "revision" : "endpoint";
+            String id = String.join("/", segments.subList(1, segments.size()));
+            if (id.startsWith("arn:") && id.contains("/" + child + "/")) {
+                // A revision or endpoint ARN ends in its id: arn:...:web-function/<name>/revision/<id>.
+                id = id.substring(id.lastIndexOf('/') + 1);
+            }
+            return functionArn + "/" + child + "/" + id;
+        }
+        return functionArn;
     }
 
     /**
@@ -828,7 +899,7 @@ public class ResourceArnBuilder {
         return io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.extractTable(statement);
     }
 
-    private String toDynamoDbTableArn(String tableName, String region, String accountId) {
+    public static String toDynamoDbTableArn(String tableName, String region, String accountId) {
         if (AwsArnUtils.isArnFor(tableName, "dynamodb")) {
             return tableName;
         }
@@ -929,12 +1000,24 @@ public class ResourceArnBuilder {
             return null;
         }
         try {
-            JsonNode node = objectMapper.readTree(body);
+            JsonNode node = (isCbor(ctx.getMediaType()) ? CBOR_MAPPER : objectMapper).readTree(body);
             ctx.setProperty("floci.bufferedJsonBody", node);
             return node;
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * A CBOR body, which names its resources in the same members a JSON body does. Both CBOR
+     * content types arrive as {@code application/cbor}: {@code AwsCborContentTypeFilter} rewrites
+     * {@code x-amz-cbor-1.1} before routing.
+     */
+    private static boolean isCbor(MediaType mediaType) {
+        return mediaType != null
+                && "application".equalsIgnoreCase(mediaType.getType())
+                && ("cbor".equalsIgnoreCase(mediaType.getSubtype())
+                        || "x-amz-cbor-1.1".equalsIgnoreCase(mediaType.getSubtype()));
     }
 
     private String extractSegmentAfter(String path, String segment) {

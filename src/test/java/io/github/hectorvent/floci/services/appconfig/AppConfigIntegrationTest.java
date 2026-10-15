@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appconfig;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
@@ -34,6 +35,7 @@ class AppConfigIntegrationTest {
     private static String emptyProfileId;
     private static String deploymentNextToken;
     private static String secondDeploymentNextToken;
+    private static String variantFlagsSessionBody;
 
     @BeforeAll
     static void setup() {
@@ -1120,5 +1122,94 @@ class AppConfigIntegrationTest {
                 .queryParam("configuration_token", token)
                 .when().get("/configuration")
                 .then().statusCode(404);
+    }
+
+    @Test @Order(52)
+    void getLatestConfigurationServesIonForAQuotedFeatureFlagsType() {
+        getLatestVariantFlagsAccepting("application/ion; type=\"AWS.AppConfig.FeatureFlags\", */*;q=0.1")
+                .header("Content-Type", startsWith("application/ion"))
+                .header("Content-Type", containsString("type=AWS.AppConfig.FeatureFlags"));
+    }
+
+    @Test @Order(53)
+    void getLatestConfigurationServesIonForAnUnquotedFeatureFlagsType() {
+        getLatestVariantFlagsAccepting("application/ion; type=AWS.AppConfig.FeatureFlags, */*;q=0.1")
+                .header("Content-Type", startsWith("application/ion"))
+                .header("Content-Type", containsString("type=AWS.AppConfig.FeatureFlags"));
+    }
+
+    @Test @Order(54)
+    void getLatestConfigurationServesIonForAQuotedFeatureFlagsTypeWithAQuotedPair() {
+        getLatestVariantFlagsAccepting("application/ion; type=\"AWS.AppConfig.Feature\\Flags\", */*;q=0.1")
+                .header("Content-Type", startsWith("application/ion"))
+                .header("Content-Type", containsString("type=AWS.AppConfig.FeatureFlags"));
+    }
+
+    @Test @Order(55)
+    void getLatestConfigurationServesStoredJsonForAQuotedOtherType() {
+        getLatestVariantFlagsAccepting("application/ion; type=\"AWS.AppConfig.Other\", */*;q=0.1")
+                .header("Content-Type", startsWith("application/json"))
+                .body("values.promo._variants[0].name", equalTo("uk"));
+    }
+
+    /** Polls a new session on a feature flag profile with variants, deployed on first use. */
+    private static ValidatableResponse getLatestVariantFlagsAccepting(String accept) {
+        if (variantFlagsSessionBody == null) {
+            variantFlagsSessionBody = deployVariantFlags();
+        }
+        String token = given()
+                .contentType(ContentType.JSON).body(variantFlagsSessionBody)
+                .when().post("/configurationsessions")
+                .then().statusCode(201)
+                .extract().path("InitialConfigurationToken");
+
+        return given()
+                .header("Accept", accept)
+                .queryParam("configuration_token", token)
+                .when().get("/configuration")
+                .then().statusCode(200)
+                .header("Version-Label", equalTo("1"));
+    }
+
+    /** Deploys a feature flag profile whose one flag has variants; returns the StartConfigurationSession body. */
+    private static String deployVariantFlags() {
+        String app = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"quoted-ion-type-app\"}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+        String env = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"test\"}")
+                .when().post("/applications/" + app + "/environments")
+                .then().statusCode(201)
+                .extract().path("Id");
+        String profile = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"flags\",\"LocationUri\":\"hosted\",\"Type\":\"AWS.AppConfig.FeatureFlags\"}")
+                .when().post("/applications/" + app + "/configurationprofiles")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        String content = "{\"flags\":{},\"version\":\"1\",\"values\":{\"promo\":{\"_variants\":["
+                + "{\"attributeValues\":{\"storeId\":\"uk\"},\"enabled\":true,\"name\":\"uk\","
+                + "\"rule\":\"(eq $storeId \\\"uk\\\")\"},"
+                + "{\"enabled\":false,\"name\":\"default\"}]}}}";
+        given()
+                .header("Content-Type", "application/json")
+                .body(content.getBytes(StandardCharsets.UTF_8))
+                .when().post("/applications/" + app + "/configurationprofiles/" + profile
+                        + "/hostedconfigurationversions")
+                .then().statusCode(201);
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"ConfigurationProfileId\":\"" + profile + "\",\"ConfigurationVersion\":\"1\","
+                        + "\"DeploymentStrategyId\":\"AppConfig.AllAtOnce\"}")
+                .when().post("/applications/" + app + "/environments/" + env + "/deployments")
+                .then().statusCode(201);
+
+        return "{\"ApplicationIdentifier\":\"" + app + "\",\"EnvironmentIdentifier\":\"" + env + "\","
+                + "\"ConfigurationProfileIdentifier\":\"" + profile + "\"}";
     }
 }

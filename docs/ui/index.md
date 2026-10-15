@@ -49,7 +49,7 @@ All keys live under `floci.services.ui.*`, so `FLOCI_SERVICES_UI_*` as environme
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_UI_ENABLED` | `true` | Enable the console sidecar |
-| `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:latest` | Console image to run |
+| `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:0.7.0` | Console image to run |
 | `FLOCI_SERVICES_UI_CONTAINER_NAME` | `floci-ui` | Name of the sidecar container |
 | `FLOCI_SERVICES_UI_PORT` | `4500` | Host port the console is published on |
 | `FLOCI_SERVICES_UI_BIND_ADDRESS` | _(none)_ | Host interface that port is published on (see [Ports](#ports)) |
@@ -156,7 +156,7 @@ previous run that it is pointing at a dead address.
 !!! note "The page says the image is unavailable"
 
     Floci could not pull the console image. Pull it yourself to see the real error:
-    `docker pull floci/floci-ui:latest`.
+    `docker pull floci/floci-ui:0.7.0`.
 
 !!! note "The page says Floci could not reach the container runtime"
 

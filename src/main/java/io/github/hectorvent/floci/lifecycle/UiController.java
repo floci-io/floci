@@ -16,9 +16,10 @@ import jakarta.ws.rs.core.Response;
  * Browser-facing endpoints that launch and redirect to the floci-ui sidecar.
  *
  * <ul>
- *   <li>{@code GET /_floci/ui} — kicks off the sidecar start (async) and returns a
- *       small interstitial page that polls {@code /status} and redirects when ready.</li>
- *   <li>{@code GET /_floci/ui/status} — JSON {@code {ready, url, error}} the
+ *   <li>{@code GET /_floci/ui}: kicks off the sidecar start (async) and returns the
+ *       landing page, which shows its wait view on this path: it polls {@code /status}
+ *       and redirects when ready.</li>
+ *   <li>{@code GET /_floci/ui/status}: JSON {@code {ready, url, error}} the
  *       interstitial polls.</li>
  * </ul>
  */
@@ -38,7 +39,7 @@ public class UiController {
     @Produces(MediaType.TEXT_HTML)
     public Response ui() {
         uiManager.ensureStartedAsync();
-        return Response.ok(uiPages.startingHtml()).build();
+        return Response.ok(uiPages.landingHtml()).build();
     }
 
     @RegisterForReflection
@@ -62,6 +63,13 @@ public class UiController {
     private static String redirectUrl(String host, int port) {
         String hostname = (host == null || host.isBlank()) ? "localhost" : host;
         int colon = hostname.indexOf(':');
+        if (hostname.startsWith("[")) {
+            int closingBracket = hostname.indexOf(']');
+            if (closingBracket == hostname.length() - 1
+                    || (closingBracket >= 0 && hostname.charAt(closingBracket + 1) == ':')) {
+                colon = hostname.indexOf(':', closingBracket + 1);
+            }
+        }
         if (colon >= 0) {
             hostname = hostname.substring(0, colon);
         }

@@ -17,14 +17,26 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Reads an npm publish envelope as a stream and keeps only what the republish check needs. Jackson
- * decodes each attachment's base64 {@code data} straight into a SHA-512 digest, so the tarball is never
- * held in memory. Any structure this scanner does not expect throws, and callers treat a throw as not
- * confirmable and forward the request unchanged.
+ * Reads an npm publish envelope as a stream and keeps only what the republish check, plus
+ * {@code GetPackageVersionReadme}'s own capture-at-publish-time accounting, needs. Jackson
+ * decodes each attachment's base64 {@code data} straight into a SHA-512 digest, so the tarball is
+ * never held in memory. Any structure this scanner does not expect throws, and callers treat a
+ * throw as not confirmable and forward the request unchanged.
  */
 final class NpmPublishEnvelopeScanner {
 
-    record Version(String tarball, String integrity) {}
+    /**
+     * {@code readme} is each version's own, exactly as a real npm client sends it (confirmed
+     * against a real captured publish fixture): a real {@code npm publish} always sends one, even
+     * when the package has no README.md at all ({@code "ERROR: No README data found!"}, npm's own
+     * literal placeholder text, not an absent field). {@code null} only for a client that omits
+     * the field outright. Deliberately not sourced from Verdaccio's own packument later: confirmed
+     * directly against a live Verdaccio container that it hoists {@code readme} to the top level
+     * only (the latest published version, truncated to 64K, matching real npmjs.org's own
+     * documented response shape) and drops the per-version field entirely, so this is the only
+     * point where a specific version's own readme is still available at all.
+     */
+    record Version(String tarball, String integrity, String readme) {}
 
     /** {@code size} is the attachment's real, decoded byte count, counted alongside its digest. */
     record Attachment(String integrity, long size) {}
@@ -102,6 +114,18 @@ final class NpmPublishEnvelopeScanner {
                         parser.skipChildren();
                     }
                 });
+            } else if (field.equals("readme")) {
+                // Best-effort: unlike dist.tarball/integrity, which a confirmable envelope must
+                // have, a readme missing or of the wrong shape (null, an object, ...) must not
+                // reject the whole envelope the way an actually malformed required field does.
+                // Before this field existed at all, any shape here fell to the default branch's
+                // plain skipChildren() below; this keeps that same tolerance for this one field
+                // now that it is read instead of skipped.
+                if (parser.currentToken() == JsonToken.VALUE_STRING) {
+                    fields.put("readme", parser.getText());
+                } else {
+                    parser.skipChildren();
+                }
             } else {
                 parser.skipChildren();
             }
@@ -175,7 +199,8 @@ final class NpmPublishEnvelopeScanner {
         Map<String, Version> versions = new HashMap<>();
         for (Map.Entry<String, Map<String, String>> entry : versionFields.entrySet()) {
             Map<String, String> fields = entry.getValue();
-            versions.put(entry.getKey(), new Version(fields.get("tarball"), fields.get("integrity")));
+            versions.put(entry.getKey(), new Version(fields.get("tarball"), fields.get("integrity"),
+                    fields.get("readme")));
         }
         return new Envelope(name, distTags, versions, attachments);
     }

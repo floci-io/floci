@@ -19,7 +19,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -27,7 +26,6 @@ import java.util.Map;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -154,6 +152,10 @@ class CognitoResourceServerCfnIntegrationTest {
             doCallRealMethod().when(cognitoService).deleteResourceServer(failedPool, IDENTIFIER);
         }
         clearInvocations(cognitoService);
+
+        continueUpdateRollback("UPDATE_ROLLBACK_COMPLETE");
+        assertServerGone(failedPool, IDENTIFIER);
+        assertServer(originalPool, IDENTIFIER, "Original API", "read");
 
         updateStack(template(finalPool, IDENTIFIER, "Final API", "admin"), "UPDATE_COMPLETE");
 
@@ -433,10 +435,7 @@ class CognitoResourceServerCfnIntegrationTest {
         deleteServer(pool);
         createServer(pool, "Out of band API", "admin");
 
-        ObjectNode nextAttempt = template(pool, IDENTIFIER, "Next attempt", "write");
-        addFailingDependentResource(nextAttempt);
-        nextAttempt.withObject("/Resources/Broken/Properties").put("ClientName", "second-broken");
-        updateStack(nextAttempt, "UPDATE_ROLLBACK_COMPLETE");
+        continueUpdateRollback("UPDATE_ROLLBACK_COMPLETE");
         assertServer(pool, IDENTIFIER, "Original API", "read");
         cloudFormation("DeleteStack", null);
         CfnStackWaits.awaitStackDeleted(stack);
@@ -459,6 +458,7 @@ class CognitoResourceServerCfnIntegrationTest {
         } finally {
             doCallRealMethod().when(cognitoService).deleteResourceServer(replacementPool, IDENTIFIER);
         }
+        continueUpdateRollback("UPDATE_ROLLBACK_COMPLETE", "Server");
         deleteServer(replacementPool);
         doAnswer(invocation -> {
             cognitoService.describeResourceServer(replacementPool, IDENTIFIER);
@@ -495,6 +495,7 @@ class CognitoResourceServerCfnIntegrationTest {
         } finally {
             doCallRealMethod().when(cognitoService).deleteResourceServer(historicalPool, IDENTIFIER);
         }
+        continueUpdateRollback("UPDATE_ROLLBACK_COMPLETE", "Server");
         assertServer(historicalPool, IDENTIFIER, "Failed replacement", "write");
         deleteServer(originalPool);
         clearInvocations(cognitoService);
@@ -521,7 +522,7 @@ class CognitoResourceServerCfnIntegrationTest {
     }
 
     @Test
-    void aPendingRollbackSurvivesFailedUpdatesUntilItCanBeRestored() throws Exception {
+    void aPendingRollbackSurvivesFailedRetriesUntilItCanBeRestored() throws Exception {
         String pool = createPool();
         createStack(template(pool, IDENTIFIER, "Original API", "read"));
         doThrow(new AwsException("InternalErrorException", "temporary restore failure", 500))
@@ -533,18 +534,12 @@ class CognitoResourceServerCfnIntegrationTest {
             updateStack(firstAttempt, "UPDATE_ROLLBACK_FAILED");
             assertServer(pool, IDENTIFIER, "First attempt", "write");
 
-            ObjectNode nextAttempt = template(pool, IDENTIFIER, "Next attempt", "admin");
-            addFailingDependentResource(nextAttempt);
-            nextAttempt.withObject("/Resources/Broken/Properties").put("ClientName", "broken-next");
-            updateStack(nextAttempt, "UPDATE_ROLLBACK_FAILED");
+            continueUpdateRollback("UPDATE_ROLLBACK_FAILED");
             assertServer(pool, IDENTIFIER, "First attempt", "write");
 
             doCallRealMethod().when(cognitoService)
                     .updateResourceServer(eq(pool), eq(IDENTIFIER), eq("Original API"), any());
-            ObjectNode recoveryAttempt = template(pool, IDENTIFIER, "Recovery attempt", "write");
-            addFailingDependentResource(recoveryAttempt);
-            recoveryAttempt.withObject("/Resources/Broken/Properties").put("ClientName", "broken-recovery");
-            updateStack(recoveryAttempt, "UPDATE_ROLLBACK_COMPLETE");
+            continueUpdateRollback("UPDATE_ROLLBACK_COMPLETE");
             assertServer(pool, IDENTIFIER, "Original API", "read");
             assertEquals(IDENTIFIER, output("ServerRef"));
         } finally {
@@ -554,7 +549,7 @@ class CognitoResourceServerCfnIntegrationTest {
     }
 
     @Test
-    void skippingAPendingRollbackPreservesRestorationAndBlocksAnotherUpdate() throws Exception {
+    void anUpdateThatLeavesAPendingRollbackAloneIsRefused() throws Exception {
         String pool = createPool();
         createStack(template(pool, IDENTIFIER, "Original API", "read"));
         doThrow(new AwsException("InternalErrorException", "temporary restore failure", 500))
@@ -569,23 +564,16 @@ class CognitoResourceServerCfnIntegrationTest {
             ObjectNode outputsOnly = firstAttempt.deepCopy();
             outputsOnly.withObject("/Resources").remove("Broken");
             outputsOnly.withObject("/Outputs").putObject("Marker").put("Value", "unchanged-resource");
-            cloudFormation("UpdateStack", outputsOnly);
-            await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                    assertEquals("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", stackStatus(),
-                            "Skipping the resource must not discard its pending restoration"));
-            assertServer(pool, IDENTIFIER, "First attempt", "write");
-            assertEquals(IDENTIFIER, output("ServerRef"));
-
-            ObjectNode nextAttempt = template(pool, IDENTIFIER, "Next attempt", "admin");
             String error = given().contentType("application/x-www-form-urlencoded")
                     .header("Authorization", CFN_AUTH).formParam("Action", "UpdateStack")
-                    .formParam("StackName", stack).formParam("TemplateBody", nextAttempt.toString())
+                    .formParam("StackName", stack).formParam("TemplateBody", outputsOnly.toString())
                     .post("/").then().statusCode(400).extract().asString();
             assertEquals("ValidationError", XmlParser.extractFirst(error, "Code", null));
             assertTrue(XmlParser.extractFirst(error, "Message", "")
-                    .contains("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS"));
-            assertEquals("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", stackStatus());
+                    .contains("UPDATE_ROLLBACK_FAILED"));
+            assertEquals("UPDATE_ROLLBACK_FAILED", stackStatus());
             assertServer(pool, IDENTIFIER, "First attempt", "write");
+            assertEquals(IDENTIFIER, output("ServerRef"));
 
             cloudFormation("DeleteStack", null);
             CfnStackWaits.awaitStackDeleted(stack);
@@ -726,6 +714,19 @@ class CognitoResourceServerCfnIntegrationTest {
 
     private void updateStack(ObjectNode template, String expectedStatus) {
         cloudFormation("UpdateStack", template);
+        assertEquals(expectedStatus, CfnStackWaits.awaitTerminal(stack).status());
+    }
+
+    private void continueUpdateRollback(String expectedStatus, String... resourcesToSkip) {
+        RequestSpecification request = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "ContinueUpdateRollback")
+                .formParam("StackName", stack);
+        for (int i = 0; i < resourcesToSkip.length; i++) {
+            request.formParam("ResourcesToSkip.member." + (i + 1), resourcesToSkip[i]);
+        }
+        request.when().post("/").then().statusCode(200);
         assertEquals(expectedStatus, CfnStackWaits.awaitTerminal(stack).status());
     }
 

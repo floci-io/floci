@@ -100,6 +100,10 @@ services:
       - TagResourceByBody
       - TagResourcePut
       - UntagResourceByQuery
+  - service: lambdaweb
+    doc: docs/services/lambda-web-functions.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/lambdaweb/LambdaWebController.java, mode: rest }
   - service: marketplace
     doc: docs/services/marketplace.md
     sources:

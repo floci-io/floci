@@ -12,11 +12,12 @@ import java.util.List;
 import static io.restassured.RestAssured.given;
 
 /**
- * Takes an IAM user or an S3 bucket that an enforcement test created back out of the shared
- * application, and makes the users such a test signs as ({@link #createUser}, {@link #auth}),
- * registering each one's removal as it goes. A {@code @QuarkusTest} shares one application with every other test class, so a
- * fixture left behind outlives the class that made it and is visible to the next class that lists
- * users or buckets unscoped. Registered with {@link PartitionCleanup} as each fixture is made.
+ * Takes an IAM user or an S3 bucket that a test created back out of the shared application, and
+ * makes the users an enforcement test signs as ({@link #createUser}, {@link #auth}) and the SNS
+ * topics it publishes to ({@link #createTopic}), registering each one's removal as it goes. A {@code @QuarkusTest} shares one application with every other
+ * test class, so a fixture left behind outlives the class that made it and is visible to the next
+ * class that lists users or buckets unscoped. Registered with {@link PartitionCleanup} as each
+ * fixture is made.
  *
  * <p>Both read back what is attached rather than taking it as an argument, and both return
  * quietly when the thing is not there. That is what makes them safe to register before the create
@@ -252,6 +253,29 @@ public final class EnforcementFixtures {
         s3(port, authorization).when().delete("/" + bucket).then().statusCode(204);
     }
 
+    /**
+     * Creates an SNS topic in the account {@code authorization} signs for, registering its deletion
+     * with {@code cleanup} as soon as it exists, and returns its ARN.
+     *
+     * @param authorization an SNS-scoped header for the account the topic belongs to
+     */
+    public static String createTopic(PartitionCleanup cleanup, int port, String authorization, String name) {
+        String topicArn = query(port, authorization, "CreateTopic", "Name", name)
+                .statusCode(200).extract().path("CreateTopicResponse.CreateTopicResult.TopicArn");
+        cleanup.register(() -> query(port, authorization, "DeleteTopic", "TopicArn", topicArn).statusCode(200));
+        return topicArn;
+    }
+
+    /**
+     * Replaces a topic's access policy.
+     *
+     * @param authorization an SNS-scoped header for the topic's owner
+     */
+    public static void setTopicPolicy(int port, String authorization, String topicArn, String policy) {
+        query(port, authorization, "SetTopicAttributes", "TopicArn", topicArn,
+                "AttributeName", "Policy", "AttributeValue", policy).statusCode(200);
+    }
+
     private static void addVersions(List<ObjectVersion> page, XmlPath listing, String element) {
         List<String> keys = listing.getList("ListVersionsResult." + element + ".Key", String.class);
         List<String> versionIds = listing.getList("ListVersionsResult." + element + ".VersionId", String.class);
@@ -265,6 +289,12 @@ public final class EnforcementFixtures {
 
     private static ValidatableResponse iam(int port, String authorization, String action,
                                            String... params) {
+        return query(port, authorization, action, params);
+    }
+
+    /** A Query-protocol request: the action and its parameters as form fields. */
+    private static ValidatableResponse query(int port, String authorization, String action,
+                                             String... params) {
         RequestSpecification request = given().port(port)
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", authorization)

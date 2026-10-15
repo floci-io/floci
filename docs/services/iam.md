@@ -145,6 +145,22 @@ policies are listed in name order so a `Marker` resumes where the previous page 
 | DeleteRolePolicy | Deletes an inline policy from a role. |
 | ListRolePolicies | Lists inline policy names stored on a role. |
 
+Inline policies share an aggregate size limit per principal: 2,048 characters for a user,
+5,120 for a group, and 10,240 for a role. Whitespace does not count. A replacement counts
+instead of the previous document with the same policy name; exceeding the limit returns
+`LimitExceeded` (HTTP 409) and preserves the stored policies. These limits match the
+[AWS IAM quotas](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html).
+
+When CloudFormation renames an inline policy, Floci releases its tracked old name on
+retained principals before writing the replacement. Failed updates restore the captured
+previous policies, including historical documents saved before these limits were enforced.
+Compensation checks the current principal, document and mutation ownership before restoration.
+A later write to the same policy prevents restoration even when it writes the same document;
+nested compensations can still unwind in reverse order. Mutation ownership lasts only within
+the current process and active rollback handles. Historical
+oversized documents can be restored only when the other policies still match their captured
+state. A failed compensation is reported as a rollback failure.
+
 ### Instance Profiles
 
 | Action | Description |
@@ -1098,15 +1114,35 @@ a Query `Action` field on it does not change the action it is checked as, and it
 still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
 the route's rule miss.
 
+A request that names its operation, in a Query `Action`, an `X-Amz-Target` header or a Smithy RPC v2
+path (`/service/<service>/operation/<operation>`), is authorized as the action AWS checks for that
+operation, which is usually the operation's own name. An RPC v2 call is checked as the service and
+operation in its path, the ones Floci runs, whatever its `smithy-protocol` header says, and an
+`X-Amz-Target` header on it does not change the action it is checked as. A CBOR body, on that path
+or on the `x-amz-cbor-1.1` one, names its resource and condition keys (a queue URL, a table name,
+`dynamodb:LeadingKeys`) the way a JSON body does, and they are read from it the same way. Where AWS
+authorizes an operation as a single action of another name, Floci does the same: `SendMessageBatch`
+is checked as `sqs:SendMessage` and `PublishBatch` as `sns:Publish`, so a policy granting the
+single-message action covers the batch call, and one naming the batch operation, which is not an
+IAM action, grants nothing. The mapping is taken from AWS's Service Reference and vendored in
+`src/main/resources/aws/iam-authorized-actions.json`. DynamoDB `TransactGetItems`, which AWS checks
+as `dynamodb:GetItem`, is checked item by item, as described under
+[Condition keys floci populates](#condition-keys-floci-populates): each `Get` as
+`dynamodb:GetItem` on its own table, with its own `dynamodb:LeadingKeys`.
+
 ### Resource-based policies
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries registered `ResourcePolicyProvider` SPI implementations (such as S3 bucket policies) during request authorization:
 
 - Resource policy statements are matched against the caller (`Principal` and `NotPrincipal` clauses), each principal type naming only its own kind of caller, as on AWS: `"*"` matches anyone; `{"AWS": "*"}` matches IAM identities and AWS services; any other `AWS` entry (a user, role, account id or account root) matches IAM identities only, and a role session matches a `Principal` naming its role through the role's own ARN, path included; `{"Service": "<name>"}` matches that service exactly. `{"CanonicalUser": "<id>"}`, which S3 bucket policies accept, names an account by its S3 canonical user ID and matches that account's IAM identities, as an account principal does; Floci's canonical ID for an account is the account id, as its S3 ACLs report it. `{"Service": "*"}`, which AWS does not accept, matches nothing, and `Federated` entries never match an IAM caller.
 - An explicit **Deny** in a resource policy overrides any allows.
+- A Deny statement's `NotPrincipal` spares an IAM caller only when it names the caller's account as well as the caller itself, the user, role or role session (the account alone for the account root), and never spares a caller that has a permissions boundary attached, as the IAM User Guide's "AWS JSON policy elements: NotPrincipal" describes: without the account, AWS "might deny access to the entire account", and with a boundary it "will always deny". An Allow with `NotPrincipal`, which Access Analyzer warns can grant to anonymous callers, grants everyone it does not name.
 - In cross-account scenarios or resource-controlled access, an explicit **Allow** in a resource policy grants access to the principal.
+- A statement that names the caller only through its account, by its id, its root ARN or its S3 canonical user ID, delegates to the account, as the IAM User Guide's "AWS account principals" describes: across accounts it is the resource owner's half of the grant, and within the account it grants nothing on its own, so the caller's identity policies have to allow the request. A statement naming the user, role or role session itself, or `"*"`, grants on its own within the account.
 - For detailed S3 bucket policy behavior and configuration, see [S3 Bucket Policy Enforcement](s3.md#bucket-policy-enforcement).
 - Lambda function policies, the statements `AddPermission` adds, take part the same way. An invoke of another account's function by ARN runs it in that account, so its function policy has to allow the caller as well; see [Function policies under IAM enforcement](lambda.md#function-policies-under-iam-enforcement).
+- SNS topic policies take part the same way for a request that names the topic in a JSON-protocol body; a topic with no policy set has the default one AWS gives a new topic. See [SNS](sns.md).
+- A call an AWS service makes to another service's resource on its own behalf, such as SES publishing an event or a notification to an SNS topic, has no IAM principal, so the target's resource policy decides it alone and has to allow the calling service, through `{"Service": "<service>.amazonaws.com"}` or `{"AWS": "*"}`. A target with no policy refuses it. Its request context holds `aws:PrincipalIsAWSService` (`true`), `aws:PrincipalServiceName` and `aws:PrincipalServiceNamesList`, `aws:SourceArn` and `aws:SourceAccount` for the resource whose configuration triggered the call, `aws:ResourceAccount` and `aws:RequestedRegion`, and none of the keys that describe an IAM principal. A publish to an SNS topic from SES also carries `aws:SourceOwner`, the key the SNS Developer Guide lists SES among the services setting, which is what the default topic policy checks, so that policy admits SES acting for the topic owner's account and no other. SES is the one service checked this way so far; see [SES IAM enforcement](ses.md#iam-enforcement).
 
 ### Service control policies (SCPs)
 
@@ -1157,6 +1193,15 @@ These identities always bypass enforcement (backward-compatible defaults):
 | Credential the filter cannot map to policies, such as a session carrying no role ARN | Allowed: it is a real credential, so rejecting it would refuse an authenticated caller |
 | No `Authorization` header | **Rejected** for a JSON, CBOR or Query management call, unless AWS serves the operation without credentials. Allowed for a REST request such as a health check (see [Unsigned requests](#unsigned-requests)) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
+
+**CloudWatch Logs streams.** `logs:CreateLogStream` and `logs:DeleteLogStream` evaluate the
+specific log-stream ARN, so policies can allow or deny one stream within a group. Their
+`aws:ResourceTag/<key>` conditions read the owning log group's current tags in the request's
+account and region. Both stream operations check the documented group and stream name constraints
+before changing storage, preventing delimiter aliases from targeting another stream. Other Logs
+actions retain their existing wildcard resource evaluation.
+These checks also apply to deletion: legacy streams with names containing `:` or `*` cannot be
+deleted through `DeleteLogStream`. Existing stored names are not automatically migrated.
 
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
 from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
@@ -1234,7 +1279,65 @@ account key carries no identity policies of its own.
 - **Action/Resource patterns**: literal matches, wildcards (`*`, `?`), and `NotAction`/`NotResource` blocks.
   Action names match without regard to case, resource ARNs match case-sensitively, as on AWS.
 - **Conditions**: support for `Condition` blocks with multiple operators.
+- **Policy variables**: `${...}` placeholders in a `Resource` pattern or a `Condition` value,
+  resolved from the request context.
 - **Effects**: `Allow` and `Deny`.
+
+#### Policy variables
+
+A `${...}` placeholder in a `Resource` pattern or a `Condition` value is resolved against the
+request context before it is matched, so a statement scoped to
+`arn:aws:iam::*:user/${aws:username}` grants the caller their own user and nobody else's. That is
+how AWS writes its own `IAMUserChangePassword` policy, and 244 of the 1,586
+[managed policies](#aws-managed-policies) floci vendors carry at least one variable: of the 1,635
+occurrences in them, 1,443 sit in a `Condition` value and 192 in a `Resource`.
+
+Substitution needs `"Version": "2012-10-17"`. Under the older `2008-10-17`, which is also the
+default when the element is absent, the user guide says variables "are instead treated as literal
+strings in the policy", and floci matches them as written.
+
+The rest of the rules, all from the user guide:
+
+- In a `Resource` or `NotResource` ARN a variable resolves only in the resource portion, the part
+  after the fifth colon: a variable "can't ... replace parts of the ARN before the fifth colon,
+  such as the service or the account", and one written there stays literal text and matches
+  nothing. One vendored managed policy,
+  `AmazonTimestreamInfluxDBServiceRolePolicy`, writes `arn:*:kms:*:${aws:PrincipalAccount}:key/*`,
+  in the account field, so that statement grants nothing under enforcement. floci follows the
+  documented rule rather than the one policy that reads past it.
+- In a `Condition` a variable resolves for the string and ARN operators only: `StringEquals`,
+  `StringNotEquals`, `StringLike`, `StringNotLike`, their `IgnoreCase` forms, and `ArnEquals`,
+  `ArnLike` and their negated forms. A variable is not supported with `Numeric`, `Date`, `Bool`,
+  `IpAddress` or `Null`, so there the value is compared as written.
+- A variable whose key has no value leaves the whole value effectively null. In `Resource` the
+  pattern then "will not match any resource", and in `NotResource` that same rule means it
+  excludes nothing, so the statement covers every resource. In a `Condition`, `StringEquals` and
+  `StringLike` do not match while the inverted `StringNotEquals` and `StringNotLike` do.
+- Key names are case-insensitive and hold no space. The guide allows a space inside a quoted
+  default and nowhere else, so `${ aws:username }` is not a variable and stays the text it is,
+  as do the other forms the guide's policy checks call errors: an empty `${}`, a missing closing
+  brace, and a default without its quotes.
+- Only a single-valued key resolves: a multivalued key cannot be used as a variable, having no one
+  value to stand in, and a default does not rescue it, a default answering a key with no value
+  rather than one with several.
+- `${key, 'default'}` falls back to the quoted default when the key has no value.
+- `${*}`, `${?}` and `${$}` stand for a literal `*`, `?` and `$`. The first two are matched as
+  those characters rather than as wildcards.
+- A resolved value is not escaped, so a value carrying a `*` widens the pattern it lands in. That
+  is AWS's behaviour too: its own policy checks warn that variables "can be evaluated as effective
+  wildcards".
+
+Variables resolve in every document the evaluator reads: identity policies, resource policies,
+session policies, permissions boundaries, SCPs, and the `Condition` of a role trust policy. A
+variable can only resolve to a key floci populates, which is the list under
+[Condition keys floci populates](#condition-keys-floci-populates).
+
+A role trust policy is the narrower case, because `sts:AssumeRole` is authorized before there is a
+session to describe: its context carries `aws:PrincipalArn`, `aws:PrincipalAccount`,
+`aws:ResourceAccount`, `aws:RequestedRegion`, `aws:PrincipalIsAWSService`, `sts:RoleSessionName`,
+and `sts:ExternalId` when the request passes one. `aws:username`, `aws:userid` and
+`aws:PrincipalType` are not among them, so a variable naming one of those resolves to nothing in a
+trust policy and the value it sits in matches nothing.
 
 #### Supported Condition Operators:
 - `StringEquals`, `StringNotEquals`, `StringEqualsIgnoreCase`, `StringNotEqualsIgnoreCase`
@@ -1278,6 +1381,7 @@ floci populates:
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucketTagging`
   and `s3:DeleteBucket` (the bucket). A request naming several EC2 resources is evaluated
   once per resource and denied when any of them fails the condition, as on AWS.
+  `logs:CreateLogStream` and `logs:DeleteLogStream` use the owning log group's tags.
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
   `s3:DeleteObjectTagging` and `s3:PutObjectTagging`. A `versionId` in the request selects the
@@ -1306,6 +1410,26 @@ floci populates:
   `assumed-role` session ARN, as AWS reports it ("For IAM roles, the request context returns the
   ARN of the role"); a condition naming the session ARN does not match. It is **absent** only for
   unknown keys, where nothing about the caller can be resolved.
+- `aws:PrincipalType` and `aws:userid`: resolved from the same lookup as `aws:PrincipalArn`, so
+  they always describe the same credential. The values follow the user guide's principal key
+  values list: `Account` with the account id for the account-root principal and for a session
+  token it minted, `User` with the user's own id for an IAM user access key and for a session
+  token that user minted, `FederatedUser` with `account:name` for a `GetFederationToken` session,
+  and `AssumedRole` with `role-id:session-name` for a role session, which for a role assigned to
+  an EC2 instance is `role-id:instance-id`. The guide renders the role-session type both as
+  `AssumedRole` and as "Assumed role"; floci uses the unspaced form, which is the one that fits
+  the vocabulary of every other value in that list and the one AWS publishes machine-side. The
+  guide's fifth value, `Anonymous`, is **not** populated: it applies to unsigned callers on S3,
+  SQS and SNS, which reach a resource policy through its own evaluation path rather than through
+  the enforcement filter, so a bucket policy conditioned on `aws:PrincipalType` being `Anonymous`
+  does not match an unsigned request.
+- `aws:username`: the IAM user's name, and **only** for an IAM user, whether it signed with its
+  own access key or with a session token it minted. The guide is explicit that it is "always
+  included in the request context for IAM users" while "anonymous requests and requests that are
+  made using the AWS account root user or IAM roles do not include this key", so for a role
+  session, a federated user or the account root it is absent, and a statement that matches on it
+  cannot match: an absent key has no equal or like value. That absence is the enforcement rather
+  than a gap in it.
 - `aws:TagKeys`: the case-sensitive requested tag keys for EC2 `RunInstances` and
   `CreateTags`, and S3 `PutBucketTagging`. `ForAllValues:StringEquals` can restrict the
   complete requested set without a `Null` guard; no tags still means absent context.
@@ -1326,6 +1450,14 @@ floci populates:
   `Null:false` when the policy must require a resolved key. Malformed requests that pass
   authorization are still checked by the DynamoDB handler.
 
+- `dynamodb:ReturnValues`: standalone `PutItem`, `UpdateItem` and `DeleteItem` authorize each
+  distinct non-`NONE` mode requested by `ReturnValues` and `ReturnValuesOnConditionCheckFailure`
+  before execution. When neither requests a non-`NONE` mode, authorization uses `NONE`.
+  Each mode is checked separately, so a grant must cover both `UPDATED_NEW` and `ALL_OLD`
+  when they are requested together; `NONE` plus `ALL_OLD` needs only `ALL_OLD`. Omitted or
+  null parameters use the execution default. Read and batch operations do not acquire this
+  key from unrelated fields. Transaction failure-image context is described below.
+
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor
 blocks. A `DenyRootUser`-style guardrail keyed on `aws:PrincipalArn` therefore fires against
@@ -1335,8 +1467,23 @@ being bounded by SCPs (below): both forms of root enforcement now agree. A negat
 absent key cannot equal what the policy names, so the condition holds, and a `Deny` written
 that way applies when the key is missing.
 
-**Not yet supported**: `dynamodb:LeadingKeys` for `Scan`, `TransactWriteItems` / `TransactGetItems`
-and the PartiQL operations.
+The keys that say who is calling are written onto every context a request is evaluated against:
+the one the enforcement filter builds, one per resource the request names, one per transaction
+item, and the one S3 builds when it evaluates a bucket policy itself under `s3.enforce-auth`. A
+role trust policy is the exception: `sts:AssumeRole` evaluates its conditions with
+`aws:PrincipalArn` alone, so a trust policy keyed on `aws:userid`, `aws:PrincipalType` or
+`aws:username` does not match yet.
+
+Transactions check each item as `PutItem`, `UpdateItem`, `DeleteItem`, `GetItem`, or
+`ConditionCheckItem` before executing the request. Each item uses its own table, leading key
+and requested attributes. `dynamodb:EnclosingOperation` identifies `TransactWriteItems` or
+`TransactGetItems`; write items expose `ReturnValuesOnConditionCheckFailure` as
+`dynamodb:ReturnValues` only when the request supplies a non-null value. An omitted value leaves
+the condition key absent. Transaction API names alone do not grant item access.
+Transaction item authorization uses the effective local table ARN, matching execution.
+A permission on a foreign account table cannot grant access to a same-named local table.
+
+**Not yet supported**: `dynamodb:LeadingKeys` for `Scan` and the PartiQL operations.
 
 ### Assumed roles
 
@@ -1407,7 +1554,8 @@ lazily-resolved `ScpProvider` exists to avoid.
 
 With enforcement on, a request carrying no `Authorization` header is refused with
 `403 MissingAuthenticationToken` when its wire shape names a management operation: a JSON, CBOR or
-Query request, identified by `X-Amz-Target`, an rpcv2 path or an `Action` parameter.
+Query request, identified by `X-Amz-Target`, an rpcv2 path or an `Action` parameter. A call routed
+to the rpcv2 endpoint is one whatever its `smithy-protocol` header says.
 
 Two carve-outs, both deliberate.
 

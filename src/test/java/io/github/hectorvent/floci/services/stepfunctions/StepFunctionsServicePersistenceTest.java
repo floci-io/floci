@@ -431,7 +431,7 @@ class StepFunctionsServicePersistenceTest {
 
     private StepFunctionsService serviceWithStorage(StorageFactory storage, AslExecutor executor) {
         return new StepFunctionsService(storage, regionResolver, executor,
-                new ObjectMapper(), mockLoader);
+                new ObjectMapper(), mockLoader, Mockito.mock(StepFunctionsEventPublisher.class));
     }
 
     private static AccountAwareStorageBackend<Execution> executionStore(StorageFactory storage) {

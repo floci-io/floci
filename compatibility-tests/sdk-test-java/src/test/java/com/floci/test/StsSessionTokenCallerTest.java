@@ -19,7 +19,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@DisplayName("STS session tokens require a long-term caller")
+@DisplayName("STS session and federation tokens require a long-term caller")
 class StsSessionTokenCallerTest {
     @ParameterizedTest
     @ValueSource(strings = {"session", "federation", "role"})
@@ -61,6 +61,13 @@ class StsSessionTokenCallerTest {
                                 .isInstanceOfSatisfying(StsException.class, error -> {
                                     assertThat(error.statusCode()).isEqualTo(403);
                                     assertThat(error.awsErrorDetails().errorCode()).isEqualTo("AccessDenied");
+                                });
+                        assertThatThrownBy(() -> temporary.getFederationToken(r -> r.name("another-caller").policy(policy)))
+                                .isInstanceOfSatisfying(StsException.class, error -> {
+                                    assertThat(error.statusCode()).isEqualTo(403);
+                                    assertThat(error.awsErrorDetails().errorCode()).isEqualTo("AccessDenied");
+                                    assertThat(error.awsErrorDetails().errorMessage())
+                                            .isEqualTo("Cannot call GetFederationToken with session credentials");
                                 });
                         assertThat(temporary.getCallerIdentity().arn()).isEqualTo(identity);
                     }

@@ -49,7 +49,8 @@ public final class DynamoDbConditionKeys {
         Set<String> attributes = new LinkedHashSet<>();
 
         switch (action == null ? "" : action) {
-            case "dynamodb:GetItem", "dynamodb:DeleteItem", "dynamodb:UpdateItem" -> {
+            case "dynamodb:GetItem", "dynamodb:DeleteItem", "dynamodb:UpdateItem",
+                    "dynamodb:ConditionCheckItem" -> {
                 JsonNode key = body.get("Key");
                 addAttributeNames(attributes, key);
                 addLeadingKey(leadingKeys, key, pkName);

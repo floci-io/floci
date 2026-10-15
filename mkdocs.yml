@@ -105,6 +105,7 @@ nav:
     - DynamoDB: services/dynamodb.md
     - Lambda: services/lambda.md
     - Lambda MicroVMs: services/lambda-microvms.md
+    - Lambda Web Functions: services/lambda-web-functions.md
     - API Gateway: services/api-gateway.md
     - Cognito: services/cognito.md
     - Cognito Identity: services/cognitoidentity.md

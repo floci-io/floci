@@ -16,8 +16,10 @@ network ACL", 20) carry their AWS default values, so tooling that compares a des
 the default before requesting an increase takes the same path it would against AWS.
 
 Applied quotas and AWS default quotas return the same data, and quota values are static.
-`RequestServiceQuotaIncrease` is accepted and validated but does not change any quota value —
-see Limitations.
+`RequestServiceQuotaIncrease` is accepted and validated, records the request, and lets you read
+it back with `GetRequestedServiceQuotaChange` or list it with
+`ListRequestedServiceQuotaChangeHistoryByQuota`, but it does not change any quota value. See
+Limitations.
 
 ## Supported Actions
 
@@ -28,19 +30,23 @@ see Limitations.
 | `GetServiceQuota` | Returns one quota by service and quota code, else `NoSuchResourceException` |
 | `GetAWSDefaultServiceQuota` | Same as GetServiceQuota; defaults equal applied values |
 | `ListAWSDefaultServiceQuotas` | Same as ListServiceQuotas; defaults equal applied values |
-| `RequestServiceQuotaIncrease` | Validates and echoes an increase request as `PENDING`; not persisted, quota unchanged |
-| `ListRequestedServiceQuotaChangeHistoryByQuota` | Validates the service/quota pair and returns the locally recorded request history; currently empty for the static catalog |
+| `RequestServiceQuotaIncrease` | Validates and stores an increase request as `PENDING`; a second open request for the same quota is refused with `ResourceAlreadyExistsException` |
+| `GetRequestedServiceQuotaChange` | Returns a stored request by id, else `NoSuchResourceException` |
+| `ListRequestedServiceQuotaChangeHistoryByQuota` | Lists the stored requests for a service/quota pair, newest first |
 <!-- floci:actions:end -->
 
 ## Limitations
 
-- **Quota increase requests are not persisted.** `RequestServiceQuotaIncrease` validates its
-  input, resolves the quota, and returns a well-formed `RequestedQuota`, but keeps no state.
-  The request is observable only in the response that creates it.
-- **`Status` is always `PENDING` and never advances.** Nothing processes requests, so no
-  request ever reaches `APPROVED`, `CASE_OPENED`, or `DENIED`. `PENDING` is what real AWS
-  returns on creation, so a caller that only reads the creation response sees faithful data;
-  a caller that polls for completion will wait forever.
+- **Quota increase requests are persisted per region, but `Status` never advances.** A
+  successful `RequestServiceQuotaIncrease` is stored under its own id and can be read back with
+  `GetRequestedServiceQuotaChange` or listed with `ListRequestedServiceQuotaChangeHistoryByQuota`
+  in the region that created it. Because a request stays `PENDING`, a second
+  `RequestServiceQuotaIncrease` for the same quota in the same region is refused with
+  `ResourceAlreadyExistsException`, matching AWS's one-open-request-per-quota rule. Nothing
+  processes a request, however, so it stays `PENDING` and
+  never reaches `APPROVED`, `CASE_OPENED`, or `DENIED`. `PENDING` is what real AWS returns on
+  creation, so a caller that reads the creation response sees faithful data; a caller that polls
+  for completion will wait forever.
 - **Unknown service codes generate a quota catalog rather than failing.** This is deliberate, so
   the code has to be well-formed to be trusted: `ServiceCode` is validated against the modeled
   `[a-zA-Z][a-zA-Z0-9-]{1,63}` (max 63 characters) and a malformed one is rejected with
@@ -48,8 +54,8 @@ see Limitations.
 - **A requested increase does not change the quota.** `GetServiceQuota` continues to return
   the catalog value after a successful increase request. Quota values remain static by design
   so pipelines never stall on an unenforced limit.
-- `GetRequestedServiceQuotaChange` and `ListRequestedServiceQuotaChangeHistory` are not
-  implemented — there is no request store for them to read.
+- `ListRequestedServiceQuotaChangeHistory` (the account-wide variant without a quota filter) is
+  not implemented.
 - `CaseId` is never returned; no support case is opened. `SupportCaseAllowed` in the request is
   accepted and ignored, as the emulator has no case-opening path either way.
 - The quota-increase template operations (`PutServiceQuotaIncreaseRequestIntoTemplate` and

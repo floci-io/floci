@@ -214,4 +214,85 @@ class Ec2DuplicateRouteTest {
         createRoute("DestinationCidrBlock", IPV4_ROUTE).when().post("/").then().statusCode(200);
         describe().body(hasXPath(ROUTE_COUNT, equalTo("4")));
     }
+
+    /** Asserts the request fails with the given 400 error code. */
+    private static void expectError(io.restassured.specification.RequestSpecification request, String code) {
+        request
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo(code));
+    }
+
+    /** The local route, read back through DescribeRouteTables, still targets "local". */
+    private static void expectLocalRouteIntact() {
+        describe()
+            .body(hasXPath(ROUTE_COUNT, equalTo("4")))
+            .body("DescribeRouteTablesResponse.routeTableSet.item.routeSet.item"
+                    + ".find { it.destinationCidrBlock == '" + VPC_CIDR + "' }.gatewayId",
+                    equalTo("local"));
+    }
+
+    /** AWS refuses DeleteRoute on the local route CreateRouteTable seeded. */
+    @Test
+    @Order(10)
+    void theSeededLocalRouteCannotBeDeleted() {
+        expectError(
+                ec2()
+                    .formParam("Action", "DeleteRoute")
+                    .formParam("RouteTableId", routeTableId)
+                    .formParam("DestinationCidrBlock", VPC_CIDR),
+                "InvalidParameterValue");
+        expectLocalRouteIntact();
+    }
+
+    /**
+     * ReplaceRoute may repoint the local route (AWS allows a NAT gateway, ENI or GWLB endpoint),
+     * but the route is still the one CreateRouteTable seeded and still cannot be deleted.
+     */
+    @Test
+    @Order(11)
+    void aRepointedLocalRouteStillCannotBeDeleted() {
+        ec2()
+            .formParam("Action", "ReplaceRoute")
+            .formParam("RouteTableId", routeTableId)
+            .formParam("DestinationCidrBlock", VPC_CIDR)
+            .formParam("NatGatewayId", NAT_GATEWAY)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        expectError(
+                ec2()
+                    .formParam("Action", "DeleteRoute")
+                    .formParam("RouteTableId", routeTableId)
+                    .formParam("DestinationCidrBlock", VPC_CIDR),
+                "InvalidParameterValue");
+
+        ec2()
+            .formParam("Action", "ReplaceRoute")
+            .formParam("RouteTableId", routeTableId)
+            .formParam("DestinationCidrBlock", VPC_CIDR)
+            .formParam("LocalTarget", "true")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        expectLocalRouteIntact();
+    }
+
+    /** DeleteRoute of a destination the table does not hold is InvalidRoute.NotFound, not a silent success. */
+    @Test
+    @Order(12)
+    void deletingAMissingRouteIsNotFound() {
+        expectError(
+                ec2()
+                    .formParam("Action", "DeleteRoute")
+                    .formParam("RouteTableId", routeTableId)
+                    .formParam("DestinationCidrBlock", "203.0.113.0/24"),
+                "InvalidRoute.NotFound");
+        expectLocalRouteIntact();
+    }
 }

@@ -543,4 +543,72 @@ class AppConfigTest {
         assertThat(response.versionLabel()).isEqualTo("1");
         assertThat(response.nextPollConfigurationToken()).isNotBlank();
     }
+
+    @Test
+    @Order(56)
+    @DisplayName("GetConfiguration (deprecated) returns the deployed version by IDs or names")
+    @SuppressWarnings("deprecation")
+    void legacyGetConfigurationReturnsDeployedVersion() {
+        String legacyAppName = TestFixtures.uniqueName("legacy-app");
+        String legacyAppId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name(legacyAppName).build()).id();
+        try {
+            String legacyEnvId = appConfig.createEnvironment(CreateEnvironmentRequest.builder()
+                    .applicationId(legacyAppId).name("legacy-env").build()).id();
+            String legacyProfileId = appConfig.createConfigurationProfile(CreateConfigurationProfileRequest.builder()
+                    .applicationId(legacyAppId)
+                    .name("legacy-config")
+                    .locationUri("hosted")
+                    .type("AWS.Freeform")
+                    .build()).id();
+            appConfig.createHostedConfigurationVersion(CreateHostedConfigurationVersionRequest.builder()
+                    .applicationId(legacyAppId)
+                    .configurationProfileId(legacyProfileId)
+                    .content(SdkBytes.fromUtf8String("{\"legacy\": true}"))
+                    .contentType("application/json")
+                    .build());
+            appConfig.startDeployment(StartDeploymentRequest.builder()
+                    .applicationId(legacyAppId)
+                    .environmentId(legacyEnvId)
+                    .configurationProfileId(legacyProfileId)
+                    .configurationVersion("1")
+                    .deploymentStrategyId("AppConfig.AllAtOnce")
+                    .build());
+
+            GetConfigurationResponse byIds = appConfig.getConfiguration(GetConfigurationRequest.builder()
+                    .application(legacyAppId).environment(legacyEnvId).configuration(legacyProfileId)
+                    .clientId("sdk-client").build());
+            assertThat(byIds.content().asUtf8String()).isEqualTo("{\"legacy\": true}");
+            assertThat(byIds.contentType()).startsWith("application/json");
+            assertThat(byIds.configurationVersion()).isEqualTo("1");
+
+            GetConfigurationResponse byNames = appConfig.getConfiguration(GetConfigurationRequest.builder()
+                    .application(legacyAppName).environment("legacy-env").configuration("legacy-config")
+                    .clientId("sdk-client").build());
+            assertThat(byNames.content().asUtf8String()).isEqualTo("{\"legacy\": true}");
+            assertThat(byNames.configurationVersion()).isEqualTo("1");
+
+            GetConfigurationResponse unchanged = appConfig.getConfiguration(GetConfigurationRequest.builder()
+                    .application(legacyAppId).environment(legacyEnvId).configuration(legacyProfileId)
+                    .clientId("sdk-client").clientConfigurationVersion("1").build());
+            assertThat(unchanged.content().asByteArray()).isEmpty();
+            assertThat(unchanged.configurationVersion()).isEqualTo("1");
+
+            // Qualified: the imported BadRequestException is AppConfigData's, this one is AppConfig's.
+            assertThrows(software.amazon.awssdk.services.appconfig.model.BadRequestException.class,
+                    () -> appConfig.getConfiguration(GetConfigurationRequest.builder()
+                            .application(legacyAppId).environment("absent").configuration(legacyProfileId)
+                            .clientId("sdk-client").build()));
+            assertThrows(ResourceNotFoundException.class,
+                    () -> appConfig.getConfiguration(GetConfigurationRequest.builder()
+                            .application(legacyAppId).environment(legacyEnvId).configuration("absent-config")
+                            .clientId("sdk-client").build()));
+        } finally {
+            try {
+                appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(legacyAppId).build());
+            } catch (Exception ignored) {
+                // Best-effort cleanup: the application name is unique, so a leftover cannot affect other tests.
+            }
+        }
+    }
 }

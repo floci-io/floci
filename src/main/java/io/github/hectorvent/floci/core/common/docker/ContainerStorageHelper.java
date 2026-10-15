@@ -273,7 +273,11 @@ public final class ContainerStorageHelper {
         return base.resolve(namespace).resolve(service).resolve(resourceId);
     }
 
-    private static String resourceNamespace(EmulatorConfig config) {
+    /**
+     * The configured resource namespace, sanitized for use inside Docker names and paths;
+     * empty when no namespace is configured or {@code config} carries no Docker config.
+     */
+    public static String resourceNamespace(EmulatorConfig config) {
         if (config == null || config.docker() == null || config.docker().resourceNamespace() == null) {
             return "";
         }
@@ -335,6 +339,22 @@ public final class ContainerStorageHelper {
             String volumeName,
             String internalMount) {
         lifecycleManager.ensureVolume(volumeName);
+        builder.withNamedVolume(volumeName, internalMount);
+    }
+
+    /**
+     * {@link #applyNamedVolume} for a volume an operator named through their own
+     * configuration: created when absent without any Floci label, so nothing that sweeps
+     * Floci-labelled volumes, a floci-scoped {@code docker volume prune} above all, and a
+     * testcontainers module reaping a run's labelled child resources above all, collects it.
+     * The operator named the volume, so its lifecycle is theirs.
+     */
+    public static void applyOperatorNamedVolume(
+            ContainerBuilder.Builder builder,
+            ContainerLifecycleManager lifecycleManager,
+            String volumeName,
+            String internalMount) {
+        lifecycleManager.ensureUnmanagedVolume(volumeName);
         builder.withNamedVolume(volumeName, internalMount);
     }
 

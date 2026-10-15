@@ -472,6 +472,29 @@ for the integration that raised it: `StepFunctions.ExecutionAlreadyExistsExcepti
 `aws-sdk:sfn:startExecution`. An Express child starts a new execution instead, so the same `Name`
 never fails it.
 
+## Lambda tasks under IAM enforcement
+
+A Lambda task, given a function ARN as its `Resource` or as the `FunctionName` of
+`arn:aws:states:::lambda:invoke`, runs the function in the account and Region the ARN names. With
+[IAM enforcement](iam.md#resource-based-policies) on, the task invokes the function as the state
+machine's execution role, as on AWS. In the role's own account, the role's policies or the
+function's policy can allow `lambda:InvokeFunction`. For a function in another account, both have
+to: the role's policies, and the function's policy through, for example, `AddPermission` naming the
+role or its account. The role's permissions boundary and its account's service control policies
+apply too, and a Deny in any of them refuses the call. A task that names a version or alias is
+authorized against that version or alias. A refused task fails with `Lambda.AccessDeniedException`,
+whose cause names the role's session and the kind of policy that refused it.
+
+A task whose `Credentials` name a role invokes the function as that role instead, once the
+execution role has assumed it. The role's trust policy has to allow the execution role, and Step
+Functions passes the state machine's ARN as `sts:ExternalId`, which the trust policy can require.
+The execution role's own policies have to allow `sts:AssumeRole` on the role too when the role is in
+another account, or when the trust policy names only the execution role's account. `RoleArn` is
+read the way the task's `Parameters` or `Arguments` are: as written, through a path or an intrinsic
+function as `RoleArn.$`, or through JSONata. A role the execution role cannot assume fails the task
+with `States.Permissions`, whose cause names the execution role's session and `sts:AssumeRole` on
+the role.
+
 ## AWS SDK task integrations
 
 A resource of the form `arn:aws:states:::aws-sdk:<service>:<action>` calls the service's API and
@@ -716,6 +739,41 @@ shutdown flushes the current execution state before the emulator stops. On resta
 history is retained, and a previously running execution is marked `ABORTED` with one
 `ExecutionAborted` event appended. After a further restart, the execution is already terminal, so
 no additional event is written.
+
+## Execution status change events
+
+Floci publishes AWS-shaped `Step Functions Execution Status Change` events to the **default**
+EventBridge bus (`source: aws.states`, `resources: [executionArn]`) for every status a STANDARD
+execution enters. Rules that match `aws.states`, for example on `detail.stateMachineArn` or
+`detail.status`, fire as they do on AWS. EXPRESS executions emit no events, as on AWS.
+
+| `detail.status` | When |
+|---|---|
+| `RUNNING` | `StartExecution` creates the execution, including a nested `states:startExecution` |
+| `SUCCEEDED` | the execution reaches a terminal state without failing |
+| `FAILED` | a `Fail` state, an unhandled error, or a runtime error ends the execution |
+| `TIMED_OUT` | the state machine's `TimeoutSeconds` elapses |
+| `ABORTED` | `StopExecution` stops the execution |
+
+The `detail` carries every key of AWS's documented event, null when it does not apply:
+`executionArn`, `stateMachineArn`, `name`, `status`, `startDate` and `stopDate` (epoch
+milliseconds, `stopDate` null while `RUNNING`), `input`, `inputDetails`, `output` and
+`outputDetails` (set only on `SUCCEEDED`), `stateMachineVersionArn` and `stateMachineAliasArn`
+(null unless the execution was started through one), `error`, `cause`, and the redrive fields.
+
+- A `TIMED_OUT` event names `States.Timeout` as its `error`.
+- `FAILED` and `TIMED_OUT` report `redriveStatus` `REDRIVABLE` with the reason
+  `Execution is <status> and is redrivable`. Every other status reports `NOT_REDRIVABLE` with
+  `Execution is <status> and cannot be redriven`.
+- As on AWS, when the escaped `input` and escaped `output` together exceed 248 KiB, `input` is
+  left out and `inputDetails.included` is `false`. When the escaped `output` alone exceeds
+  248 KiB, `output` is left out and `outputDetails.included` is `false`.
+  `DescribeExecution` still returns both in full.
+
+Known differences from AWS:
+
+- Executions aborted by the startup sweep described above emit no `ABORTED` event.
+- Floci does not implement redrive, so `redriveCount` is always `0` and `redriveDate` is null.
 
 ## Partitions
 

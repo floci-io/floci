@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -48,10 +49,10 @@ class EksPodIdentityWebhookTest {
         cluster.setName(CLUSTER_NAME);
         when(eks.findAuthenticationCluster(ACCOUNT_ID, CLUSTER_NAME)).thenReturn(Optional.of(cluster));
         when(addons.describe(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON)))
-                .thenReturn(Mockito.mock(Addon.class));
+                .thenReturn(inlineMock(Addon.class));
         when(associations.list(any(), anyString(), anyString(), any(), any()))
                 .thenReturn(new EksPodIdentityAssociationService.Page(
-                        List.of(Mockito.mock(PodIdentityAssociationSummary.class)), null));
+                        List.of(inlineMock(PodIdentityAssociationSummary.class)), null));
     }
 
     private Map<String, Object> admissionReview(Map<String, Object> pod) {

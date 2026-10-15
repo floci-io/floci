@@ -19,6 +19,11 @@ public class PolicyStatement {
     private final List<String> notResources;// NotResource patterns; null when resources is set
     // Condition: outer key = operator (e.g. "StringEquals"), inner key = context key, value = list of values
     private final Map<String, Map<String, List<String>>> conditions;
+    // The document's Version element, which decides whether this statement's ${...} are policy
+    // variables or literal text. It belongs to the document rather than the statement, but
+    // statements from many documents are evaluated as one list, so each carries its own. Null
+    // when the document has no Version element, which is the 2008-10-17 default.
+    private final String version;
 
     public PolicyStatement(String effect,
                            Map<String, List<String>> principals,
@@ -27,7 +32,8 @@ public class PolicyStatement {
                            List<String> notActions,
                            List<String> resources,
                            List<String> notResources,
-                           Map<String, Map<String, List<String>>> conditions) {
+                           Map<String, Map<String, List<String>>> conditions,
+                           String version) {
         this.effect = effect;
         this.principals = principals;
         this.notPrincipals = notPrincipals;
@@ -36,20 +42,22 @@ public class PolicyStatement {
         this.resources = resources;
         this.notResources = notResources;
         this.conditions = conditions;
+        this.version = version;
     }
 
+    /** Without a version, {@code ${...}} stays literal text, as it does under 2008-10-17. */
     public PolicyStatement(String effect,
                            List<String> actions,
                            List<String> notActions,
                            List<String> resources,
                            List<String> notResources,
                            Map<String, Map<String, List<String>>> conditions) {
-        this(effect, null, null, actions, notActions, resources, notResources, conditions);
+        this(effect, null, null, actions, notActions, resources, notResources, conditions, null);
     }
 
     /** Convenience constructor for simple allow/deny without conditions or Not* fields. */
     public PolicyStatement(String effect, List<String> actions, List<String> resources) {
-        this(effect, null, null, actions, null, resources, null, null);
+        this(effect, null, null, actions, null, resources, null, null, null);
     }
 
     public String getEffect()              { return effect; }
@@ -60,6 +68,7 @@ public class PolicyStatement {
     public List<String> getResources()     { return resources; }
     public List<String> getNotResources()  { return notResources; }
     public Map<String, Map<String, List<String>>> getConditions() { return conditions; }
+    public String getVersion()             { return version; }
 
     public boolean isDeny()  { return "Deny".equalsIgnoreCase(effect); }
     public boolean isAllow() { return "Allow".equalsIgnoreCase(effect); }

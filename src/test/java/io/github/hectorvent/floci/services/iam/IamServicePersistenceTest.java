@@ -72,6 +72,58 @@ class IamServicePersistenceTest {
     }
 
     @Test
+    void userInlinePolicyQuotaUsesPersistedAggregateAfterRestart(@TempDir Path directory) {
+        IamService first = newService(directory);
+        first.createUser("R", "/");
+        String firstPolicy = policyWithNonWhitespaceLength(1_200);
+        String secondPolicy = policyWithNonWhitespaceLength(800);
+        first.putUserPolicy("R", "first", firstPolicy);
+        first.putUserPolicy("R", "second", secondPolicy);
+
+        IamService restarted = newService(directory);
+        assertEquals(firstPolicy, restarted.getUserPolicy("R", "first"));
+        assertEquals(secondPolicy, restarted.getUserPolicy("R", "second"));
+
+        AwsException aggregateError = assertThrows(AwsException.class,
+                () -> restarted.putUserPolicy("R", "third", policyWithNonWhitespaceLength(200)));
+        assertEquals("LimitExceeded", aggregateError.getErrorCode());
+        assertEquals(409, aggregateError.getHttpStatus());
+
+        AwsException replacementError = assertThrows(AwsException.class,
+                () -> restarted.putUserPolicy("R", "first", policyWithNonWhitespaceLength(1_249)));
+        assertEquals("LimitExceeded", replacementError.getErrorCode());
+        assertEquals(409, replacementError.getHttpStatus());
+        assertEquals(firstPolicy, restarted.getUserPolicy("R", "first"));
+        assertEquals(secondPolicy, restarted.getUserPolicy("R", "second"));
+    }
+
+    @Test
+    void groupInlinePolicyQuotaUsesPersistedAggregateAfterRestart(@TempDir Path directory) {
+        IamService first = newService(directory);
+        first.createGroup("R", "/");
+        String firstPolicy = policyWithNonWhitespaceLength(3_000);
+        String secondPolicy = policyWithNonWhitespaceLength(2_000);
+        first.putGroupPolicy("R", "first", firstPolicy);
+        first.putGroupPolicy("R", "second", secondPolicy);
+
+        IamService restarted = newService(directory);
+        assertEquals(firstPolicy, restarted.getGroupPolicy("R", "first"));
+        assertEquals(secondPolicy, restarted.getGroupPolicy("R", "second"));
+
+        AwsException aggregateError = assertThrows(AwsException.class,
+                () -> restarted.putGroupPolicy("R", "third", policyWithNonWhitespaceLength(200)));
+        assertEquals("LimitExceeded", aggregateError.getErrorCode());
+        assertEquals(409, aggregateError.getHttpStatus());
+
+        AwsException replacementError = assertThrows(AwsException.class,
+                () -> restarted.putGroupPolicy("R", "first", policyWithNonWhitespaceLength(3_121)));
+        assertEquals("LimitExceeded", replacementError.getErrorCode());
+        assertEquals(409, replacementError.getHttpStatus());
+        assertEquals(firstPolicy, restarted.getGroupPolicy("R", "first"));
+        assertEquals(secondPolicy, restarted.getGroupPolicy("R", "second"));
+    }
+
+    @Test
     void openIdConnectProviderSurvivesRestart(@TempDir Path dir) {
         IamService first = newService(dir);
         OpenIDConnectProvider created = first.createOpenIDConnectProvider(

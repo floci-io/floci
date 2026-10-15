@@ -63,9 +63,9 @@ class SesSendCustomVerificationEmailV2IntegrationTest {
     @Test
     @Order(2)
     void send_storesRenderedEmailInInspectionMailbox() {
-        given().header("Authorization", AUTH).queryParam("email", RECIPIENT)
+        given().header("Authorization", AUTH).queryParam("email", FROM)
         .when().get("/_aws/ses").then().statusCode(200)
-                .body(containsString(FROM))
+                .body(containsString(RECIPIENT))
                 .body(containsString(SUBJECT))
                 // The template body is passed through verbatim (no placeholder substitution)...
                 .body(containsString("<html><body>verify</body></html>"))

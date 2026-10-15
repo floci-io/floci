@@ -43,6 +43,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -357,7 +358,7 @@ class RedshiftServiceTest {
         persisted.setClusterStatus("available");
         persisted.setProxyPort(7108);
 
-        AccountAwareStorageBackend.AccountEntry<Cluster> entry = mock(AccountAwareStorageBackend.AccountEntry.class);
+        AccountAwareStorageBackend.AccountEntry<Cluster> entry = inlineMock(AccountAwareStorageBackend.AccountEntry.class);
         when(entry.value()).thenReturn(persisted);
         when(entry.accountId()).thenReturn("111111111111");
         when(entry.key()).thenReturn("c1");

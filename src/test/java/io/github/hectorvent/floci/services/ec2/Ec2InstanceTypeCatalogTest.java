@@ -44,6 +44,7 @@ class Ec2InstanceTypeCatalogTest {
                 "t4g.micro",
                 "t4g.small",
                 "t4g.medium",
+                "m6g.large",
                 "m6gd.large",
                 "m6gd.2xlarge",
                 "m7gd.large",

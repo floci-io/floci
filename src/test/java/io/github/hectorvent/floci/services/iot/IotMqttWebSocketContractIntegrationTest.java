@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.iot;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.testing.IotMqttTlsProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -17,6 +19,7 @@ import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse;
 import org.eclipse.paho.mqttv5.common.packet.MqttProperties;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -52,17 +55,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * covered by {@link IotMqttWebSocketFramingIntegrationTest}.
  */
 @QuarkusTest
-@TestProfile(IotMqttWebSocketIntegrationTest.Profile.class)
+@TestProfile(IotMqttTlsProfile.class)
 class IotMqttWebSocketContractIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(IotMqttWebSocketContractIntegrationTest.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final int PLAIN_PORT = IotMqttWebSocketIntegrationTest.PLAIN_PORT;
+    private static final int PLAIN_PORT = IotMqttTlsProfile.PLAIN_PORT;
+
     @ConfigProperty(name = "quarkus.http.test-ssl-port", defaultValue = "0")
     int testSslPort;
 
     @ConfigProperty(name = "quarkus.http.test-port", defaultValue = "0")
     int testHttpPort;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     // ==================== Handshake ====================
 
@@ -122,6 +129,7 @@ class IotMqttWebSocketContractIntegrationTest {
         .then()
                 .statusCode(201)
                 .extract().path("apiId");
+        cleanup.register(() -> given().when().delete("/v2/apis/" + apiId).then().statusCode(204));
         given()
                 .contentType("application/json")
                 .body("{\"stageName\":\"probe\"}")
@@ -256,6 +264,8 @@ class IotMqttWebSocketContractIntegrationTest {
         MqttClient tcp = new MqttClient("tcp://127.0.0.1:" + PLAIN_PORT, "retain-pub-" + System.nanoTime(), new MemoryPersistence());
         tcp.connect();
         tcp.publish(topic, payload, 1, true);
+        // A retained publish with an empty payload deletes the topic's retained message.
+        cleanup.register(() -> given().queryParam("retain", true).when().post("/topics/" + topic).then().statusCode(200));
         tcp.disconnect();
         tcp.close();
 
@@ -286,6 +296,7 @@ class IotMqttWebSocketContractIntegrationTest {
             client.client.subscribe("$aws/things/" + thing + "/shadow/update/accepted", 1);
             client.client.publish("$aws/things/" + thing + "/shadow/update",
                     "{\"state\":{\"desired\":{\"led\":\"on\"}},\"clientToken\":\"ws-token\"}".getBytes(StandardCharsets.UTF_8), 1, false);
+            cleanup.register(() -> given().when().delete("/things/" + thing + "/shadow").then().statusCode(200));
 
             JsonNode accepted = OBJECT_MAPPER.readTree(client.take());
             assertEquals("on", accepted.path("state").path("desired").path("led").asText());
@@ -297,6 +308,7 @@ class IotMqttWebSocketContractIntegrationTest {
     void topicRuleFiresForAWebSocketPublish() throws Exception {
         String source = "contract/rule/source/" + System.nanoTime();
         String target = "contract/rule/target/" + System.nanoTime();
+        String rule = "wsRepublish" + System.nanoTime();
         given()
             .contentType("application/json")
             .body("""
@@ -315,9 +327,10 @@ class IotMqttWebSocketContractIntegrationTest {
                 }
                 """.formatted(source, target))
         .when()
-            .put("/rules/wsRepublish" + System.nanoTime())
+            .put("/rules/" + rule)
         .then()
             .statusCode(200);
+        cleanup.register(() -> given().when().delete("/rules/" + rule).then().statusCode(200));
 
         try (PahoWs subscriber = PahoWs.connect(wss(), "rule-sub-" + System.nanoTime())) {
             subscriber.client.subscribe(target, 1);

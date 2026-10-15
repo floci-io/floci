@@ -16,6 +16,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -43,7 +44,7 @@ class ApiGatewayEdgeRestApiPartitionTest {
                 stores.computeIfAbsent(invocation.getArgument(1, String.class),
                         ignored -> AccountAwareStorageBackend.inMemory("000000000000")));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().cloudfront().domainSuffix()).thenReturn("cloudfront.net");
+        when(config.services().cloudfront().domainSuffix()).thenReturn(Optional.empty());
         service = new ApiGatewayService(storageFactory, config, mock(TlsCertificateManager.class),
                 new RegionResolver("us-east-1", "000000000000"));
     }

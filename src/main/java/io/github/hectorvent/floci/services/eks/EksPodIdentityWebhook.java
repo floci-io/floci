@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.eks;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -100,13 +101,16 @@ public class EksPodIdentityWebhook {
             return List.of();
         }
         Optional<Cluster> cluster = eks.findAuthenticationCluster(accountId, clusterName);
-        if (cluster.isEmpty() || !podIdentityAgentInstalled(cluster.get())) {
+        if (cluster.isEmpty()) {
             return List.of();
         }
-        if (!hasAssociation(cluster.get(), namespace, serviceAccountOf(pod))) {
-            return List.of();
-        }
-        return buildPatch(pod);
+        return RequestScopes.callAs(accountId, () -> {
+            if (!podIdentityAgentInstalled(cluster.get())
+                    || !hasAssociation(cluster.get(), namespace, serviceAccountOf(pod))) {
+                return List.of();
+            }
+            return buildPatch(pod);
+        });
     }
 
     private boolean podIdentityAgentInstalled(Cluster cluster) {

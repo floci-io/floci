@@ -691,7 +691,29 @@ class IamIntegrationTest {
             .statusCode(200)
             .contentType("application/xml")
             .body("GetAccessKeyLastUsedResponse.GetAccessKeyLastUsedResult"
-                    + ".AccessKeyLastUsed.ServiceName", equalTo("N/A"));
+                    + ".AccessKeyLastUsed.ServiceName", equalTo("N/A"))
+            .body(not(containsString("<UserName>")));
+    }
+
+    @Test
+    @Order(49)
+    void getAccessKeyLastUsedReturnsOwningUserName() {
+        // Terraform's aws_iam_access_key import resolves the owner from this field.
+        createUser("last-used-owner");
+        String keyId = createAccessKeyFor("last-used-owner");
+        given()
+            .formParam("Action", "GetAccessKeyLastUsed")
+            .formParam("AccessKeyId", keyId)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetAccessKeyLastUsedResponse.GetAccessKeyLastUsedResult.UserName",
+                    equalTo("last-used-owner"))
+            .body("GetAccessKeyLastUsedResponse.GetAccessKeyLastUsedResult"
+                    + ".AccessKeyLastUsed.Region", equalTo("N/A"));
     }
 
     @Test

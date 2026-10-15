@@ -143,6 +143,61 @@ class SesServiceAddressSyntaxTest {
     }
 
     @Test
+    void v1RawSendWithSender_fromHeaderWithoutAtIsAMissingUserName() {
+        assertRejects("User name is missing: 'sender.example.com'.", () -> service.sendEmail(request(SENDER)
+                .content(fromHeaderRaw(NO_AT, false)).build()));
+        assertRejects("User name is missing: '=?UTF-8?B?5bGx55Sw?= <sender.example.com>'.",
+                () -> service.sendEmail(request(SENDER).content(fromHeaderRaw("山田 <" + NO_AT + ">", false)).build()));
+    }
+
+    @Test
+    void v1RawSendWithSender_addressInTheDisplayNameIsNotSwappedIn() {
+        assertRejects("User name is missing: '\"sender@example.com\" <sender.example.com>'.",
+                () -> service.sendEmail(request(SENDER).content(fromHeaderRaw(SENDER + " <" + NO_AT + ">", false)).build()));
+    }
+
+    @Test
+    void v1RawSendWithSender_onlyTheFirstFromHeaderAddressNeedsAnAt() {
+        assertRejects("User name is missing: 'sender.example.com'.", () -> service.sendEmail(request(SENDER)
+                .content(fromHeaderRaw(NO_AT + ", " + SENDER, false)).build()));
+        AwsException e = assertThrows(AwsException.class, () -> service.sendEmail(request(SENDER)
+                .content(fromHeaderRaw(SENDER + ", " + NO_AT, false)).build()));
+        assertEquals("MessageRejected", e.getErrorCode(), "a later address without @ reaches sender verification");
+    }
+
+    @Test
+    void v1RawSendWithSender_otherFromHeaderViolationsAreReportedFirst() {
+        assertRejects("Missing domain", () -> service.sendEmail(request(SENDER)
+                .content(fromHeaderRaw(NO_AT + ", " + EMPTY_DOMAIN, false)).build()));
+    }
+
+    @Test
+    void v1RawSendWithSender_missingUserNameIsReportedAfterRecipientSyntax() {
+        assertRejects(MISSING_FINAL_DOMAIN, () -> service.sendEmail(request(SENDER).toAddresses(List.of())
+                .content(fromHeaderRaw(NO_AT, false, "success.simulator.amazonses.com")).build()));
+    }
+
+    @Test
+    void v1RawSendWithSender_missingUserNameIsReportedAfterUnknownConfigurationSet() {
+        AwsException e = assertThrows(AwsException.class, () -> service.sendEmail(request(SENDER)
+                .configurationSetName("missing").content(fromHeaderRaw(NO_AT, false)).build()));
+
+        assertEquals("ConfigurationSetDoesNotExist", e.getErrorCode());
+    }
+
+    @Test
+    void v1RawSendWithSender_missingUserNameIsReportedAfterMissingDestination() {
+        assertRejects("Missing required header 'To'.", () -> service.sendEmail(request(SENDER).toAddresses(List.of())
+                .content(rawWithoutTo(NO_AT, false)).build()));
+    }
+
+    @Test
+    void v1RawSendWithSender_missingUserNameIsReportedBeforeLength() {
+        assertRejects("User name is missing: 'sender.example.com'.", () -> service.sendEmail(request(SENDER)
+                .toAddresses(List.of(address(321))).content(fromHeaderRaw(NO_AT, false)).build()));
+    }
+
+    @Test
     void v2RawSend_fromHeaderWithoutAtKeepsJavaMailMessage() {
         assertRejects(MISSING_FINAL_DOMAIN, () -> service.sendEmail(request(null)
                 .content(fromHeaderRaw(NO_AT, true)).build()));
@@ -324,8 +379,12 @@ class SesServiceAddressSyntaxTest {
     }
 
     private static EmailContent.Raw v2RawWithoutTo(String from) {
+        return rawWithoutTo(from, true);
+    }
+
+    private static EmailContent.Raw rawWithoutTo(String from, boolean fromHeaderAsFallback) {
         return new EmailContent.Raw(Base64.getEncoder().encodeToString(("From: " + from
-                + "\r\nSubject: s\r\n\r\nbody").getBytes(StandardCharsets.UTF_8)), true);
+                + "\r\nSubject: s\r\n\r\nbody").getBytes(StandardCharsets.UTF_8)), fromHeaderAsFallback);
     }
 
     private static EmailContent.Raw raw(String from, String to, String extraHeaders) {

@@ -15,6 +15,10 @@ import java.util.Optional;
 /** Typed table operations for Java consumers that manage DynamoDB tables directly. */
 public interface DynamoDbTableAccess {
 
+    /** A table's time-to-live setting, as DescribeTimeToLive reports it. */
+    record TimeToLive(boolean enabled, String attributeName) {
+    }
+
     TableDefinition createTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
                                 List<AttributeDefinition> attributeDefinitions, Long readCapacity,
                                 Long writeCapacity, List<GlobalSecondaryIndex> globalSecondaryIndexes,
@@ -33,6 +37,10 @@ public interface DynamoDbTableAccess {
     TableDefinition enableStream(Scope scope, String tableName, String viewType);
 
     TableDefinition disableStream(Scope scope, String tableName);
+
+    TimeToLive timeToLive(Scope scope, String tableName);
+
+    void updateTimeToLive(Scope scope, String tableName, String attributeName, boolean enabled);
 
     Map<String, String> listTagsOfResource(Scope scope, String resourceArn);
 

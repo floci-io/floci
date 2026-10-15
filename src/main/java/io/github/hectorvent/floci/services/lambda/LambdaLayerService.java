@@ -524,7 +524,7 @@ public class LambdaLayerService {
     }
 
     /**
-     * True when the ARN is a well-formed layer version ARN outside the {@code aws} partition.
+     * True when the ARN is a well-formed layer version ARN outside the request's partition.
      * Partitions are isolated, so such a layer is unreachable rather than merely unreadable, and
      * {@link #getLayerVersionByArn} already rejects it outright. Attaching one to a function has
      * to reject too, or Floci would persist an ARN its own lookup path calls invalid.

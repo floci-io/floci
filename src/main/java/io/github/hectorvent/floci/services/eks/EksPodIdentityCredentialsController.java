@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.WebIdentityToken;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier.ExpiredTokenException;
@@ -117,8 +118,9 @@ public class EksPodIdentityCredentialsController {
         String namespace = rest.substring(0, colon);
         String serviceAccount = rest.substring(colon + 1);
 
-        Optional<PodIdentityAssociation> maybeAssociation = associationService.findAssociation(
-                cluster, namespace, serviceAccount);
+        String callerAccountId = AwsArnUtils.accountOrDefault(cluster.getArn(), cluster.getAccountId());
+        Optional<PodIdentityAssociation> maybeAssociation = RequestScopes.callAs(callerAccountId,
+                () -> associationService.findAssociation(cluster, namespace, serviceAccount));
         if (maybeAssociation.isEmpty()) {
             return error(404, "ResourceNotFoundException: No association found for service account: "
                     + serviceAccount + "\n");
@@ -126,7 +128,6 @@ public class EksPodIdentityCredentialsController {
 
         PodIdentityAssociation association = maybeAssociation.get();
         String roleArn = association.roleArn();
-        String callerAccountId = cluster.getAccountId();
         String roleAccountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
         String accessKeyId = "ASIA" + randomId(16);
@@ -150,11 +151,12 @@ public class EksPodIdentityCredentialsController {
                 .map(id -> id + ":" + sessionName)
                 .orElse(null);
 
-        // Like STS AssumeRole, the session names the stored role, so it lives in the role's
-        // partition even when the association was made with the role's ARN in another partition.
+        // Like STS AssumeRole, store the session in the minting account while its role ARN names
+        // the assumed role, including the role's AWS partition when that differs.
         String sessionRoleArn = role.map(IamRole::getArn).filter(AwsArnUtils::isArn).orElse(roleArn);
-        iamService.registerSession(accessKeyId, secretAccessKey, sessionToken, sessionRoleArn,
-                expiration, association.policy(), callerAccountId, sessionName, assumedRoleId);
+        RequestScopes.runAs(callerAccountId, () -> iamService.registerSession(
+                accessKeyId, secretAccessKey, sessionToken, sessionRoleArn,
+                expiration, association.policy(), callerAccountId, sessionName, assumedRoleId));
 
         EksPodIdentityCredentialsResponse response = new EksPodIdentityCredentialsResponse(
                 accessKeyId,

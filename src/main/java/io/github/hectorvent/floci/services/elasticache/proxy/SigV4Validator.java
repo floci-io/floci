@@ -39,6 +39,14 @@ public class SigV4Validator {
      * @return true if the token is valid, identities match, and the token is not expired
      */
     public boolean validate(String token, String expectedGroupId, String expectedUsername) {
+        return validate(token, expectedGroupId, expectedUsername, null);
+    }
+
+    /**
+     * As above, accepting a long-term access key only when {@code ownerAccountId} holds it, for
+     * the auth proxy, which checks tokens on its own thread outside any request.
+     */
+    public boolean validate(String token, String expectedGroupId, String expectedUsername, String ownerAccountId) {
         try {
             URI uri = URI.create("http://" + token);
             String clusterId = uri.getHost();
@@ -54,7 +62,8 @@ public class SigV4Validator {
                 return false;
             }
 
-            return requestValidator.validate(rawQuery, clusterId, "User", false, expectedUsername, "IAM token");
+            return requestValidator.validate(rawQuery, clusterId, "User", false, expectedUsername, "IAM token",
+                    ownerAccountId);
         } catch (Exception e) {
             LOG.debugv("IAM token validation error: {0}", e.getMessage());
             return false;

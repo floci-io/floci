@@ -357,6 +357,7 @@ class ElastiCacheServerlessServiceTest {
                 validator.capture(), eq("account-cache"));
         assertTrue(validator.getValue().validatePassword("alice", "owner-secret"));
         assertFalse(validator.getValue().validatePassword("alice", "password-a"));
+        assertEquals("111111111111", validator.getValue().ownerAccountId());
         AccountAwareStorageBackend<CacheCluster> backing = factory.create("elasticache", "elasticache-redis-clusters.json", null);
         assertTrue(backing.getForAccount("000000000000", original.getBackingCacheClusterId()).isEmpty());
         assertTrue(backing.getForAccount("111111111111", original.getBackingCacheClusterId()).isPresent());

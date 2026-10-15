@@ -44,7 +44,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "configservice", "connect", "controlcatalog", "controltower", "datasync", "dlm", "dms", "dynamodb", "ec2",
             "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elbv2", "emr", "emrserverless",
             "eventbridge", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
-            "lambdamicrovms", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
+            "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "pipes", "ram", "rds", "redshift", "redshiftserverless", "resourceexplorer2", "route53resolver",
             "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "sns", "sqs",
             "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2");
@@ -890,6 +890,16 @@ class PartitionCrossServiceSmokeIntegrationTest {
         String region = offered(partitionCase, "lambda");
         String arn = signed(region, "lambda").when().get("/2025-09-09/managed-microvm-images")
             .then().statusCode(200).extract().jsonPath().getString("items[0].imageArn");
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void lambdaWebFunctionArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "lambda");
+        String message = signed(region, "lambda").when().get("/2025-03-07/web-functions/smoke-missing-web-function")
+            .then().statusCode(404).extract().jsonPath().getString("message");
+        String arn = message.substring("The function ".length(), message.indexOf(" does not exist."));
         PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 

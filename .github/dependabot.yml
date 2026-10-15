@@ -18,6 +18,17 @@ updates:
     ignore:
       - dependency-name: "com.networknt:json-schema-validator"
         versions: [">=2.0.0"]
+      # Generated for protobuf-java 4 from 2.65.0 on; the pom pins protobuf-java 3.25.
+      - dependency-name: "com.google.api.grpc:proto-google-common-protos"
+        versions: [">=2.65.0"]
+      # httpcore5 5.4 breaks every Docker call in the native image, and httpclient5 5.6 needs
+      # org.tukaani:xz at native link time; see the comments on both in pom.xml.
+      - dependency-name: "org.apache.httpcomponents.core5:httpcore5"
+        versions: [">=5.4.0"]
+      - dependency-name: "org.apache.httpcomponents.core5:httpcore5-h2"
+        versions: [">=5.4.0"]
+      - dependency-name: "org.apache.httpcomponents.client5:httpclient5"
+        versions: [">=5.6.0"]
     labels:
       - "dependencies"
       - "java"

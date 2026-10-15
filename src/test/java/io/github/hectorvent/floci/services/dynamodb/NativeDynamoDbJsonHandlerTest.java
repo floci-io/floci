@@ -1160,6 +1160,129 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void scanNamesTheSelectWhenRejectingAttributesToGet() {
+        createUsersTable("eu-west-1");
+
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Select": "COUNT", "AttributesToGet": ["userId"]}
+                """));
+        assertEquals("1 validation error detected: Cannot specify the AttributesToGet "
+                + "when choosing to get only the Count", ex.getMessage());
+    }
+
+    @Test
+    void queryReportsTheAttributesToGetConflictBeforeTheMissingIndex() {
+        createUsersTable("eu-west-1");
+
+        AwsException ex = expectValidationException("Query", json("""
+                {"TableName": "Users",
+                 "KeyConditions": {"userId": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "a"}]}},
+                 "Select": "ALL_PROJECTED_ATTRIBUTES", "AttributesToGet": ["userId"]}
+                """));
+        assertEquals("1 validation error detected: Cannot specify the AttributesToGet "
+                + "when choosing to get ALL_PROJECTED_ATTRIBUTES", ex.getMessage());
+    }
+
+    @Test
+    void queryListsEveryMixedParameter() {
+        AwsException ex = expectValidationException("Query", json("""
+                {"TableName": "Users", "KeyConditionExpression": "userId = :u",
+                 "ExpressionAttributeValues": {":u": {"S": "a"}},
+                 "KeyConditions": {"userId": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "a"}]}},
+                 "FilterExpression": "attribute_exists(x)", "ProjectionExpression": "userId",
+                 "AttributesToGet": ["userId"], "ConditionalOperator": "AND",
+                 "QueryFilter": {"x": {"ComparisonOperator": "NOT_NULL"}}}
+                """));
+        assertEquals("Can not use both expression and non-expression parameters in the same request: "
+                + "Non-expression parameters: {AttributesToGet, QueryFilter, ConditionalOperator, KeyConditions} "
+                + "Expression parameters: {ProjectionExpression, FilterExpression, KeyConditionExpression}",
+                ex.getMessage());
+    }
+
+    @Test
+    void queryAllowsAFilterExpressionWithKeyConditions() throws Exception {
+        createUsersTable("eu-west-1");
+
+        Response response = handler.handle("Query", json("""
+                {"TableName": "Users",
+                 "KeyConditions": {"userId": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "a"}]}},
+                 "FilterExpression": "attribute_exists(x)"}
+                """), "eu-west-1");
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void scanListsEveryMixedParameter() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "FilterExpression": "attribute_exists(x)",
+                 "ProjectionExpression": "userId", "AttributesToGet": ["userId"],
+                 "ConditionalOperator": "AND", "ScanFilter": {"x": {"ComparisonOperator": "NOT_NULL"}}}
+                """));
+        assertEquals("Can not use both expression and non-expression parameters in the same request: "
+                + "Non-expression parameters: {AttributesToGet, ScanFilter, ConditionalOperator} "
+                + "Expression parameters: {ProjectionExpression, FilterExpression}", ex.getMessage());
+    }
+
+    @Test
+    void scanReportsTheLimitBeforeMixedParameters() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Limit": 0, "FilterExpression": "attribute_exists(x)",
+                 "ScanFilter": {"x": {"ComparisonOperator": "NOT_NULL"}}}
+                """));
+        assertEquals("1 validation error detected: Value at 'Limit' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
+    void scanRejectsAnUnknownReturnConsumedCapacityBeforeTheTableLookup() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Missing", "ReturnConsumedCapacity": "BOGUS", "Select": "BOGUS"}
+                """));
+        assertEquals("1 validation error detected: Value 'BOGUS' at 'returnConsumedCapacity' "
+                + "failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]",
+                ex.getMessage());
+    }
+
+    @Test
+    void nullReturnConsumedCapacityIsTreatedAsAbsent() throws Exception {
+        createUsersTable("eu-west-1");
+        String key = "{\"userId\": {\"S\": \"a\"}}";
+        String select = "\"SELECT * FROM \\\"Users\\\" WHERE userId = 'a'\"";
+        Map<String, String> requests = Map.ofEntries(
+                Map.entry("PutItem", "{\"TableName\": \"Users\", \"Item\": " + key),
+                Map.entry("GetItem", "{\"TableName\": \"Users\", \"Key\": " + key),
+                Map.entry("DeleteItem", "{\"TableName\": \"Users\", \"Key\": " + key),
+                Map.entry("UpdateItem", "{\"TableName\": \"Users\", \"Key\": " + key),
+                Map.entry("Query", "{\"TableName\": \"Users\", \"KeyConditionExpression\": \"userId = :u\", "
+                        + "\"ExpressionAttributeValues\": {\":u\": {\"S\": \"a\"}}"),
+                Map.entry("Scan", "{\"TableName\": \"Users\""),
+                Map.entry("BatchGetItem", "{\"RequestItems\": {\"Users\": {\"Keys\": [" + key + "]}}"),
+                Map.entry("BatchWriteItem", "{\"RequestItems\": {\"Users\": [{\"PutRequest\": {\"Item\": " + key + "}}]}"),
+                Map.entry("TransactGetItems", "{\"TransactItems\": [{\"Get\": {\"TableName\": \"Users\", \"Key\": " + key + "}}]"),
+                Map.entry("TransactWriteItems", "{\"TransactItems\": [{\"Put\": {\"TableName\": \"Users\", \"Item\": " + key + "}}]"),
+                Map.entry("ExecuteStatement", "{\"Statement\": " + select),
+                Map.entry("BatchExecuteStatement", "{\"Statements\": [{\"Statement\": " + select + "}]"),
+                Map.entry("ExecuteTransaction", "{\"TransactStatements\": [{\"Statement\": " + select + "}]"));
+
+        for (Map.Entry<String, String> request : requests.entrySet()) {
+            Response response = handler.handle(request.getKey(),
+                    json(request.getValue() + ", \"ReturnConsumedCapacity\": null}"), "eu-west-1");
+            assertEquals(200, response.getStatus(), request.getKey());
+            JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+            assertFalse(body.has("ConsumedCapacity"), request.getKey());
+        }
+    }
+
+    @Test
+    void scanReportsTheLimitBeforeReturnConsumedCapacity() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Limit": 0, "ReturnConsumedCapacity": "BOGUS"}
+                """));
+        assertEquals("1 validation error detected: Value at 'Limit' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to 1", ex.getMessage());
+    }
+
+    @Test
     void scanAcceptsSegmentsAtTheBounds() throws Exception {
         createUsersTable("eu-west-1");
 

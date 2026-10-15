@@ -1,12 +1,8 @@
 package io.github.hectorvent.floci.services.iot;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.CertificateMetadata;
-import io.github.hectorvent.floci.config.FlociCertificateAuthority;
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
-import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import io.github.hectorvent.floci.testing.IotMqttTlsProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
@@ -14,14 +10,12 @@ import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttSecurityException;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import javax.net.ssl.SSLSocketFactory;
-import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -41,20 +35,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * connection's policy variables. The plaintext listener stays permissive.
  */
 @QuarkusTest
-@TestProfile(IotMqttMutualTlsIntegrationTest.Profile.class)
+@TestProfile(IotMqttTlsProfile.class)
 class IotMqttMutualTlsIntegrationTest {
 
-    static final Path DATA_DIR = Path.of("target", "floci-iot-mqtt-mtls-test").toAbsolutePath();
-    static final Path TLS_DIR = DATA_DIR.resolve("tls");
-    static final int PLAIN_PORT = 18838;
-    static final int TLS_PORT = 18839;
+    static final Path TLS_DIR = Path.of(IotMqttTlsProfile.TLS_DIR);
+    static final int PLAIN_PORT = IotMqttTlsProfile.PLAIN_PORT;
+    static final int TLS_PORT = IotMqttTlsProfile.TLS_PORT;
     /** The name the device dials, which Paho also sends as the TLS server name. */
     static final String DOMAIN = "localhost";
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private static final String CONNECT_ANY_CLIENT = policy("Allow", "arn:aws:iot:*:*:client/*", null);
     private static final String CONNECT_AS_ATTACHED_THING =
             policy("Allow", "arn:aws:iot:*:*:client/${iot:Connection.Thing.ThingName}", null);
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @Test
     void activeCertificateWithConnectPolicyIsAdmitted() throws Exception {
@@ -89,7 +84,7 @@ class IotMqttMutualTlsIntegrationTest {
 
     @Test
     void mqtt5DeviceWithoutPolicyIsRefusedWithTheNotAuthorizedReasonCode() throws Exception {
-        IotDeviceIdentity device = IotDeviceIdentity.provision(true);
+        IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
 
         org.eclipse.paho.mqttv5.client.MqttClient client = mqtt5Client("v5-no-policy-" + System.nanoTime());
         try {
@@ -104,7 +99,7 @@ class IotMqttMutualTlsIntegrationTest {
 
     @Test
     void activeCertificateWithoutPolicyIsRefused() {
-        IotDeviceIdentity device = IotDeviceIdentity.provision(true);
+        IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
 
         assertNotAuthorized(() -> connectTls(device, "no-policy-" + System.nanoTime()));
     }
@@ -130,10 +125,8 @@ class IotMqttMutualTlsIntegrationTest {
 
     @Test
     void detachedPolicyIsRefusedOnTheNextConnect() throws Exception {
-        IotDeviceIdentity device = IotDeviceIdentity.provision(true);
-        String policy = "detach-" + System.nanoTime();
-        createPolicy(policy, CONNECT_ANY_CLIENT);
-        attachPolicy(policy, device.certificateArn);
+        IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
+        String policy = device.attachNewPolicy(CONNECT_ANY_CLIENT, cleanup);
         MqttClient first = connectTls(device, "detach-1-" + System.nanoTime());
         first.disconnect();
         first.close();
@@ -188,7 +181,10 @@ class IotMqttMutualTlsIntegrationTest {
         IotDeviceIdentity device = provisionWithPolicy(true, CONNECT_AS_ATTACHED_THING);
         String thingName = "thing" + System.nanoTime();
         given().contentType("application/json").body("{}").when().post("/things/" + thingName).then().statusCode(200);
+        cleanup.register(() -> given().when().delete("/things/" + thingName).then().statusCode(200));
         given().header("x-amzn-principal", device.certificateArn).when().put("/things/" + thingName + "/principals").then().statusCode(200);
+        cleanup.register(() -> given().header("x-amzn-principal", device.certificateArn)
+                .when().delete("/things/" + thingName + "/principals").then().statusCode(200));
 
         MqttClient asThing = connectTls(device, thingName);
         assertTrue(asThing.isConnected());
@@ -234,7 +230,7 @@ class IotMqttMutualTlsIntegrationTest {
         List<IotDeviceIdentity> refused = new ArrayList<>();
         for (int i = 0; i < devices; i++) {
             admitted.add(provisionWithPolicy(true, CONNECT_ANY_CLIENT));
-            refused.add(IotDeviceIdentity.provision(true));
+            refused.add(IotDeviceIdentity.provision(true, cleanup));
         }
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(devices * 2);
@@ -276,11 +272,9 @@ class IotMqttMutualTlsIntegrationTest {
         }
     }
 
-    private static IotDeviceIdentity provisionWithPolicy(boolean active, String document) {
-        IotDeviceIdentity device = IotDeviceIdentity.provision(active);
-        String policy = "connect-" + System.nanoTime();
-        createPolicy(policy, document);
-        attachPolicy(policy, device.certificateArn);
+    private IotDeviceIdentity provisionWithPolicy(boolean active, String document) {
+        IotDeviceIdentity device = IotDeviceIdentity.provision(active, cleanup);
+        device.attachNewPolicy(document, cleanup);
         return device;
     }
 
@@ -335,62 +329,8 @@ class IotMqttMutualTlsIntegrationTest {
         assertEquals(MqttException.REASON_CODE_NOT_AUTHORIZED, refused.getReasonCode());
     }
 
-    private static void createPolicy(String name, String document) {
-        given()
-                .contentType("application/json")
-                .body(OBJECT_MAPPER.createObjectNode().put("policyDocument", document).toString())
-                .when().post("/policies/" + name)
-                .then().statusCode(200);
-    }
-
-    private static void attachPolicy(String name, String certificateArn) {
-        given().queryParam("target", certificateArn).when().put("/target-policies/" + name).then().statusCode(200);
-    }
-
     private static String policy(String effect, String resource, String condition) {
         return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"" + effect + "\",\"Action\":\"iot:Connect\","
                 + "\"Resource\":\"" + resource + "\"" + (condition == null ? "" : ",\"Condition\":" + condition) + "}]}";
-    }
-
-    /**
-     * TLS on with a CA-issued leaf on disk, as in {@link IotMqttTlsIntegrationTest}, on ports and a
-     * data directory of its own so both classes can run in one JVM.
-     */
-    public static final class Profile implements QuarkusTestProfile {
-
-        static {
-            try {
-                Files.createDirectories(TLS_DIR);
-                for (String name : List.of("floci-server.crt", "floci-server.key", "floci-server.metadata.json")) {
-                    Files.deleteIfExists(TLS_DIR.resolve(name));
-                }
-                FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
-                List<String> sans = List.of("localhost", "127.0.0.1", "*.localhost.floci.io");
-                CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("localhost", sans, KeyAlgorithm.RSA_2048, null);
-                Files.writeString(TLS_DIR.resolve("floci-server.crt"), leaf.certificatePem());
-                Files.writeString(TLS_DIR.resolve("floci-server.key"), leaf.privateKeyPem());
-                Files.writeString(TLS_DIR.resolve("floci-server.metadata.json"),
-                        OBJECT_MAPPER.writeValueAsString(CertificateMetadata.create(sans, "dev")));
-            } catch (IOException e) {
-                throw new IllegalStateException("could not prepare the TLS fixtures", e);
-            }
-        }
-
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.ofEntries(
-                    Map.entry("floci.tls.enabled", "true"),
-                    Map.entry("floci.tls.self-signed", "true"),
-                    Map.entry("floci.tls.aws-https-port", "0"),
-                    Map.entry("floci.storage.persistent-path", DATA_DIR.toString()),
-                    Map.entry("quarkus.tls.key-store.pem.0.cert", TLS_DIR.resolve("floci-server.crt").toString()),
-                    Map.entry("quarkus.tls.key-store.pem.0.key", TLS_DIR.resolve("floci-server.key").toString()),
-                    Map.entry("quarkus.http.insecure-requests", "enabled"),
-                    Map.entry("floci.services.iot.mqtt.enabled", "true"),
-                    Map.entry("floci.services.iot.mqtt.auto-start", "true"),
-                    Map.entry("floci.services.iot.mqtt.host", "127.0.0.1"),
-                    Map.entry("floci.services.iot.mqtt.port", Integer.toString(PLAIN_PORT)),
-                    Map.entry("floci.services.iot.mqtt.tls-port", Integer.toString(TLS_PORT)));
-        }
     }
 }

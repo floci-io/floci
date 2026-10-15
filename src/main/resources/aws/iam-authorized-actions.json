@@ -1,0 +1,311 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_iam_authorized_actions.py",
+    "reference": "https://servicereference.us-east-1.amazonaws.com/",
+    "retrieved": "2026-10-14",
+    "note": "make iam-authorized-actions-verify checks every entry against AWS."
+  },
+  "authorizedActions": {
+    "access-analyzer": {
+      "GetFindingV2": "access-analyzer:GetFinding",
+      "ListFindingsV2": "access-analyzer:ListFindings"
+    },
+    "agent-registry": {
+      "BatchGetDiscoverableRegistryRecord": "agent-registry:GetDiscoverableRegistryRecord"
+    },
+    "apigateway": {
+      "CreateApiMapping": "apigateway:POST",
+      "CreateBasePathMapping": "apigateway:POST",
+      "CreateDocumentationPart": "apigateway:POST",
+      "CreateDocumentationVersion": "apigateway:POST",
+      "CreateIntegrationResponse": "apigateway:POST",
+      "CreateRequestValidator": "apigateway:POST",
+      "CreateResource": "apigateway:POST",
+      "CreateRoute": "apigateway:POST",
+      "CreateRouteResponse": "apigateway:POST",
+      "CreateUsagePlanKey": "apigateway:POST",
+      "DeleteAccessLogSettings": "apigateway:DELETE",
+      "DeleteApi": "apigateway:DELETE",
+      "DeleteApiKey": "apigateway:DELETE",
+      "DeleteApiMapping": "apigateway:DELETE",
+      "DeleteBasePathMapping": "apigateway:DELETE",
+      "DeleteClientCertificate": "apigateway:DELETE",
+      "DeleteCorsConfiguration": "apigateway:DELETE",
+      "DeleteDocumentationPart": "apigateway:DELETE",
+      "DeleteDocumentationVersion": "apigateway:DELETE",
+      "DeleteDomainNameAccessAssociation": "apigateway:DELETE",
+      "DeleteGatewayResponse": "apigateway:DELETE",
+      "DeleteMethod": "apigateway:DELETE",
+      "DeleteMethodResponse": "apigateway:DELETE",
+      "DeleteRequestValidator": "apigateway:DELETE",
+      "DeleteResource": "apigateway:DELETE",
+      "DeleteRestApi": "apigateway:DELETE",
+      "DeleteRoute": "apigateway:DELETE",
+      "DeleteRouteRequestParameter": "apigateway:DELETE",
+      "DeleteRouteResponse": "apigateway:DELETE",
+      "DeleteRouteSettings": "apigateway:DELETE",
+      "DeleteUsagePlan": "apigateway:DELETE",
+      "DeleteUsagePlanKey": "apigateway:DELETE",
+      "ExportApi": "apigateway:GET",
+      "FlushStageAuthorizersCache": "apigateway:DELETE",
+      "FlushStageCache": "apigateway:DELETE",
+      "GetAccount": "apigateway:GET",
+      "GetApi": "apigateway:GET",
+      "GetApiKey": "apigateway:GET",
+      "GetApiKeys": "apigateway:GET",
+      "GetApiMapping": "apigateway:GET",
+      "GetApiMappings": "apigateway:GET",
+      "GetApis": "apigateway:GET",
+      "GetBasePathMapping": "apigateway:GET",
+      "GetBasePathMappings": "apigateway:GET",
+      "GetClientCertificate": "apigateway:GET",
+      "GetClientCertificates": "apigateway:GET",
+      "GetDocumentationPart": "apigateway:GET",
+      "GetDocumentationParts": "apigateway:GET",
+      "GetDocumentationVersion": "apigateway:GET",
+      "GetDocumentationVersions": "apigateway:GET",
+      "GetDomainNameAccessAssociations": "apigateway:GET",
+      "GetExport": "apigateway:GET",
+      "GetGatewayResponse": "apigateway:GET",
+      "GetGatewayResponses": "apigateway:GET",
+      "GetIntegrationResponses": "apigateway:GET",
+      "GetIntegrations": "apigateway:GET",
+      "GetMethod": "apigateway:GET",
+      "GetMethodResponse": "apigateway:GET",
+      "GetRequestValidator": "apigateway:GET",
+      "GetRequestValidators": "apigateway:GET",
+      "GetResource": "apigateway:GET",
+      "GetResources": "apigateway:GET",
+      "GetRestApi": "apigateway:GET",
+      "GetRestApis": "apigateway:GET",
+      "GetRoute": "apigateway:GET",
+      "GetRouteResponse": "apigateway:GET",
+      "GetRouteResponses": "apigateway:GET",
+      "GetRoutes": "apigateway:GET",
+      "GetSdk": "apigateway:GET",
+      "GetSdkType": "apigateway:GET",
+      "GetSdkTypes": "apigateway:GET",
+      "GetUsage": "apigateway:GET",
+      "GetUsagePlan": "apigateway:GET",
+      "GetUsagePlanKey": "apigateway:GET",
+      "GetUsagePlanKeys": "apigateway:GET",
+      "GetUsagePlans": "apigateway:GET",
+      "ImportApiKeys": "apigateway:POST",
+      "ImportDocumentationParts": "apigateway:PUT",
+      "PutGatewayResponse": "apigateway:PUT",
+      "PutIntegrationResponse": "apigateway:PUT",
+      "PutMethod": "apigateway:PUT",
+      "PutMethodResponse": "apigateway:PUT",
+      "PutRoutingRule": "apigateway:UpdateRoutingRule",
+      "RejectDomainNameAccessAssociation": "apigateway:RejectAccessAssociation",
+      "ResetAuthorizersCache": "apigateway:DELETE",
+      "TestInvokeAuthorizer": "apigateway:POST",
+      "TestInvokeMethod": "apigateway:POST",
+      "UpdateApiKey": "apigateway:PATCH",
+      "UpdateApiMapping": "apigateway:PATCH",
+      "UpdateBasePathMapping": "apigateway:PATCH",
+      "UpdateClientCertificate": "apigateway:PATCH",
+      "UpdateDocumentationPart": "apigateway:PATCH",
+      "UpdateDocumentationVersion": "apigateway:PATCH",
+      "UpdateGatewayResponse": "apigateway:PATCH",
+      "UpdateMethod": "apigateway:PATCH",
+      "UpdateMethodResponse": "apigateway:PATCH",
+      "UpdateRequestValidator": "apigateway:PATCH",
+      "UpdateResource": "apigateway:PATCH",
+      "UpdateRoute": "apigateway:PATCH",
+      "UpdateRouteResponse": "apigateway:PATCH",
+      "UpdateUsage": "apigateway:PATCH",
+      "UpdateUsagePlan": "apigateway:PATCH"
+    },
+    "aws-marketplace": {
+      "BatchDescribeEntities": "aws-marketplace:DescribeEntity"
+    },
+    "batch": {
+      "CancelJobs": "batch:CancelJob",
+      "TerminateJobs": "batch:TerminateJob",
+      "TerminateServiceJobs": "batch:TerminateServiceJob"
+    },
+    "bcm-pricing-calculator": {
+      "BatchCreateBillScenarioCommitmentModification": "bcm-pricing-calculator:CreateBillScenarioCommitmentModification",
+      "BatchCreateBillScenarioUsageModification": "bcm-pricing-calculator:CreateBillScenarioUsageModification",
+      "BatchCreateWorkloadEstimateUsage": "bcm-pricing-calculator:CreateWorkloadEstimateUsage",
+      "BatchDeleteBillScenarioCommitmentModification": "bcm-pricing-calculator:DeleteBillScenarioCommitmentModification",
+      "BatchDeleteBillScenarioUsageModification": "bcm-pricing-calculator:DeleteBillScenarioUsageModification",
+      "BatchDeleteWorkloadEstimateUsage": "bcm-pricing-calculator:DeleteWorkloadEstimateUsage",
+      "BatchUpdateBillScenarioCommitmentModification": "bcm-pricing-calculator:UpdateBillScenarioCommitmentModification",
+      "BatchUpdateBillScenarioUsageModification": "bcm-pricing-calculator:UpdateBillScenarioUsageModification",
+      "BatchUpdateWorkloadEstimateUsage": "bcm-pricing-calculator:UpdateWorkloadEstimateUsage"
+    },
+    "bedrock": {
+      "InvokeModelWithBidirectionalStream": "bedrock:InvokeModel",
+      "RetrieveAndGenerateStream": "bedrock:RetrieveAndGenerate"
+    },
+    "cassandra": {
+      "GetKeyspace": "cassandra:Select",
+      "GetTable": "cassandra:Select",
+      "GetType": "cassandra:Select",
+      "ListKeyspaces": "cassandra:Select",
+      "ListTables": "cassandra:Select",
+      "ListTypes": "cassandra:Select"
+    },
+    "cognito-idp": {
+      "DescribeTermsByClient": "cognito-idp:DescribeTerms"
+    },
+    "connect": {
+      "UpdateUserConfig": "connect:UpdateUserPhoneConfig"
+    },
+    "deadline": {
+      "BatchGetJob": "deadline:GetJob",
+      "BatchGetSession": "deadline:GetSession",
+      "BatchGetSessionAction": "deadline:GetSessionAction",
+      "BatchGetStep": "deadline:GetStep",
+      "BatchGetTask": "deadline:GetTask",
+      "BatchGetWorker": "deadline:GetWorker",
+      "BatchUpdateJob": "deadline:UpdateJob",
+      "BatchUpdateTask": "deadline:UpdateTask"
+    },
+    "detective": {
+      "ListOrganizationAdminAccounts": "detective:ListOrganizationAdminAccount"
+    },
+    "dms": {
+      "DescribeDataProviders": "dms:ListDataProviders",
+      "DescribeExtensionPackAssociations": "dms:ListExtensionPacks",
+      "DescribeInstanceProfiles": "dms:ListInstanceProfiles",
+      "DescribeMetadataModelAssessments": "dms:ListMetadataModelAssessments",
+      "DescribeMetadataModelConversions": "dms:ListMetadataModelConversions",
+      "DescribeMetadataModelExportsAsScript": "dms:ListMetadataModelExports",
+      "DescribeMetadataModelExportsToTarget": "dms:ListMetadataModelExports",
+      "DescribeMigrationProjects": "dms:ListMigrationProjects",
+      "ModifyConversionConfiguration": "dms:UpdateConversionConfiguration",
+      "StartExtensionPackAssociation": "dms:AssociateExtensionPack",
+      "StartMetadataModelExportAsScript": "dms:StartMetadataModelExportAsScripts"
+    },
+    "dynamodb": {
+      "TransactGetItems": "dynamodb:GetItem"
+    },
+    "glue": {
+      "BatchGetDataQualityResult": "glue:GetDataQualityResult",
+      "BatchGetDataQualityResultV2": "glue:GetDataQualityResult",
+      "BatchGetDataQualityRulesetEvaluationRun": "glue:GetDataQualityRulesetEvaluationRun",
+      "BatchPutDataQualityStatisticAnnotation": "glue:PutDataQualityStatisticAnnotation",
+      "GetDataQualityResultV2": "glue:GetDataQualityResult",
+      "ListDataQualityResultsV2": "glue:ListDataQualityResults",
+      "ListDataQualityStatisticAnnotations": "glue:GetDataQualityResult",
+      "ListDataQualityStatistics": "glue:GetDataQualityResult",
+      "PublishDataQualityResultV2": "glue:PublishDataQuality"
+    },
+    "lakeformation": {
+      "GetTemporaryDataLocationCredentials": "lakeformation:GetDataAccess"
+    },
+    "lambda": {
+      "GetLayerVersionByArn": "lambda:GetLayerVersion",
+      "Invoke": "lambda:InvokeFunction",
+      "InvokeWithResponseStream": "lambda:InvokeFunction"
+    },
+    "lex": {
+      "ListUtteranceAnalyticsData": "lex:ListAggregatedUtterances",
+      "ListUtteranceMetrics": "lex:ListAggregatedUtterances"
+    },
+    "mediaconnect": {
+      "BatchGetRouterInput": "mediaconnect:GetRouterInput",
+      "BatchGetRouterNetworkInterface": "mediaconnect:GetRouterNetworkInterface",
+      "BatchGetRouterOutput": "mediaconnect:GetRouterOutput"
+    },
+    "qapps": {
+      "CreatePresignedUrl": "qapps:ImportDocument"
+    },
+    "quicksight": {
+      "DeleteTopicV2": "quicksight:DeleteTopic",
+      "DescribeAnalysisDefinition": "quicksight:DescribeAnalysis",
+      "DescribeDashboardDefinition": "quicksight:DescribeDashboard",
+      "DescribeTemplateDefinition": "quicksight:DescribeTemplate",
+      "DescribeTopicPermissionsV2": "quicksight:DescribeTopicPermissions",
+      "DescribeTopicV2": "quicksight:DescribeTopic",
+      "ListTopicsV2": "quicksight:ListTopics",
+      "SearchTopicsV2": "quicksight:SearchTopics",
+      "UpdateTopicPermissionsV2": "quicksight:UpdateTopicPermissions"
+    },
+    "redshift-data": {
+      "GetStatementResultV2": "redshift-data:GetStatementResult"
+    },
+    "resource-explorer-2": {
+      "ListResources": "resource-explorer-2:Search"
+    },
+    "route53resolver": {
+      "BatchCreateFirewallRule": "route53resolver:CreateFirewallRule",
+      "BatchDeleteFirewallRule": "route53resolver:DeleteFirewallRule",
+      "BatchUpdateFirewallRule": "route53resolver:UpdateFirewallRule"
+    },
+    "s3": {
+      "DeleteBucketAnalyticsConfiguration": "s3:PutAnalyticsConfiguration",
+      "DeleteBucketCors": "s3:PutBucketCORS",
+      "DeleteBucketEncryption": "s3:PutEncryptionConfiguration",
+      "DeleteBucketIntelligentTieringConfiguration": "s3:PutIntelligentTieringConfiguration",
+      "DeleteBucketInventoryConfiguration": "s3:PutInventoryConfiguration",
+      "DeleteBucketLifecycle": "s3:PutLifecycleConfiguration",
+      "DeleteBucketMetadataConfiguration": "s3:DeleteBucketMetadataTableConfiguration",
+      "DeleteBucketMetricsConfiguration": "s3:PutMetricsConfiguration",
+      "DeleteBucketOwnershipControls": "s3:PutBucketOwnershipControls",
+      "GetBucketAccelerateConfiguration": "s3:GetAccelerateConfiguration",
+      "GetBucketAnalyticsConfiguration": "s3:GetAnalyticsConfiguration",
+      "GetBucketEncryption": "s3:GetEncryptionConfiguration",
+      "GetBucketIntelligentTieringConfiguration": "s3:GetIntelligentTieringConfiguration",
+      "GetBucketInventoryConfiguration": "s3:GetInventoryConfiguration",
+      "GetBucketLifecycle": "s3:GetLifecycleConfiguration",
+      "GetBucketMetadataConfiguration": "s3:GetBucketMetadataTableConfiguration",
+      "GetBucketMetricsConfiguration": "s3:GetMetricsConfiguration",
+      "GetBucketNotificationConfiguration": "s3:GetBucketNotification",
+      "GetObjectLockConfiguration": "s3:GetBucketObjectLockConfiguration",
+      "HeadBucket": "s3:ListBucket",
+      "ListBucketAnalyticsConfigurations": "s3:GetAnalyticsConfiguration",
+      "ListBucketIntelligentTieringConfigurations": "s3:GetIntelligentTieringConfiguration",
+      "ListBucketInventoryConfigurations": "s3:GetInventoryConfiguration",
+      "ListBucketMetricsConfigurations": "s3:GetMetricsConfiguration",
+      "ListBuckets": "s3:ListAllMyBuckets",
+      "ListObjectVersions": "s3:ListBucketVersions",
+      "PutBucketAccelerateConfiguration": "s3:PutAccelerateConfiguration",
+      "PutBucketAnalyticsConfiguration": "s3:PutAnalyticsConfiguration",
+      "PutBucketEncryption": "s3:PutEncryptionConfiguration",
+      "PutBucketIntelligentTieringConfiguration": "s3:PutIntelligentTieringConfiguration",
+      "PutBucketInventoryConfiguration": "s3:PutInventoryConfiguration",
+      "PutBucketLifecycle": "s3:PutLifecycleConfiguration",
+      "PutBucketMetricsConfiguration": "s3:PutMetricsConfiguration",
+      "PutBucketNotificationConfiguration": "s3:PutBucketNotification",
+      "PutObjectLockConfiguration": "s3:PutBucketObjectLockConfiguration",
+      "SelectObjectContent": "s3:GetObject"
+    },
+    "sagemaker": {
+      "UpdateRecord": "sagemaker:PutRecord"
+    },
+    "securityhub": {
+      "BatchUpdateFindingsV2": "securityhub:BatchUpdateFindings",
+      "GetFindingStatisticsV2": "securityhub:GetAdhocInsightResults",
+      "GetFindingsV2": "securityhub:GetFindings"
+    },
+    "signin": {
+      "CreateOAuth2TokenWithIAM": "signin:CreateOAuth2Token",
+      "IntrospectOAuth2TokenWithIAM": "signin:IntrospectOAuth2Token",
+      "RevokeOAuth2TokenWithIAM": "signin:RevokeOAuth2Token"
+    },
+    "sns": {
+      "PublishBatch": "sns:Publish"
+    },
+    "sqs": {
+      "ChangeMessageVisibilityBatch": "sqs:ChangeMessageVisibility",
+      "DeleteMessageBatch": "sqs:DeleteMessage",
+      "SendMessageBatch": "sqs:SendMessage"
+    },
+    "sso-oauth": {
+      "CreateToken": "sso-oauth:CreateTokenWithIAM"
+    },
+    "tax": {
+      "BatchGetTaxExemptions": "tax:GetExemptions",
+      "GetTaxExemptionTypes": "tax:GetExemptions",
+      "ListTaxExemptions": "tax:GetExemptions",
+      "PutTaxExemption": "tax:UpdateExemptions"
+    },
+    "vpc-lattice": {
+      "BatchUpdateRule": "vpc-lattice:UpdateRule"
+    }
+  }
+}

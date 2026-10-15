@@ -404,6 +404,37 @@ class CodeArtifactPypiDockerIntegrationTest {
     }
 
     /**
+     * The real-world gap this closes: the readme-capture call site inside {@code
+     * CodeArtifactPypiController#upload} had never once been exercised by a real multipart body
+     * against a live pypiserver container (every other readme test either called {@code
+     * CodeArtifactService} directly or never sent a {@code description} field at all). A
+     * throwaway package, not {@link #PACKAGE_NAME}, so it doesn't disturb the ordered sequence
+     * above.
+     */
+    @Test
+    @Order(14)
+    void getPackageVersionReadmeReturnsWhatARealTwineUploadSent() {
+        String packageName = "floci-pypiserver-readme-spike";
+        String filename = "floci_pypiserver_readme_spike-1.0.0.tar.gz";
+        String description = "# Real Readme\n\nSent as the real twine upload's own description field.";
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename,
+                        "readme-spike-bytes".getBytes(StandardCharsets.UTF_8), description))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi&package="
+                        + packageName + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("readme", equalTo(description))
+                .body("package", equalTo(packageName))
+                .body("version", equalTo("1.0.0"));
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code PypiserverSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container.
@@ -458,6 +489,16 @@ class CodeArtifactPypiDockerIntegrationTest {
      * {@code name} and the {@code content} file part, so the rest are included for realism only.
      */
     private static byte[] twineUploadBody(String boundary, String packageName, String filename, byte[] content) {
+        return twineUploadBody(boundary, packageName, filename, content, null);
+    }
+
+    /**
+     * Same real twine shape as the 4-argument overload above, with an optional {@code description}
+     * field (the real PyPI legacy upload API's field for a distribution's long description) a real
+     * {@code twine upload} also sends whenever the project's metadata carries one.
+     */
+    private static byte[] twineUploadBody(String boundary, String packageName, String filename, byte[] content,
+            String description) {
         String preamble = "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\":action\"\r\n\r\n"
                 + "file_upload\r\n"
@@ -473,6 +514,9 @@ class CodeArtifactPypiDockerIntegrationTest {
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"filetype\"\r\n\r\n"
                 + "sdist\r\n"
+                + (description == null ? "" : "--" + boundary + "\r\n"
+                        + "Content-Disposition: form-data; name=\"description\"\r\n\r\n"
+                        + description + "\r\n")
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"content\"; filename=\"" + filename + "\"\r\n"
                 + "Content-Type: application/octet-stream\r\n\r\n";

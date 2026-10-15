@@ -947,9 +947,8 @@ class DynamoDbIntegrationTest {
             .body("""
                 {
                     "TableName": "TestTable",
-                    "KeyConditionExpression": "pk = :pk",
-                    "ExpressionAttributeValues": {
-                        ":pk": {"S": "user-1"}
+                    "KeyConditions": {
+                        "pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "user-1"}]}
                     },
                     "Select": "SPECIFIC_ATTRIBUTES",
                     "AttributesToGet": ["pk", "sk"]
@@ -1106,7 +1105,8 @@ class DynamoDbIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
             .body("message", equalTo("Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}"));
+                    + "Non-expression parameters: {AttributesToGet} "
+                    + "Expression parameters: {ProjectionExpression, KeyConditionExpression}"));
     }
 
     @Test

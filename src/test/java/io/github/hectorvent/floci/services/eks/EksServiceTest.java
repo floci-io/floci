@@ -1759,7 +1759,7 @@ class EksServiceTest {
         String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
 
         doThrow(new RuntimeException("Simulated tagging failure"))
-                .when(spyEc2).createTags(any(), any(), any());
+                .when(spyEc2).createSystemTags(any(), any(), any());
 
         StorageFactory storageFactory = fixedStorageFactory(new InMemoryStorage<>());
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");

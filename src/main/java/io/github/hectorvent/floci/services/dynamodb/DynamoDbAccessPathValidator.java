@@ -55,17 +55,11 @@ final class DynamoDbAccessPathValidator {
     static void validateSelection(TableDefinition table, DynamoDbAccessPath accessPath,
                                   String select, String projectionExpression,
                                   JsonNode attributesToGet, JsonNode expressionAttributeNames) {
-        if (projectionExpression != null && select != null && !"SPECIFIC_ATTRIBUTES".equals(select)) {
-            throw validationException("1 validation error detected: "
-                    + "Cannot specify the ProjectionExpression when choosing to get "
-                    + ("COUNT".equals(select) ? "only the Count" : select));
-        }
+        rejectWithSelect("ProjectionExpression", projectionExpression != null, select);
+        rejectWithSelect("AttributesToGet", attributesToGet != null, select);
         if ("ALL_PROJECTED_ATTRIBUTES".equals(select) && !accessPath.isIndex()) {
             throw validationException("1 validation error detected: "
                     + "ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName");
-        }
-        if (attributesToGet != null && select != null && !"SPECIFIC_ATTRIBUTES".equals(select)) {
-            throw validationException("Cannot use both Select and AttributesToGet unless Select is SPECIFIC_ATTRIBUTES");
         }
         if (!accessPath.isGlobalSecondaryIndex() || "ALL".equals(accessPath.projectionType())) {
             return;
@@ -90,6 +84,14 @@ final class DynamoDbAccessPathValidator {
             throw validationException("One or more parameter values were invalid: Global secondary index "
                     + accessPath.indexName() + " does not project "
                     + String.join(", ", requestedAttributes.stream().sorted().toList()));
+        }
+    }
+
+    private static void rejectWithSelect(String parameter, boolean present, String select) {
+        if (present && select != null && !"SPECIFIC_ATTRIBUTES".equals(select)) {
+            throw validationException("1 validation error detected: "
+                    + "Cannot specify the " + parameter + " when choosing to get "
+                    + ("COUNT".equals(select) ? "only the Count" : select));
         }
     }
 

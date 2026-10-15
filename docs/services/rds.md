@@ -71,6 +71,10 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBClusterEndpoints` | List a cluster's built-in writer and reader endpoints and its custom endpoints, with the four documented filters |
 | `ModifyDBClusterEndpoint` | Change a custom endpoint's type or member list |
 | `DeleteDBClusterEndpoint` | Delete a custom endpoint |
+| `AddRoleToDBCluster` | Associate an IAM role with a cluster, optionally for a feature; see [IAM role associations](#iam-role-associations) |
+| `RemoveRoleFromDBCluster` | Remove a role from a cluster |
+| `AddRoleToDBInstance` | Associate an IAM role with an instance for a feature |
+| `RemoveRoleFromDBInstance` | Remove a role from an instance |
 | `AddSourceIdentifierToSubscription` | Add a source id to a subscription |
 | `RemoveSourceIdentifierFromSubscription` | Remove a source id from a subscription |
 | `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
@@ -612,6 +616,32 @@ Custom endpoints are modelled, not routed: a custom endpoint reports the cluster
 reachable, but connections through it go where the cluster endpoint sends them rather than being
 spread across the chosen members.
 
+## IAM role associations
+
+`AddRoleToDBCluster` and `AddRoleToDBInstance` associate an IAM role with an available cluster or
+instance, and `DescribeDBClusters` / `DescribeDBInstances` report it in `AssociatedRoles` with status
+`ACTIVE` straight away. `CreateDBCluster` accepts `AssociatedRoles` too: a list that names a role twice,
+or has an entry without a `RoleArn`, refuses the create before any cluster exists, and the roles are
+associated in one step, so a create that fails leaves no cluster behind.
+
+`FeatureName` (such as `s3Import`, `s3Export` or `Lambda`) is optional for a cluster and required for an
+instance. A role is associated at most once per cluster (`DBClusterRoleAlreadyExists`, which covers
+the role ARN only, so two roles may share a feature), and a role or a feature at most once per instance
+(`DBInstanceRoleAlreadyExists`, documented as "The specified RoleArn or FeatureName value is already
+associated"). `RemoveRoleFromDBCluster` removes the
+role, matching the feature name when one is given, and `RemoveRoleFromDBInstance` removes the role for
+the feature named; an association that does not exist is `DBClusterRoleNotFound` /
+`DBInstanceRoleNotFound`. A stopped cluster or instance refuses both (`InvalidDBClusterStateFault` /
+`InvalidDBInstanceState`).
+
+A `FeatureName` must be one the engine lists in `SupportedFeatureNames` (`DescribeDBEngineVersions`),
+matched without regard to case; any other is `InvalidParameterValue`, and a `CreateDBCluster` naming
+one creates nothing. MySQL, MariaDB and Aurora MySQL list none, so their roles take no feature name.
+
+Associations are recorded, not exercised: Floci does not check the role in IAM and does not hand the
+role's credentials to the database, so an `aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
+associations, and snapshots, restores and read replicas start without any.
+
 ## Aurora managed password opt-out
 
 When `ModifyDBCluster` disables `ManageMasterUserPassword` while the managed secret has
@@ -721,6 +751,30 @@ The RDS auth proxy validates the master username and password at the proxy layer
 
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
 
+Aurora members use their cluster's IAM database authentication setting and master
+username and password for backend connections. `EnableIAMDatabaseAuthentication`
+on `CreateDBInstance` does not override the cluster setting. A member request with
+`MasterUsername` or `MasterUserPassword` returns `InvalidParameterCombination`;
+configure those credentials on the cluster and omit them from the member request.
+Managed master secrets belong to the cluster; `ManageMasterUserPassword` on a member
+does not create a separate member secret. When a cluster record lacks a credential,
+the member retains its normalized default for that field.
+
+`ModifyDBInstance` preserves the cluster-owned master password when
+`MasterUserPassword` is supplied for a member; other supported instance settings
+still apply. Change the cluster password with `ModifyDBCluster`.
+
+Accepted cluster password changes update stored member credentials even when the
+cluster has no backend or runs in mock mode. An unchanged password does not update
+relays. Rotating an initialized data volume requires a running backend; changing
+stored metadata alone does not rotate that volume.
+
+Changing `EnableIAMDatabaseAuthentication` with `ModifyDBCluster` updates existing
+Aurora members and applies to new connections through the cluster and member
+endpoints. Omitting the flag preserves the current setting. Existing connections
+are not disconnected.
+
+
 A token can be signed with an access key or with temporary credentials: an assumed role's, or the execution role credentials Floci hands a Lambda function. A token signed with temporary credentials carries their session token in `X-Amz-Security-Token`, and it is accepted while that session is valid and only with the session token issued alongside the access key.
 
 On RDS, a token is only good for the endpoint it was generated for: the hostname, port and region passed to `generate-db-auth-token` are the ones the instance (or cluster, or RDS Proxy) publishes. MySQL and MariaDB endpoints in Floci always refuse a token generated for another endpoint. PostgreSQL endpoints do the same by default; set `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING=false` to accept a token generated for another name, for clients that generate tokens for a container name or DNS alias the endpoint does not publish. Either way, the username must match the `DBUser` in the token exactly. Because clients on the host reach the same proxy over the loopback interface, a token generated for `localhost` or `127.0.0.1` on the published port is accepted as well. Clients on a Docker network connect by Floci's container name, so set `FLOCI_SERVICES_RDS_ENDPOINT_HOST` to that name (see [Docker Compose](#docker-compose)) so it is what the endpoint publishes and tokens are generated for. With [IAM enforcement](iam.md#iam-enforcement-mode) turned on, the token's principal must also be allowed `rds-db:connect` on the database user, scoped the way AWS scopes it:
@@ -729,7 +783,7 @@ On RDS, a token is only good for the endpoint it was generated for: the hostname
 arn:aws:rds-db:<region>:<account-id>:dbuser:<DbiResourceId>/<db-user-name>
 ```
 
-Aurora clusters use the `DbClusterResourceId`, and connections through an RDS Proxy use the proxy's `prx-…` resource id. A token that fails any of these checks is refused with the engine's ordinary authentication failure; the reason is written to Floci's log.
+Aurora cluster endpoints and their member instance endpoints use the cluster's `DbClusterResourceId`, including after member reboot or runtime recovery, and connections through an RDS Proxy use the proxy's `prx-…` resource id. A token that fails any of these checks is refused with the engine's ordinary authentication failure; the reason is written to Floci's log.
 
 On PostgreSQL, the token names a database role (`DBUser`) and the session runs as that role: `current_user` and `session_user` both report it, objects it creates are owned by it, and a token naming a role the database does not have is refused with `FATAL: role "..." does not exist`. Create the role first with `CREATE ROLE <name> WITH LOGIN` as the master user, and grant it whatever the application needs.
 

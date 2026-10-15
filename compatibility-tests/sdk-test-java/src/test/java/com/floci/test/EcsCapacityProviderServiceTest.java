@@ -4,7 +4,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
-import software.amazon.awssdk.core.waiters.WaiterOverrideConfiguration;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.CapacityProviderStrategyItem;
@@ -59,7 +58,10 @@ class EcsCapacityProviderServiceTest {
                     .cpu("256").memory("512")
                     .containerDefinitions(ContainerDefinition.builder()
                             .name("app").image("alpine:3").memory(128)
-                            .command("sleep", "3600").essential(true).build())).taskDefinition();
+                            // PID 1 gets no default SIGTERM handler, so a bare "sleep 3600" sits out
+                            // the whole stopTimeout grace period for each task deleteService stops.
+                            .command("sh", "-c", "trap 'exit 0' TERM; sleep 3600 & wait")
+                            .essential(true).build())).taskDefinition();
             try {
                 ecs.createService(request -> request.cluster(name).serviceName(name)
                         .taskDefinition(definition.taskDefinitionArn()).desiredCount(2)
@@ -83,8 +85,7 @@ class EcsCapacityProviderServiceTest {
                                                    List<CapacityProviderStrategyItem> strategy,
                                                    Map<String, Long> expected) {
         DescribeServicesRequest describe = DescribeServicesRequest.builder().cluster(name).services(name).build();
-        assertThat(ecs.waiter().waitUntilServicesStable(describe,
-                WaiterOverrideConfiguration.builder().waitTimeout(Duration.ofSeconds(30)).build())
+        assertThat(ecs.waiter().waitUntilServicesStable(describe, TestFixtures.waiterOverride(Duration.ofSeconds(30)))
                 .matched().response()).isPresent();
 
         int count = expected.values().stream().mapToInt(Long::intValue).sum();

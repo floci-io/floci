@@ -266,7 +266,7 @@ PUT, PATCH and DELETE).
 | Property | Env var | Default | Description |
 |---|---|---|---|
 | `floci.services.cloudfront.enabled` | `FLOCI_SERVICES_CLOUDFRONT_ENABLED` | `true` | Enable or disable the service |
-| `floci.services.cloudfront.domain-suffix` | `FLOCI_SERVICES_CLOUDFRONT_DOMAIN_SUFFIX` | `cloudfront.net` | Domain suffix for generated distribution domain names |
+| `floci.services.cloudfront.domain-suffix` | `FLOCI_SERVICES_CLOUDFRONT_DOMAIN_SUFFIX` | unset | Domain suffix for generated distribution domain names. Unset, it follows the request's partition: `cloudfront.net`, or `cloudfront.cn` in China. A configured suffix applies in every partition |
 | `floci.services.cloudfront.allowed-private-origin-hosts` | `FLOCI_SERVICES_CLOUDFRONT_ALLOWED_PRIVATE_ORIGIN_HOSTS` | `[]` | Exact custom-origin hosts permitted to resolve to private/non-routable addresses (comma-separated in the environment variable) |
 
 ## CLI Examples

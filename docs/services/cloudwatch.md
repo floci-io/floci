@@ -330,8 +330,24 @@ aws logs put-retention-policy \
 
 ## CloudWatch Metrics {#metrics}
 
-**Protocol:** Query (XML) and JSON 1.1 (both supported)
-**Endpoint:** `POST http://localhost:4566/`
+**Protocol:** Query (XML) and JSON 1.0 (both supported)
+
+CloudWatch Query operations accept form-encoded POST requests and root GET requests with
+URL query parameters. GET uses the existing handlers, signature validation and IAM policy checks. A `monitoring`
+credential in the Authorization header or presigned URL selects CloudWatch, including
+requests with browser Accept headers or unrelated target headers. Unsigned GET requests
+select it only for unambiguous supported actions; ordinary S3, SNS and browser requests
+retain their existing routing. Only a Query protocol claim can dispatch a CloudWatch GET;
+an unclaimed request cannot perform a CloudWatch operation. Header-signed and presigned
+requests use the account and region in their credential scope.
+`Action` takes precedence over `Operation`.
+
+Use `Version=2010-08-01` for current GET operations. Omitting the version selects the
+legacy `2009-05-15` API, which supports only `ListMetrics` and `GetMetricStatistics`.
+An invalid version or action returns HTTP 404 `InvalidAction`; an absent action returns
+HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action prefix.
+
+**Endpoint:** `http://localhost:4566/`. Query: GET or POST; JSON: POST.
 
 ### Supported Actions
 

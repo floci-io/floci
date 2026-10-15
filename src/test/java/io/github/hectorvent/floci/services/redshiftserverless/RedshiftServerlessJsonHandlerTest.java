@@ -76,6 +76,9 @@ class RedshiftServerlessJsonHandlerTest {
         iamDbUserResolver = mock(RedshiftIamDbUserResolver.class);
         when(iamDbUserResolver.resolveDbUser("AUTH")).thenReturn("IAM:alice");
         EmulatorConfig config = mock(EmulatorConfig.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-snapshots.json"),
+                any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         when(config.storage().persistentPath()).thenReturn(System.getProperty("java.io.tmpdir"));
         when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-usagelimits.json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
@@ -378,10 +381,57 @@ class RedshiftServerlessJsonHandlerTest {
 
     @Test
     void anUnknownActionIsReportedAsUnknownOperation() {
+        Response response = handler.handle("NoSuchOperation", mapper.createObjectNode(), REGION);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("UnknownOperationException", errorType(response));
+    }
+
+    @Test
+    void aModeledActionWithoutAnImplementationIsStillAnUnknownOperation() {
         Response response = handler.handle("CreateScheduledAction", mapper.createObjectNode(), REGION);
 
         assertEquals(400, response.getStatus());
         assertEquals("UnknownOperationException", errorType(response));
+    }
+
+    @Test
+    void aRequestBreakingTheModelConstraintsIsRejectedWithoutChangingState() {
+        Response badEnum = handler.handle("CreateNamespace",
+                parse("{\"namespaceName\":\"state-ns\",\"logExports\":[\"nope\"]}"), REGION);
+        Response missingNamespace = handler.handle("CreateWorkgroup", parse("{\"workgroupName\":\"state-wg\"}"), REGION);
+        Response missingName = handler.handle("GetWorkgroup", parse("{}"), REGION);
+
+        assertEquals("ValidationException", errorType(badEnum));
+        assertEquals("ValidationException", errorType(missingNamespace));
+        assertEquals("ValidationException", errorType(missingName));
+        assertEquals("ResourceNotFoundException", errorType(
+                handler.handle("GetNamespace", parse("{\"namespaceName\":\"state-ns\"}"), REGION)));
+        assertEquals(0, body(handler.handle("ListWorkgroups", parse("{}"), REGION)).get("workgroups").size());
+    }
+
+    @Test
+    void aNonStringPageTokenIsRejectedInsteadOfRestartingTheListing() {
+        for (String action : new String[] {"ListNamespaces", "ListWorkgroups", "ListSnapshots", "ListUsageLimits"}) {
+            Response response = handler.handle(action, parse("{\"nextToken\":12345678}"), REGION);
+
+            assertEquals("ValidationException", errorType(response), action);
+        }
+    }
+
+    @Test
+    void aTagWithANonStringKeyOrValueIsRejectedInsteadOfCoerced() {
+        String arn = body(handler.handle("CreateNamespace", parse("{\"namespaceName\":\"tag-ns\"}"), REGION))
+                .get("namespace").get("namespaceArn").textValue();
+
+        for (String tag : new String[] {"{\"key\":123,\"value\":\"v\"}", "{\"key\":\"k\",\"value\":false}"}) {
+            Response response = handler.handle("TagResource",
+                    parse("{\"resourceArn\":\"" + arn + "\",\"tags\":[" + tag + "]}"), REGION);
+
+            assertEquals("ValidationException", errorType(response), tag);
+        }
+        assertEquals(0, body(handler.handle("ListTagsForResource", parse("{\"resourceArn\":\"" + arn + "\"}"), REGION))
+                .get("tags").size());
     }
 
     @Test
@@ -470,6 +520,29 @@ class RedshiftServerlessJsonHandlerTest {
             request.put(field, value);
         }
         return request;
+    }
+
+    @Test
+    void updateSnapshotReturnsTheUpdatedSnapshotAndRejectsABadRetention() {
+        create("upd-handler-ns");
+        body(handler.handle("CreateSnapshot",
+                parse("{\"snapshotName\":\"upd-handler\",\"namespaceName\":\"upd-handler-ns\",\"retentionPeriod\":7}"),
+                REGION));
+
+        JsonNode updated = body(handler.handle("UpdateSnapshot",
+                parse("{\"snapshotName\":\"upd-handler\",\"retentionPeriod\":45}"), REGION)).get("snapshot");
+        assertEquals("upd-handler", updated.get("snapshotName").textValue());
+        assertEquals(45, updated.get("snapshotRetentionPeriod").intValue());
+        assertEquals(45, updated.get("snapshotRemainingDays").intValue());
+
+        JsonNode indefinite = body(handler.handle("UpdateSnapshot",
+                parse("{\"snapshotName\":\"upd-handler\",\"retentionPeriod\":-1}"), REGION)).get("snapshot");
+        assertTrue(indefinite.path("snapshotRetentionPeriod").isMissingNode());
+
+        assertEquals(400, handler.handle("UpdateSnapshot",
+                parse("{\"snapshotName\":\"upd-handler\",\"retentionPeriod\":0}"), REGION).getStatus());
+        assertEquals(400, handler.handle("UpdateSnapshot",
+                parse("{\"snapshotName\":\"missing-snap\",\"retentionPeriod\":5}"), REGION).getStatus());
     }
 
     private JsonNode body(Response response) {

@@ -151,6 +151,7 @@ public class ContainerBuilder {
         private Long nanoCpus;
         private Integer cpuShares;
         private boolean readonlyRootfs;
+        private boolean init;
         private final Map<Integer, Integer> portBindings = new HashMap<>();
         private final List<Integer> loopbackPortBindings = new ArrayList<>();
         private final Map<Integer, String> portBindingHostIps = new HashMap<>();
@@ -273,6 +274,17 @@ public class ContainerBuilder {
         /** Mounts the container's own filesystem read only. */
         public Builder withReadonlyRootfs() {
             this.readonlyRootfs = true;
+            return this;
+        }
+
+        /**
+         * Runs Docker's init process as PID 1, which forwards signals to the command (Docker
+         * {@code --init}). The kernel gives PID 1 no default signal actions, so a command that
+         * installs no SIGTERM handler of its own ignores the stop request and only goes when
+         * Docker sends SIGKILL at the end of the stop timeout.
+         */
+        public Builder withInit() {
+            this.init = true;
             return this;
         }
 
@@ -690,7 +702,8 @@ public class ContainerBuilder {
                     cpuShares,
                     readonlyRootfs,
                     List.copyOf(linkLocalIps),
-                    Map.copyOf(portBindingHostIps)
+                    Map.copyOf(portBindingHostIps),
+                    init
             );
         }
     }

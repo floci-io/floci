@@ -538,6 +538,16 @@ public class NativeDynamoDbJsonHandler {
     private static final Set<String> VALID_RETURN_CONSUMED_CAPACITY = Set.of("INDEXES", "TOTAL", "NONE");
     private static final Set<String> VALID_RETURN_ITEM_COLLECTION_METRICS = Set.of("SIZE", "NONE");
 
+    private static String returnConsumedCapacityError(JsonNode request) {
+        // DynamoDB treats a JSON null here as an absent member.
+        JsonNode value = request.get("ReturnConsumedCapacity");
+        if (value == null || value.isNull() || VALID_RETURN_CONSUMED_CAPACITY.contains(value.asText())) {
+            return null;
+        }
+        return "Value '" + value.asText() + "' at 'returnConsumedCapacity' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]";
+    }
+
     private Response handlePutItem(JsonNode request, String region) {
         String tableName = request.has("TableName") ? request.path("TableName").asText() : null;
         DynamoDbTableNames.resolve(tableName); // validate tableName before other params
@@ -552,11 +562,7 @@ public class NativeDynamoDbJsonHandler {
                 ? request.get("ExpressionAttributeValues") : null;
 
         List<String> validationErrors = new ArrayList<>();
-        String rcc = request.has("ReturnConsumedCapacity") ? request.get("ReturnConsumedCapacity").asText() : null;
-        if (rcc != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rcc)) {
-            validationErrors.add("Value '" + rcc + "' at 'returnConsumedCapacity' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]");
-        }
+        addReturnConsumedCapacityError(request, validationErrors);
         String ricm = request.has("ReturnItemCollectionMetrics") ? request.get("ReturnItemCollectionMetrics").asText() : null;
         if (ricm != null && !VALID_RETURN_ITEM_COLLECTION_METRICS.contains(ricm)) {
             validationErrors.add("Value '" + ricm + "' at 'returnItemCollectionMetrics' failed to satisfy constraint: "
@@ -641,12 +647,7 @@ public class NativeDynamoDbJsonHandler {
         }
 
         // Validate enums before table lookup
-        String rccGet = request.has("ReturnConsumedCapacity") ? request.get("ReturnConsumedCapacity").asText() : null;
-        if (rccGet != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccGet)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + rccGet + "' at 'returnConsumedCapacity' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]", 400);
-        }
+        requireValidReturnConsumedCapacity(request);
 
         // Validate ProjectionExpression syntax and reserved words before item lookup
         if (projectionExpression != null) {
@@ -692,11 +693,7 @@ public class NativeDynamoDbJsonHandler {
 
         // Validate ReturnValues + ReturnConsumedCapacity together
         List<String> delValidationErrors = new ArrayList<>();
-        String rccDel = request.has("ReturnConsumedCapacity") ? request.get("ReturnConsumedCapacity").asText() : null;
-        if (rccDel != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccDel)) {
-            delValidationErrors.add("Value '" + rccDel + "' at 'returnConsumedCapacity' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]");
-        }
+        addReturnConsumedCapacityError(request, delValidationErrors);
         if (!VALID_RETURN_VALUES_DELETE.contains(returnValues)) {
             delValidationErrors.add("Value '" + returnValues + "' at 'returnValues' failed to satisfy constraint: "
                     + "Member must satisfy enum value set: [NONE, ALL_OLD]");
@@ -769,19 +766,13 @@ public class NativeDynamoDbJsonHandler {
 
         // UpdateItem stops at the first invalid enum and reports one error, unlike PutItem
         // and DeleteItem which aggregate.
-        String rccUpd = request.has("ReturnConsumedCapacity") ? request.get("ReturnConsumedCapacity").asText() : null;
         if (!VALID_RETURN_VALUES_UPDATE.contains(returnValues)) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + returnValues + "' at 'returnValues' "
                     + "failed to satisfy constraint: "
                     + "Member must satisfy enum value set: [NONE, ALL_OLD, ALL_NEW, UPDATED_OLD, UPDATED_NEW]", 400);
         }
-        if (rccUpd != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccUpd)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + rccUpd + "' at 'returnConsumedCapacity' "
-                    + "failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]", 400);
-        }
+        requireValidReturnConsumedCapacity(request);
         DynamoDbExpressionSize.checkWrite(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
@@ -1091,33 +1082,17 @@ public class NativeDynamoDbJsonHandler {
         }
 
         // Validate ReturnConsumedCapacity before Select
-        String rccQuery = request.has("ReturnConsumedCapacity") ? request.get("ReturnConsumedCapacity").asText() : null;
-        if (rccQuery != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccQuery)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + rccQuery + "' at 'returnConsumedCapacity' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]", 400);
+        String rccQueryError = returnConsumedCapacityError(request);
+        if (rccQueryError != null) {
+            throw new AwsException("ValidationException", "1 validation error detected: " + rccQueryError, 400);
         }
 
-        if (keyConditionExpr != null && keyConditions != null) {
-            throw new AwsException("ValidationException",
-                    "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {KeyConditions} Expression parameters: {KeyConditionExpression}", 400);
-        }
-        if (keyConditionExpr != null && queryFilter != null) {
-            throw new AwsException("ValidationException",
-                    "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {QueryFilter} Expression parameters: {KeyConditionExpression}", 400);
-        }
-        if (filterExpr != null && queryFilter != null) {
-            throw new AwsException("ValidationException",
-                    "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {QueryFilter} Expression parameters: {FilterExpression}", 400);
-        }
-        if (attributesToGet != null && projectionExpression != null) {
-            throw new AwsException("ValidationException",
-                    "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}", 400);
-        }
+        // DynamoDB counts KeyConditions as a non-expression parameter only next to a KeyConditionExpression.
+        rejectMixedParameters(request,
+                keyConditionExpr == null
+                        ? List.of("AttributesToGet", "QueryFilter", "ConditionalOperator")
+                        : List.of("AttributesToGet", "QueryFilter", "ConditionalOperator", "KeyConditions"),
+                List.of("ProjectionExpression", "FilterExpression", "KeyConditionExpression"));
 
         if (keyConditionExpr == null && keyConditions == null) {
             throw new AwsException("ValidationException",
@@ -1254,12 +1229,6 @@ public class NativeDynamoDbJsonHandler {
         Integer segment = request.has("Segment") ? request.get("Segment").asInt() : null;
         Integer totalSegments = request.has("TotalSegments") ? request.get("TotalSegments").asInt() : null;
 
-        if (filterExpr != null && scanFilter != null) {
-            throw new AwsException("ValidationException",
-                    "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {ScanFilter} Expression parameters: {FilterExpression}", 400);
-        }
-
         List<String> rangeErrors = new ArrayList<>();
         if (limit != null && limit < 1) {
             rangeErrors.add("Value at 'Limit' failed to satisfy constraint: "
@@ -1278,6 +1247,15 @@ public class NativeDynamoDbJsonHandler {
                     + "Member must have value less than or equal to " + MAX_TOTAL_SEGMENTS);
         }
         throwValidationErrors(rangeErrors);
+
+        String rccScanError = returnConsumedCapacityError(request);
+        if (rccScanError != null) {
+            throw new AwsException("ValidationException", "1 validation error detected: " + rccScanError, 400);
+        }
+
+        rejectMixedParameters(request,
+                List.of("AttributesToGet", "ScanFilter", "ConditionalOperator"),
+                List.of("ProjectionExpression", "FilterExpression"));
 
         if (segment != null && totalSegments == null) {
             throw new AwsException("ValidationException",
@@ -1310,11 +1288,6 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + select + "' at 'select' failed to satisfy constraint: "
                     + "Member must satisfy enum value set: [SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]", 400);
-        }
-        if (projectionExpressionScan != null && attributesToGetScan != null) {
-            throw new AwsException("ValidationException",
-                    "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}", 400);
         }
         boolean hasAttributesToGetScan = attributesToGetScan != null && attributesToGetScan.size() > 0;
         if ("SPECIFIC_ATTRIBUTES".equals(select)
@@ -1384,15 +1357,12 @@ public class NativeDynamoDbJsonHandler {
         requireSearchVectorsMember(request, "IndexName");
         String tableName = request.path("TableName").asText();
         String indexName = request.get("IndexName").asText();
-        String rccSearch = request.has("ReturnConsumedCapacity")
-                ? request.get("ReturnConsumedCapacity").asText() : null;
-        if (rccSearch != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(rccSearch)) {
+        String rccSearchError = returnConsumedCapacityError(request);
+        if (rccSearchError != null) {
             // No "N validation errors detected" envelope here, unlike every other operation.
-            throw new AwsException("ValidationException",
-                    "Value '" + rccSearch + "' at 'returnConsumedCapacity' "
-                    + "failed to satisfy constraint: Member must satisfy enum value set: "
-                    + "[INDEXES, TOTAL, NONE]", 400);
+            throw new AwsException("ValidationException", rccSearchError, 400);
         }
+        String rccSearch = request.path("ReturnConsumedCapacity").asText("NONE");
         requireSearchVectorsMember(request, "TopK");
         int topK = request.get("TopK").asInt();
         if (topK < 1) {
@@ -1434,7 +1404,7 @@ public class NativeDynamoDbJsonHandler {
             searchResults.add(searchResult);
         }
         response.set("SearchResults", searchResults);
-        if (rccSearch != null && !"NONE".equals(rccSearch)) {
+        if (!"NONE".equals(rccSearch)) {
             ObjectNode consumedCapacity = objectMapper.createObjectNode();
             consumedCapacity.put("VectorSearchRequestBytes", VECTOR_SEARCH_REQUEST_BYTES);
             response.set("ConsumedCapacity", consumedCapacity);
@@ -1534,12 +1504,7 @@ public class NativeDynamoDbJsonHandler {
 
         // The per-table write cost needs the stored images from before the batch runs.
         var returnCCBatch = request.path("ReturnConsumedCapacity").asText("NONE");
-        if (!VALID_RETURN_CONSUMED_CAPACITY.contains(returnCCBatch)) {
-            throw new AwsException("ValidationException",
-                    "1 validation error detected: Value '" + returnCCBatch
-                    + "' at 'returnConsumedCapacity' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]", 400);
-        }
+        requireValidReturnConsumedCapacity(request);
         Map<String, DynamoDbWriteCapacity.Cost> costs = null;
         if (!"NONE".equals(returnCCBatch)) {
             costs = new LinkedHashMap<>();
@@ -2027,10 +1992,9 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private static void addReturnConsumedCapacityError(JsonNode request, List<String> validationErrors) {
-        String returnCC = request.has("ReturnConsumedCapacity") ? request.get("ReturnConsumedCapacity").asText() : null;
-        if (returnCC != null && !VALID_RETURN_CONSUMED_CAPACITY.contains(returnCC)) {
-            validationErrors.add("Value '" + returnCC + "' at 'returnConsumedCapacity' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]");
+        String error = returnConsumedCapacityError(request);
+        if (error != null) {
+            validationErrors.add(error);
         }
     }
 
@@ -2038,6 +2002,18 @@ public class NativeDynamoDbJsonHandler {
         List<String> validationErrors = new ArrayList<>();
         addReturnConsumedCapacityError(request, validationErrors);
         throwValidationErrors(validationErrors);
+    }
+
+    private static void rejectMixedParameters(JsonNode request, List<String> nonExpressionNames,
+                                              List<String> expressionNames) {
+        List<String> nonExpression = nonExpressionNames.stream().filter(request::has).toList();
+        List<String> expression = expressionNames.stream().filter(request::has).toList();
+        if (!nonExpression.isEmpty() && !expression.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {" + String.join(", ", nonExpression)
+                    + "} Expression parameters: {" + String.join(", ", expression) + "}", 400);
+        }
     }
 
     private static void throwValidationErrors(List<String> validationErrors) {

@@ -40,6 +40,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -445,98 +446,32 @@ class PostgresProtocolHandlerTest {
         }
     }
 
-    @Test
-    void hostnameVerificationSucceedsForRegisteredAdvertisedHost() throws Exception {
-        try (ServerSocket backendServer = new ServerSocket(0);
-             ServerSocket clientServer = new ServerSocket(0)) {
-
-            RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
-            String advertisedHost = "172.17.0.5";
-            tlsCertificates.ensureHost(advertisedHost);
-
-            int backendPort = backendServer.getLocalPort();
-            Thread backendThread = Thread.ofVirtual().start(() -> {
-                try {
-                    mockBackendStartup(backendServer, new AtomicReference<>(), false);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            });
-
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
-                Socket proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
-
-                Thread authThread = Thread.ofVirtual().start(() -> {
-                    try {
-                        PostgresProtocolHandler.AuthenticatedSession session =
-                        PostgresProtocolHandler.authenticate(
-                                proxyClient, () -> backend,
-                                "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(), testBinding(), tlsCertificates,
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
-                        if (session != null) {
-                            PostgresProtocolHandler.bridge(session);
-                        }
-                    } catch (IOException expected) {
-                        // The test closes proxyClient once the handshake succeeds, which ends authenticate.
-                    }
-                });
-
-                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
-                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
-
-                writeSslRequest(clientOut);
-                assertEquals('S', clientIn.readUnsignedByte());
-
-                Path caCertFile = tempDir.resolve("tls").resolve("rds-ca.crt");
-                SSLSocket sslClient = verifyingClientSocket(ourClient, caCertFile, advertisedHost);
-                sslClient.startHandshake(); // must not throw — advertisedHost is in the cert's SAN
-
-                proxyClient.close();
-                authThread.join(5_000);
-                backendThread.join(5_000);
-            }
-        }
-    }
-
-    @Test
-    void hostnameVerificationFailsForUnregisteredAdvertisedHost() throws Exception {
-        try (ServerSocket backendServer = new ServerSocket(0);
-             ServerSocket clientServer = new ServerSocket(0)) {
+    @ParameterizedTest
+    @CsvSource({"172.17.0.5, true", "never-registered.example.com, false"})
+    void hostnameVerificationRequiresRegisteredAdvertisedHost(String advertisedHost, boolean registered) throws Exception {
+        try (ServerSocket clientServer = new ServerSocket(0);
+             Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = clientServer.accept()) {
 
             RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
             tlsCertificates.ensureHost("172.17.0.5");
 
-            int backendPort = backendServer.getLocalPort();
-            Thread backendThread = Thread.ofVirtual().start(() -> {
-                try {
-                    mockBackendStartup(backendServer, new AtomicReference<>(), false);
-                } catch (IOException e) {
-                    // Backend connection is torn down before completing startup — expected here.
-                }
-            });
-
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
-                Socket proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
-
-                Thread authThread = Thread.ofVirtual().start(() -> {
-                    try {
-                        PostgresProtocolHandler.AuthenticatedSession session =
-                        PostgresProtocolHandler.authenticate(
-                                proxyClient, () -> backend,
-                                "dbadmin", "adminpass", "postgres",
-                                false, testSigV4Validator(), testBinding(), tlsCertificates,
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
-                        if (session != null) {
-                            PostgresProtocolHandler.bridge(session);
+            AtomicReference<Throwable> authFailure = new AtomicReference<>();
+            Thread authThread = Thread.ofVirtual()
+                    .uncaughtExceptionHandler((thread, error) -> authFailure.set(error))
+                    .start(() -> {
+                        try {
+                            PostgresProtocolHandler.authenticate(
+                                    proxyClient, NEVER_CONNECT,
+                                    "dbadmin", "adminpass", "postgres",
+                                    false, testSigV4Validator(), testBinding(), tlsCertificates,
+                                    (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
+                        } catch (IOException expected) {
+                            // Closing or rejecting TLS ends authentication before PostgreSQL startup.
                         }
-                    } catch (IOException ignored) {
-                        // Client aborts the handshake below — the handler observing that is expected.
-                    }
-                });
+                    });
 
+            try {
                 DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
                 DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
 
@@ -544,12 +479,19 @@ class PostgresProtocolHandlerTest {
                 assertEquals('S', clientIn.readUnsignedByte());
 
                 Path caCertFile = tempDir.resolve("tls").resolve("rds-ca.crt");
-                SSLSocket sslClient = verifyingClientSocket(ourClient, caCertFile, "never-registered.example.com");
-                assertThrows(SSLHandshakeException.class, sslClient::startHandshake);
-
+                try (SSLSocket sslClient = verifyingClientSocket(ourClient, caCertFile, advertisedHost)) {
+                    if (registered) {
+                        sslClient.startHandshake();
+                    } else {
+                        assertThrows(SSLHandshakeException.class, sslClient::startHandshake);
+                    }
+                }
+            } finally {
                 proxyClient.close();
                 authThread.join(5_000);
+                assertFalse(authThread.isAlive(), "authThread did not terminate");
             }
+            assertNull(authFailure.get(), "TLS authentication thread failed");
         }
     }
 

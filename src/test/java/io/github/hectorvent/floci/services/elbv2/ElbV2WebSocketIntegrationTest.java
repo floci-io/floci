@@ -18,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -61,7 +62,14 @@ class ElbV2WebSocketIntegrationTest {
                     if (!"websocket".equalsIgnoreCase(request.getHeader("Upgrade"))) {
                         request.response().setStatusCode(400).end("not an upgrade");
                     } else if (!request.path().startsWith("/socket.io/")) {
-                        request.response().setStatusCode(404).end();
+                        request.response().headers()
+                                .add("Set-Cookie", "a=1; Path=/")
+                                .add("Set-Cookie", "b=2; Path=/")
+                                .add("Set-Cookie", "c=3; Path=/")
+                                .add("X-Multi", "one")
+                                .add("X-Multi", "two")
+                                .add("Keep-Alive", "timeout=5");
+                        request.response().setStatusCode(404).end("upgrade refused");
                     } else {
                         String query = request.query();
                         request.toWebSocket().onSuccess(socket -> socket.textMessageHandler(
@@ -137,6 +145,11 @@ class ElbV2WebSocketIntegrationTest {
 
         UpgradeRejectedException rejected = assertInstanceOf(UpgradeRejectedException.class, failure.getCause());
         assertEquals(404, rejected.getStatus());
+        assertEquals(List.of("a=1; Path=/", "b=2; Path=/", "c=3; Path=/"),
+                rejected.getHeaders().getAll("Set-Cookie"));
+        assertEquals(List.of("one", "two"), rejected.getHeaders().getAll("X-Multi"));
+        assertEquals(List.of(), rejected.getHeaders().getAll("Keep-Alive"));
+        assertEquals("upgrade refused", rejected.getBody().toString());
     }
 
     @Test

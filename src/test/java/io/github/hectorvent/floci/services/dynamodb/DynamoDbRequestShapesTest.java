@@ -81,6 +81,18 @@ class DynamoDbRequestShapesTest {
     }
 
     @Test
+    void exportFilterSpecificationIsChecked() {
+        String prefix = "{\"TableArn\":\"t\",\"S3Bucket\":\"b\",\"FilterSpecification\":";
+        assertAccepted("ExportTableToPointInTime", prefix + "{\"FilterExpression\":\"#a = :v\","
+                + "\"ExpressionAttributeNames\":{\"#a\":\"a\"},\"ExpressionAttributeValues\":{\":v\":{\"S\":\"x\"}}}}");
+        assertRejected("ExportTableToPointInTime", prefix + "\"a\"}", "Unexpected field type");
+        assertRejected("ExportTableToPointInTime", prefix + "{\"FilterExpression\":5}}",
+                "NUMBER_VALUE cannot be converted to String");
+        assertRejected("ExportTableToPointInTime", prefix + "{\"ExpressionAttributeValues\":{\":v\":{\"S\":5}}}}",
+                "NUMBER_VALUE cannot be converted to String");
+    }
+
+    @Test
     void firstBadMemberInBodyOrderWins() {
         assertRejected("Scan", "{\"TableName\":\"t\",\"Limit\":\"5\",\"IndexName\":5}", "STRING_VALUE cannot be converted to Integer");
         assertRejected("Scan", "{\"TableName\":\"t\",\"IndexName\":5,\"Limit\":\"5\"}", "NUMBER_VALUE cannot be converted to String");

@@ -42,6 +42,7 @@ public class DbCluster {
     private Instant createdAt;
     private int proxyPort;
     private Map<String, String> tags = new LinkedHashMap<>();
+    private List<DbRoleAssociation> associatedRoles = new ArrayList<>();
     private String engineMode;
     private boolean storageEncrypted;
 
@@ -178,6 +179,11 @@ public class DbCluster {
 
     public int getProxyPort() { return proxyPort; }
     public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
+
+    public List<DbRoleAssociation> getAssociatedRoles() { return associatedRoles; }
+    public void setAssociatedRoles(List<DbRoleAssociation> associatedRoles) {
+        this.associatedRoles = associatedRoles != null ? new ArrayList<>(associatedRoles) : new ArrayList<>();
+    }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>(); }

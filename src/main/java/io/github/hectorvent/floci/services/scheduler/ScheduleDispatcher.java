@@ -225,10 +225,12 @@ public class ScheduleDispatcher implements Resettable {
             }
             case RATE -> {
                 long intervalMs = SchedulerExpressionParser.parseRateMillis(expr);
-                Instant base = lastFireByArn.getOrDefault(arn, schedule.getCreationDate() != null
-                        ? schedule.getCreationDate()
-                        : now);
-                yield base.plusMillis(intervalMs);
+                Instant lastFire = lastFireByArn.get(arn);
+                if (lastFire != null) {
+                    yield lastFire.plusMillis(intervalMs);
+                }
+                yield schedule.getStartDate() != null ? schedule.getStartDate()
+                        : schedule.getCreationDate() != null ? schedule.getCreationDate() : now;
             }
             case CRON -> {
                 Instant base = lastFireByArn.getOrDefault(arn, schedule.getCreationDate() != null

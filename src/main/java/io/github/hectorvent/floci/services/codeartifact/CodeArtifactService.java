@@ -79,6 +79,15 @@ public class CodeArtifactService implements Resettable {
      */
     private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm", "pypi");
     private static final Set<String> ORIGIN_RESTRICTION_VALUES = Set.of("ALLOW", "BLOCK");
+    /**
+     * Formats AWS documents as valid for {@code GetPackageVersionReadme} specifically: the
+     * action's own request parameter doc gives "Valid Values: npm | pypi | nuget", narrower than
+     * the shared eight-value {@code PackageFormat} wire enum every other package-version action
+     * here accepts. Maven, Swift, generic, Ruby, and Cargo package versions carry no readme at
+     * all in real CodeArtifact, so a request for one of those formats is rejected outright rather
+     * than silently 404ing the way an unimplemented capability elsewhere here might.
+     */
+    private static final Set<String> README_FORMATS = Set.of("npm", "pypi", "nuget");
 
     private static final Logger LOG = Logger.getLogger(CodeArtifactService.class);
 
@@ -107,6 +116,8 @@ public class CodeArtifactService implements Resettable {
     public record ResourcePolicy(String resourceArn, String revision, String document) {}
     public record PublishPackageVersionResult(CodeArtifactPackageVersion packageVersion, PackageAsset asset) {}
     public record PackageVersionAssetResult(PackageAsset asset, String packageVersionRevision) {}
+    public record PackageVersionReadmeResult(String format, String namespace, String packageName, String version,
+            String versionRevision, String readme) {}
     public record AuthorizationToken(String token, long expirationEpochSeconds) {}
     public record AuthorizationTokenScope(String owner, String region) {}
     private record AuthorizationTokenRecord(String owner, String region, String domain, Instant expiration) {}
@@ -144,6 +155,16 @@ public class CodeArtifactService implements Resettable {
     // a stale total surviving a restart for bytes that no longer exist anywhere, with nothing to
     // ever naturally clean it up; kept in memory instead, so a restart loses both together.
     private final ConcurrentHashMap<String, Long> containerBackedAssetBytes = new ConcurrentHashMap<>();
+    // Keyed the same way as packageVersions (packageVersionKey): npm's per-version readme (from
+    // the publish envelope, see recordPublishedPackageVersionReadme) and pypi's upload
+    // "description" form field both land here, since neither sidecar can answer for either after
+    // the fact (see getPackageVersionReadme's own javadoc). In memory only, like the fence and
+    // containerBackedAssetBytes above and for the exact same reason: the Verdaccio/pypiserver
+    // content a readme describes does not survive a Floci restart either (no volume attached,
+    // removed on shutdown), so persisting the readme text but not the package version it
+    // describes would leave it answering for a version that, after a restart, no longer exists
+    // anywhere real.
+    private final ConcurrentHashMap<String, String> packageVersionReadmes = new ConcurrentHashMap<>();
 
     @Inject
     public CodeArtifactService(StorageFactory storageFactory, RegionResolver regionResolver, EmulatorConfig config,
@@ -389,6 +410,15 @@ public class CodeArtifactService implements Resettable {
                 }
             }
         }
+        // Same reasoning, same prefix: packageVersionReadmes is also keyed by name
+        // (region/domain/repository/format/namespace/package/version), not a freshly minted id, so
+        // a pypi/npm package republished to a repository recreated under this same name must not
+        // inherit a readme captured for a version with the same coordinates under the deleted
+        // repository.
+        packageVersionReadmes.keySet().stream()
+                .filter(k -> k.startsWith(ownerScopedOriginPrefix))
+                .toList()
+                .forEach(packageVersionReadmes::remove);
         return r;
     }
 
@@ -895,6 +925,18 @@ public class CodeArtifactService implements Resettable {
                 containerBackedPackageDeletionFence.put(ownerScopedKey(owner, accountingKey),
                         containerBackedPackageDeletionCounter.incrementAndGet());
             }
+            // Harmless to do unconditionally: without this, a package republished under the same
+            // namespace/packageName/version after being deleted would inherit the deleted
+            // publish's readme text instead of whatever (or nothing) the new publish itself sent.
+            // Built from accountingKey, not the raw originKey above: readme capture/lookup key off
+            // accountingPackageName the same way the fence and byte accounting just above do (see
+            // accountingPackageName's own javadoc), so a pypi package deleted under one case/
+            // punctuation spelling still finds the readme captured under another.
+            String ownerScopedReadmePrefix = ownerScopedKey(owner, accountingKey) + "::";
+            packageVersionReadmes.keySet().stream()
+                    .filter(k -> k.startsWith(ownerScopedReadmePrefix))
+                    .toList()
+                    .forEach(packageVersionReadmes::remove);
         } else {
             List<CodeArtifactPackageVersion> versions = genericPackageVersions(region, domain, owner, repository,
                     format, namespace, packageName);
@@ -1069,8 +1111,7 @@ public class CodeArtifactService implements Resettable {
             throw validation("namespace is required when requesting an asset from a maven package version.");
         }
         String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
-        String revisionKey = repoId + "/" + (namespace == null ? "" : namespace) + "/" + packageName + "/" + version;
-        String revision = Digests.sha256Hex(revisionKey.getBytes(StandardCharsets.UTF_8));
+        String revision = synthesizeContainerBackedRevision(repoId, namespace, packageName, version);
         if (packageVersionRevision != null && !packageVersionRevision.equals(revision)) {
             throw notFound("Package version '" + version + "' was not found at revision '"
                     + packageVersionRevision + "'.", version, "package-version");
@@ -1088,6 +1129,142 @@ public class CodeArtifactService implements Resettable {
         asset.setContent(content);
         asset.setHashes(computeHashes(content));
         return new PackageVersionAssetResult(asset, revision);
+    }
+
+    /**
+     * The same synthesized revision {@link #getContainerBackedPackageVersionAsset} uses, shared
+     * so {@link #getPackageVersionReadme}'s npm/pypi answers report a revision consistent with
+     * whatever {@code GetPackageVersionAsset} would already report for the same version
+     * coordinate, rather than two independently-computed stand-ins that happen to differ.
+     */
+    private static String synthesizeContainerBackedRevision(String repoId, String namespace, String packageName,
+            String version) {
+        String revisionKey = repoId + "/" + (namespace == null ? "" : namespace) + "/" + packageName + "/" + version;
+        return Digests.sha256Hex(revisionKey.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Gets the readme text for one package version. AWS documents this action for npm, pypi, and
+     * nuget only (see {@link #README_FORMATS}), unlike every other package-version action here,
+     * which accepts the full eight-format set: Maven, Swift, generic, Ruby, and Cargo package
+     * versions carry no readme in real CodeArtifact, and this rejects them outright with
+     * {@code ValidationException} rather than quietly answering not-found.
+     *
+     * <p>Neither npm nor pypi can be answered live from the sidecar itself, confirmed directly
+     * rather than assumed for either one. npm: a real npm client's publish envelope does carry a
+     * per-version {@code readme} (confirmed against a real captured publish fixture), but
+     * Verdaccio's own packument response does not echo it back — checked against a live Verdaccio
+     * container, which hoists {@code readme} to the top level only, for the single
+     * most-recently-published version, truncated to 64K, exactly like real npmjs.org's own
+     * documented response shape; the per-version field in a GET response simply does not exist.
+     * pypi: pypiserver parses only a distribution's filename, never its embedded metadata (also
+     * confirmed directly: its own {@code PkgFile} model has no description-shaped field anywhere,
+     * and its {@code /json} route's own code comment says outright "we do not presently have any
+     * description/summary"). For both, the one place the text exists at all is the original
+     * publish/upload itself (npm's per-version {@code readme} field; pypi's twine upload's
+     * {@code description} form field, the real PyPI legacy upload API's field for a distribution's
+     * long description, in Markdown or reStructuredText per AWS's own doc wording for this very
+     * action); see {@link #recordPublishedPackageVersionReadme}, the only place either is ever
+     * captured.
+     *
+     * <p>nuget is accepted, since AWS documents it as valid, but never finds anything: nothing in
+     * Floci today implements the real NuGet wire protocol, so no nuget package version can ever
+     * actually exist here. This 404s for it exactly the same way as any npm/pypi version nothing
+     * ever published, rather than special-casing a format with no data behind it either way.
+     */
+    public PackageVersionReadmeResult getPackageVersionReadme(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName, String version) {
+        if (format == null || !README_FORMATS.contains(format)) {
+            throw validation("format must be one of " + README_FORMATS + ".");
+        }
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        requireNonBlank(packageName, "package");
+        requireNonBlank(version, "packageVersion");
+        validatePackageToken("package", packageName);
+        validatePackageToken("packageVersion", version);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+        // npm, pypi, and nuget alike: none of the three can be answered live (see this method's
+        // own javadoc), so a version that was never captured here means it was never published,
+        // including every nuget version, since nothing ever publishes one. Checked before
+        // ensureFormatContainerId below so a nuget request, which can only ever 404, never mints
+        // and persists a sidecar container id for a format with no sidecar at all.
+        String key = packageVersionKey(region, domain, repository, format, namespace,
+                accountingPackageName(format, packageName), version);
+        String readme = Optional.ofNullable(packageVersionReadmes.get(ownerScopedKey(owner, key)))
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version"));
+        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+        String revision = synthesizeContainerBackedRevision(repoId, namespace, packageName, version);
+        return new PackageVersionReadmeResult(format, namespace, packageName, version, revision, readme);
+    }
+
+    /**
+     * Captures the readme text for one published npm or pypi package version at the one moment it
+     * is ever available: right after the real upload/publish to the sidecar actually succeeded.
+     * See {@link #getPackageVersionReadme}'s own javadoc for why both formats need this; neither
+     * sidecar can answer for a specific version after the fact.
+     *
+     * <p>{@code namespace}/{@code packageName}/{@code version} arrive straight from the wire
+     * protocol here (an npm publish envelope's own per-version field, or a twine upload's {@code
+     * name}/{@code version} form fields), never through {@link #validatePackageToken} the way
+     * every JSON-API package operation's own coordinates already are. {@link #escapeKeySegment}'s
+     * whole collision-safety argument rests on no namespace/package/version that reaches it ever
+     * containing a raw {@code '#'}; silently skipping one that does (rather than escaping or
+     * rejecting outright) keeps that invariant true for this new path into {@link #packageVersionKey}
+     * without turning a client's publish, which already succeeded against the real sidecar, into a
+     * thrown exception over what is only a best-effort readme capture.
+     *
+     * <p>{@code synchronized}, and re-checks the repository still exists, for the same reason
+     * {@code recordContainerBackedAssetBytes}-style accounting calls elsewhere in this codebase
+     * do: the caller's own "does this repository still exist" check ran in a separate,
+     * already-released {@code synchronized} call ({@link #ensureFormatContainerId}, inside each
+     * proxy's own {@code requireRepository} path), before the real HTTP round trip to the sidecar
+     * that this call reports the result of. A {@code DeleteRepository} landing in that window
+     * would otherwise resurrect a key {@link #deleteRepository} already cleaned up. Re-checking
+     * existence here, inside the same {@code synchronized} call that does the write, closes that
+     * window the same way every other mutating method here already does.
+     *
+     * <p>{@code packageFenceSnapshot} is whatever {@link #currentContainerBackedPackageFence}
+     * returned when the proxy called it, right before issuing the real write this call reports the
+     * readme of — the exact same snapshot the proxy already takes to call
+     * {@link #recordContainerBackedAssetBytes}. Without comparing it here too, a publish's readme
+     * capture that runs on a delayed callback (npm's own, off the event loop) after a concurrent
+     * {@link #deletePackage} or native unpublish has already removed this package would resurrect
+     * a readme for a package {@link #getPackageVersionReadme} should now 404 on, the same window
+     * {@code recordContainerBackedAssetBytes} already closes for byte accounting.
+     */
+    public synchronized void recordPublishedPackageVersionReadme(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName, String version,
+            String readme, long packageFenceSnapshot) {
+        if (!isValidPackageToken(packageName) || !isValidPackageToken(version)
+                || (namespace != null && !isValidPackageToken(namespace))) {
+            LOG.warnv("Skipping readme capture for {0}/{1} package ''{2}'' version ''{3}'': the namespace, name, "
+                    + "or version contains a character ('#', '/', or whitespace) a real CodeArtifact package "
+                    + "coordinate cannot have.", domain, repository, packageName, version);
+            return;
+        }
+        String owner = effectiveOwner(domainOwner);
+        if (repositories.getForAccount(owner, repositoryKey(region, domain, repository)).isEmpty()) {
+            LOG.warnv("Skipping readme capture for {0}/{1}: the repository was deleted while this publish was in "
+                    + "flight.", domain, repository);
+            return;
+        }
+        String accountingName = accountingPackageName(format, packageName);
+        String fenceKey = packageKey(region, domain, repository, format, namespace, accountingName);
+        long currentFence = containerBackedPackageDeletionFence.getOrDefault(ownerScopedKey(owner, fenceKey), 0L);
+        if (currentFence != packageFenceSnapshot) {
+            LOG.warnv("Skipping readme capture for {0}/{1} package ''{2}'': a DeletePackage removed it from the "
+                    + "{3} sidecar (possibly replaced by a different publish) while this publish was in flight.",
+                    domain, repository, packageName, format);
+            return;
+        }
+        String key = packageVersionKey(region, domain, repository, format, namespace, accountingName, version);
+        packageVersionReadmes.put(ownerScopedKey(owner, key), readme == null ? "" : readme);
     }
 
     // ------------------------------------------------------------ authorization
@@ -1198,6 +1375,7 @@ public class CodeArtifactService implements Resettable {
         packageOriginConfigs.clear();
         containerBackedAssetBytes.clear();
         containerBackedPackageDeletionFence.clear();
+        packageVersionReadmes.clear();
         authorizationTokens.clear();
         if (inMemory) {
             memoryAssetStore.clear();
@@ -1385,15 +1563,18 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
-     * Cleans up this service's own byte accounting and deletion fence for one container-backed
-     * package after something other than {@link #deletePackage} removed it directly from the
-     * sidecar: specifically, a real npm client's native {@code npm unpublish}, which the pinned
-     * Verdaccio image (configured with {@code unpublish: $all}) honors on its own wire protocol,
-     * bypassing {@link #deletePackage} entirely (confirmed: {@code CodeArtifactNpmDataPlane}
-     * forwards any request that is not a publish straight through). {@link #deletePackage}'s own
-     * container-backed branch already does both of these same two things as part of deleting the
-     * real sidecar content too; this is that same bookkeeping on its own, for when the sidecar
-     * content is already gone by a path {@link #deletePackage} never saw.
+     * Cleans up this service's own byte accounting, deletion fence, and captured readmes for one
+     * container-backed package after something other than {@link #deletePackage} removed it
+     * directly from the sidecar: specifically, a real npm client's native {@code npm unpublish},
+     * which the pinned Verdaccio image (configured with {@code unpublish: $all}) honors on its own
+     * wire protocol, bypassing {@link #deletePackage} entirely (confirmed: {@code
+     * CodeArtifactNpmDataPlane} forwards any request that is not a publish straight through).
+     * {@link #deletePackage}'s own container-backed branch already does all three of these same
+     * things as part of deleting the real sidecar content too; this is that same bookkeeping on
+     * its own, for when the sidecar content is already gone by a path {@link #deletePackage} never
+     * saw. Without the readme cleanup here, {@link #getPackageVersionReadme} would keep answering
+     * for a package a real npm registry (and real CodeArtifact) now 404s on, forever, since nothing
+     * else ever revisits that store once it's written.
      *
      * <p>{@code namespace}/{@code packageName} come straight from the wire protocol here too (the
      * unpublish request's own path), so this guards the same escape-collision invariant
@@ -1413,6 +1594,14 @@ public class CodeArtifactService implements Resettable {
         String ownerScopedKey = ownerScopedKey(owner, key);
         containerBackedAssetBytes.remove(ownerScopedKey);
         containerBackedPackageDeletionFence.put(ownerScopedKey, containerBackedPackageDeletionCounter.incrementAndGet());
+        // Same key as the accounting/fence entries above: recordPublishedPackageVersionReadme now
+        // normalizes through accountingPackageName the same way (see its own javadoc), so this
+        // prefix matches whatever it wrote regardless of format.
+        String readmePrefix = ownerScopedKey + "::";
+        packageVersionReadmes.keySet().stream()
+                .filter(k -> k.startsWith(readmePrefix))
+                .toList()
+                .forEach(packageVersionReadmes::remove);
     }
 
     /**
@@ -1561,6 +1750,15 @@ public class CodeArtifactService implements Resettable {
         }
     }
 
+    /**
+     * The non-throwing form of {@link #validatePackageToken}, for a caller like
+     * {@link #recordContainerBackedAssetBytes} or {@link #recordPublishedPackageVersionReadme}
+     * that takes a namespace/package/version straight from a wire protocol rather than the JSON
+     * API's own validated request fields, and must skip a value that fails this rather than throw:
+     * the real write it guards already succeeded against a live sidecar by the time it runs, so
+     * rejecting it here would turn that success into a client-visible error over what is only
+     * best-effort bookkeeping.
+     */
     private static boolean isValidPackageToken(String value) {
         return value != null && !value.isEmpty() && value.length() <= 255 && PACKAGE_TOKEN.matcher(value).matches();
     }

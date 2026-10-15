@@ -96,17 +96,17 @@ public class AwsConfigService {
     private Map<String, DeliveryChannel> deliveryChannels = new ConcurrentHashMap<>();
     private Map<String, RetentionConfiguration> retentionConfigurations = new ConcurrentHashMap<>();
 
-    // recorder run-state is transient runtime state (not persisted)
+    // Transient runtime state is scoped by account and region, like the durable stores.
     private final ConcurrentHashMap<String, Boolean> recorderRunning = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> recorderLastStartTime = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> recorderLastStopTime = new ConcurrentHashMap<>();
 
-    // per-rule evaluation timing is transient runtime state, keyed region + "|" + ruleName
+    // per-rule evaluation timing is transient runtime state, keyed account + region + ruleName
     private final ConcurrentHashMap<String, Long> ruleFirstActivatedTime = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> ruleLastInvokedTime = new ConcurrentHashMap<>();
 
     // guards the check-then-act between a rule's existence and its evaluations, keyed
-    // region + "|" + ruleName, so DeleteConfigRule can't race PutEvaluations/PutExternalEvaluation
+    // account + region + ruleName, so DeleteConfigRule can't race PutEvaluations/PutExternalEvaluation
     // into recreating a deleted rule's evaluation bucket for a later same-named rule to inherit
     private final ConcurrentHashMap<String, Object> ruleLocks = new ConcurrentHashMap<>();
 
@@ -683,9 +683,9 @@ public class AwsConfigService {
                     "Cannot find configuration recorder with the specified name.", 400);
         }
         configurationRecorders.remove(region);
-        recorderRunning.remove(region);
-        recorderLastStartTime.remove(region);
-        recorderLastStopTime.remove(region);
+        recorderRunning.remove(runtimeKey(region));
+        recorderLastStartTime.remove(runtimeKey(region));
+        recorderLastStopTime.remove(runtimeKey(region));
     }
 
     public void startConfigurationRecorder(String region, String name) {
@@ -694,8 +694,8 @@ public class AwsConfigService {
             throw new AwsException("NoSuchConfigurationRecorderException",
                     "Cannot find configuration recorder with the specified name.", 400);
         }
-        recorderRunning.put(region, true);
-        recorderLastStartTime.put(region, now());
+        recorderRunning.put(runtimeKey(region), true);
+        recorderLastStartTime.put(runtimeKey(region), now());
     }
 
     public void stopConfigurationRecorder(String region, String name) {
@@ -704,8 +704,8 @@ public class AwsConfigService {
             throw new AwsException("NoSuchConfigurationRecorderException",
                     "Cannot find configuration recorder with the specified name.", 400);
         }
-        recorderRunning.put(region, false);
-        recorderLastStopTime.put(region, now());
+        recorderRunning.put(runtimeKey(region), false);
+        recorderLastStopTime.put(runtimeKey(region), now());
     }
 
     public List<ConfigurationRecorderStatus> describeConfigurationRecorderStatus(String region, List<String> names) {
@@ -727,10 +727,10 @@ public class AwsConfigService {
         }
         ConfigurationRecorderStatus status = new ConfigurationRecorderStatus(
                 recorder.name(),
-                recorderRunning.getOrDefault(region, false),
-                recorderLastStartTime.containsKey(region) ? "SUCCESS" : "Pending",
-                recorderLastStartTime.get(region),
-                recorderLastStopTime.get(region));
+                recorderRunning.getOrDefault(runtimeKey(region), false),
+                recorderLastStartTime.containsKey(runtimeKey(region)) ? "SUCCESS" : "Pending",
+                recorderLastStartTime.get(runtimeKey(region)),
+                recorderLastStopTime.get(runtimeKey(region)));
         return List.of(status);
     }
 
@@ -773,7 +773,7 @@ public class AwsConfigService {
             throw new AwsException("NoSuchDeliveryChannelException",
                     "Cannot find delivery channel with the specified name.", 400);
         }
-        if (recorderRunning.getOrDefault(region, false)) {
+        if (recorderRunning.getOrDefault(runtimeKey(region), false)) {
             throw new AwsException("LastDeliveryChannelDeleteFailedException",
                     "You cannot delete the delivery channel you specified because the customer managed "
                             + "configuration recorder is running.", 400);
@@ -1049,9 +1049,9 @@ public class AwsConfigService {
     /** Aggregation authorizations share {@link #ruleLocks} with the config rules, so their keys
      *  are namespaced apart. A config rule name cannot contain '|', but making the two key spaces
      *  disjoint by construction costs nothing and does not depend on that staying true. */
-    private static String authorizationLockKey(String region, String authorizedAccountId,
+    private String authorizationLockKey(String region, String authorizedAccountId,
             String authorizedAwsRegion) {
-        return "aggregation-authorization|" + region + "|"
+        return "aggregation-authorization|" + runtimeKey(region) + "|"
                 + authorizationKey(authorizedAccountId, authorizedAwsRegion);
     }
 
@@ -1063,8 +1063,12 @@ public class AwsConfigService {
         return resourceType + "|" + resourceId;
     }
 
-    private static String ruleKey(String region, String ruleName) {
-        return region + "|" + ruleName;
+    private String runtimeKey(String region) {
+        return regionResolver.getAccountId() + "|" + region;
+    }
+
+    private String ruleKey(String region, String ruleName) {
+        return runtimeKey(region) + "|" + ruleName;
     }
 
     private Object lockFor(String key) {

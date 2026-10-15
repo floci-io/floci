@@ -35,6 +35,13 @@ quarkus:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
     delay-enabled: true
+  index-dependency:
+    swagger-models-v2:
+      group-id: io.swagger
+      artifact-id: swagger-models
+    swagger-models-v3:
+      group-id: io.swagger.core.v3
+      artifact-id: swagger-models
   native:
     # quarkus-jdbc-mysql used to force this. Without it the image has only UTF-8, UTF-16,
     # ISO-8859-1 and US-ASCII, which breaks latin1 MySQL columns and non-UTF-8 mail bodies.
@@ -73,6 +80,8 @@ quarkus:
         # DriverManager finds the JDBC drivers through ServiceLoader, and the MySQL
         # driver reads its time zone table at connect time.
         - META-INF/services/java.sql.Driver
+        # OpenAPIParser discovers the Swagger 2.0 converter through ServiceLoader.
+        - META-INF/services/io.swagger.v3.parser.core.extensions.SwaggerParserExtension
         - com/mysql/cj/util/TimeZoneMapping.properties
       # snappy-java registers 27 JNI libraries, one per platform. Only the one
       # for the running platform loads, so 23 are dropped. Linux x86_64 and
@@ -529,13 +538,14 @@ floci:
       list-shards-next-token-ttl-millis: 300000
     firehose:
       enabled: true
-      tick-interval-seconds: 10
+      tick-interval-seconds: 1
       flush-record-count: 0
       staging-bucket: floci-firehose-staging
     kms:
       enabled: true
     cognito:
       enabled: true
+      enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
       allow-plaintext-http: false
@@ -585,6 +595,19 @@ floci:
       # single image (e.g. private registry mirror). When unset, the image is
       # picked from OpenSearchVersions.imageFor(EngineVersion).
       # default-image: "registry.example.com/opensearch:2.19.5"
+      # data-volume: optional data volume for the spawned domain containers; an absolute
+      # path is bind-mounted as <path>/<account-id>/<region>/<domain-name> (nested under a <namespace>
+      # subdirectory when docker.resource-namespace is set), any other value is a Docker
+      # volume name and each domain gets its own <name>-<namespace>-<account-id>-<region>-<domain-name> volume
+      # of it (no namespace segment when unset). Storage named here is never removed on
+      # domain delete, and a volume created when absent carries no Floci label, so no
+      # sweep of Floci-labelled volumes collects it. When unset, each domain gets a
+      # Floci-managed volume.
+      # Linux daemon paths starting with / keep their path syntax on Windows.
+      # Bind-directory ownership is prepared by a temporary root container using the
+      # selected image. Existing files are untouched; init failure aborts domain startup.
+      # data-volume: "opensearch-data"
+      # data-volume: "/srv/floci/opensearch"
       proxy-base-port: 9400
       proxy-max-port: 9499
       keep-running-on-shutdown: false
@@ -661,7 +684,7 @@ floci:
       prefer-local-images: true
     ui:
       enabled: true
-      image: "floci/floci-ui:latest"
+      image: "floci/floci-ui:0.7.0"
       container-name: floci-ui
       port: 4500
       # bind-address: unset by default, so Docker publishes the console on every interface.

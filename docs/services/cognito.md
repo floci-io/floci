@@ -30,7 +30,7 @@ An action given a user pool ID that does not resolve returns `ResourceNotFoundEx
 
 `CreateUserPoolClient` and `UpdateUserPoolClient` store `AuthSessionValidity` in minutes,
 and `DescribeUserPoolClient` returns it. Values must be integers from 3 through 15.
-New clients default to 3 minutes; an update that omits the field retains its stored value.
+New clients default to 3 minutes, and an update that omits the field resets it to 3.
 An explicit JSON `null` behaves as an omitted field. Wrong JSON types or numbers
 outside the 32-bit integer range return `SerializationException`. Integer durations
 outside 3 through 15 return `InvalidParameterException` with Cognito's constraint-error
@@ -92,7 +92,7 @@ pool's Region rather than the `SourceArn` Region, and does not apply `ReplyToEma
 | CreateUserPoolClient | Creates an app client for a user pool, including optional generated secret handling. |
 | DescribeUserPoolClient | Returns the stored app client configuration. |
 | ListUserPoolClients | Lists app clients for a user pool. |
-| UpdateUserPoolClient | Updates an app client's settings. A field the request omits keeps its stored value, where AWS resets it to its default. |
+| UpdateUserPoolClient | Updates an app client's settings. As on AWS, a setting the request omits is reset to its default, the one a new client gets. An omitted `ClientName` keeps the client's name, since the API documents no default for it. |
 | DeleteUserPoolClient | Deletes an app client from a user pool. |
 | AddUserPoolClientSecret | Adds a client secret to an app client, up to 2. A supplied `ClientSecret` must be 24 to 64 word characters; without one Floci generates the secret and returns its value. |
 | ListUserPoolClientSecrets | Lists an app client's client secrets, without their values. |
@@ -187,6 +187,14 @@ With TLS enabled, a custom domain (`CustomDomainConfig` set) is added to Floci's
 certificate as soon as it is created, so `https://<domain>` verifies without a restart; see
 [TLS](../configuration/tls.md) for the accepted suffixes. A prefix domain is served under
 `amazoncognito.com` on AWS, not by Floci, and is left alone.
+
+Custom domains are not available in AWS GovCloud (US)
+([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-cog.html)) or in
+the AWS European Sovereign Cloud
+([EUSC guide](https://docs.aws.eu/esc/latest/userguide/cognito.html)), so `CreateUserPoolDomain` and
+`UpdateUserPoolDomain` refuse a `CustomDomainConfig` in a GovCloud or EUSC region with
+`InvalidParameterException`. Prefix domains work there. See
+[AWS Partitions](../configuration/partitions.md).
 
 ### Log Delivery
 
@@ -455,6 +463,8 @@ the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, 
 `USER_AUTH` must list the matching `ALLOW_` value.
 
 ## User Attribute Update Verification
+
+`UpdateUserAttributes` and `AdminUpdateUserAttributes` delete attributes submitted with a blank value, including whitespace-only values. Deleting an email or phone number also removes its verified flag and pending value. Admin updates invalidate the matching pending verification code.
 
 `CreateUserPool`, `UpdateUserPool`, and `DescribeUserPool` support
 `UserAttributeUpdateSettings.AttributesRequireVerificationBeforeUpdate` for
@@ -781,9 +791,21 @@ Cognito JSON protocol.
 
 ## Configuration
 
-| Variable                         | Default | Description                   |
-|----------------------------------|---------|-------------------------------|
-| `FLOCI_SERVICES_COGNITO_ENABLED` | `true`  | Enable or disable the service |
+| Variable                                               | Default | Description                   |
+|--------------------------------------------------------|---------|-------------------------------|
+| `FLOCI_SERVICES_COGNITO_ENABLED`                       | `true`  | Enable or disable the service |
+| `FLOCI_SERVICES_COGNITO_ENFORCE_TOKEN_VALIDITY_LIMITS` | `true`  | Reject app clients whose token validity is outside AWS's limits |
+
+`CreateUserPoolClient` and `UpdateUserPoolClient` enforce AWS's token validity limits: access and
+ID tokens between 5 minutes and 1 day, refresh tokens between 60 minutes and 3,650 days, each in
+its `TokenValidityUnits` unit (hours for access and ID tokens, days for refresh tokens, by default).
+A client outside them fails with `InvalidParameterException` (`Invalid range for token validity.`),
+as on AWS. A `RefreshTokenValidity` of `0` is accepted and becomes AWS's 30-day default, stored in
+the client's refresh token unit (`43200` for `minutes`). An update is checked as it is sent, since a
+token validity or unit the request omits is reset to its default rather than kept. To keep tokens
+shorter than AWS allows, for example a one-minute access token to test what happens
+when it expires, set `FLOCI_SERVICES_COGNITO_ENFORCE_TOKEN_VALIDITY_LIMITS=false`
+(`floci.services.cognito.enforce-token-validity-limits`).
 
 ## Examples
 

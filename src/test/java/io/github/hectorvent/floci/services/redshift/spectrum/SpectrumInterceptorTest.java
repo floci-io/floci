@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.net.Socket;
 import java.util.List;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.mockito.ArgumentMatchers.any;
@@ -23,9 +24,9 @@ class SpectrumInterceptorTest {
     @BeforeEach
     void setUp() {
         catalog = mock(SpectrumCatalog.class);
-        materializer = mock(SpectrumMaterializer.class);
+        materializer = inlineMock(SpectrumMaterializer.class);
         interceptor = new SpectrumInterceptor(catalog, new SpectrumStatementParser(), new SpectrumQueryClassifier(),
-                null, mock(SpectrumS3Reader.class), materializer);
+                null, inlineMock(SpectrumS3Reader.class), materializer);
     }
 
     @Test

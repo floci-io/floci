@@ -16,12 +16,14 @@ import com.github.dockerjava.api.command.StopContainerCmd;
 import com.github.dockerjava.api.command.WaitContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -29,9 +31,11 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntConsumer;
 import java.util.function.IntFunction;
@@ -63,6 +67,22 @@ class ContainerLifecycleManagerVolumeTest {
     void setUp() {
         manager = new ContainerLifecycleManager(
                 dockerClient, imageCacheService, containerDetector, portAllocator, config);
+    }
+
+    @Test
+    void ensureVolumePersistsOwnershipLabelsAndTheirLegacyAliases() {
+        InspectVolumeCmd inspect = mock(InspectVolumeCmd.class);
+        when(dockerClient.inspectVolumeCmd("task-volume")).thenReturn(inspect);
+        when(inspect.exec()).thenThrow(new NotFoundException("missing"));
+        CreateVolumeCmd create = mock(CreateVolumeCmd.class, RETURNS_SELF);
+        when(dockerClient.createVolumeCmd()).thenReturn(create);
+        manager.ensureVolume("task-volume", Map.of("io.floci.service", "ecs",
+                "io.floci.owner", "alpha/4566", "io.floci.ecs.run", "run-id"));
+        verify(create).withLabels(argThat(labels -> "ecs".equals(labels.get("io.floci.service"))
+                && "alpha/4566".equals(labels.get("io.floci.owner"))
+                && "alpha/4566".equals(labels.get("floci_owner_port"))
+                && "run-id".equals(labels.get("io.floci.ecs.run"))
+                && "run-id".equals(labels.get("floci.ecs-run"))));
     }
 
     @Test
@@ -550,6 +570,58 @@ class ContainerLifecycleManagerVolumeTest {
         assertEquals(1, creates.get(), "a missing volume must be created");
     }
 
+    /** A Floci-derived volume carries the labels a floci-scoped prune and sweep filter on. */
+    @Test
+    void ensureVolume_labelsCreatedVolumeAsFlociManaged() {
+        inspectVolumeBehaving(attempt -> {
+            throw new NotFoundException("No such volume: vol");
+        });
+        CreateVolumeCmd cmd = mock(CreateVolumeCmd.class, RETURNS_SELF);
+        when(dockerClient.createVolumeCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(mock(CreateVolumeResponse.class));
+        ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
+
+        manager.ensureVolume("vol");
+
+        verify(cmd).withLabels(labels.capture());
+        assertEquals(Map.of("floci", "true", "floci_emulator", "floci-aws"), labels.getValue());
+    }
+
+    /**
+     * A volume an operator named is created without any Floci label: no sweep of
+     * Floci-labelled volumes, a floci-scoped prune or a testcontainers run's
+     * labelled-children reap, may collect operator storage.
+     */
+    @Test
+    void ensureUnmanagedVolume_createsMissingVolumeWithoutLabels() {
+        AtomicInteger inspects = inspectVolumeBehaving(attempt -> {
+            throw new NotFoundException("No such volume: vol");
+        });
+        CreateVolumeCmd cmd = mock(CreateVolumeCmd.class, RETURNS_SELF);
+        when(dockerClient.createVolumeCmd()).thenReturn(cmd);
+        when(cmd.exec()).thenReturn(mock(CreateVolumeResponse.class));
+        ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
+
+        manager.ensureUnmanagedVolume("vol");
+
+        assertEquals(1, inspects.get());
+        verify(cmd).withLabels(labels.capture());
+        assertTrue(labels.getValue().isEmpty(),
+                "an operator-named volume carries no label a Floci sweep filters on");
+    }
+
+    /** An existing operator-named volume is left exactly as the operator created it. */
+    @Test
+    void ensureUnmanagedVolume_doesNotCreateWhenVolumeAlreadyExists() {
+        AtomicInteger inspects = inspectVolumeBehaving(attempt ->
+                mock(InspectVolumeResponse.class));
+
+        manager.ensureUnmanagedVolume("vol");
+
+        assertEquals(1, inspects.get());
+        verify(dockerClient, never()).createVolumeCmd();
+    }
+
     @Test
     void ensureVolume_doesNotCreateWhenVolumeAlreadyExists() {
         // This existence guard is what keeps ensureVolume idempotent now that transient-I/O
@@ -639,5 +711,62 @@ class ContainerLifecycleManagerVolumeTest {
 
         verify(spyManager).startContainer("helper-id");
         verify(dockerClient, never()).startContainerCmd("helper-id");
+    }
+
+    @Test
+    void ensureBindDirectoryRunsRootHelperUsingImageOwnershipAndCleansUp() {
+        CreateContainerCmd command = bindInitHelper(0);
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+
+        manager.ensureBindDirectory("/host/domain", "custom-opensearch", "/usr/share/opensearch/data");
+
+        verify(imageCacheService).ensureImageExists("custom-opensearch");
+        verify(command).withHostConfig(hostConfig.capture());
+        assertEquals("/host/domain", hostConfig.getValue().getBinds()[0].getPath());
+        assertEquals("/floci-bind-directory", hostConfig.getValue().getBinds()[0].getVolume().getPath());
+        verify(command).withUser("0");
+        verify(command).withEntrypoint("sh");
+        verify(command).withCmd("-c", "ownership=$(stat -c '%u:%g' \"$1\") && "
+                + "chown \"$ownership\" \"$2\" && chmod u+rwx \"$2\"",
+                "floci-bind-init", "/usr/share/opensearch/data", "/floci-bind-directory");
+        verify(dockerClient).startContainerCmd("helper-id");
+        verify(dockerClient).removeContainerCmd("helper-id");
+    }
+
+    @Test
+    void ensureBindDirectoryPropagatesFailedInitAndStillRemovesHelper() {
+        bindInitHelper(1);
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, () ->
+                manager.ensureBindDirectory("/host/domain", "custom-opensearch", "/usr/share/opensearch/data"));
+
+        assertTrue(exception.getMessage().contains("exited with status 1"));
+        verify(dockerClient).removeContainerCmd("helper-id");
+    }
+
+    @Test
+    void ensureBindDirectoryRechecksDirectoryOnEveryLaunch() {
+        bindInitHelper(0);
+
+        manager.ensureBindDirectory("/host/domain", "custom-opensearch", "/usr/share/opensearch/data");
+        manager.ensureBindDirectory("/host/domain", "custom-opensearch", "/usr/share/opensearch/data");
+
+        verify(dockerClient, times(2)).createContainerCmd("custom-opensearch");
+    }
+
+    private CreateContainerCmd bindInitHelper(int status) {
+        CreateContainerCmd command = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("custom-opensearch")).thenReturn(command);
+        CreateContainerResponse response = mock(CreateContainerResponse.class);
+        when(response.getId()).thenReturn("helper-id");
+        when(command.exec()).thenReturn(response);
+        when(dockerClient.startContainerCmd("helper-id")).thenReturn(mock(StartContainerCmd.class));
+        WaitContainerCmd wait = mock(WaitContainerCmd.class);
+        when(dockerClient.waitContainerCmd("helper-id")).thenReturn(wait);
+        WaitContainerResultCallback callback = mock(WaitContainerResultCallback.class);
+        when(wait.exec(any(WaitContainerResultCallback.class))).thenReturn(callback);
+        when(callback.awaitStatusCode(60, TimeUnit.SECONDS)).thenReturn(status);
+        when(dockerClient.removeContainerCmd("helper-id")).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
+        return command;
     }
 }

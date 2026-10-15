@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testutil.SesMailbox;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
@@ -13,6 +14,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -22,7 +25,9 @@ import java.security.Signature;
 import java.security.spec.RSAPublicKeySpec;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Spliterators;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -768,8 +773,10 @@ class CognitoIntegrationTest {
                         equalTo("no-reply@verificationemail.com"));
     }
 
-    @Test
-    void adminCreateUserEmailsAnInvitationWithAWorkingTemporaryPassword() throws Exception {
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = "Inv\"ite\\123Aa!")
+    void adminCreateUserEmailsAnInvitationWithAWorkingTemporaryPassword(String temporaryPassword) throws Exception {
         String invitePoolId = cognitoJson("CreateUserPool", """
                 { "PoolName": "InvitationPool" }
                 """).path("UserPool").path("Id").asText();
@@ -782,14 +789,15 @@ class CognitoIntegrationTest {
                 """.formatted(invitePoolId)).path("UserPoolClient").path("ClientId").asText();
         String invitee = "invited+" + UUID.randomUUID() + "@example.com";
 
-        cognitoAction("AdminCreateUser", """
-                {
-                  "UserPoolId": "%s",
-                  "Username": "%s",
-                  "UserAttributes": [{ "Name": "email", "Value": "%s" }],
-                  "DesiredDeliveryMediums": ["EMAIL"]
-                }
-                """.formatted(invitePoolId, invitee, invitee))
+        Map<String, Object> createUser = new LinkedHashMap<>();
+        createUser.put("UserPoolId", invitePoolId);
+        createUser.put("Username", invitee);
+        createUser.put("UserAttributes", List.of(Map.of("Name", "email", "Value", invitee)));
+        createUser.put("DesiredDeliveryMediums", List.of("EMAIL"));
+        if (temporaryPassword != null) {
+            createUser.put("TemporaryPassword", temporaryPassword);
+        }
+        cognitoAction("AdminCreateUser", OBJECT_MAPPER.writeValueAsString(createUser))
                 .then()
                 .statusCode(200)
                 .body("User.UserStatus", equalTo("FORCE_CHANGE_PASSWORD"));
@@ -808,15 +816,15 @@ class CognitoIntegrationTest {
                 .matcher(body);
         assertTrue(invitation.find(), body);
         assertEquals(invitee, invitation.group(1));
+        if (temporaryPassword != null) {
+            assertEquals(temporaryPassword, invitation.group(2));
+        }
 
-        cognitoAction("AdminInitiateAuth", """
-                {
-                  "UserPoolId": "%s",
-                  "ClientId": "%s",
-                  "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
-                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
-                }
-                """.formatted(invitePoolId, inviteClientId, invitee, invitation.group(2)))
+        cognitoAction("AdminInitiateAuth", OBJECT_MAPPER.writeValueAsString(Map.of(
+                "UserPoolId", invitePoolId,
+                "ClientId", inviteClientId,
+                "AuthFlow", "ADMIN_USER_PASSWORD_AUTH",
+                "AuthParameters", Map.of("USERNAME", invitee, "PASSWORD", invitation.group(2)))))
                 .then()
                 .statusCode(200)
                 .body("ChallengeName", equalTo("NEW_PASSWORD_REQUIRED"));
@@ -1152,13 +1160,7 @@ class CognitoIntegrationTest {
                 .body("__type", equalTo("NotAuthorizedException"))
                 .body("message", equalTo("Contact administrator to reset password."));
 
-        given()
-                .queryParam("email", email)
-                .when()
-                .get("/_aws/ses")
-                .then()
-                .statusCode(200)
-                .body("messages", hasSize(0));
+        assertEquals(0, SesMailbox.messagesTo(email).size());
     }
 
     @Test
@@ -2795,6 +2797,49 @@ class CognitoIntegrationTest {
                 .statusCode(400);
     }
 
+    /**
+     * AWS: access and ID tokens "Must be set to a value between 5 minutes and 1 day", refresh tokens
+     * "between 60 minutes and 3,650 days". The first two requests are the reproduction in #5147.
+     */
+    @Test
+    @Order(96)
+    void createAndUpdateUserPoolClientRejectTokenValidityOutsideAwsLimits() throws Exception {
+        String limitsPoolId = cognitoJson("CreateUserPool", """
+                {"PoolName": "TokenValidityLimitsPool"}
+                """).path("UserPool").path("Id").asText();
+
+        for (String validity : List.of(
+                """
+                "AccessTokenValidity": 1, "IdTokenValidity": 1,
+                "TokenValidityUnits": {"AccessToken": "minutes", "IdToken": "minutes"}""",
+                """
+                "RefreshTokenValidity": 20, "TokenValidityUnits": {"RefreshToken": "minutes"}""",
+                """
+                "AccessTokenValidity": 25""")) {
+            cognitoAction("CreateUserPoolClient", """
+                    {"UserPoolId": "%s", "ClientName": "short-tokens", %s}
+                    """.formatted(limitsPoolId, validity))
+                    .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"))
+                    .body("message", equalTo("Invalid range for token validity."));
+        }
+
+        String limitsClientId = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId": "%s", "ClientName": "limit-tokens",
+                 "AccessTokenValidity": 5, "IdTokenValidity": 1440, "RefreshTokenValidity": 60,
+                 "TokenValidityUnits": {"AccessToken": "minutes", "IdToken": "minutes", "RefreshToken": "minutes"}}
+                """.formatted(limitsPoolId)).path("UserPoolClient").path("ClientId").asText();
+        cognitoAction("UpdateUserPoolClient", """
+                {"UserPoolId": "%s", "ClientId": "%s", "AccessTokenValidity": 4,
+                 "TokenValidityUnits": {"AccessToken": "minutes"}}
+                """.formatted(limitsPoolId, limitsClientId))
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo("Invalid range for token validity."));
+    }
+
     @Test
     @Order(97)
     void createUserPoolClientRejectsInconsistentOAuthFlowConfiguration() throws Exception {
@@ -3594,16 +3639,7 @@ class CognitoIntegrationTest {
     }
 
     private static String fetchLatestSesVerificationCode(String recipient) throws Exception {
-        String response = given()
-                .queryParam("email", recipient)
-                .when()
-                .get("/_aws/ses")
-                .then()
-                .statusCode(200)
-                .extract()
-                .asString();
-        JsonNode payload = OBJECT_MAPPER.readTree(response);
-        String body = payload.path("messages").get(0).path("Body").path("text_part").asText();
+        String body = SesMailbox.messagesTo(recipient).get(0).path("Body").path("text_part").asText();
         Matcher matcher = SIX_DIGIT_CODE.matcher(body);
         assertTrue(matcher.find(), "verification code email should contain a 6-digit code");
         return matcher.group(1);

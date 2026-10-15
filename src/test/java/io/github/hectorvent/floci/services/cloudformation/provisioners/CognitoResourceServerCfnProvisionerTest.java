@@ -498,6 +498,34 @@ class CognitoResourceServerCfnProvisionerTest {
         assertEquals(pending, resource.getAttributes().get("__FlociResourceServerUpdate"));
     }
 
+    /**
+     * A replacement whose rollback could not delete it stays owed. A later update reaches the
+     * resource server only once ContinueUpdateRollback skipped it, and rolling back that update's
+     * failed attempt restores its own snapshot instead of retrying the orphan's delete.
+     */
+    @Test
+    void aFailedAttemptAfterASkippedRollbackRestoresItsSnapshotAndLeavesTheOrphanOwed() {
+        StackResource resource = resource(IDENTIFIER, POOL);
+        provisioner.provision(resource, properties(NEW_POOL, IDENTIFIER, "Replacement API"), ctx(IDENTIFIER));
+        doThrow(new AwsException("InternalErrorException", "delete failed", 500)).doNothing()
+                .when(cognito).deleteResourceServer(NEW_POOL, IDENTIFIER);
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(resource));
+        assertEquals(POOL, resource.getAttributes().get("__FlociResourceServerPoolId"));
+        assertTrue(provisioner.hasReplacementUpdate(resource));
+        when(cognito.describeResourceServer(POOL, IDENTIFIER)).thenReturn(server(POOL, IDENTIFIER, "Old API"));
+        doThrow(new AwsException("InternalErrorException", "update failed", 500))
+                .when(cognito).updateResourceServer(eq(POOL), eq(IDENTIFIER), eq("New API"), any());
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource,
+                properties(POOL, IDENTIFIER, "New API"), ctx(IDENTIFIER)));
+        assertTrue(provisioner.rollbackUpdate(resource));
+
+        verify(cognito).updateResourceServer(eq(POOL), eq(IDENTIFIER), eq("Old API"), any());
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
+        verify(cognito, times(1)).deleteResourceServer(NEW_POOL, IDENTIFIER);
+        assertTrue(provisioner.hasReplacementUpdate(resource));
+    }
+
     @Test
     void aRecoveredReplacementUsesTheRestoredIdentityForTheNextAttempt() {
         String replacementIdentifier = "https://replacement.example.com";

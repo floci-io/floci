@@ -55,7 +55,7 @@ suites in Docker against it.
 
 ## Branching Model
 
-Floci uses a **tag-driven release model**. Merging a PR never publishes a release image. `main` is published once a day as the `nightly` channel, and a stable release is published only when a maintainer runs the "Release Cut" workflow (`.github/workflows/release-cut.yml`, `workflow_dispatch`). That workflow runs semantic-release, which bumps `pom.xml`, writes `CHANGELOG.md`, commits, and pushes the `X.Y.Z` tag. The tag then triggers `.github/workflows/release.yml`, which builds and publishes the release images to Docker Hub and public ECR.
+Floci uses a **tag-driven release model**. Merging a PR never publishes a release image. `main` is published once a day as the `nightly` channel, and a stable release is published only when the "Release Cut" workflow (`.github/workflows/release-cut.yml`) runs: on its schedule at 00:30 US Central time on the 15th and the last day of each month, or when a maintainer dispatches it. That workflow runs semantic-release, which bumps `pom.xml`, writes `CHANGELOG.md`, commits, and pushes the `X.Y.Z` tag. The tag then triggers `.github/workflows/release.yml`, which builds and publishes the release images to Docker Hub and public ECR.
 
 | Branch / tag | Purpose | Docker published? |
 |---|---|---|
@@ -277,11 +277,12 @@ Once your current pull requests are reviewed, merged, or closed, you are welcome
 
 ## Release Process (maintainers)
 
-Stable releases ship on the **1st and 3rd Tuesday of each month**. Merging to `main` does
-not cut a release: the change rides the next train, and reaches the `nightly` image on the
-next nightly build.
+Stable releases ship on the **15th and the last day of each month**. Merging to `main`
+does not cut a release: the change rides the next train, and reaches the `nightly` image on
+the next nightly build.
 
-Releases are cut from `main` with the **Release Cut** workflow
+Releases are cut from `main` by the **Release Cut** workflow, which runs on a schedule at
+00:30 US Central time (America/Chicago) on those days. Maintainers can also run it by hand
 (Actions → Release Cut → Run workflow). semantic-release analyzes the
 Conventional Commits since the last tag, bumps `pom.xml`, regenerates
 `CHANGELOG.md`, commits, tags, and publishes the GitHub Release; the tag

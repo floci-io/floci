@@ -31,12 +31,13 @@ public final class SqlParameterParser {
      *                      honor backslash escapes (e.g. Redshift Data API)
      * @param numericNames whether a parameter name may start with a digit, as in
      *                     {@code :1} (RDS Data API)
+     * @param mysqlComments whether comments follow MySQL's hash, double-dash, and non-nesting rules
      */
     public record Options(boolean allowBackticks, boolean backslashEscapes, boolean escapeStrings,
-                          boolean numericNames) {
-        public static final Options REDSHIFT = new Options(false, false, true, false);
-        public static final Options RDS_MYSQL = new Options(true, true, false, true);
-        public static final Options RDS_POSTGRESQL = new Options(true, false, false, true);
+                          boolean numericNames, boolean mysqlComments) {
+        public static final Options REDSHIFT = new Options(false, false, true, false, false);
+        public static final Options RDS_MYSQL = new Options(true, true, false, true, true);
+        public static final Options RDS_POSTGRESQL = new Options(true, false, false, true, false);
     }
 
     /**
@@ -68,7 +69,7 @@ public final class SqlParameterParser {
         while (i < len) {
             char c = sql.charAt(i);
 
-            if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
+            if (startsLineComment(sql, i, options)) {
                 int end = sql.indexOf('\n', i);
                 end = end < 0 ? len : end;
                 out.append(sql, i, end);
@@ -77,8 +78,7 @@ public final class SqlParameterParser {
             }
 
             if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                int end = sql.indexOf("*/", i + 2);
-                end = end < 0 ? len : end + 2;
+                int end = skipBlockComment(sql, i, !options.mysqlComments());
                 out.append(sql, i, end);
                 i = end;
                 continue;
@@ -196,15 +196,14 @@ public final class SqlParameterParser {
         while (i < len) {
             char c = sql.charAt(i);
 
-            if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
+            if (startsLineComment(sql, i, options)) {
                 int end = sql.indexOf('\n', i);
                 i = end < 0 ? len : end;
                 continue;
             }
 
             if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                int end = sql.indexOf("*/", i + 2);
-                i = end < 0 ? len : end + 2;
+                i = skipBlockComment(sql, i, !options.mysqlComments());
                 continue;
             }
 
@@ -230,6 +229,38 @@ public final class SqlParameterParser {
             i++;
         }
         return false;
+    }
+
+    private static boolean startsLineComment(String sql, int start, Options options) {
+        boolean mysql = options.mysqlComments();
+        if (mysql && sql.charAt(start) == '#') {
+            return true;
+        }
+        if (sql.charAt(start) != '-' || start + 1 >= sql.length() || sql.charAt(start + 1) != '-') {
+            return false;
+        }
+        return !mysql || (start + 2 < sql.length()
+                && (Character.isWhitespace(sql.charAt(start + 2)) || Character.isISOControl(sql.charAt(start + 2))));
+    }
+
+    private static int skipBlockComment(String sql, int start, boolean nested) {
+        int depth = 1;
+        int i = start + 2;
+        while (i + 1 < sql.length()) {
+            if (nested && sql.charAt(i) == '/' && sql.charAt(i + 1) == '*') {
+                depth++;
+                i += 2;
+            } else if (sql.charAt(i) == '*' && sql.charAt(i + 1) == '/') {
+                depth--;
+                i += 2;
+                if (depth == 0) {
+                    return i;
+                }
+            } else {
+                i++;
+            }
+        }
+        return sql.length();
     }
 
     private static int skipQuoted(String sql, int start, char quote, Options options) {

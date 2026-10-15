@@ -1,0 +1,1225 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_redshift_serverless_shapes.py",
+    "botocore": "botocore 1.43.113 (installed package)"
+  },
+  "operations": {
+    "ConvertRecoveryPointToSnapshot": "ConvertRecoveryPointToSnapshotRequest",
+    "CreateCustomDomainAssociation": "CreateCustomDomainAssociationRequest",
+    "CreateEndpointAccess": "CreateEndpointAccessRequest",
+    "CreateNamespace": "CreateNamespaceRequest",
+    "CreateReservation": "CreateReservationRequest",
+    "CreateScheduledAction": "CreateScheduledActionRequest",
+    "CreateSnapshot": "CreateSnapshotRequest",
+    "CreateSnapshotCopyConfiguration": "CreateSnapshotCopyConfigurationRequest",
+    "CreateUsageLimit": "CreateUsageLimitRequest",
+    "CreateWorkgroup": "CreateWorkgroupRequest",
+    "DeleteCustomDomainAssociation": "DeleteCustomDomainAssociationRequest",
+    "DeleteEndpointAccess": "DeleteEndpointAccessRequest",
+    "DeleteNamespace": "DeleteNamespaceRequest",
+    "DeleteResourcePolicy": "DeleteResourcePolicyRequest",
+    "DeleteScheduledAction": "DeleteScheduledActionRequest",
+    "DeleteSnapshot": "DeleteSnapshotRequest",
+    "DeleteSnapshotCopyConfiguration": "DeleteSnapshotCopyConfigurationRequest",
+    "DeleteUsageLimit": "DeleteUsageLimitRequest",
+    "DeleteWorkgroup": "DeleteWorkgroupRequest",
+    "GetCredentials": "GetCredentialsRequest",
+    "GetCustomDomainAssociation": "GetCustomDomainAssociationRequest",
+    "GetEndpointAccess": "GetEndpointAccessRequest",
+    "GetIdentityCenterAuthToken": "GetIdentityCenterAuthTokenRequest",
+    "GetNamespace": "GetNamespaceRequest",
+    "GetRecoveryPoint": "GetRecoveryPointRequest",
+    "GetReservation": "GetReservationRequest",
+    "GetReservationOffering": "GetReservationOfferingRequest",
+    "GetResourcePolicy": "GetResourcePolicyRequest",
+    "GetScheduledAction": "GetScheduledActionRequest",
+    "GetSnapshot": "GetSnapshotRequest",
+    "GetTableRestoreStatus": "GetTableRestoreStatusRequest",
+    "GetTrack": "GetTrackRequest",
+    "GetUsageLimit": "GetUsageLimitRequest",
+    "GetWorkgroup": "GetWorkgroupRequest",
+    "ListCustomDomainAssociations": "ListCustomDomainAssociationsRequest",
+    "ListEndpointAccess": "ListEndpointAccessRequest",
+    "ListManagedWorkgroups": "ListManagedWorkgroupsRequest",
+    "ListNamespaces": "ListNamespacesRequest",
+    "ListRecoveryPoints": "ListRecoveryPointsRequest",
+    "ListReservationOfferings": "ListReservationOfferingsRequest",
+    "ListReservations": "ListReservationsRequest",
+    "ListScheduledActions": "ListScheduledActionsRequest",
+    "ListSnapshotCopyConfigurations": "ListSnapshotCopyConfigurationsRequest",
+    "ListSnapshots": "ListSnapshotsRequest",
+    "ListTableRestoreStatus": "ListTableRestoreStatusRequest",
+    "ListTagsForResource": "ListTagsForResourceRequest",
+    "ListTracks": "ListTracksRequest",
+    "ListUsageLimits": "ListUsageLimitsRequest",
+    "ListWorkgroups": "ListWorkgroupsRequest",
+    "PutResourcePolicy": "PutResourcePolicyRequest",
+    "RestoreFromRecoveryPoint": "RestoreFromRecoveryPointRequest",
+    "RestoreFromSnapshot": "RestoreFromSnapshotRequest",
+    "RestoreTableFromRecoveryPoint": "RestoreTableFromRecoveryPointRequest",
+    "RestoreTableFromSnapshot": "RestoreTableFromSnapshotRequest",
+    "TagResource": "TagResourceRequest",
+    "UntagResource": "UntagResourceRequest",
+    "UpdateCustomDomainAssociation": "UpdateCustomDomainAssociationRequest",
+    "UpdateEndpointAccess": "UpdateEndpointAccessRequest",
+    "UpdateLakehouseConfiguration": "UpdateLakehouseConfigurationRequest",
+    "UpdateNamespace": "UpdateNamespaceRequest",
+    "UpdateScheduledAction": "UpdateScheduledActionRequest",
+    "UpdateSnapshot": "UpdateSnapshotRequest",
+    "UpdateSnapshotCopyConfiguration": "UpdateSnapshotCopyConfigurationRequest",
+    "UpdateUsageLimit": "UpdateUsageLimitRequest",
+    "UpdateWorkgroup": "UpdateWorkgroupRequest"
+  },
+  "shapes": {
+    "AmazonResourceName": {
+      "type": "string",
+      "min": 1,
+      "max": 1011
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "Capacity": {
+      "type": "integer"
+    },
+    "CatalogNameString": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "^[a-z0-9_-]*[a-z]+[a-z0-9_-]*$"
+    },
+    "ConfigParameter": {
+      "type": "structure",
+      "members": {
+        "parameterKey": "ParameterKey",
+        "parameterValue": "ParameterValue"
+      }
+    },
+    "ConfigParameterList": {
+      "type": "list",
+      "member": "ConfigParameter"
+    },
+    "ConvertRecoveryPointToSnapshotRequest": {
+      "type": "structure",
+      "required": [
+        "recoveryPointId",
+        "snapshotName"
+      ],
+      "members": {
+        "recoveryPointId": "String",
+        "retentionPeriod": "Integer",
+        "snapshotName": "String",
+        "tags": "TagList"
+      }
+    },
+    "CreateCustomDomainAssociationRequest": {
+      "type": "structure",
+      "required": [
+        "customDomainCertificateArn",
+        "customDomainName",
+        "workgroupName"
+      ],
+      "members": {
+        "customDomainCertificateArn": "CustomDomainCertificateArnString",
+        "customDomainName": "CustomDomainName",
+        "workgroupName": "WorkgroupName"
+      }
+    },
+    "CreateEndpointAccessRequest": {
+      "type": "structure",
+      "required": [
+        "endpointName",
+        "subnetIds",
+        "workgroupName"
+      ],
+      "members": {
+        "endpointName": "String",
+        "ownerAccount": "OwnerAccount",
+        "subnetIds": "SubnetIdList",
+        "vpcSecurityGroupIds": "VpcSecurityGroupIdList",
+        "workgroupName": "String"
+      }
+    },
+    "CreateNamespaceRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName"
+      ],
+      "members": {
+        "adminPasswordSecretKmsKeyId": "KmsKeyId",
+        "adminUserPassword": "DbPassword",
+        "adminUsername": "DbUser",
+        "dbName": "String",
+        "defaultIamRoleArn": "String",
+        "iamRoles": "IamRoleArnList",
+        "kmsKeyId": "String",
+        "logExports": "LogExportList",
+        "manageAdminPassword": "Boolean",
+        "namespaceName": "NamespaceName",
+        "redshiftIdcApplicationArn": "RedshiftIdcApplicationArn",
+        "tags": "TagList"
+      }
+    },
+    "CreateReservationRequest": {
+      "type": "structure",
+      "required": [
+        "capacity",
+        "offeringId"
+      ],
+      "members": {
+        "capacity": "Capacity",
+        "clientToken": "String",
+        "offeringId": "CreateReservationRequestOfferingIdString"
+      }
+    },
+    "CreateReservationRequestOfferingIdString": {
+      "type": "string",
+      "min": 1,
+      "max": 64
+    },
+    "CreateScheduledActionRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName",
+        "roleArn",
+        "schedule",
+        "scheduledActionName",
+        "targetAction"
+      ],
+      "members": {
+        "enabled": "Boolean",
+        "endTime": "Timestamp",
+        "namespaceName": "NamespaceName",
+        "roleArn": "IamRoleArn",
+        "schedule": "Schedule",
+        "scheduledActionDescription": "String",
+        "scheduledActionName": "ScheduledActionName",
+        "startTime": "Timestamp",
+        "targetAction": "TargetAction"
+      }
+    },
+    "CreateSnapshotCopyConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "destinationRegion",
+        "namespaceName"
+      ],
+      "members": {
+        "destinationKmsKeyId": "KmsKeyId",
+        "destinationRegion": "String",
+        "namespaceName": "NamespaceName",
+        "snapshotRetentionPeriod": "Integer"
+      }
+    },
+    "CreateSnapshotRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName",
+        "snapshotName"
+      ],
+      "members": {
+        "namespaceName": "String",
+        "retentionPeriod": "Integer",
+        "snapshotName": "String",
+        "tags": "TagList"
+      }
+    },
+    "CreateSnapshotScheduleActionParameters": {
+      "type": "structure",
+      "required": [
+        "namespaceName",
+        "snapshotNamePrefix"
+      ],
+      "members": {
+        "namespaceName": "NamespaceName",
+        "retentionPeriod": "Integer",
+        "snapshotNamePrefix": "SnapshotNamePrefix",
+        "tags": "TagList"
+      }
+    },
+    "CreateUsageLimitRequest": {
+      "type": "structure",
+      "required": [
+        "amount",
+        "resourceArn",
+        "usageType"
+      ],
+      "members": {
+        "amount": "Long",
+        "breachAction": "UsageLimitBreachAction",
+        "period": "UsageLimitPeriod",
+        "resourceArn": "String",
+        "usageType": "UsageLimitUsageType"
+      }
+    },
+    "CreateWorkgroupRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName",
+        "workgroupName"
+      ],
+      "members": {
+        "baseCapacity": "Integer",
+        "configParameters": "ConfigParameterList",
+        "enhancedVpcRouting": "Boolean",
+        "extraComputeForAutomaticOptimization": "Boolean",
+        "ipAddressType": "IpAddressType",
+        "maxCapacity": "Integer",
+        "namespaceName": "NamespaceName",
+        "port": "Integer",
+        "pricePerformanceTarget": "PerformanceTarget",
+        "publiclyAccessible": "Boolean",
+        "securityGroupIds": "SecurityGroupIdList",
+        "subnetIds": "SubnetIdList",
+        "tags": "TagList",
+        "trackName": "TrackName",
+        "workgroupName": "WorkgroupName"
+      }
+    },
+    "CustomDomainCertificateArnString": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "arn:[\\w+=/,.@-]+:acm:[\\w+=/,.@-]*:[0-9]+:[\\w+=,.@-]+(/[\\w+=,.@-]+)*"
+    },
+    "CustomDomainName": {
+      "type": "string",
+      "min": 1,
+      "max": 253,
+      "pattern": "^(((?!-)[A-Za-z0-9-]{0,62}[A-Za-z0-9])\\.)+((?!-)[A-Za-z0-9-]{1,62}[A-Za-z0-9])$"
+    },
+    "DbName": {
+      "type": "string"
+    },
+    "DbPassword": {
+      "type": "string"
+    },
+    "DbUser": {
+      "type": "string"
+    },
+    "DeleteCustomDomainAssociationRequest": {
+      "type": "structure",
+      "required": [
+        "customDomainName",
+        "workgroupName"
+      ],
+      "members": {
+        "customDomainName": "CustomDomainName",
+        "workgroupName": "WorkgroupName"
+      }
+    },
+    "DeleteEndpointAccessRequest": {
+      "type": "structure",
+      "required": [
+        "endpointName"
+      ],
+      "members": {
+        "endpointName": "String"
+      }
+    },
+    "DeleteNamespaceRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName"
+      ],
+      "members": {
+        "finalSnapshotName": "String",
+        "finalSnapshotRetentionPeriod": "Integer",
+        "namespaceName": "NamespaceName"
+      }
+    },
+    "DeleteResourcePolicyRequest": {
+      "type": "structure",
+      "required": [
+        "resourceArn"
+      ],
+      "members": {
+        "resourceArn": "String"
+      }
+    },
+    "DeleteScheduledActionRequest": {
+      "type": "structure",
+      "required": [
+        "scheduledActionName"
+      ],
+      "members": {
+        "scheduledActionName": "ScheduledActionName"
+      }
+    },
+    "DeleteSnapshotCopyConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "snapshotCopyConfigurationId"
+      ],
+      "members": {
+        "snapshotCopyConfigurationId": "String"
+      }
+    },
+    "DeleteSnapshotRequest": {
+      "type": "structure",
+      "required": [
+        "snapshotName"
+      ],
+      "members": {
+        "snapshotName": "String"
+      }
+    },
+    "DeleteUsageLimitRequest": {
+      "type": "structure",
+      "required": [
+        "usageLimitId"
+      ],
+      "members": {
+        "usageLimitId": "String"
+      }
+    },
+    "DeleteWorkgroupRequest": {
+      "type": "structure",
+      "required": [
+        "workgroupName"
+      ],
+      "members": {
+        "workgroupName": "WorkgroupName"
+      }
+    },
+    "GetCredentialsRequest": {
+      "type": "structure",
+      "members": {
+        "customDomainName": "CustomDomainName",
+        "dbName": "DbName",
+        "durationSeconds": "Integer",
+        "workgroupName": "WorkgroupName"
+      }
+    },
+    "GetCustomDomainAssociationRequest": {
+      "type": "structure",
+      "required": [
+        "customDomainName",
+        "workgroupName"
+      ],
+      "members": {
+        "customDomainName": "CustomDomainName",
+        "workgroupName": "WorkgroupName"
+      }
+    },
+    "GetEndpointAccessRequest": {
+      "type": "structure",
+      "required": [
+        "endpointName"
+      ],
+      "members": {
+        "endpointName": "String"
+      }
+    },
+    "GetIdentityCenterAuthTokenRequest": {
+      "type": "structure",
+      "required": [
+        "workgroupNames"
+      ],
+      "members": {
+        "workgroupNames": "WorkgroupNameList"
+      }
+    },
+    "GetNamespaceRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName"
+      ],
+      "members": {
+        "namespaceName": "NamespaceName"
+      }
+    },
+    "GetRecoveryPointRequest": {
+      "type": "structure",
+      "required": [
+        "recoveryPointId"
+      ],
+      "members": {
+        "recoveryPointId": "String"
+      }
+    },
+    "GetReservationOfferingRequest": {
+      "type": "structure",
+      "required": [
+        "offeringId"
+      ],
+      "members": {
+        "offeringId": "GetReservationOfferingRequestOfferingIdString"
+      }
+    },
+    "GetReservationOfferingRequestOfferingIdString": {
+      "type": "string",
+      "min": 1,
+      "max": 64
+    },
+    "GetReservationRequest": {
+      "type": "structure",
+      "required": [
+        "reservationId"
+      ],
+      "members": {
+        "reservationId": "GetReservationRequestReservationIdString"
+      }
+    },
+    "GetReservationRequestReservationIdString": {
+      "type": "string",
+      "min": 1,
+      "max": 64
+    },
+    "GetResourcePolicyRequest": {
+      "type": "structure",
+      "required": [
+        "resourceArn"
+      ],
+      "members": {
+        "resourceArn": "String"
+      }
+    },
+    "GetScheduledActionRequest": {
+      "type": "structure",
+      "required": [
+        "scheduledActionName"
+      ],
+      "members": {
+        "scheduledActionName": "ScheduledActionName"
+      }
+    },
+    "GetSnapshotRequest": {
+      "type": "structure",
+      "members": {
+        "ownerAccount": "String",
+        "snapshotArn": "String",
+        "snapshotName": "String"
+      }
+    },
+    "GetTableRestoreStatusRequest": {
+      "type": "structure",
+      "required": [
+        "tableRestoreRequestId"
+      ],
+      "members": {
+        "tableRestoreRequestId": "String"
+      }
+    },
+    "GetTrackRequest": {
+      "type": "structure",
+      "required": [
+        "trackName"
+      ],
+      "members": {
+        "trackName": "TrackName"
+      }
+    },
+    "GetUsageLimitRequest": {
+      "type": "structure",
+      "required": [
+        "usageLimitId"
+      ],
+      "members": {
+        "usageLimitId": "String"
+      }
+    },
+    "GetWorkgroupRequest": {
+      "type": "structure",
+      "required": [
+        "workgroupName"
+      ],
+      "members": {
+        "workgroupName": "WorkgroupName"
+      }
+    },
+    "IamRoleArn": {
+      "type": "string"
+    },
+    "IamRoleArnList": {
+      "type": "list",
+      "member": "IamRoleArn"
+    },
+    "Integer": {
+      "type": "integer"
+    },
+    "IpAddressType": {
+      "type": "string",
+      "pattern": "^(ipv4|dualstack)$"
+    },
+    "KmsKeyId": {
+      "type": "string"
+    },
+    "LakehouseIdcRegistration": {
+      "type": "string",
+      "enum": [
+        "Associate",
+        "Disassociate"
+      ]
+    },
+    "LakehouseRegistration": {
+      "type": "string",
+      "enum": [
+        "Register",
+        "Deregister"
+      ]
+    },
+    "ListCustomDomainAssociationsRequest": {
+      "type": "structure",
+      "members": {
+        "customDomainCertificateArn": "CustomDomainCertificateArnString",
+        "customDomainName": "CustomDomainName",
+        "maxResults": "ListCustomDomainAssociationsRequestMaxResultsInteger",
+        "nextToken": "PaginationToken"
+      }
+    },
+    "ListCustomDomainAssociationsRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListEndpointAccessRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "ListEndpointAccessRequestMaxResultsInteger",
+        "nextToken": "String",
+        "ownerAccount": "OwnerAccount",
+        "vpcId": "String",
+        "workgroupName": "String"
+      }
+    },
+    "ListEndpointAccessRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListManagedWorkgroupsRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "ListManagedWorkgroupsRequestMaxResultsInteger",
+        "nextToken": "PaginationToken",
+        "sourceArn": "SourceArn"
+      }
+    },
+    "ListManagedWorkgroupsRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListNamespacesRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "ListNamespacesRequestMaxResultsInteger",
+        "nextToken": "String"
+      }
+    },
+    "ListNamespacesRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListRecoveryPointsRequest": {
+      "type": "structure",
+      "members": {
+        "endTime": "Timestamp",
+        "maxResults": "ListRecoveryPointsRequestMaxResultsInteger",
+        "namespaceArn": "String",
+        "namespaceName": "NamespaceName",
+        "nextToken": "String",
+        "startTime": "Timestamp"
+      }
+    },
+    "ListRecoveryPointsRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListReservationOfferingsRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "ListReservationOfferingsRequestMaxResultsInteger",
+        "nextToken": "PaginationToken"
+      }
+    },
+    "ListReservationOfferingsRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListReservationsRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "ListReservationsRequestMaxResultsInteger",
+        "nextToken": "PaginationToken"
+      }
+    },
+    "ListReservationsRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListScheduledActionsRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "ListScheduledActionsRequestMaxResultsInteger",
+        "namespaceName": "NamespaceName",
+        "nextToken": "PaginationToken"
+      }
+    },
+    "ListScheduledActionsRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListSnapshotCopyConfigurationsRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "ListSnapshotCopyConfigurationsRequestMaxResultsInteger",
+        "namespaceName": "NamespaceName",
+        "nextToken": "PaginationToken"
+      }
+    },
+    "ListSnapshotCopyConfigurationsRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListSnapshotsRequest": {
+      "type": "structure",
+      "members": {
+        "endTime": "Timestamp",
+        "maxResults": "ListSnapshotsRequestMaxResultsInteger",
+        "namespaceArn": "String",
+        "namespaceName": "String",
+        "nextToken": "String",
+        "ownerAccount": "String",
+        "startTime": "Timestamp"
+      }
+    },
+    "ListSnapshotsRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListTableRestoreStatusRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "ListTableRestoreStatusRequestMaxResultsInteger",
+        "namespaceName": "String",
+        "nextToken": "PaginationToken",
+        "workgroupName": "String"
+      }
+    },
+    "ListTableRestoreStatusRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListTagsForResourceRequest": {
+      "type": "structure",
+      "required": [
+        "resourceArn"
+      ],
+      "members": {
+        "resourceArn": "AmazonResourceName"
+      }
+    },
+    "ListTracksRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "ListTracksRequestMaxResultsInteger",
+        "nextToken": "PaginationToken"
+      }
+    },
+    "ListTracksRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListUsageLimitsRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "ListUsageLimitsRequestMaxResultsInteger",
+        "nextToken": "PaginationToken",
+        "resourceArn": "String",
+        "usageType": "UsageLimitUsageType"
+      }
+    },
+    "ListUsageLimitsRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListWorkgroupsRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "ListWorkgroupsRequestMaxResultsInteger",
+        "nextToken": "String",
+        "ownerAccount": "OwnerAccount"
+      }
+    },
+    "ListWorkgroupsRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "LogDestinationType": {
+      "type": "string",
+      "enum": [
+        "s3table",
+        "cloudwatch"
+      ]
+    },
+    "LogExport": {
+      "type": "string",
+      "enum": [
+        "useractivitylog",
+        "userlog",
+        "connectionlog"
+      ]
+    },
+    "LogExportList": {
+      "type": "list",
+      "min": 0,
+      "max": 16,
+      "member": "LogExport"
+    },
+    "Long": {
+      "type": "long"
+    },
+    "NamespaceName": {
+      "type": "string",
+      "min": 3,
+      "max": 64,
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "OwnerAccount": {
+      "type": "string",
+      "min": 1,
+      "max": 12,
+      "pattern": "(\\d{12})"
+    },
+    "PaginationToken": {
+      "type": "string",
+      "min": 8,
+      "max": 1024
+    },
+    "ParameterKey": {
+      "type": "string"
+    },
+    "ParameterValue": {
+      "type": "string"
+    },
+    "PerformanceTarget": {
+      "type": "structure",
+      "members": {
+        "level": "PerformanceTargetLevelInteger",
+        "status": "PerformanceTargetStatus"
+      }
+    },
+    "PerformanceTargetLevelInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "PerformanceTargetStatus": {
+      "type": "string",
+      "enum": [
+        "ENABLED",
+        "DISABLED"
+      ]
+    },
+    "PutResourcePolicyRequest": {
+      "type": "structure",
+      "required": [
+        "policy",
+        "resourceArn"
+      ],
+      "members": {
+        "policy": "String",
+        "resourceArn": "String"
+      }
+    },
+    "RedshiftIdcApplicationArn": {
+      "type": "string",
+      "min": 1,
+      "max": 1024
+    },
+    "RestoreFromRecoveryPointRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName",
+        "recoveryPointId",
+        "workgroupName"
+      ],
+      "members": {
+        "maintainIntegration": "Boolean",
+        "namespaceName": "NamespaceName",
+        "recoveryPointId": "String",
+        "workgroupName": "WorkgroupName"
+      }
+    },
+    "RestoreFromSnapshotRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName",
+        "workgroupName"
+      ],
+      "members": {
+        "adminPasswordSecretKmsKeyId": "KmsKeyId",
+        "maintainIntegration": "Boolean",
+        "manageAdminPassword": "Boolean",
+        "namespaceName": "NamespaceName",
+        "ownerAccount": "String",
+        "snapshotArn": "String",
+        "snapshotName": "String",
+        "workgroupName": "WorkgroupName"
+      }
+    },
+    "RestoreTableFromRecoveryPointRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName",
+        "newTableName",
+        "recoveryPointId",
+        "sourceDatabaseName",
+        "sourceTableName",
+        "workgroupName"
+      ],
+      "members": {
+        "activateCaseSensitiveIdentifier": "Boolean",
+        "namespaceName": "String",
+        "newTableName": "String",
+        "recoveryPointId": "String",
+        "sourceDatabaseName": "String",
+        "sourceSchemaName": "String",
+        "sourceTableName": "String",
+        "targetDatabaseName": "String",
+        "targetSchemaName": "String",
+        "workgroupName": "String"
+      }
+    },
+    "RestoreTableFromSnapshotRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName",
+        "newTableName",
+        "snapshotName",
+        "sourceDatabaseName",
+        "sourceTableName",
+        "workgroupName"
+      ],
+      "members": {
+        "activateCaseSensitiveIdentifier": "Boolean",
+        "namespaceName": "String",
+        "newTableName": "String",
+        "snapshotName": "String",
+        "sourceDatabaseName": "String",
+        "sourceSchemaName": "String",
+        "sourceTableName": "String",
+        "targetDatabaseName": "String",
+        "targetSchemaName": "String",
+        "workgroupName": "String"
+      }
+    },
+    "S3TableAction": {
+      "type": "string",
+      "enum": [
+        "Enable",
+        "Disable"
+      ]
+    },
+    "S3TableGranularity": {
+      "type": "string",
+      "enum": [
+        "namespace",
+        "account"
+      ]
+    },
+    "S3TableName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "^(all|sys_[a-z0-9_]+)$"
+    },
+    "S3TableNameList": {
+      "type": "list",
+      "min": 0,
+      "max": 256,
+      "member": "S3TableName"
+    },
+    "Schedule": {
+      "type": "structure",
+      "members": {
+        "at": "Timestamp",
+        "cron": "String"
+      }
+    },
+    "ScheduledActionName": {
+      "type": "string",
+      "min": 3,
+      "max": 60,
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "SecurityGroupId": {
+      "type": "string"
+    },
+    "SecurityGroupIdList": {
+      "type": "list",
+      "member": "SecurityGroupId"
+    },
+    "SnapshotNamePrefix": {
+      "type": "string",
+      "min": 1,
+      "max": 235
+    },
+    "SourceArn": {
+      "type": "string",
+      "pattern": "^arn:aws[a-z-]*:glue:[a-z0-9-]+:\\d+:(database|catalog)[a-z0-9-:]*(?:/[A-Za-z0-9-_]{1,255})*$"
+    },
+    "String": {
+      "type": "string"
+    },
+    "SubnetId": {
+      "type": "string"
+    },
+    "SubnetIdList": {
+      "type": "list",
+      "member": "SubnetId"
+    },
+    "Tag": {
+      "type": "structure",
+      "required": [
+        "key",
+        "value"
+      ],
+      "members": {
+        "key": "TagKey",
+        "value": "TagValue"
+      }
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "TagKeyList": {
+      "type": "list",
+      "min": 0,
+      "max": 200,
+      "member": "TagKey"
+    },
+    "TagList": {
+      "type": "list",
+      "min": 0,
+      "max": 200,
+      "member": "Tag"
+    },
+    "TagResourceRequest": {
+      "type": "structure",
+      "required": [
+        "resourceArn",
+        "tags"
+      ],
+      "members": {
+        "resourceArn": "AmazonResourceName",
+        "tags": "TagList"
+      }
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 0,
+      "max": 256
+    },
+    "TargetAction": {
+      "type": "structure",
+      "members": {
+        "createSnapshot": "CreateSnapshotScheduleActionParameters"
+      }
+    },
+    "Timestamp": {
+      "type": "timestamp"
+    },
+    "TrackName": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "^[a-zA-Z0-9_]+$"
+    },
+    "UntagResourceRequest": {
+      "type": "structure",
+      "required": [
+        "resourceArn",
+        "tagKeys"
+      ],
+      "members": {
+        "resourceArn": "AmazonResourceName",
+        "tagKeys": "TagKeyList"
+      }
+    },
+    "UpdateCustomDomainAssociationRequest": {
+      "type": "structure",
+      "required": [
+        "customDomainCertificateArn",
+        "customDomainName",
+        "workgroupName"
+      ],
+      "members": {
+        "customDomainCertificateArn": "CustomDomainCertificateArnString",
+        "customDomainName": "CustomDomainName",
+        "workgroupName": "WorkgroupName"
+      }
+    },
+    "UpdateEndpointAccessRequest": {
+      "type": "structure",
+      "required": [
+        "endpointName"
+      ],
+      "members": {
+        "endpointName": "String",
+        "vpcSecurityGroupIds": "VpcSecurityGroupIdList"
+      }
+    },
+    "UpdateLakehouseConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName"
+      ],
+      "members": {
+        "catalogName": "CatalogNameString",
+        "dryRun": "Boolean",
+        "lakehouseIdcApplicationArn": "String",
+        "lakehouseIdcRegistration": "LakehouseIdcRegistration",
+        "lakehouseRegistration": "LakehouseRegistration",
+        "namespaceName": "NamespaceName"
+      }
+    },
+    "UpdateNamespaceRequest": {
+      "type": "structure",
+      "required": [
+        "namespaceName"
+      ],
+      "members": {
+        "adminPasswordSecretKmsKeyId": "KmsKeyId",
+        "adminUserPassword": "DbPassword",
+        "adminUsername": "DbUser",
+        "defaultIamRoleArn": "String",
+        "iamRoles": "IamRoleArnList",
+        "kmsKeyId": "String",
+        "logDestinationType": "LogDestinationType",
+        "logExports": "LogExportList",
+        "manageAdminPassword": "Boolean",
+        "namespaceName": "NamespaceName",
+        "s3TableAction": "S3TableAction",
+        "s3TableGranularity": "S3TableGranularity",
+        "s3TableKmsKeyId": "KmsKeyId",
+        "s3TableNames": "S3TableNameList"
+      }
+    },
+    "UpdateScheduledActionRequest": {
+      "type": "structure",
+      "required": [
+        "scheduledActionName"
+      ],
+      "members": {
+        "enabled": "Boolean",
+        "endTime": "Timestamp",
+        "roleArn": "IamRoleArn",
+        "schedule": "Schedule",
+        "scheduledActionDescription": "String",
+        "scheduledActionName": "ScheduledActionName",
+        "startTime": "Timestamp",
+        "targetAction": "TargetAction"
+      }
+    },
+    "UpdateSnapshotCopyConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "snapshotCopyConfigurationId"
+      ],
+      "members": {
+        "snapshotCopyConfigurationId": "String",
+        "snapshotRetentionPeriod": "Integer"
+      }
+    },
+    "UpdateSnapshotRequest": {
+      "type": "structure",
+      "required": [
+        "snapshotName"
+      ],
+      "members": {
+        "retentionPeriod": "Integer",
+        "snapshotName": "String"
+      }
+    },
+    "UpdateUsageLimitRequest": {
+      "type": "structure",
+      "required": [
+        "usageLimitId"
+      ],
+      "members": {
+        "amount": "Long",
+        "breachAction": "UsageLimitBreachAction",
+        "usageLimitId": "String"
+      }
+    },
+    "UpdateWorkgroupRequest": {
+      "type": "structure",
+      "required": [
+        "workgroupName"
+      ],
+      "members": {
+        "baseCapacity": "Integer",
+        "configParameters": "ConfigParameterList",
+        "enhancedVpcRouting": "Boolean",
+        "extraComputeForAutomaticOptimization": "Boolean",
+        "ipAddressType": "IpAddressType",
+        "maxCapacity": "Integer",
+        "port": "Integer",
+        "pricePerformanceTarget": "PerformanceTarget",
+        "publiclyAccessible": "Boolean",
+        "securityGroupIds": "SecurityGroupIdList",
+        "subnetIds": "SubnetIdList",
+        "trackName": "TrackName",
+        "workgroupName": "WorkgroupName"
+      }
+    },
+    "UsageLimitBreachAction": {
+      "type": "string",
+      "enum": [
+        "log",
+        "emit-metric",
+        "deactivate"
+      ]
+    },
+    "UsageLimitPeriod": {
+      "type": "string",
+      "enum": [
+        "daily",
+        "weekly",
+        "monthly"
+      ]
+    },
+    "UsageLimitUsageType": {
+      "type": "string",
+      "enum": [
+        "serverless-compute",
+        "cross-region-datasharing"
+      ]
+    },
+    "VpcSecurityGroupId": {
+      "type": "string"
+    },
+    "VpcSecurityGroupIdList": {
+      "type": "list",
+      "member": "VpcSecurityGroupId"
+    },
+    "WorkgroupName": {
+      "type": "string",
+      "min": 3,
+      "max": 64,
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "WorkgroupNameList": {
+      "type": "list",
+      "min": 1,
+      "max": 20,
+      "member": "WorkgroupName"
+    }
+  }
+}

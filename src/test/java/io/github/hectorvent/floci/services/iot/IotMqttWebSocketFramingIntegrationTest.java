@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iot;
 
+import io.github.hectorvent.floci.testing.IotMqttTlsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -30,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and that a broken stream or an oversized frame ends the session rather than hanging it.
  */
 @QuarkusTest
-@TestProfile(IotMqttWebSocketIntegrationTest.Profile.class)
+@TestProfile(IotMqttTlsProfile.class)
 class IotMqttWebSocketFramingIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(IotMqttWebSocketFramingIntegrationTest.class);

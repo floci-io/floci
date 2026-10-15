@@ -39,36 +39,43 @@ public final class AwsRequestSigner implements Filter {
     private final String secretKey;
     private final String sessionToken;
     private final String service;
+    private final String region;
     private final Instant signedAt;
     private final boolean signContentType;
 
     private AwsRequestSigner(String accessKeyId, String secretKey, String sessionToken, String service,
-                             Instant signedAt, boolean signContentType) {
+                             Instant signedAt, boolean signContentType, String region) {
         this.accessKeyId = accessKeyId;
         this.secretKey = secretKey;
         this.sessionToken = sessionToken;
         this.service = service;
+        this.region = region;
         this.signedAt = signedAt;
         this.signContentType = signContentType;
     }
 
     public static AwsRequestSigner signedAs(String accessKeyId, String secretKey, String service) {
-        return new AwsRequestSigner(accessKeyId, secretKey, null, service, null, false);
+        return new AwsRequestSigner(accessKeyId, secretKey, null, service, null, false, "us-east-1");
     }
 
     /** Signs as of a fixed instant instead of now; used to trip the clock-skew window. */
     public AwsRequestSigner signedAt(Instant instant) {
-        return new AwsRequestSigner(accessKeyId, secretKey, sessionToken, service, instant, signContentType);
+        return new AwsRequestSigner(accessKeyId, secretKey, sessionToken, service, instant, signContentType, region);
     }
 
     /** Signs with the same key but a different secret, as a client with a stale secret would. */
     public AwsRequestSigner withSecret(String otherSecret) {
-        return new AwsRequestSigner(accessKeyId, otherSecret, sessionToken, service, signedAt, signContentType);
+        return new AwsRequestSigner(accessKeyId, otherSecret, sessionToken, service, signedAt, signContentType, region);
     }
 
     /** Also signs {@code content-type}, as the Java SDK and botocore do; for binary bodies only. */
     public AwsRequestSigner signingContentType() {
-        return new AwsRequestSigner(accessKeyId, secretKey, sessionToken, service, signedAt, true);
+        return new AwsRequestSigner(accessKeyId, secretKey, sessionToken, service, signedAt, true, region);
+    }
+
+    public AwsRequestSigner inRegion(String signingRegion) {
+        return new AwsRequestSigner(accessKeyId, secretKey, sessionToken, service, signedAt, signContentType,
+                signingRegion);
     }
 
     @Override
@@ -126,10 +133,10 @@ public final class AwsRequestSigner implements Filter {
                 + canonicalHeaders + "\n"
                 + signedHeaders + "\n"
                 + Digests.sha256Hex(body);
-        String credentialScope = scopeDate + "/us-east-1/" + service + "/aws4_request";
+        String credentialScope = scopeDate + "/" + region + "/" + service + "/aws4_request";
         String stringToSign = ALGORITHM + "\n" + amzDate + "\n" + credentialScope + "\n"
                 + Digests.sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
-        byte[] signingKey = SigV4RequestValidator.deriveSigningKey(secretKey, scopeDate, "us-east-1", service);
+        byte[] signingKey = SigV4RequestValidator.deriveSigningKey(secretKey, scopeDate, region, service);
         String signature = SigV4RequestValidator.hexEncode(SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
 
         Map<String, String> result = new LinkedHashMap<>();
@@ -140,6 +147,24 @@ public final class AwsRequestSigner implements Filter {
         result.put("Authorization", ALGORITHM + " Credential=" + accessKeyId + "/" + credentialScope
                 + ", SignedHeaders=" + signedHeaders + ", Signature=" + signature);
         return result;
+    }
+
+    /** Presigns a body-bearing request with caller-supplied query fields, including a session token. */
+    public URI presignedUri(String method, URI uri, Map<String, String> extraQuery, byte[] body) throws Exception {
+        String date = AMZ_DATE.format(signedAt != null ? signedAt : Instant.now());
+        String scope = date.substring(0, 8) + "/" + region + "/" + service + "/aws4_request";
+        TreeMap<String, String> query = new TreeMap<>(extraQuery);
+        query.putAll(Map.of("X-Amz-Algorithm", ALGORITHM, "X-Amz-Credential", accessKeyId + "/" + scope,
+                "X-Amz-Date", date, "X-Amz-Expires", "60", "X-Amz-SignedHeaders", "host"));
+        String encoded = query.entrySet().stream()
+                .map(e -> S3RequestSigner.uriEncode(e.getKey()) + "=" + S3RequestSigner.uriEncode(e.getValue()))
+                .collect(Collectors.joining("&"));
+        String canonical = method + "\n" + doubleEncodedPath(uri.getRawPath()) + "\n" + encoded
+                + "\nhost:" + uri.getAuthority() + "\n\nhost\n" + Digests.sha256Hex(body);
+        String toSign = ALGORITHM + "\n" + date + "\n" + scope + "\n" + Digests.sha256Hex(canonical);
+        String signature = SigV4RequestValidator.hexEncode(SigV4RequestValidator.hmacSha256(
+                SigV4RequestValidator.deriveSigningKey(secretKey, date.substring(0, 8), region, service), toSign));
+        return URI.create(uri + "?" + encoded + "&X-Amz-Signature=" + signature);
     }
 
     private static String doubleEncodedPath(String rawPath) {

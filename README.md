@@ -153,7 +153,7 @@ services:
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_UI_ENABLED` | `true` | Enable the console sidecar |
-| `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:latest` | Console image to run |
+| `FLOCI_SERVICES_UI_IMAGE` | `floci/floci-ui:0.7.0` | Console image to run |
 | `FLOCI_SERVICES_UI_CONTAINER_NAME` | `floci-ui` | Name of the sidecar container |
 | `FLOCI_SERVICES_UI_PORT` | `4500` | Host port the console is published on |
 | `FLOCI_SERVICES_UI_BIND_ADDRESS` | _(none)_ | Host interface that port is published on. Unset publishes on every interface; set `127.0.0.1` when Floci's own port is loopback-only |
@@ -293,7 +293,7 @@ Floci supports local emulation for application services, data services, eventing
 
 | Category | Services |
 |---|---|
-| Core app services | S3, SQS, SNS, DynamoDB, Lambda, Lambda MicroVMs, IAM, STS, KMS, Secrets Manager, SSM |
+| Core app services | S3, SQS, SNS, DynamoDB, Lambda, Lambda MicroVMs, Lambda Web Functions, IAM, STS, KMS, Secrets Manager, SSM |
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, SWF, CloudWatch Logs, CloudWatch Metrics, CloudWatch OAM, CloudWatch RUM, Managed Prometheus (AMP) |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, Cognito Identity, ACM, Route53, Route 53 Resolver, Cloud Map, Global Accelerator |
 | Containers and compute | ECS, EC2, Lightsail, EKS, MWAA, ECR, EFS, CodeBuild, CodeDeploy, CodePipeline, CodeGuru Reviewer, CodeArtifact, AWS Batch, Auto Scaling, Application Auto Scaling, Elastic Beanstalk, ELB v2, ELB Classic |
@@ -844,7 +844,7 @@ image: floci/floci:nightly
 
 ### Release train
 
-Stable releases ship on the **1st and 3rd Tuesday of each month**. Between trains, `floci/floci:nightly` tracks `main`. Every merged fix is available the next day, and dated `nightly-mmddyyyy` tags let you pin a specific night's build.
+Stable releases ship on the **15th and the last day of each month**, cut automatically at 00:30 US Central time. Between trains, `floci/floci:nightly` tracks `main`. Every merged fix is available the next day, and dated `nightly-mmddyyyy` tags let you pin a specific night's build.
 
 Versions are derived from Conventional Commits by [semantic-release](https://github.com/semantic-release/semantic-release); `CHANGELOG.md` is generated, never hand-edited. Releases are cut from `main` only: there are no maintenance branches.
 

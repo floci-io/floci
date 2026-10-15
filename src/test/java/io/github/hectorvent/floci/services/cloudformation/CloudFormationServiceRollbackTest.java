@@ -2,13 +2,17 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
+import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.model.StackUpdateSnapshot;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
@@ -20,13 +24,19 @@ import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
 import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -40,18 +50,23 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Covers rollback cleanup when another actor removes a resource after its create succeeded, and
- * which resources a stack delete walks after a failed operation left them in a failed status, and
- * that a stack which finished deleting is no longer updatable.
+ * Covers rollback cleanup when another actor removes a resource after its create succeeded, which
+ * resources a stack delete walks after a failed operation left them in a failed status, what a
+ * failed update rollback keeps so ContinueUpdateRollback can retry it, and that a stack which
+ * finished deleting is no longer updatable.
  */
 class CloudFormationServiceRollbackTest {
 
     private static final String ACCOUNT = "000000000000";
     private static final String REGION = "us-east-1";
+    private static final String FORCED_ROLLBACK_REASON = "One or more resources were skipped during UpdateRollback."
+            + " These resources were not rolled back and may have drifted from the template."
+            + " Run drift detection (DetectStackDrift) to review their current state before your next update.";
 
     private CfnResourceDispatcher provisioner;
     private CloudFormationService service;
@@ -424,6 +439,293 @@ class CloudFormationServiceRollbackTest {
         assertNull(resource.getAttributes().get("rollbackSnapshot"));
     }
 
+    @Test
+    void refusesUpdate_afterUpdateRollbackFailed_refusesButStillAllowsAfterUpdateRollbackComplete() {
+        assertTrue(CloudFormationService.refusesUpdate("UPDATE_ROLLBACK_FAILED"));
+        assertFalse(CloudFormationService.refusesUpdate("UPDATE_ROLLBACK_COMPLETE"));
+    }
+
+    /**
+     * The walker's inputs live only for the update that failed. What it needs to run again is kept
+     * on the stack, and must survive the stack's persisted JSON: a ContinueUpdateRollback after a
+     * restart works from the stored copy alone.
+     */
+    @Test
+    void updateRollbackFailed_persistsWhatContinueUpdateRollbackNeeds() throws Exception {
+        Stack stack = new Stack();
+        stack.setStackName("update-rollback-failed-snapshot");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_IN_PROGRESS");
+        stack.setTemplateBody("failed-template");
+        stack.setOriginalTemplateBody("failed-original");
+
+        StackResource logGroup = resource("LogGroup", "/lg", "AWS::Logs::LogGroup", "UPDATE_COMPLETE");
+        StackResource added = resource("Dup", null, "AWS::Logs::LogGroup", "CREATE_FAILED");
+        added.setStatusReason("already exists");
+        stack.getResources().put(logGroup.getLogicalId(), logGroup);
+        stack.getResources().put(added.getLogicalId(), added);
+        StackUpdateSnapshot previousState = new StackUpdateSnapshot(
+                "previous-template", "previous-original", Map.of("P", "1"), Map.of("P", "1"),
+                Map.of("Out", "v"), Map.of(), Map.of(),
+                Map.of("LogGroup", resource("LogGroup", "/lg", "AWS::Logs::LogGroup", "CREATE_COMPLETE")));
+
+        service.rollbackFailedExecution(stack, REGION, false, added, previousState,
+                new LinkedHashSet<>(List.of("LogGroup", "Dup")));
+
+        assertEquals("UPDATE_ROLLBACK_FAILED", stack.getStatus());
+        assertEquals("failed-template", stack.getTemplateBody());
+
+        Stack restored = persistedCopy(stack);
+        assertEquals(List.of("LogGroup"), restored.getUpdateRollbackResourceIds());
+        assertEquals("previous-template", restored.getUpdateRollbackSnapshot().templateBody());
+        assertEquals("CREATE_COMPLETE",
+                restored.getUpdateRollbackSnapshot().resources().get("LogGroup").getStatus());
+
+        when(provisioner.rollbackUpdate(any(StackResource.class), any())).thenReturn(true);
+        restored.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+        service.resumeUpdateRollback(restored, List.of(), false, REGION);
+
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", restored.getStatus());
+        assertEquals("previous-template", restored.getTemplateBody());
+        assertEquals("previous-original", restored.getOriginalTemplateBody());
+        assertEquals("v", restored.getOutputs().get("Out"));
+        assertEquals("CREATE_COMPLETE", restored.getResources().get("LogGroup").getStatus());
+        assertNull(restored.getUpdateRollbackSnapshot());
+        assertNull(restored.getUpdateRollbackResourceIds());
+    }
+
+    /**
+     * A stack stored before the snapshot was kept still has a way out: every UPDATE_FAILED
+     * resource is owed a rollback, and the template it already holds is kept.
+     */
+    @Test
+    void resumeUpdateRollback_withoutAStoredSnapshot_owesEveryUpdateFailedResourceAndKeepsTheTemplate() {
+        Stack stack = new Stack();
+        stack.setStackName("legacy-update-rollback-failed");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+        stack.setTemplateBody("current-template");
+
+        StackResource logGroup = resource("LogGroup", "/lg", "AWS::Logs::LogGroup", "UPDATE_FAILED");
+        StackResource stable = resource("Stable", "/stable", "AWS::Logs::LogGroup", "UPDATE_COMPLETE");
+        stack.getResources().put(logGroup.getLogicalId(), logGroup);
+        stack.getResources().put(stable.getLogicalId(), stable);
+        when(provisioner.rollbackUpdate(any(StackResource.class), any())).thenReturn(true);
+
+        service.resumeUpdateRollback(stack, List.of(), false, REGION);
+
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", stack.getStatus());
+        assertEquals("current-template", stack.getTemplateBody());
+        assertEquals("UPDATE_COMPLETE", logGroup.getStatus());
+        assertEquals("UPDATE_COMPLETE", stable.getStatus());
+        verify(provisioner).rollbackUpdate(eq(logGroup), any());
+        verify(provisioner, never()).rollbackUpdate(eq(stable), any());
+    }
+
+    /**
+     * A skip naming a resource of a nested stack Floci holds is one AWS would act on and Floci does
+     * not support: the rollback fails again with Floci's reason, touching no resource and keeping
+     * what a later retry needs.
+     */
+    @Test
+    void resumeUpdateRollback_skippingANestedStackResource_failsAgainWithoutTouchingAResource() {
+        Stack stack = new Stack();
+        stack.setStackName("nested-skip");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+        StackResource nested = resource("Nested", "nested-stack-id", "AWS::CloudFormation::Stack", "UPDATE_FAILED");
+        stack.getResources().put(nested.getLogicalId(), nested);
+        StackUpdateSnapshot previousState = new StackUpdateSnapshot(
+                "previous-template", "previous-original", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of("Nested", resource("Nested", "nested-stack-id", "AWS::CloudFormation::Stack",
+                        "CREATE_COMPLETE")));
+        stack.setUpdateRollbackSnapshot(previousState);
+        stack.setUpdateRollbackResourceIds(List.of("Nested"));
+
+        service.resumeUpdateRollback(stack, List.of("Nested.Child"), false, REGION);
+
+        assertEquals("UPDATE_ROLLBACK_FAILED", stack.getStatus());
+        assertEquals("Skipping a resource of a nested stack is not supported by Floci: Nested.Child",
+                stack.getStatusReason());
+        assertEquals("UPDATE_FAILED", nested.getStatus());
+        assertEquals(previousState, stack.getUpdateRollbackSnapshot());
+        assertEquals(List.of("Nested"), stack.getUpdateRollbackResourceIds());
+        verify(provisioner, never()).rollbackUpdate(any(StackResource.class), any());
+    }
+
+    /**
+     * A resume runs the restore of a resource still owed one again, through the same provisioner
+     * hook the first rollback used: here one whose first restore threw.
+     */
+    @Test
+    void resumeUpdateRollback_afterARestoreThatThrew_runsTheRestoreAgain() {
+        Stack stack = new Stack();
+        stack.setStackName("retry-thrown-restore");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_IN_PROGRESS");
+        StackResource dashboard = resource("Dashboard", "ops", "AWS::CloudWatch::Dashboard", "UPDATE_COMPLETE");
+        StackResource added = resource("ZFail", null, "AWS::CloudFormation::Stack", "CREATE_FAILED");
+        stack.getResources().put(dashboard.getLogicalId(), dashboard);
+        stack.getResources().put(added.getLogicalId(), added);
+        StackUpdateSnapshot previousState = new StackUpdateSnapshot(
+                "previous-template", "previous-original", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of("Dashboard", resource("Dashboard", "ops", "AWS::CloudWatch::Dashboard", "CREATE_COMPLETE")));
+        when(provisioner.rollbackUpdate(eq(dashboard), any()))
+                .thenThrow(new IllegalStateException("simulated restore failure"))
+                .thenReturn(true);
+
+        service.rollbackFailedExecution(stack, REGION, false, added, previousState,
+                new LinkedHashSet<>(List.of("Dashboard", "ZFail")));
+
+        assertEquals("UPDATE_ROLLBACK_FAILED", stack.getStatus());
+        assertEquals("UPDATE_FAILED", dashboard.getStatus());
+
+        stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+        service.resumeUpdateRollback(stack, List.of(), false, REGION);
+
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", stack.getStatus());
+        assertEquals("CREATE_COMPLETE", dashboard.getStatus());
+        verify(provisioner, times(2)).rollbackUpdate(eq(dashboard), any());
+    }
+
+    /**
+     * The resume runs on the operation executor, whose future nobody reads. An unexpected failure
+     * must still settle the stack in UPDATE_ROLLBACK_FAILED, keeping what a retry needs, instead
+     * of stranding it in UPDATE_ROLLBACK_IN_PROGRESS, where ContinueUpdateRollback refuses it.
+     * A resource the failed pass already rolled back is no longer owed, so the retry does not roll it back again.
+     */
+    @Test
+    void resumeUpdateRollback_whenTheBodyThrows_settlesInUpdateRollbackFailedAndCanBeContinued()
+            throws Exception {
+        FailingClock clock = new FailingClock();
+        CloudFormationService resumeService = serviceReading(clock);
+        resumeService.createChangeSet("resume-throws", "create", "CREATE",
+                "{\"Resources\":{\"LogGroup\":{\"Type\":\"AWS::Logs::LogGroup\"}}}", null,
+                Map.of(), List.of(), Map.of(), REGION, ACCOUNT);
+        Stack stack = resumeService.describeStacks("resume-throws", REGION, ACCOUNT).getFirst();
+        StackResource logGroup = resource("LogGroup", "/lg", "AWS::Logs::LogGroup", "UPDATE_FAILED");
+        stack.getResources().put(logGroup.getLogicalId(), logGroup);
+        StackUpdateSnapshot previousState = new StackUpdateSnapshot(
+                "previous-template", "previous-original", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of("LogGroup", resource("LogGroup", "/lg", "AWS::Logs::LogGroup", "CREATE_COMPLETE")));
+        stack.setUpdateRollbackSnapshot(previousState);
+        stack.setUpdateRollbackResourceIds(List.of("LogGroup"));
+        stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+        when(provisioner.rollbackUpdate(eq(logGroup), any())).thenReturn(true, false);
+        clock.failNextRead("simulated clock failure");
+
+        resumeService.resumeUpdateRollback(stack, List.of(), false, REGION);
+
+        assertEquals("UPDATE_ROLLBACK_FAILED", stack.getStatus());
+        assertEquals("simulated clock failure", stack.getStatusReason());
+        StackEvent last = stack.getEvents().getLast();
+        assertEquals("resume-throws", last.getLogicalResourceId());
+        assertEquals("AWS::CloudFormation::Stack", last.getResourceType());
+        assertEquals("UPDATE_ROLLBACK_FAILED", last.getResourceStatus());
+        assertEquals("simulated clock failure", last.getResourceStatusReason());
+        assertEquals(previousState, stack.getUpdateRollbackSnapshot());
+        assertEquals(List.of(), stack.getUpdateRollbackResourceIds());
+
+        resumeService.continueUpdateRollback("resume-throws", List.of(), false, REGION).get(10, TimeUnit.SECONDS);
+
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", stack.getStatus());
+        assertNull(stack.getUpdateRollbackSnapshot());
+        verify(provisioner).rollbackUpdate(eq(logGroup), any());
+    }
+
+    /**
+     * A skip already reported is no longer owed a rollback when an unexpected failure settles the
+     * stack, or a later retry would roll back a resource the caller skipped.
+     */
+    @Test
+    void resumeUpdateRollback_whenTheBodyThrowsAfterASkip_noLongerOwesTheSkippedResource() throws Exception {
+        FailingClock clock = new FailingClock();
+        CloudFormationService resumeService = serviceReading(clock);
+        resumeService.createChangeSet("resume-throws-after-skip", "create", "CREATE",
+                "{\"Resources\":{\"LogGroup\":{\"Type\":\"AWS::Logs::LogGroup\"}}}", null,
+                Map.of(), List.of(), Map.of(), REGION, ACCOUNT);
+        Stack stack = resumeService.describeStacks("resume-throws-after-skip", REGION, ACCOUNT).getFirst();
+        StackResource skipped = resource("Skipped", "/skipped", "AWS::Logs::LogGroup", "UPDATE_FAILED");
+        stack.getResources().put(skipped.getLogicalId(), skipped);
+        StackUpdateSnapshot previousState = new StackUpdateSnapshot(
+                "previous-template", "previous-original", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of("Skipped", resource("Skipped", "/skipped", "AWS::Logs::LogGroup", "CREATE_COMPLETE")));
+        stack.setUpdateRollbackSnapshot(previousState);
+        stack.setUpdateRollbackResourceIds(List.of("Skipped"));
+        stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+        clock.failNextRead("simulated clock failure");
+
+        resumeService.resumeUpdateRollback(stack, List.of("Skipped"), false, REGION);
+
+        assertEquals("UPDATE_ROLLBACK_FAILED", stack.getStatus());
+        assertEquals("simulated clock failure", stack.getStatusReason());
+        assertEquals("UPDATE_COMPLETE", skipped.getStatus());
+        assertEquals("Resource skipped during UpdateRollback", skipped.getStatusReason());
+        assertEquals(previousState, stack.getUpdateRollbackSnapshot());
+        assertEquals(List.of(), stack.getUpdateRollbackResourceIds());
+
+        resumeService.continueUpdateRollback("resume-throws-after-skip", List.of(), false, REGION)
+                .get(10, TimeUnit.SECONDS);
+
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", stack.getStatus());
+        assertEquals("UPDATE_COMPLETE", skipped.getStatus());
+        verify(provisioner, never()).rollbackUpdate(any(StackResource.class), any());
+    }
+
+    /**
+     * ForceRollback skips every UPDATE_FAILED resource, reporting each as a ResourcesToSkip skip
+     * is, and a rollback it completes says in the stack's reason that resources were skipped.
+     */
+    @Test
+    void resumeUpdateRollback_forced_skipsEveryUpdateFailedResourceAndExplainsTheCompletion() {
+        Stack stack = new Stack();
+        stack.setStackName("forced-rollback");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+        stack.setTemplateBody("failed-template");
+        StackResource role = resource("Role", "role", "AWS::IAM::Role", "UPDATE_FAILED");
+        StackResource stable = resource("Stable", "/stable", "AWS::Logs::LogGroup", "CREATE_COMPLETE");
+        StackResource logGroup = resource("LogGroup", "/lg", "AWS::Logs::LogGroup", "UPDATE_FAILED");
+        for (StackResource resource : new StackResource[] {role, stable, logGroup}) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        stack.setUpdateRollbackSnapshot(new StackUpdateSnapshot(
+                "previous-template", "previous-original", Map.of(), Map.of(), Map.of("Out", "v"), Map.of(),
+                Map.of(), Map.of(
+                        "Role", resource("Role", "role", "AWS::IAM::Role", "CREATE_COMPLETE"),
+                        "Stable", resource("Stable", "/stable", "AWS::Logs::LogGroup", "CREATE_COMPLETE"),
+                        "LogGroup", resource("LogGroup", "/lg", "AWS::Logs::LogGroup", "CREATE_COMPLETE"))));
+        stack.setUpdateRollbackResourceIds(List.of("Role", "LogGroup"));
+
+        service.resumeUpdateRollback(stack, List.of(), true, REGION);
+
+        for (StackResource skipped : List.of(role, logGroup)) {
+            assertEquals("UPDATE_COMPLETE", skipped.getStatus(), skipped.getLogicalId());
+            assertEquals("Resource skipped during UpdateRollback", skipped.getStatusReason(), skipped.getLogicalId());
+        }
+        verify(provisioner, never()).rollbackUpdate(any(StackResource.class), any());
+        assertEquals(List.of(
+                        "Role UPDATE_COMPLETE Resource skipped during UpdateRollback",
+                        "LogGroup UPDATE_COMPLETE Resource skipped during UpdateRollback",
+                        "forced-rollback UPDATE_ROLLBACK_COMPLETE " + FORCED_ROLLBACK_REASON),
+                stack.getEvents().stream()
+                        .map(event -> event.getLogicalResourceId() + " " + event.getResourceStatus() + " "
+                                + event.getResourceStatusReason())
+                        .toList());
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", stack.getStatus());
+        assertEquals(FORCED_ROLLBACK_REASON, stack.getStatusReason());
+        assertEquals(FORCED_ROLLBACK_REASON, stack.getEvents().getLast().getResourceStatusReason());
+        assertEquals("previous-template", stack.getTemplateBody());
+        assertEquals("v", stack.getOutputs().get("Out"));
+        assertNull(stack.getUpdateRollbackSnapshot());
+        assertNull(stack.getUpdateRollbackResourceIds());
+    }
+
     private static StackResource resource(String logicalId, String physicalId, String resourceType, String status) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
@@ -431,6 +733,53 @@ class CloudFormationServiceRollbackTest {
         resource.setResourceType(resourceType);
         resource.setStatus(status);
         return resource;
+    }
+
+    /** A service over the shared provisioner that reads the time from {@code clock}. */
+    private CloudFormationService serviceReading(Clock clock) {
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn(ACCOUNT);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.defaultAccountId()).thenReturn(ACCOUNT);
+        return new CloudFormationService(provisioner, mock(S3Service.class), mock(SsmService.class),
+                mock(CfnDynamicReferences.class), new ObjectMapper(), config, regionResolver, clock,
+                new InMemoryStorageFactory());
+    }
+
+    /** The stack as {@code PersistentStorage} writes it and reads it back. */
+    private static Stack persistedCopy(Stack stack) throws Exception {
+        ObjectMapper mapper = new ObjectMapper()
+                .registerModule(new JavaTimeModule())
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        return mapper.readValue(mapper.writeValueAsString(stack), Stack.class);
+    }
+
+    /** The system clock, except that the read after {@link #failNextRead} throws. */
+    private static final class FailingClock extends Clock {
+        private final AtomicReference<String> failure = new AtomicReference<>();
+
+        void failNextRead(String message) {
+            failure.set(message);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Instant instant() {
+            String message = failure.getAndSet(null);
+            if (message != null) {
+                throw new IllegalStateException(message);
+            }
+            return Instant.now();
+        }
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {

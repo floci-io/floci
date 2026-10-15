@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -16,7 +17,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ServiceQuotasServiceTest {
 
-    private final ServiceQuotasService service = new ServiceQuotasService(new ObjectMapper());
+    private static final String ACCOUNT_ID = "000000000000";
+
+    private final ServiceQuotasService service =
+            new ServiceQuotasService(new InMemoryStorageFactory(ACCOUNT_ID), new ObjectMapper());
 
     @Test
     void syntheticQuotaCodesAreStableAndWellFormed() {
@@ -105,8 +109,82 @@ class ServiceQuotasServiceTest {
     void wellFormedServiceCodesAreStillAccepted() {
         // Including an unknown-but-valid code: generating a catalog for those is deliberate.
         for (String good : List.of("codebuild", "widgetfactory", "elasticloadbalancing", "AWS-Thing", "ec")) {
-            assertTrue(service.listServiceQuotas(good, null, null, null, "us-east-1", "000000000000")
+            assertTrue(service.listServiceQuotas(good, null, null, null, "us-east-1", ACCOUNT_ID)
                     .withArray("Quotas").size() > 0, good);
         }
+    }
+
+    @Test
+    void requestedIncreaseIsReadableBackById() {
+        ObjectNode created = service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9000.0, null, "us-east-1", ACCOUNT_ID)
+                .withObject("RequestedQuota");
+        String id = created.path("Id").asText();
+
+        ObjectNode read = service.getRequestedServiceQuotaChange(id, "us-east-1").withObject("RequestedQuota");
+        assertEquals(id, read.path("Id").asText());
+        assertEquals("codebuild", read.path("ServiceCode").asText());
+        assertEquals("L-2DC20C30", read.path("QuotaCode").asText());
+        assertEquals("Concurrently running builds", read.path("QuotaName").asText());
+        assertEquals(9000.0, read.path("DesiredValue").asDouble());
+        assertEquals("PENDING", read.path("Status").asText());
+    }
+
+    @Test
+    void repeatedRequestsForTheSameQuotaReturnResourceAlreadyExists() {
+        service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9000.0, null, "us-east-1", ACCOUNT_ID);
+        AwsException e = assertThrows(AwsException.class, () -> service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9500.0, null, "us-east-1", ACCOUNT_ID));
+        assertEquals("ResourceAlreadyExistsException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
+    void requestStoredInOneRegionIsNotVisibleInAnother() {
+        String id = service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9000.0, null, "us-east-1", ACCOUNT_ID)
+                .path("RequestedQuota").path("Id").asText();
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.getRequestedServiceQuotaChange(id, "eu-west-1"));
+        assertEquals("NoSuchResourceException", e.getErrorCode());
+    }
+
+    @Test
+    void historyListsOnlyTheRequestedQuota() {
+        service.requestServiceQuotaIncrease(
+                "codebuild", "L-2DC20C30", 9000.0, null, "us-east-1", ACCOUNT_ID);
+        service.requestServiceQuotaIncrease(
+                "lambda", "L-B99A9384", 8000.0, null, "us-east-1", ACCOUNT_ID);
+
+        JsonNode codebuild = service.listRequestedServiceQuotaChangeHistoryByQuota(
+                "codebuild", "L-2DC20C30", null, null, "us-east-1");
+        assertEquals(1, codebuild.path("RequestedQuotas").size());
+        assertEquals("codebuild", codebuild.path("RequestedQuotas").get(0).path("ServiceCode").asText());
+
+        JsonNode lambda = service.listRequestedServiceQuotaChangeHistoryByQuota(
+                "lambda", "L-B99A9384", null, null, "us-east-1");
+        assertEquals(1, lambda.path("RequestedQuotas").size());
+        assertEquals("lambda", lambda.path("RequestedQuotas").get(0).path("ServiceCode").asText());
+    }
+
+    @Test
+    void missingRequestIdThrowsIllegalArgument() {
+        AwsException empty = assertThrows(AwsException.class,
+                () -> service.getRequestedServiceQuotaChange("", "us-east-1"));
+        assertEquals("IllegalArgumentException", empty.getErrorCode());
+        assertEquals(400, empty.getHttpStatus());
+        AwsException nullId = assertThrows(AwsException.class,
+                () -> service.getRequestedServiceQuotaChange(null, "us-east-1"));
+        assertEquals("IllegalArgumentException", nullId.getErrorCode());
+    }
+
+    @Test
+    void unknownRequestIdThrowsNoSuchResource() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.getRequestedServiceQuotaChange("DEADBEEF", "us-east-1"));
+        assertEquals("NoSuchResourceException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
     }
 }

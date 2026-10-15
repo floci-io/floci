@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.config;
 
 import io.github.hectorvent.floci.services.iot.IotMqttWebSocketIntegrationTest;
+import io.github.hectorvent.floci.testing.IotMqttTlsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.vertx.core.Vertx;
@@ -48,7 +49,7 @@ import static org.mockito.Mockito.when;
  * dial the Quarkus test ports directly.
  */
 @QuarkusTest
-@TestProfile(IotMqttWebSocketIntegrationTest.Profile.class)
+@TestProfile(IotMqttTlsProfile.class)
 class IotMqttWebSocketProxyIntegrationTest {
 
     static final String LEARNED_HOST = "iot.example.localhost.floci.io";
@@ -95,10 +96,14 @@ class IotMqttWebSocketProxyIntegrationTest {
         assertThrows(SSLHandshakeException.class, () -> upgradeAs(LEARNED_HOST),
                 "precondition: the boot leaf covers one label under localhost.floci.io, not two");
 
-        certificateManager.ensureHost(LEARNED_HOST);
+        try {
+            certificateManager.ensureHost(LEARNED_HOST);
 
-        assertArrayEquals(CONNACK_ACCEPTED, upgradeAs(LEARNED_HOST),
-                "after ensureHost a client verifying the learned name gets an MQTT session on /mqtt");
+            assertArrayEquals(CONNACK_ACCEPTED, upgradeAs(LEARNED_HOST),
+                    "after ensureHost a client verifying the learned name gets an MQTT session on /mqtt");
+        } finally {
+            certificateManager.clear();
+        }
     }
 
     private int startProxy() throws Exception {

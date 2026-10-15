@@ -154,6 +154,18 @@ class SqlParameterParserTest {
     }
 
     @Test
+    void nestedBlockCommentsFollowTheSqlDialect() {
+        String sql = "select 1; /* outer /* inner */ select 2; */";
+        assertFalse(SqlParameterParser.isMultiStatement(sql, Options.REDSHIFT));
+        assertTrue(SqlParameterParser.isMultiStatement(sql, Options.RDS_MYSQL));
+        assertTrue(SqlParameterParser.isMultiStatement(sql + " select 3", Options.REDSHIFT));
+
+        ParsedSql parsed = SqlParameterParser.parse("select 1 /* outer /* inner */ :ignored */ + :value",
+                Options.REDSHIFT);
+        assertEquals(List.of("value"), parsed.parameterOrder());
+    }
+
+    @Test
     void escapeStringWithAnEscapedQuoteIsNotSeenAsMultiStatement() {
         assertFalse(SqlParameterParser.isMultiStatement("select E'a\\';b' as v", Options.REDSHIFT));
     }
@@ -162,6 +174,39 @@ class SqlParameterParserTest {
     void isMultiStatementRespectsBacktickOption() {
         assertTrue(SqlParameterParser.isMultiStatement("select `a;b`", Options.REDSHIFT));
         assertFalse(SqlParameterParser.isMultiStatement("select `a;b`", Options.RDS_MYSQL));
+    }
+
+    @Test
+    void mysqlCommentsFollowTheMysqlLineCommentRules() {
+        ParsedSql parsed = SqlParameterParser.parse("select 1--:value # :ignored\n", Options.RDS_MYSQL);
+        assertEquals("select 1--? # :ignored\n", parsed.sql());
+        assertEquals(List.of("value"), parsed.parameterOrder());
+        assertTrue(SqlParameterParser.isMultiStatement("select 1--1; select 2", Options.RDS_MYSQL));
+        assertFalse(SqlParameterParser.isMultiStatement("select 1--1; select 2", Options.REDSHIFT));
+        assertFalse(SqlParameterParser.isMultiStatement("select 1; # ignored; select 2\n", Options.RDS_MYSQL));
+    }
+
+    @Test
+    void mysqlCommentRulesAreIndependentOfQuotingAndParameterOptions() {
+        Options options = new Options(false, false, true, false, true);
+        assertFalse(SqlParameterParser.isMultiStatement("select 1; # ignored; select 2\n", options));
+        assertTrue(SqlParameterParser.isMultiStatement("select 1--1; select 2", options));
+        assertTrue(SqlParameterParser.isMultiStatement("select 1; /* outer /* inner */ select 2; */", options));
+
+        ParsedSql hash = SqlParameterParser.parse("select :value # :ignored\n", options);
+        assertEquals(List.of("value"), hash.parameterOrder());
+        ParsedSql dash = SqlParameterParser.parse("select 1--:value", options);
+        assertEquals(List.of("value"), dash.parameterOrder());
+        ParsedSql block = SqlParameterParser.parse("select :first /* outer /* inner */ + :second", options);
+        assertEquals(List.of("first", "second"), block.parameterOrder());
+    }
+
+    @Test
+    void mysqlQuotingOptionsDoNotEnableMysqlComments() {
+        Options options = new Options(true, true, false, true, false);
+        assertTrue(SqlParameterParser.isMultiStatement("select 1; # not a comment", options));
+        assertFalse(SqlParameterParser.isMultiStatement("select 1--1; select 2", options));
+        assertFalse(SqlParameterParser.isMultiStatement("select 1; /* outer /* inner */ select 2; */", options));
     }
 
     @Test

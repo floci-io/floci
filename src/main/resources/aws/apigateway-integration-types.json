@@ -1,0 +1,15 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_apigateway_types.py",
+    "botocore": "botocore 1.43.111 (installed package)",
+    "model": "apigateway/2015-07-09/service-2.json",
+    "shape": "IntegrationType"
+  },
+  "integrationTypes": [
+    "AWS",
+    "AWS_PROXY",
+    "HTTP",
+    "HTTP_PROXY",
+    "MOCK"
+  ]
+}

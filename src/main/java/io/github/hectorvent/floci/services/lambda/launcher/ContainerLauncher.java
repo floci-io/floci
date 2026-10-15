@@ -989,7 +989,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         } finally {
             if (helperId != null) {
                 try {
-                    lifecycleManager.stopAndRemove(helperId, null);
+                    // This helper only sleeps while the copy runs; it has no runtime to drain.
+                    lifecycleManager.stopAndRemove(helperId, null, 0);
                 } catch (Exception e) {
                     LOG.warnv("Could not remove code-volume helper {0}: {1}", helperId, e.getMessage());
                 }

@@ -21,6 +21,11 @@ public class InstanceRefresh {
     private Instant startTime;
     private Instant endTime;
     private String region;
+    private List<InstanceRefreshReplacement> replacements;
+
+    public List<InstanceRefreshReplacement> getReplacements() { return replacements; }
+    public void setReplacements(List<InstanceRefreshReplacement> value) { replacements = value; }
+
 
     private String desiredLaunchTemplateId;
     private String desiredLaunchTemplateName;

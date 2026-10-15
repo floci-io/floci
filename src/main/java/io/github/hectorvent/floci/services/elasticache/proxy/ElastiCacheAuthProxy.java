@@ -56,7 +56,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
                     defaultMode = passwordValidator.memberAuthMode(username);
                 }
                 if (defaultMode == AuthMode.IAM) {
-                    return sigV4Validator.validate(password, groupId, "default");
+                    return sigV4Validator.validate(password, groupId, "default", passwordValidator.ownerAccountId());
                 }
                 return false;
             }
@@ -67,7 +67,8 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
             }
             if (userMode != null) {
                 return switch (userMode) {
-                    case IAM -> sigV4Validator.validate(password, groupId, effectiveUser);
+                    case IAM -> sigV4Validator.validate(password, groupId, effectiveUser,
+                            passwordValidator.ownerAccountId());
                     case PASSWORD, NO_AUTH -> passwordValidator.validatePassword(effectiveUser, password);
                 };
             }
@@ -75,7 +76,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
         }
 
         return switch (currentAuthMode()) {
-            case IAM -> sigV4Validator.validate(password, groupId, effectiveUser);
+            case IAM -> sigV4Validator.validate(password, groupId, effectiveUser, passwordValidator.ownerAccountId());
             case PASSWORD -> passwordValidator.validatePassword(username, password);
             case NO_AUTH -> true;
         };
@@ -120,6 +121,14 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
 
         /** The cache's auth mode now, or null to keep the one the proxy started with. */
         default AuthMode authMode() {
+            return null;
+        }
+
+        /**
+         * The account that owns the cache, whose long-term access keys an IAM token may be signed
+         * with, or null to look keys up in the default account.
+         */
+        default String ownerAccountId() {
             return null;
         }
     }

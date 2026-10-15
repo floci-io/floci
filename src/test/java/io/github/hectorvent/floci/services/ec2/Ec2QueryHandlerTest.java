@@ -11,6 +11,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
@@ -33,6 +34,59 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2QueryHandlerTest {
+
+    @ParameterizedTest
+    @CsvSource({
+            "CreateVpc,vpc", "CreateSubnet,subnet", "CreateSecurityGroup,security-group",
+            "CreateInternetGateway,internet-gateway", "CreateRouteTable,route-table",
+            "CreateCapacityReservation,capacity-reservation", "AllocateHosts,dedicated-host",
+            "AllocateAddress,elastic-ip", "AuthorizeSecurityGroupIngress,security-group-rule",
+            "AuthorizeSecurityGroupEgress,security-group-rule", "RunInstances,instance",
+            "RunInstances,network-interface", "CreateVolume,volume",
+            "RequestSpotInstances,spot-instances-request", "RequestSpotInstances,instance"
+    })
+    void rejectsReservedCreationTagsBeforeAllocatingResources(String action, String resourceType) {
+        for (String prefix : List.of("TagSpecification", "TagSpecifications")) {
+            Ec2Service service = mock(Ec2Service.class);
+            MultivaluedMap<String, String> params = createSubnetParams("10.38.1.0/24");
+            params.putSingle("GroupName", "test");
+            params.putSingle("GroupDescription", "test");
+            params.putSingle("MinCount", "1");
+            params.putSingle("MaxCount", "1");
+            params.putSingle(prefix + ".1.ResourceType", resourceType);
+            params.putSingle(prefix + ".1.Tag.1.Key", "Name");
+            params.putSingle(prefix + ".1.Tag.1.Value", "valid");
+            params.putSingle(prefix + ".1.Tag.2.Key", "aWs:reserved");
+            params.putSingle(prefix + ".1.Tag.2.Value", "invalid");
+
+            Response response = handler(service).handle(action, params, "us-east-1");
+
+            assertEquals(400, response.getStatus());
+            String code = List.of("vpc", "subnet", "security-group-rule", "spot-instances-request")
+                    .contains(resourceType)
+                    ? "InvalidParameter" : "InvalidParameterValue";
+            assertTrue(response.getEntity().toString().contains("<Code>" + code + "</Code>"));
+            assertTrue(response.getEntity().toString().contains("reserved for internal use"));
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CreateLaunchTemplate", "CreateLaunchTemplateVersion"})
+    void rejectsReservedNestedTemplateTagsBeforeCreatingATemplateOrVersion(String action) {
+        Ec2Service service = mock(Ec2Service.class);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("LaunchTemplateName", "test");
+        params.putSingle("LaunchTemplateId", "lt-test");
+        params.putSingle("LaunchTemplateData.TagSpecification.1.ResourceType", "instance");
+        params.putSingle("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "aws:reserved");
+
+        Response response = handler(service).handle(action, params, "us-east-1");
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>InvalidTagKey.Malformed</Code>"));
+        verifyNoInteractions(service);
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"TagSpecification", "TagSpecifications"})

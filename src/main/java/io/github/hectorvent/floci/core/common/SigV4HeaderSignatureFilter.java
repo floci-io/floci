@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.apigateway.ApiGatewayExecuteControlle
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayUserRequestController;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncExecutionController;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.RequestBodyReader;
 import io.github.hectorvent.floci.services.s3.S3ControlController;
 import io.github.hectorvent.floci.services.s3.S3Controller;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
@@ -24,6 +25,7 @@ import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
@@ -45,7 +47,7 @@ import java.util.Set;
 import java.util.function.UnaryOperator;
 
 /**
- * Verifies the SigV4 signature in the {@code Authorization} header of every request outside S3
+ * Verifies header and query SigV4 signatures on every request outside S3
  * when {@code floci.auth.validate-signatures} is enabled, so a request signed with the wrong
  * secret is refused by SQS, KMS, IAM, Scheduler and the rest as it already is by S3.
  *
@@ -75,8 +77,10 @@ import java.util.function.UnaryOperator;
  * Everything else is verified here, S3 Control included, whatever service its scope names.
  *
  * <p>As with S3, signature verification is authentication only, and an unsigned request is let
- * through: whether a caller may act is IAM enforcement's decision. Presigned query-string
- * signatures and SigV4a ({@code AWS4-ECDSA-P256-SHA256}) are not verified here.
+ * through: whether a caller may act is IAM enforcement's decision. A nonblank Authorization
+ * header takes precedence over query credentials. Query signatures expire at X-Amz-Expires;
+ * both placements share credential lookup, canonicalization and protocol error mapping.
+ * SigV4a ({@code AWS4-ECDSA-P256-SHA256}) is not verified here.
  *
  * <p>Errors follow the protocol the request used: a Query or REST-XML request (Route 53,
  * CloudFront, S3 Control) receives an {@code <ErrorResponse>}, a CBOR request a CBOR body, and
@@ -84,7 +88,7 @@ import java.util.function.UnaryOperator;
  * are AWS's: {@code IncompleteSignature} for a header that cannot be checked,
  * {@code InvalidClientTokenId} / {@code UnrecognizedClientException} for an access key Floci does
  * not know, and {@code SignatureDoesNotMatch} / {@code InvalidSignatureException} for a signature
- * that does not verify or falls outside the fifteen-minute clock-skew window.
+ * that does not verify, exceeds its query expiry or falls outside the header clock-skew window.
  *
  * <p>Nothing here runs with the flag off: the filter returns before reading a single header.
  */
@@ -96,6 +100,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
     private static final Logger LOG = Logger.getLogger(SigV4HeaderSignatureFilter.class);
 
     private static final Duration MAX_CLOCK_SKEW = Duration.ofMinutes(15);
+    private static final long MAX_EXPIRY_SECONDS = 604800;
     private static final DateTimeFormatter AMZ_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
@@ -145,9 +150,22 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
         if (resource != null && VERIFIED_ELSEWHERE.contains(resource)) {
             return;
         }
-        SigV4AuthorizationHeader signed = SigV4AuthorizationHeader.parse(ctx.getHeaderString("Authorization"));
-        if (signed == null) {
-            return;
+        String authorization = ctx.getHeaderString("Authorization");
+        MultivaluedMap<String, String> query = ctx.getUriInfo().getQueryParameters();
+        boolean presigned = isBlank(authorization) && query.containsKey("X-Amz-Credential");
+        SigV4AuthorizationHeader signed;
+        if (presigned) {
+            if (!"AWS4-HMAC-SHA256".equals(query.getFirst("X-Amz-Algorithm"))) {
+                incompleteSignature(ctx, resource, "Presigned request requires X-Amz-Algorithm=AWS4-HMAC-SHA256.");
+                return;
+            }
+            signed = new SigV4AuthorizationHeader(query.getFirst("X-Amz-Credential"),
+                    query.getFirst("X-Amz-SignedHeaders"), query.getFirst("X-Amz-Signature"));
+        } else {
+            signed = SigV4AuthorizationHeader.parse(authorization);
+            if (signed == null) {
+                return;
+            }
         }
 
         CredentialScope scope = CredentialScope.parse(signed.credential());
@@ -162,14 +180,42 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
                     "'Host' or ':authority' must be a 'SignedHeader' in the AWS Authorization.");
             return;
         }
-        Instant requestTime = requestTime(ctx);
+        Instant requestTime = presigned ? parseAmzDate(query.getFirst("X-Amz-Date")) : requestTime(ctx);
         if (requestTime == null) {
             incompleteSignature(ctx, resource, "Authorization header requires existence of either a "
                     + "'X-Amz-Date' or a 'Date' header.");
             return;
         }
 
-        Optional<String> secretKey = resolveSecretKey(scope.accessKeyId(), ctx.getHeaderString("X-Amz-Security-Token"));
+        long expires = 0;
+        if (presigned) {
+            try {
+                expires = Long.parseLong(query.getFirst("X-Amz-Expires"));
+                if (expires < 1 || expires > MAX_EXPIRY_SECONDS) {
+                    throw new IllegalArgumentException("Invalid expiry");
+                }
+            } catch (RuntimeException error) {
+                incompleteSignature(ctx, resource, "Presigned request requires X-Amz-Expires between 1 and 604800.");
+                return;
+            }
+        }
+        String token = ctx.getHeaderString("X-Amz-Security-Token");
+        ServiceDescriptor queryService = null;
+        if (presigned) {
+            try {
+                if (token == null) {
+                    token = RequestBodyReader.formField(ctx, "X-Amz-Security-Token");
+                    if (token == null) {
+                        token = query.getFirst("X-Amz-Security-Token");
+                    }
+                }
+                queryService = queryService(ctx, resource);
+            } catch (IllegalArgumentException error) {
+                incompleteSignature(ctx, resource, "Cannot read presigned request form parameters.");
+                return;
+            }
+        }
+        Optional<String> secretKey = resolveSecretKey(scope.accessKeyId(), token);
         if (secretKey.isEmpty()) {
             LOG.debugv("Refusing {0} request signed with unknown access key {1}",
                     scope.service(), SigV4RequestValidator.sanitizeForLog(scope.accessKeyId()));
@@ -179,16 +225,35 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
 
         String amzDate = AMZ_DATE.format(requestTime);
         Instant now = Instant.now();
-        if (Duration.between(requestTime, now).abs().compareTo(MAX_CLOCK_SKEW) > 0) {
-            signatureDoesNotMatch(ctx, resource, "Signature expired: " + amzDate + " is outside the "
-                    + MAX_CLOCK_SKEW.toMinutes() + " minute window around the server time "
-                    + AMZ_DATE.format(now) + ".");
+        if (presigned && !now.isBefore(requestTime.plusSeconds(expires))) {
+            signatureDoesNotMatch(ctx, resource, "Signature expired: " + amzDate + " is now earlier than "
+                    + AMZ_DATE.format(now.minusSeconds(expires)));
+            return;
+        }
+        if (requestTime.isAfter(now.plus(MAX_CLOCK_SKEW))) {
+            signatureDoesNotMatch(ctx, resource, "Signature not yet current: " + amzDate + " is still later than "
+                    + AMZ_DATE.format(now.plus(MAX_CLOCK_SKEW)));
+            return;
+        }
+        if (!presigned && requestTime.isBefore(now.minus(MAX_CLOCK_SKEW))) {
+            signatureDoesNotMatch(ctx, resource, "Signature expired: " + amzDate + " is now earlier than "
+                    + AMZ_DATE.format(now.minus(MAX_CLOCK_SKEW)));
             return;
         }
         if (!amzDate.startsWith(scope.date())) {
             signatureDoesNotMatch(ctx, resource, "Date in Credential scope does not match YYYYMMDD from "
                     + "ISO-8601 version of date from HTTP: '" + scope.date() + "' != '"
                     + amzDate.substring(0, 8) + "'.");
+            return;
+        }
+
+        if (queryService != null && !queryService.credentialScopes().contains(scope.service())) {
+            // Multiple accepted scopes can include endpoint aliases, not canonical signing names.
+            String expectedService = queryService.credentialScopes().size() == 1
+                    ? queryService.credentialScopes().iterator().next() : null;
+            signatureDoesNotMatch(ctx, resource, expectedService == null
+                    ? "Credential should be scoped to the service receiving the request."
+                    : "Credential should be scoped to correct service: '" + expectedService + "'");
             return;
         }
 
@@ -200,7 +265,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
         boolean matches;
         try {
             matches = signatureMatches(ctx.getMethod(), rawPath(ctx), rawQuery(ctx), signed.signedHeaders(),
-                    headers, body, secretKey.get(), amzDate, scope, signed.signature());
+                    headers, body, secretKey.get(), amzDate, scope, signed.signature(), presigned);
         } catch (Exception e) {
             LOG.debugv(e, "SigV4 verification failed to complete for accessKey={0}",
                     SigV4RequestValidator.sanitizeForLog(scope.accessKeyId()));
@@ -217,12 +282,46 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
     static boolean signatureMatches(String method, String rawPath, String rawQuery, String signedHeaders,
                                     UnaryOperator<String> headers, byte[] body, String secretKey,
                                     String amzDate, CredentialScope scope, String signature) throws Exception {
+        return signatureMatches(method, rawPath, rawQuery, signedHeaders, headers, body,
+                secretKey, amzDate, scope, signature, false);
+    }
+
+    // Non-S3 body-bearing SDK presigners hash the body; only a signed payload marker opts out.
+    private static boolean signatureMatches(String method, String rawPath, String rawQuery, String signedHeaders,
+                                            UnaryOperator<String> headers, byte[] body, String secretKey,
+                                            String amzDate, CredentialScope scope, String signature,
+                                            boolean presigned) throws Exception {
         return SigV4Canonicalization.signatureMatches(method, rawPath,
-                SigV4Canonicalization.canonicalQueryString(rawQuery, false),
+                SigV4Canonicalization.canonicalQueryString(rawQuery, presigned),
                 SigV4Canonicalization.canonicalHeaders(signedHeaders, headers),
                 signedHeaders,
                 SigV4Canonicalization.payloadHash(headers.apply("x-amz-content-sha256"), signedHeaders, body, false),
                 amzDate, scope, secretKey, signature);
+    }
+
+    private ServiceDescriptor queryService(ContainerRequestContext ctx, Class<?> resource) {
+        ServiceDescriptor descriptor;
+        if (resource == AwsQueryController.class) {
+            String action = AwsQueryServiceResolver.action(RequestBodyReader.formField(ctx, "Action"),
+                    RequestBodyReader.formField(ctx, "Operation"));
+            String target = action == null ? null
+                    : AwsQueryController.inferServiceFromAction(action, RequestBodyReader.formField(ctx, "Version"));
+            descriptor = target == null ? null : catalog.byExternalKey(target).orElse(null);
+        } else if (ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                && claim.service() != null) {
+            descriptor = claim.service();
+        } else {
+            descriptor = resource == null ? null : catalog.byResourceClass(resource).orElse(null);
+        }
+        return descriptor;
+    }
+
+    private static Instant parseAmzDate(String value) {
+        try {
+            return value == null ? null : Instant.from(AMZ_DATE.parse(value));
+        } catch (DateTimeParseException error) {
+            return null;
+        }
     }
 
     /**
@@ -349,7 +448,9 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
                     CborErrorResponses.mediaTypeFor(contentType)));
             return;
         }
-        if (isFormEncoded(ctx.getMediaType())) {
+        if (isFormEncoded(ctx.getMediaType())
+                || ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                && claim.protocol() == WireProtocol.AWS_QUERY) {
             ctx.abortWith(AwsQueryResponse.error(queryCode, message, null, status));
             return;
         }

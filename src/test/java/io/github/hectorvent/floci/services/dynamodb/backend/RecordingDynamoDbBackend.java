@@ -117,6 +117,17 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
     }
 
     @Override
+    public TimeToLive timeToLive(Scope scope, String tableName) {
+        record("timeToLive", scope);
+        return new TimeToLive(false, null);
+    }
+
+    @Override
+    public void updateTimeToLive(Scope scope, String tableName, String attributeName, boolean enabled) {
+        record("updateTimeToLive", scope);
+    }
+
+    @Override
     public Map<String, String> listTagsOfResource(Scope scope, String resourceArn) {
         record("listTagsOfResource", scope);
         return Map.of();

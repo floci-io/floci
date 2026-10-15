@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -78,7 +79,7 @@ class LambdaEventSourceMappingCfnProvisionerTest {
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> resolveMockNode((JsonNode) inv.getArgument(0), engine));
 
-        ProvisionContext context = mock(ProvisionContext.class);
+        ProvisionContext context = inlineMock(ProvisionContext.class);
         when(context.engine()).thenReturn(engine);
         when(context.region()).thenReturn("us-east-1");
         when(context.accountId()).thenReturn("000000000000");

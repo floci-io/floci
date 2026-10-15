@@ -314,7 +314,7 @@ public class AwsJson11Controller {
                 case "elasticmapreduce" -> emrHandler.handle(action, request, region);
                 case "wafv2" -> wafV2Handler.handle(action, request, region);
                 case "memorydb" -> memoryDbHandler.handle(action, request, region);
-                case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
+                case "logs" -> cloudWatchLogsHandler.handle(action, request, regionResolver.getRegion());
                 case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region,
                         IamEnforcementFilter.requestAuthorization(
                                 httpHeaders.getHeaderString("Authorization"), uriInfo.getQueryParameters()));
@@ -324,7 +324,7 @@ public class AwsJson11Controller {
                 case "kms" -> kmsJsonHandler.handle(action, request, region);
                 case "cognito-idp" -> cognitoJsonHandler.handle(action, request, region);
                 case "acm" -> acmJsonHandler.handle(action, request, region);
-                case "ecs" -> ecsJsonHandler.handle(action, request, region);
+                case "ecs" -> ecsJsonHandler.handle(action, request, region, uriInfo.getBaseUri());
                 case "ecr" -> ecrJsonHandler.handle(action, request, region);
                 case "glue" -> glueJsonHandler.handle(action, request, region);
                 case "athena" -> athenaJsonHandler.handle(action, request, region);

@@ -102,6 +102,11 @@ class RdsCatalogueReadIntegrationTest {
                 .body(VERSIONS + ".SupportsReadReplica", equalTo("false"))
                 .body(containsString("<SupportedFeatureNames></SupportedFeatureNames>"))
                 .body(VERSIONS + ".SupportsGlobalDatabases", equalTo("true"));
+        query("DescribeDBEngineVersions").formParam("Engine", "aurora-postgresql").formParam("DefaultOnly", "true")
+        .when().post("/").then()
+                .statusCode(200)
+                .body(VERSIONS + ".SupportedFeatureNames.member",
+                        contains("s3Import", "s3Export", "Lambda", "Comprehend", "SageMaker", "Bedrock"));
     }
 
     @Test
@@ -150,6 +155,10 @@ class RdsCatalogueReadIntegrationTest {
                 .extract().xmlPath().getString("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.EngineVersion");
         assertEquals(expected, created);
         assertEquals(defaultVersion(engine), created);
+        // A caller sizing instances for the cluster must find an orderable class at that version.
+        query("DescribeOrderableDBInstanceOptions").formParam("Engine", engine).formParam("EngineVersion", created)
+        .when().post("/").then().statusCode(200)
+                .body(containsString("<OrderableDBInstanceOption>"));
         query("DeleteDBCluster").formParam("DBClusterIdentifier", id).formParam("SkipFinalSnapshot", "true")
         .when().post("/").then().statusCode(200);
     }

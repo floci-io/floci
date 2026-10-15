@@ -63,6 +63,11 @@ public class CloudWatchDashboardCfnProvisioner implements CfnResourceProvisioner
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         // A snapshot describes the update in flight; one an earlier update left behind is stale.
         r.getAttributes().remove(CfnRollback.DASHBOARD_UPDATE_SNAPSHOT_ATTR);
+        if (ctx.isUpdate()) {
+            // The unwind below undoes this update; only ContinueUpdateRollback retries the delete
+            // the last rollback could not make.
+            ReplacementCleanup.endRollbackRetry(r);
+        }
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         String explicitName = ctx.resolveOptional(props, "DashboardName");
         boolean hasExplicitName = explicitName != null && !explicitName.isBlank();

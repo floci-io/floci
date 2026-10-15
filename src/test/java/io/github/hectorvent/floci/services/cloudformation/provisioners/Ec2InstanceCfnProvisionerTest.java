@@ -39,6 +39,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -472,7 +473,9 @@ class Ec2InstanceCfnProvisionerTest {
         when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
                 .thenReturn(List.of(reservationOf(i1)));
         when(ec2.describeTags(eq("us-east-1"), any())).thenReturn(List.of(
-                tagEntry("i-1", "env", "prod"), tagEntry("i-1", "old", "stale")));
+                tagEntry("i-1", "env", "prod"), tagEntry("i-1", "old", "stale"),
+                tagEntry("i-1", "aws:autoscaling:groupName", "group"),
+                tagEntry("i-1", "AWS:cloudformation:stack-id", "stack")));
         provisioner.provision(r, props("""
                 {"ImageId": "ami-1", "Tags": [{"Key": "env", "Value": "prod"}]}
                 """), ctx("i-1"));
@@ -482,6 +485,41 @@ class Ec2InstanceCfnProvisionerTest {
         verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("i-1")), removed.capture());
         assertEquals(1, removed.getValue().size());
         assertEquals("old", removed.getValue().get(0).getKey());
+    }
+
+    @Test
+    void reservedUpdateTagsFailBeforeChangingTheInstanceOrItsTags() throws Exception {
+        StackResource r = resource("Server");
+        r.setPhysicalId("i-1");
+        r.getAttributes().put("InstanceId", "i-1");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"ImageId": "ami-1", "InstanceType": "t3.small",
+                 "SecurityGroupIds": ["sg-new"], "UserData": "changed",
+                 "Tags": [{"Key": "AWS:reserved", "Value": "invalid"}]}
+                """), ctx("i-1")));
+
+        assertEquals("InvalidParameterValue", failure.getErrorCode());
+        assertEquals("i-1", r.getPhysicalId());
+        assertEquals(Map.of("InstanceId", "i-1"), r.getAttributes());
+        verifyNoInteractions(ec2);
+    }
+
+    @Test
+    void reservedCreateTagsFailBeforeLaunchingAnInstance() throws Exception {
+        assertThrows(AwsException.class, () -> provisioner.provision(resource("Server"), props("""
+                {"ImageId": "ami-1", "Tags": [{"Key": "aws:reserved", "Value": "invalid"}]}
+                """), ctx(null)));
+
+        verifyNoInteractions(ec2);
+    }
+
+    @Test
+    void tagReconciliationValidatesBeforeDeletingStaleTags() {
+        assertThrows(AwsException.class, () -> Ec2Tags.reconcile(ec2, "us-east-1", "i-1",
+                Map.of("env", "new", "aWs:reserved", "invalid")));
+
+        verifyNoInteractions(ec2);
     }
 
     @Test

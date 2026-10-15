@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
@@ -151,7 +152,7 @@ class DynamoDbFacadeTest {
         RequestContext requestContext = new RequestContext();
         requestContext.setRegion(OTHER_REGION);
         IamConditionContextResolver resolver = new IamConditionContextResolver(dynamoDb,
-                mock(Instance.class), mock(Instance.class), requestContext, mock(EmulatorConfig.class));
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), requestContext, mock(EmulatorConfig.class));
         ContainerRequestContext request = mock(ContainerRequestContext.class);
         JsonNode body = mapper.readTree("""
                 {"TableName": "recorded-table", "Key": {"id": {"S": "USER_alice"}}}
@@ -194,6 +195,6 @@ class DynamoDbFacadeTest {
                 mock(IotMqttBrokerService.class), mock(SqsService.class), mock(SnsService.class),
                 mock(S3Service.class), mock(KinesisService.class), facade, mock(LambdaService.class),
                 mock(FirehoseService.class), mock(CloudWatchLogsService.class),
-                mock(FlociCertificateAuthority.class), new IamPolicyEvaluator(mapper));
+                inlineMock(FlociCertificateAuthority.class), new IamPolicyEvaluator(mapper));
     }
 }

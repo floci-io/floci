@@ -62,8 +62,12 @@ class CognitoAuthSessionValidityIntegrationTest {
         assertEquals(minutes, describeClient(clientId).path("AuthSessionValidity").asInt());
     }
 
+    /**
+     * AWS on UpdateUserPoolClient: "If you don't provide a value for an attribute, Amazon Cognito sets it
+     * to its default value."
+     */
     @Test
-    void omittedCreateUsesDefaultAndOmittedUpdatePreservesConfiguredValue() throws Exception {
+    void omittedCreateAndOmittedUpdateBothUseTheDefault() throws Exception {
         JsonNode defaultClient = cognitoJson("CreateUserPoolClient", """
                 {"UserPoolId":"%s","ClientName":"default-client"}
                 """.formatted(poolId)).path("UserPoolClient");
@@ -75,8 +79,8 @@ class CognitoAuthSessionValidityIntegrationTest {
         JsonNode updated = cognitoJson("UpdateUserPoolClient", """
                 {"UserPoolId":"%s","ClientId":"%s","ClientName":"renamed"}
                 """.formatted(poolId, clientId)).path("UserPoolClient");
-        assertEquals(10, updated.path("AuthSessionValidity").asInt());
-        assertEquals(10, describeClient(clientId).path("AuthSessionValidity").asInt());
+        assertEquals(3, updated.path("AuthSessionValidity").asInt());
+        assertEquals(3, describeClient(clientId).path("AuthSessionValidity").asInt());
     }
 
     @Test
@@ -90,9 +94,9 @@ class CognitoAuthSessionValidityIntegrationTest {
         JsonNode updated = cognitoJson("UpdateUserPoolClient", """
                 {"UserPoolId":"%s","ClientId":"%s","ClientName":"renamed","AuthSessionValidity":null}
                 """.formatted(poolId, clientId)).path("UserPoolClient");
-        assertEquals(10, updated.path("AuthSessionValidity").asInt());
+        assertEquals(3, updated.path("AuthSessionValidity").asInt());
         JsonNode stored = describeClient(clientId);
-        assertEquals(10, stored.path("AuthSessionValidity").asInt());
+        assertEquals(3, stored.path("AuthSessionValidity").asInt());
         assertEquals("renamed", stored.path("ClientName").asText());
     }
 

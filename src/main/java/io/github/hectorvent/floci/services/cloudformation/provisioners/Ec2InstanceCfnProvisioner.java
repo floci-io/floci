@@ -54,6 +54,8 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
+        List<Tag> tags = Ec2Tags.validatedTags(desiredTags);
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         CloudFormationTemplateEngine engine = ctx.engine();
         String region = ctx.region();
@@ -115,20 +117,9 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             publishInstanceAttributes(r, current);
             storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
             putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
-            Ec2Tags.reconcile(ec2Service, region, current.getInstanceId(), ctx.resolveTags(props, "Tags"));
+            Ec2Tags.reconcile(ec2Service, region, current.getInstanceId(), desiredTags);
             ReplacementCleanup.record(r, ctx, attributesBefore);
             return;
-        }
-
-        List<Tag> tags = new ArrayList<>();
-        JsonNode tagsNode = props != null ? engine.resolveNode(props.get("Tags")) : null;
-        if (tagsNode != null && tagsNode.isArray()) {
-            for (JsonNode tag : tagsNode) {
-                String key = engine.resolve(tag.path("Key"));
-                if (!key.isEmpty()) {
-                    tags.add(new Tag(key, engine.resolve(tag.path("Value"))));
-                }
-            }
         }
 
         // The launch-time public-IP override rides on the primary network

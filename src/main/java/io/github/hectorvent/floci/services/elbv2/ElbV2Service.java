@@ -1012,7 +1012,13 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     public void removeListenerCertificates(String region, String listenerArn, List<String> certArns) {
         Listener listener = requireListener(region, listenerArn);
-        listener.getCertificates().removeAll(certArns);
+        List<String> certificates = listener.getCertificates();
+        if (servesCertificates(listener.getProtocol()) && !certificates.isEmpty()
+                && certArns.contains(certificates.getFirst())) {
+            throw new AwsException("OperationNotPermitted",
+                    "The default listener certificate cannot be removed.", 400);
+        }
+        certificates.removeAll(certArns);
         persistRegion(listeners, region);
     }
 

@@ -18,14 +18,24 @@ final class Ec2Tags {
     private Ec2Tags() {
     }
 
+    static List<Tag> validatedTags(Map<String, String> desired) {
+        List<Tag> tags = desired.entrySet().stream()
+                .map(entry -> new Tag(entry.getKey(), entry.getValue())).toList();
+        Ec2Service.validateUserTagKeys(tags);
+        return tags;
+    }
+
     /**
      * Brings a resource's tags to {@code desired}: removes the keys AWS currently has that the
      * template no longer declares, then creates or overwrites the declared ones.
      */
     static void reconcile(Ec2Service ec2Service, String region, String resourceId, Map<String, String> desired) {
+        List<Tag> add = validatedTags(desired);
         Map<String, String> current = new LinkedHashMap<>();
         for (Map<String, String> entry : ec2Service.describeTags(region, Map.of("resource-id", List.of(resourceId)))) {
-            current.put(entry.get("key"), entry.get("value"));
+            if (!Ec2Service.isAwsTagKey(entry.get("key"))) {
+                current.put(entry.get("key"), entry.get("value"));
+            }
         }
         List<String> stale = ProvisionContext.staleTagKeys(current, desired);
         if (!stale.isEmpty()) {
@@ -35,11 +45,7 @@ final class Ec2Tags {
             }
             ec2Service.deleteTags(region, List.of(resourceId), remove);
         }
-        if (!desired.isEmpty()) {
-            List<Tag> add = new ArrayList<>();
-            for (Map.Entry<String, String> entry : desired.entrySet()) {
-                add.add(new Tag(entry.getKey(), entry.getValue()));
-            }
+        if (!add.isEmpty()) {
             ec2Service.createTags(region, List.of(resourceId), add);
         }
     }

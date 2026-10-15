@@ -43,6 +43,22 @@ class AcmIntegrationTest {
     // ==================== User Story 1: RequestCertificate ====================
 
     @Test
+    void requestCertificateRejectsEmptySans() {
+        given()
+            .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {"DomainName": "empty-sans.example.com", "SubjectAlternativeNames": []}
+                """)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("1 validation error detected: Value '[]' at 'subjectAlternativeNames' "
+                + "failed to satisfy constraint: Member must have length greater than or equal to 1"));
+    }
+
+    @Test
     @Order(1)
     void requestCertificateBasic() {
         createdCertificateArn = given()

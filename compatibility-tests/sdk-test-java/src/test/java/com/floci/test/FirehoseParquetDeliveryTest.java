@@ -80,6 +80,7 @@ class FirehoseParquetDeliveryTest {
 
     private static final int BUFFERING_INTERVAL_SECONDS = 5;
     private static final long POLL_TIMEOUT_MILLIS = 240_000L;
+    private static final long POLL_INTERVAL_MILLIS = TestFixtures.isRealAws() ? 5_000L : 250L;
     private static final byte[] PARQUET_MAGIC = "PAR1".getBytes(StandardCharsets.US_ASCII);
 
     private static final String VALID_RECORD_1 =
@@ -221,7 +222,7 @@ class FirehoseParquetDeliveryTest {
                 throw new AssertionError("delivery stream stayed " + status + " for "
                         + POLL_TIMEOUT_MILLIS / 1000 + "s");
             }
-            Thread.sleep(5_000L);
+            Thread.sleep(POLL_INTERVAL_MILLIS);
         }
     }
 
@@ -470,7 +471,7 @@ class FirehoseParquetDeliveryTest {
             if (!contents.isEmpty()) {
                 return contents.get(0).key();
             }
-            Thread.sleep(5_000L);
+            Thread.sleep(POLL_INTERVAL_MILLIS);
         }
         throw new AssertionError("no object delivered under " + prefix + " within "
                 + POLL_TIMEOUT_MILLIS / 1000 + "s");

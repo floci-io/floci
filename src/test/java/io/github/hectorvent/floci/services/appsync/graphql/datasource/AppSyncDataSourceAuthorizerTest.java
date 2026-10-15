@@ -123,6 +123,24 @@ class AppSyncDataSourceAuthorizerTest {
     }
 
     @Test
+    void untrustedRoleDenialNamesTheOnePrincipalOfEveryPartition() {
+        String chinaRoleArn = "arn:aws-cn:iam::000000000000:role/appsync/Resolver";
+        DataSource source = dataSource(DataSourceType.AWS_LAMBDA);
+        source.setDataSourceArn("arn:aws-cn:appsync:cn-north-1:000000000000:apis/example/datasources/Products");
+        source.setServiceRoleArn(chinaRoleArn);
+        IamRole role = new IamRole("id", "Resolver", "/appsync/", chinaRoleArn, """
+                {"Statement":{"Effect":"Allow","Action":"sts:AssumeRole",
+                  "Principal":{"Service":"lambda.amazonaws.com"}}}
+                """);
+        when(iam.findRole("000000000000", "Resolver")).thenReturn(Optional.of(role));
+        AwsException error = assertThrows(AwsException.class,
+                () -> authorizer.authorize(source, Map.of("operation", "Invoke"), "cn-north-1"));
+        assertEquals("AccessDeniedException", error.getErrorCode());
+        assertEquals("AppSync data source Products: service role does not trust appsync.amazonaws.com",
+                error.getMessage());
+    }
+
+    @Test
     void untrustedRoleDenies() {
         DataSource source = dataSource(DataSourceType.AWS_LAMBDA);
         role("""

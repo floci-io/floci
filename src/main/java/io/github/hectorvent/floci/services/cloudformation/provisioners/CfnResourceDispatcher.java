@@ -277,6 +277,12 @@ public class CfnResourceDispatcher {
                 .orElse(false);
     }
 
+    public boolean requiresUpdateRecovery(StackResource resource) {
+        return registry.forType(resource.getResourceType())
+                .map(owner -> owner.requiresUpdateRecovery(resource))
+                .orElse(false);
+    }
+
     /** Whether this update replaced the resource's physical entity, so the stack has cleanup pending. */
     public boolean hasReplacementUpdate(StackResource resource) {
         return registry.forType(resource.getResourceType())

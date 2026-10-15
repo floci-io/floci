@@ -19,6 +19,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
+
 @ExtendWith(MockitoExtension.class)
 class InitializationHooksRunnerTest {
 
@@ -165,7 +167,7 @@ class InitializationHooksRunnerTest {
     @DisplayName("hasHooks should return true when scripts exist in a primary directory")
     void hasHooksShouldReturnTrueWhenScriptsExist(@TempDir Path tempDir) throws IOException {
         Files.createFile(tempDir.resolve("01-setup.sh"));
-        InitializationHook hook = Mockito.mock(InitializationHook.class);
+        InitializationHook hook = inlineMock(InitializationHook.class);
         Mockito.when(hook.getName()).thenReturn("startup");
         Mockito.when(hook.getPrimaryPaths()).thenReturn(List.of(tempDir.toFile()));
         Mockito.when(hook.getCompatPaths()).thenReturn(List.of());
@@ -177,7 +179,7 @@ class InitializationHooksRunnerTest {
     @DisplayName("hasHooks should return true when scripts exist only in a compat directory")
     void hasHooksShouldReturnTrueWhenScriptsExistInCompatDir(@TempDir Path tempDir) throws IOException {
         Files.createFile(tempDir.resolve("01-setup.sh"));
-        InitializationHook hook = Mockito.mock(InitializationHook.class);
+        InitializationHook hook = inlineMock(InitializationHook.class);
         Mockito.when(hook.getName()).thenReturn("startup");
         Mockito.when(hook.getPrimaryPaths()).thenReturn(List.of());
         Mockito.when(hook.getCompatPaths()).thenReturn(List.of(tempDir.toFile()));
@@ -188,7 +190,7 @@ class InitializationHooksRunnerTest {
     @Test
     @DisplayName("hasHooks should return false when all hook directories are empty")
     void hasHooksShouldReturnFalseWhenDirectoryIsEmpty(@TempDir Path tempDir) {
-        InitializationHook hook = Mockito.mock(InitializationHook.class);
+        InitializationHook hook = inlineMock(InitializationHook.class);
         Mockito.when(hook.getName()).thenReturn("startup");
         Mockito.when(hook.getPrimaryPaths()).thenReturn(List.of(tempDir.toFile()));
         Mockito.when(hook.getCompatPaths()).thenReturn(List.of());
@@ -199,7 +201,7 @@ class InitializationHooksRunnerTest {
     @Test
     @DisplayName("hasHooks should return false when hook directories do not exist")
     void hasHooksShouldReturnFalseWhenDirectoryDoesNotExist() {
-        InitializationHook hook = Mockito.mock(InitializationHook.class);
+        InitializationHook hook = inlineMock(InitializationHook.class);
         Mockito.when(hook.getName()).thenReturn("startup");
         Mockito.when(hook.getPrimaryPaths()).thenReturn(List.of(new File("/nonexistent/path")));
         Mockito.when(hook.getCompatPaths()).thenReturn(List.of());
@@ -215,7 +217,7 @@ class InitializationHooksRunnerTest {
         Files.createFile(compatDir.resolve("01-seed.sh"));
         Files.createFile(compatDir.resolve("02-extra.sh"));
 
-        InitializationHook hook = Mockito.mock(InitializationHook.class);
+        InitializationHook hook = inlineMock(InitializationHook.class);
         Mockito.when(hook.getName()).thenReturn("ready");
         Mockito.when(hook.getPrimaryPaths()).thenReturn(List.of(primaryDir.toFile()));
         Mockito.when(hook.getCompatPaths()).thenReturn(List.of(compatDir.toFile()));

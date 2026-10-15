@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -113,12 +114,32 @@ public final class AwsQueryResponse {
      * @param type  the error type, typically "Sender" for 4xx or "Receiver" for 5xx
      */
     public static Response error(String code, String message, String xmlns, int status, String type) {
-        String xml = new XmlBuilder()
+        return error(code, message, xmlns, status, type, Map.of());
+    }
+
+    /**
+     * Builds a Query-protocol XML error response for an error shape that declares members beyond its
+     * message, such as SNS {@code VerificationException}'s {@code Status}. Each member is an element of
+     * {@code <Error>} after {@code <Message>}, where the SDKs read it.
+     *
+     * @param members the error's other members by name, in the order they are written
+     */
+    public static Response error(String code, String message, String xmlns, int status,
+                                 Map<String, String> members) {
+        String type = status >= 500 ? "Receiver" : "Sender";
+        return error(code, message, xmlns, status, type, members);
+    }
+
+    private static Response error(String code, String message, String xmlns, int status, String type,
+                                  Map<String, String> members) {
+        XmlBuilder error = new XmlBuilder()
                 .start("ErrorResponse", xmlns)
                   .start("Error")
                     .elem("Type", type)
                     .elem("Code", code)
-                    .elem("Message", message)
+                    .elem("Message", message);
+        members.forEach(error::elem);
+        String xml = error
                   .end("Error")
                   .raw(responseMetadata())
                 .end("ErrorResponse")

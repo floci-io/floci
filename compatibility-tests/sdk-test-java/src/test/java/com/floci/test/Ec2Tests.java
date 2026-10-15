@@ -476,7 +476,7 @@ class Ec2Tests {
         CreateSubnetResponse resp = ec2.createSubnet(CreateSubnetRequest.builder()
                 .vpcId(vpcId)
                 .cidrBlock("10.0.1.0/24")
-                .availabilityZone("us-east-1a")
+                .availabilityZone(TestFixtures.availabilityZone())
                 .tagSpecifications(
                         TagSpecification.builder()
                                 .resourceType(ResourceType.SUBNET)
@@ -1038,7 +1038,7 @@ class Ec2Tests {
         String endpointId = null;
         try {
             ownSubnetId = ec2.createSubnet(CreateSubnetRequest.builder()
-                    .vpcId(vpcId).cidrBlock("10.0.90.0/24").availabilityZone("us-east-1a")
+                    .vpcId(vpcId).cidrBlock("10.0.90.0/24").availabilityZone(TestFixtures.availabilityZone())
                     .build()).subnet().subnetId();
             ownGroupId = ec2.createSecurityGroup(CreateSecurityGroupRequest.builder()
                     .groupName("vpce-eni-sdk-test").description("endpoint interface ids")

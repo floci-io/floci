@@ -67,8 +67,8 @@ class EcsContainerManagerVolumesFromTest {
         appBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(containerBuilder.newContainer("sidecar:latest")).thenReturn(sourceBuilder);
         when(containerBuilder.newContainer("app:latest")).thenReturn(appBuilder);
-        when(sourceBuilder.build()).thenReturn(mock(ContainerSpec.class));
-        when(appBuilder.build()).thenReturn(mock(ContainerSpec.class));
+        when(sourceBuilder.build()).thenReturn(new ContainerSpec("test-image"));
+        when(appBuilder.build()).thenReturn(new ContainerSpec("test-image"));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
@@ -126,7 +126,7 @@ class EcsContainerManagerVolumesFromTest {
     void firelensRouterAndApplicationStartAfterTheirVolumeSource() {
         ContainerBuilder.Builder routerBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(containerBuilder.newContainer("router:latest")).thenReturn(routerBuilder);
-        when(routerBuilder.build()).thenReturn(mock(ContainerSpec.class));
+        when(routerBuilder.build()).thenReturn(new ContainerSpec("test-image"));
         when(lifecycleManager.create(any())).thenReturn("router-id");
         when(lifecycleManager.startCreated(eq("router-id"), any()))
                 .thenReturn(new ContainerInfo("router-id", Map.of()));

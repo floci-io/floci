@@ -19,6 +19,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineSpy;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -31,7 +32,6 @@ import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -284,7 +284,7 @@ class TlsCertificateManagerTest extends TlsCertificateManagerFixture {
 
     @Test
     void aFailedReissueLeavesTheServedFilesIntactAndDoesNotThrow() throws Exception {
-        FlociCertificateAuthority broken = spy(ca);
+        FlociCertificateAuthority broken = inlineSpy(ca);
         doThrow(new IllegalStateException("boom")).when(broken).issueServerCertificate(anyString(), anyList(), any(), any());
         byte[] certBefore = servedCertificate();
         String metadataBefore = Files.readString(tlsDir.resolve("floci-server.metadata.json"));

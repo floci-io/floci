@@ -41,6 +41,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -394,6 +395,32 @@ class IotAuthorizerCfnProvisionerTest {
                 resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
         assertTrue(resource.getAttributes().containsKey(CfnRollback.AUTHORIZER_UPDATE_SNAPSHOT_ATTR));
         assertFalse(resource.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+    }
+
+    /**
+     * A replacement whose rollback could not delete it stays owed. A later update reaches the
+     * authorizer only once ContinueUpdateRollback skipped it, and that update's own unwind restores
+     * its snapshot and leaves the orphan to the cleanup instead of retrying its delete.
+     */
+    @Test
+    void anUnwindAfterASkippedRollbackRestoresTheAuthorizerAndLeavesTheOrphanOwed() {
+        StackResource resource = create(props("auth").put("SigningDisabled", true).put("Status", "ACTIVE"));
+        update(resource, props("auth-2").put("SigningDisabled", true));
+        doThrow(new AwsException("InternalFailureException", "delete down", 500)).doNothing()
+                .when(service).deleteAuthorizer("auth-2", REGION);
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(resource));
+        assertEquals("auth", resource.getPhysicalId());
+        assertEquals("auth-2", provisioner.updateCleanupPhysicalId(resource));
+        doThrow(new AwsException("InternalFailureException", "tags down", 500))
+                .when(service).tagResource(anyString(), anyMap());
+
+        assertThrows(AwsException.class, () -> update(resource, props("auth")
+                .put("SigningDisabled", true).put("Status", "INACTIVE").set("Tags", tags("team", "a"))));
+
+        assertEquals("ACTIVE", authorizers.get("auth").getStatus());
+        assertEquals("true", resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
+        verify(service, times(1)).deleteAuthorizer("auth-2", REGION);
+        assertEquals("auth-2", provisioner.updateCleanupPhysicalId(resource));
     }
 
     @Test

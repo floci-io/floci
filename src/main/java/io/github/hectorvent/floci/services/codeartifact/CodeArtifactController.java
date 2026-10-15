@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationToken;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.DomainView;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PackageVersionAssetResult;
+import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PackageVersionReadmeResult;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.PublishPackageVersionResult;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.ResourcePolicy;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackageVersion;
@@ -413,6 +414,21 @@ public class CodeArtifactController {
                 .build();
     }
 
+    @GET
+    @Path("/v1/package/version/readme")
+    public Response getPackageVersionReadme(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                             @QueryParam("domain-owner") String domainOwner,
+                                             @QueryParam("repository") String repository,
+                                             @QueryParam("format") String format,
+                                             @QueryParam("namespace") String namespace,
+                                             @QueryParam("package") String packageName,
+                                             @QueryParam("version") String version) {
+        String region = regionResolver.resolveRegion(headers);
+        PackageVersionReadmeResult result = service.getPackageVersionReadme(region, domain, domainOwner, repository,
+                format, namespace, packageName, version);
+        return ok(packageVersionReadme(result));
+    }
+
     // -------------------------------------------------------------------- tags
 
     @POST
@@ -581,6 +597,19 @@ public class CodeArtifactController {
         ObjectNode origin = node.putObject("origin");
         origin.put("originType", "INTERNAL");
         node.putArray("licenses");
+        return node;
+    }
+
+    private ObjectNode packageVersionReadme(PackageVersionReadmeResult result) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("format", result.format());
+        if (result.namespace() != null) {
+            node.put("namespace", result.namespace());
+        }
+        node.put("package", result.packageName());
+        node.put("version", result.version());
+        node.put("versionRevision", result.versionRevision());
+        node.put("readme", result.readme());
         return node;
     }
 

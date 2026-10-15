@@ -71,6 +71,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     private final AslExecutor aslExecutor;
     private final ObjectMapper objectMapper;
     private final SfnMockLoader mockLoader;
+    private final StepFunctionsEventPublisher eventPublisher;
 
     // Fields that are valid only in JSONPath mode. Validated against real AWS:
     // creating a JSONata state machine with any of these fields returns SCHEMA_VALIDATION_FAILED.
@@ -123,7 +124,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     @Inject
     public StepFunctionsService(StorageFactory storageFactory, RegionResolver regionResolver,
                                 AslExecutor aslExecutor, ObjectMapper objectMapper,
-                                SfnMockLoader mockLoader) {
+                                SfnMockLoader mockLoader, StepFunctionsEventPublisher eventPublisher) {
         this.stateMachineStore = storageFactory.create("stepfunctions", "sfn-state-machines.json",
                 new TypeReference<Map<String, StateMachine>>() {});
         this.executionStore = storageFactory.create("stepfunctions", "sfn-executions.json",
@@ -141,6 +142,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         this.aslExecutor = aslExecutor;
         this.objectMapper = objectMapper;
         this.mockLoader = mockLoader;
+        this.eventPublisher = eventPublisher;
     }
 
     public void clear() {
@@ -781,12 +783,19 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         }
 
         LOG.infov("Started execution: {0}", arn);
+        if (!express) {
+            eventPublisher.emitStatusChange(exec);
+        }
 
         // The executor appends to this same history, so the cache entry put above is already the
-        // finished history by the time this runs.
+        // finished history by the time this runs. The worker also lands here after StopExecution
+        // aborted it; that ABORTED event is StopExecution's to emit, so it is not emitted twice.
         aslExecutor.executeAsync(sm, exec, history, mockedTestCase, (updatedExec, updatedHistory) -> {
             executionStore.put(updatedExec.getExecutionArn(), updatedExec);
             LOG.infov("Execution {0} completed with status {1}", updatedExec.getExecutionArn(), updatedExec.getStatus());
+            if (!express && !"ABORTED".equals(updatedExec.getStatus())) {
+                eventPublisher.emitStatusChange(updatedExec);
+            }
         });
 
         return exec;
@@ -962,6 +971,9 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             return;
         }
         executionStore.put(arn, exec);
+        if (StepFunctionsEventPublisher.isStandard(exec)) {
+            eventPublisher.emitStatusChange(exec);
+        }
     }
 
     /**

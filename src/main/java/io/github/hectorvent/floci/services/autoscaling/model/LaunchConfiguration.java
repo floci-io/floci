@@ -18,6 +18,9 @@ public class LaunchConfiguration {
     private String keyName;
     private List<String> securityGroups = new ArrayList<>();
     private String userData;
+    // Historical configurations mixed API base64 and decoded instance text. An absent marker
+    // retains their existing launch behavior; only newly created records have known encoding.
+    private Boolean userDataBase64Encoded;
     private String iamInstanceProfile;
     // Nullable on purpose: AWS treats an absent flag as "fall back to the
     // subnet's MapPublicIpOnLaunch" and an explicit false as an override.
@@ -52,6 +55,9 @@ public class LaunchConfiguration {
 
     public String getUserData() { return userData; }
     public void setUserData(String v) { this.userData = v; }
+
+    public Boolean getUserDataBase64Encoded() { return userDataBase64Encoded; }
+    public void setUserDataBase64Encoded(Boolean v) { this.userDataBase64Encoded = v; }
 
     public String getIamInstanceProfile() { return iamInstanceProfile; }
     public void setIamInstanceProfile(String v) { this.iamInstanceProfile = v; }

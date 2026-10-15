@@ -216,7 +216,7 @@ public class RedshiftServerlessService implements Resettable {
         validateNamespaceName(namespaceName);
         String key = storageKey(region, namespaceName);
         if (namespaces.get(key).isPresent()) {
-            throw conflict("The namespace " + namespaceName + " already exists.");
+            throw ServerlessSupport.conflict("The namespace " + namespaceName + " already exists.");
         }
 
         Namespace namespace = new Namespace();
@@ -339,7 +339,7 @@ public class RedshiftServerlessService implements Resettable {
         // A workgroup cannot outlive its namespace; the model lists ConflictException for this call
         // but not its trigger, so this guard is the single place to relax if AWS turns out to differ.
         if (workgroupOf(namespaceName, region).isPresent()) {
-            throw conflict("The namespace " + namespaceName + " still has a workgroup. Delete the workgroup first.");
+            throw ServerlessSupport.conflict("The namespace " + namespaceName + " still has a workgroup. Delete the workgroup first.");
         }
         namespaces.delete(storageKey(region, namespaceName));
         deleted.setStatus("DELETING");
@@ -361,7 +361,7 @@ public class RedshiftServerlessService implements Resettable {
         Namespace namespace = getNamespace(namespaceName, region);
         String key = storageKey(region, snapshotName);
         if (snapshots.get(key).isPresent()) {
-            throw conflict("The snapshot " + snapshotName + " already exists.");
+            throw ServerlessSupport.conflict("The snapshot " + snapshotName + " already exists.");
         }
         RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot();
         snapshot.setSnapshotName(snapshotName);
@@ -387,7 +387,7 @@ public class RedshiftServerlessService implements Resettable {
             return null;
         }
         if (retentionPeriod < 1 || retentionPeriod > MAX_RETENTION_DAYS) {
-            throw validation("retentionPeriod must be -1 (indefinite) or between 1 and " + MAX_RETENTION_DAYS + ".");
+            throw ServerlessSupport.validation("retentionPeriod must be -1 (indefinite) or between 1 and " + MAX_RETENTION_DAYS + ".");
         }
         return retentionPeriod;
     }
@@ -430,7 +430,7 @@ public class RedshiftServerlessService implements Resettable {
         Path dir = dumpDir(region);
         Path file = dir.resolve(snapshotName + ".sql").normalize();
         if (!file.startsWith(dir)) {
-            throw validation("Invalid snapshotName.");
+            throw ServerlessSupport.validation("Invalid snapshotName.");
         }
         return file;
     }
@@ -466,9 +466,24 @@ public class RedshiftServerlessService implements Resettable {
     public String snapshotNameFromArn(String snapshotArn, String region) {
         String prefix = regionResolver.buildArn("redshift-serverless", region, "snapshot/");
         if (snapshotArn == null || !snapshotArn.startsWith(prefix) || snapshotArn.length() == prefix.length()) {
-            throw validation("snapshotArn does not identify a snapshot in this account and Region.");
+            throw ServerlessSupport.validation("snapshotArn does not identify a snapshot in this account and Region.");
         }
         return snapshotArn.substring(prefix.length());
+    }
+
+    /**
+     * Changes a snapshot's retention. An omitted period leaves the snapshot as it is, and -1 makes
+     * it indefinite. {@code snapshotRemainingDays} keeps counting from the creation time, because
+     * the snapshot carries no separate retention start.
+     */
+    public synchronized RedshiftServerlessSnapshot updateSnapshot(String snapshotName, Integer retentionPeriod,
+                                                                  String region) {
+        RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot(getSnapshot(snapshotName, region));
+        if (retentionPeriod != null) {
+            snapshot.setRetentionPeriod(validateRetentionPeriod(retentionPeriod));
+            snapshots.put(storageKey(region, snapshotName), snapshot);
+        }
+        return snapshot;
     }
 
     public synchronized RedshiftServerlessSnapshot deleteSnapshot(String snapshotName, String region) {
@@ -516,7 +531,7 @@ public class RedshiftServerlessService implements Resettable {
         }
         Workgroup workgroup = getWorkgroup(workgroupName, region);
         if (!namespaceName.equals(workgroup.getNamespaceName())) {
-            throw validation("The workgroup " + workgroupName + " does not belong to the namespace "
+            throw ServerlessSupport.validation("The workgroup " + workgroupName + " does not belong to the namespace "
                     + namespaceName + ".");
         }
         Namespace namespace = getNamespace(namespaceName, region);
@@ -564,7 +579,7 @@ public class RedshiftServerlessService implements Resettable {
             throw resourceNotFound(resourceArn);
         }
         if (tagKeys == null) {
-            throw validation("tagKeys is required.");
+            throw ServerlessSupport.validation("tagKeys is required.");
         }
         return retag(resourceArn, region, tagMap -> tagKeys.forEach(tagMap::remove));
     }
@@ -630,13 +645,12 @@ public class RedshiftServerlessService implements Resettable {
 
     private static void requireResourceArn(String resourceArn) {
         if (resourceArn == null || resourceArn.isBlank()) {
-            throw validation("resourceArn is required.");
+            throw ServerlessSupport.validation("resourceArn is required.");
         }
     }
 
     private static AwsException resourceNotFound(String resourceArn) {
-        return new AwsException("ResourceNotFoundException",
-                "The resource " + resourceArn + " was not found.", 400);
+        return ServerlessSupport.notFound("The resource " + resourceArn + " was not found.");
     }
 
     public synchronized Workgroup createWorkgroup(String workgroupName, String namespaceName,
@@ -647,10 +661,10 @@ public class RedshiftServerlessService implements Resettable {
         Namespace namespace = getNamespace(namespaceName, region);
         String key = storageKey(region, workgroupName);
         if (workgroups.get(key).isPresent()) {
-            throw conflict("The workgroup " + workgroupName + " already exists.");
+            throw ServerlessSupport.conflict("The workgroup " + workgroupName + " already exists.");
         }
         if (workgroupOf(namespaceName, region).isPresent()) {
-            throw conflict("The namespace " + namespaceName + " already has a workgroup.");
+            throw ServerlessSupport.conflict("The namespace " + namespaceName + " already has a workgroup.");
         }
 
         Workgroup workgroup = new Workgroup();
@@ -787,8 +801,7 @@ public class RedshiftServerlessService implements Resettable {
         Namespace namespace = getNamespace(workgroup.getNamespaceName(), region);
         if (workgroup.getRuntimeHost() == null || workgroup.getRuntimePort() <= 0
                 || namespace.getAdminUserPassword() == null) {
-            throw new AwsException("ValidationException",
-                    "Workgroup runtime is not available for Data API execution.", 400);
+            throw ServerlessSupport.validation("Workgroup runtime is not available for Data API execution.");
         }
         return new WorkgroupTarget(workgroup.getWorkgroupArn(), workgroup.getWorkgroupName(),
                 workgroup.getRuntimeHost(), workgroup.getRuntimePort(), namespace.getDbName(),
@@ -810,7 +823,7 @@ public class RedshiftServerlessService implements Resettable {
 
     private Workgroup resolveWorkgroup(String nameOrArn, String region) {
         if (nameOrArn == null || nameOrArn.isBlank()) {
-            throw validation("workgroupName is required.");
+            throw ServerlessSupport.validation("workgroupName is required.");
         }
         if (!nameOrArn.startsWith("arn:")) {
             return getWorkgroup(nameOrArn, region);
@@ -827,15 +840,15 @@ public class RedshiftServerlessService implements Resettable {
         Workgroup workgroup = resolveWorkgroup(workgroupName, region);
         Namespace namespace = getNamespace(workgroup.getNamespaceName(), region);
         if (dbName != null && !dbName.equals(namespace.getDbName())) {
-            throw validation("dbName must be " + namespace.getDbName() + ", the only database in this workgroup.");
+            throw ServerlessSupport.validation("dbName must be " + namespace.getDbName() + ", the only database in this workgroup.");
         }
         int duration = durationSeconds == null ? DEFAULT_CREDENTIAL_DURATION_SECONDS : durationSeconds;
         if (duration < MIN_CREDENTIAL_DURATION_SECONDS || duration > MAX_CREDENTIAL_DURATION_SECONDS) {
-            throw validation("durationSeconds must be between " + MIN_CREDENTIAL_DURATION_SECONDS + " and "
+            throw ServerlessSupport.validation("durationSeconds must be between " + MIN_CREDENTIAL_DURATION_SECONDS + " and "
                     + MAX_CREDENTIAL_DURATION_SECONDS + ".");
         }
         if (workgroup.getRuntimeHost() == null) {
-            throw validation("Workgroup runtime is not available.");
+            throw ServerlessSupport.validation("Workgroup runtime is not available.");
         }
         return runtime.issueCredential(workgroups.accountId(), region, workgroup.getWorkgroupName(), dbUser,
                 duration);
@@ -862,7 +875,7 @@ public class RedshiftServerlessService implements Resettable {
                     newPassword);
         } catch (AwsException e) {
             if ("InvalidParameterValue".equals(e.getErrorCode())) {
-                throw new AwsException("ValidationException", e.getMessage(), 400);
+                throw ServerlessSupport.validation(e.getMessage());
             }
             throw e;
         }
@@ -915,24 +928,24 @@ public class RedshiftServerlessService implements Resettable {
 
     private static void requireSnapshotName(String snapshotName) {
         if (snapshotName == null || snapshotName.isBlank()) {
-            throw validation("snapshotName is required.");
+            throw ServerlessSupport.validation("snapshotName is required.");
         }
     }
 
     private static void validateSnapshotName(String snapshotName) {
         requireSnapshotName(snapshotName);
         if (snapshotName.length() < 3 || snapshotName.length() > 255 || !SNAPSHOT_NAME.matcher(snapshotName).matches()) {
-            throw validation("snapshotName must be 3-255 characters of lowercase letters, numbers, and hyphens.");
+            throw ServerlessSupport.validation("snapshotName must be 3-255 characters of lowercase letters, numbers, and hyphens.");
         }
     }
 
     private static void validateNamespaceName(String namespaceName) {
         if (namespaceName == null || namespaceName.length() < 3 || namespaceName.length() > 64
                 || !NAMESPACE_NAME.matcher(namespaceName).matches()) {
-            throw validation("namespaceName must be 3-64 characters of lowercase letters, numbers, and hyphens.");
+            throw ServerlessSupport.validation("namespaceName must be 3-64 characters of lowercase letters, numbers, and hyphens.");
         }
         if (RESERVED_WORDS.contains(namespaceName)) {
-            throw validation("namespaceName must not be an Amazon Redshift reserved word.");
+            throw ServerlessSupport.validation("namespaceName must not be an Amazon Redshift reserved word.");
         }
     }
 
@@ -941,7 +954,7 @@ public class RedshiftServerlessService implements Resettable {
             return DEFAULT_DB_NAME;
         }
         if (dbName.length() > 127 || !DB_NAME.matcher(dbName).matches()) {
-            throw validation("dbName must start with a letter and be at most 127 characters.");
+            throw ServerlessSupport.validation("dbName must start with a letter and be at most 127 characters.");
         }
         return dbName;
     }
@@ -950,7 +963,7 @@ public class RedshiftServerlessService implements Resettable {
         List<String> validated = copyOf(logExports);
         for (String logExport : validated) {
             if (!LOG_EXPORTS.contains(logExport)) {
-                throw validation("logExports must contain only useractivitylog, userlog, and connectionlog.");
+                throw ServerlessSupport.validation("logExports must contain only useractivitylog, userlog, and connectionlog.");
             }
         }
         return validated;
@@ -967,7 +980,7 @@ public class RedshiftServerlessService implements Resettable {
     private static void validateWorkgroupName(String workgroupName) {
         if (workgroupName == null || workgroupName.length() < 3 || workgroupName.length() > 64
                 || !WORKGROUP_NAME.matcher(workgroupName).matches()) {
-            throw validation("workgroupName must be 3-64 characters of lowercase letters, numbers, and hyphens.");
+            throw ServerlessSupport.validation("workgroupName must be 3-64 characters of lowercase letters, numbers, and hyphens.");
         }
     }
 
@@ -975,29 +988,29 @@ public class RedshiftServerlessService implements Resettable {
         requirePositive(settings.baseCapacity(), "baseCapacity");
         requirePositive(settings.maxCapacity(), "maxCapacity");
         if (settings.port() != null && !isAllowedPort(settings.port())) {
-            throw validation("port must be in the range 5431-5455 or 8191-8215.");
+            throw ServerlessSupport.validation("port must be in the range 5431-5455 or 8191-8215.");
         }
         if (settings.ipAddressType() != null && !IP_ADDRESS_TYPES.contains(settings.ipAddressType())) {
-            throw validation("ipAddressType must be ipv4 or dualstack.");
+            throw ServerlessSupport.validation("ipAddressType must be ipv4 or dualstack.");
         }
         if (settings.trackName() != null
                 && (settings.trackName().isEmpty() || settings.trackName().length() > 256
                 || !TRACK_NAME.matcher(settings.trackName()).matches())) {
-            throw validation("trackName must be 1-256 characters of letters, numbers, and underscores.");
+            throw ServerlessSupport.validation("trackName must be 1-256 characters of letters, numbers, and underscores.");
         }
         PricePerformanceTarget target = settings.pricePerformanceTarget();
         if (target != null) {
             if (target.getStatus() != null && !PERFORMANCE_TARGET_STATUSES.contains(target.getStatus())) {
-                throw validation("pricePerformanceTarget.status must be ENABLED or DISABLED.");
+                throw ServerlessSupport.validation("pricePerformanceTarget.status must be ENABLED or DISABLED.");
             }
             if (target.getLevel() != null && (target.getLevel() < 1 || target.getLevel() > 100)) {
-                throw validation("pricePerformanceTarget.level must be between 1 and 100.");
+                throw ServerlessSupport.validation("pricePerformanceTarget.level must be between 1 and 100.");
             }
         }
         if (settings.configParameters() != null) {
             for (ConfigParameter parameter : settings.configParameters()) {
                 if (parameter.getParameterKey() == null || parameter.getParameterKey().isBlank()) {
-                    throw validation("configParameters entries require a parameterKey.");
+                    throw ServerlessSupport.validation("configParameters entries require a parameterKey.");
                 }
             }
         }
@@ -1005,7 +1018,7 @@ public class RedshiftServerlessService implements Resettable {
 
     private static void requirePositive(Integer value, String field) {
         if (value != null && value < 1) {
-            throw validation(field + " must be a positive integer.");
+            throw ServerlessSupport.validation(field + " must be a positive integer.");
         }
     }
 
@@ -1014,8 +1027,7 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     private static AwsException workgroupNotFound(String workgroupName) {
-        return new AwsException("ResourceNotFoundException",
-                "The workgroup " + workgroupName + " was not found.", 400);
+        return ServerlessSupport.notFound("The workgroup " + workgroupName + " was not found.");
     }
 
     private static String storageKey(String region, String namespaceName) {
@@ -1023,20 +1035,10 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     private static AwsException notFound(String namespaceName) {
-        return new AwsException("ResourceNotFoundException",
-                "The namespace " + namespaceName + " was not found.", 400);
+        return ServerlessSupport.notFound("The namespace " + namespaceName + " was not found.");
     }
 
     private static AwsException snapshotNotFound(String snapshotName) {
-        return new AwsException("ResourceNotFoundException",
-                "The snapshot " + snapshotName + " was not found.", 400);
-    }
-
-    private static AwsException conflict(String message) {
-        return new AwsException("ConflictException", message, 400);
-    }
-
-    private static AwsException validation(String message) {
-        return new AwsException("ValidationException", message, 400);
+        return ServerlessSupport.notFound("The snapshot " + snapshotName + " was not found.");
     }
 }

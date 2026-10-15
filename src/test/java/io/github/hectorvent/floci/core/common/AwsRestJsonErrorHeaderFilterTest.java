@@ -4,6 +4,7 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerResponseContext;
 import org.junit.jupiter.api.Test;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -14,7 +15,7 @@ class AwsRestJsonErrorHeaderFilterTest {
     @Test
     void doesNotAddRestJsonHeaderToJsonProtocolErrorForDualProtocolService() {
         ResolvedServiceCatalog catalog = mock(ResolvedServiceCatalog.class);
-        ServiceDescriptor dualProtocolService = mock(ServiceDescriptor.class);
+        ServiceDescriptor dualProtocolService = inlineMock(ServiceDescriptor.class);
         when(dualProtocolService.supportsProtocol(ServiceProtocol.REST_JSON)).thenReturn(true);
 
         ContainerRequestContext request = mock(ContainerRequestContext.class);

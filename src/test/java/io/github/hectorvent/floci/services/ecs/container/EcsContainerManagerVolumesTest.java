@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
+import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -22,21 +23,33 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -61,6 +74,174 @@ class EcsContainerManagerVolumesTest {
     private EcrRegistryManager ecrRegistryManager;
     private EcsContainerManager manager;
 
+    private static Stream<Volume> ephemeralVolumes() {
+        return Stream.of(new Volume("shared", null),
+                new Volume("shared", null, null, Map.of("host", Map.of())),
+                new Volume("shared", "", null, Map.of("host", Map.of("sourcePath", ""))));
+    }
+
+    @ParameterizedTest
+    @MethodSource("ephemeralVolumes")
+    void ephemeralVolumeIsCreatedOnceAndSharedByContainersWithTheirAccessModes(Volume volume) {
+        EcsTaskHandle handle = manager.startTask(task("000000000000", "us-east-1"),
+                ephemeralDefinition(volume), List.of(), "us-east-1");
+
+        ArgumentCaptor<String> volumeName = ArgumentCaptor.forClass(String.class);
+        verify(builder).withNamedVolume(volumeName.capture(), eq("/data"), eq(false));
+        verify(builder).withNamedVolume(volumeName.getValue(), "/data", true);
+        verify(lifecycleManager).ensureVolume(eq(volumeName.getValue()), any());
+        verify(lifecycleManager, times(1)).ensureVolume(anyString(), any());
+        assertEquals(List.of(volumeName.getValue()), handle.getTaskVolumeNames().stream().toList());
+        verify(builder, never()).withBind(any(), any());
+    }
+
+    @Test
+    void taskVolumeIdentityIncludesAccountAndRegion() {
+        TaskDefinition definition = ephemeralDefinition(new Volume("shared", null));
+        manager.startTask(task("111111111111", "us-east-1"), definition, List.of(), "us-east-1");
+        manager.startTask(task("222222222222", "us-east-1"), definition, List.of(), "us-east-1");
+        manager.startTask(task("111111111111", "eu-west-1"), definition, List.of(), "eu-west-1");
+
+        ArgumentCaptor<String> names = ArgumentCaptor.forClass(String.class);
+        verify(lifecycleManager, times(3)).ensureVolume(names.capture(), any());
+        assertEquals(3, names.getAllValues().stream().distinct().count());
+    }
+
+    @Test
+    void unmountedAndUnsupportedVolumesAreNotCreatedAsEphemeralStorage() {
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+        app.setMountPoints(List.of(new MountPoint("external", "/external", false),
+                new MountPoint("ebs", "/ebs", false)));
+        TaskDefinition definition = new TaskDefinition();
+        definition.setFamily("ephemeral-test");
+        definition.setContainerDefinitions(List.of(app));
+        definition.setVolumes(List.of(new Volume("unused", null),
+                new Volume("external", null, null, Map.of("dockerVolumeConfiguration", Map.of("scope", "shared"))),
+                new Volume("ebs", null, null, Map.of("configuredAtLaunch", true))));
+
+        manager.startTask(task("000000000000", "us-east-1"), definition, List.of(), "us-east-1");
+
+        verify(lifecycleManager, never()).ensureVolume(anyString(), any());
+        verify(builder, never()).withNamedVolume(any(), any(), anyBoolean());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedLaunchRemovesItsEphemeralVolume(boolean firstContainerStarted) {
+        if (firstContainerStarted) {
+            when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("docker-id", Map.of()))
+                    .thenThrow(new IllegalStateException("launch failed"));
+        } else {
+            when(lifecycleManager.createAndStart(any())).thenThrow(new IllegalStateException("launch failed"));
+        }
+        assertThrows(IllegalStateException.class, () -> manager.startTask(task("000000000000", "us-east-1"),
+                ephemeralDefinition(new Volume("shared", null)), List.of(), "us-east-1"));
+
+        ArgumentCaptor<String> name = ArgumentCaptor.forClass(String.class);
+        verify(lifecycleManager).ensureVolume(name.capture(), any());
+        verify(lifecycleManager).removeVolume(name.getValue());
+    }
+
+    @Test
+    void volumeRemovalIsRetriedAfterContainersAreGone() {
+        when(lifecycleManager.getDockerClient()).thenReturn(mock(DockerClient.class, RETURNS_DEEP_STUBS));
+        EcsContainerManager stopping = spy(manager);
+        doReturn(0).when(stopping).getExitCodeIfStopped(anyString());
+        doReturn(null).when(stopping).getFinishedAtIfStopped(anyString());
+        EcsTaskHandle handle = stopping.startTask(task("000000000000", "us-east-1"),
+                ephemeralDefinition(new Volume("shared", null)), List.of(), "us-east-1");
+        String volumeName = handle.getTaskVolumeNames().iterator().next();
+        when(lifecycleManager.removeVolume(volumeName)).thenReturn(false, true);
+
+        stopping.stopTask(handle);
+        assertTrue(handle.allContainersRemoved());
+        assertTrue(handle.hasTaskVolumes());
+        stopping.stopTask(handle);
+        assertFalse(handle.hasTaskVolumes());
+        verify(lifecycleManager, times(2)).removeVolume(volumeName);
+    }
+
+    @Test
+    void volumeIsKeptUntilEveryContainerHasBeenRemoved() {
+        EcsTaskHandle handle = manager.startTask(task("000000000000", "us-east-1"),
+                ephemeralDefinition(new Volume("shared", null)), List.of(), "us-east-1");
+        String name = handle.getTaskVolumeNames().iterator().next();
+        doThrow(new IllegalStateException("remove failed")).when(lifecycleManager)
+                .stopAndRemoveStrict("docker-id", null);
+
+        manager.cleanupStoppedTask(handle);
+        assertTrue(handle.hasTaskVolumes());
+        verify(lifecycleManager, never()).removeVolume(name);
+
+        doNothing().when(lifecycleManager).stopAndRemoveStrict("docker-id", null);
+        when(lifecycleManager.removeVolume(name)).thenReturn(true);
+        manager.cleanupStoppedTask(handle);
+        assertFalse(handle.hasTaskVolumes());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedLaunchPreservesResourcesWhenCleanupFails(boolean containerRemovalFails) {
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("docker-id", Map.of()))
+                .thenThrow(new IllegalStateException("launch failed"));
+        if (containerRemovalFails) {
+            doThrow(new IllegalStateException("remove failed")).when(lifecycleManager)
+                    .stopAndRemoveStrict("docker-id", null);
+        } else {
+            when(lifecycleManager.removeVolume(anyString())).thenReturn(false);
+        }
+        EcsTaskLaunchException failure = assertThrows(EcsTaskLaunchException.class,
+                () -> manager.startTask(task("000000000000", "us-east-1"),
+                        ephemeralDefinition(new Volume("shared", null)), List.of(), "us-east-1"));
+        EcsTaskHandle handle = failure.getHandle();
+        assertTrue(handle.hasTaskVolumes());
+        assertEquals(!containerRemovalFails, handle.allContainersRemoved());
+        assertEquals("launch failed", failure.getMessage());
+
+        doNothing().when(lifecycleManager).stopAndRemoveStrict("docker-id", null);
+        when(lifecycleManager.removeVolume(anyString())).thenReturn(true);
+        manager.cleanupStoppedTask(handle);
+        assertTrue(handle.allContainersRemoved());
+        assertFalse(handle.hasTaskVolumes());
+    }
+
+    @Test
+    void recoveredVolumeNamesMatchLaunchAndExcludeUnusedAndExternalVolumes() {
+        EcsTask task = task("000000000000", "us-east-1");
+        TaskDefinition definition = ephemeralDefinition(new Volume("shared", null));
+        EcsTaskHandle handle = manager.startTask(task, definition, List.of(), "us-east-1");
+        assertEquals(handle.getTaskVolumeNames(), manager.taskVolumeNames(task, definition));
+        definition.setVolumes(List.of(new Volume("shared", "/host/path")));
+        assertTrue(manager.taskVolumeNames(task, definition).isEmpty());
+        definition.setVolumes(List.of(new Volume("shared", null,
+                new EfsVolumeConfiguration("fs-test", null, null, null, null, null))));
+        assertTrue(manager.taskVolumeNames(task, definition).isEmpty());
+    }
+
+    private static TaskDefinition ephemeralDefinition(Volume volume) {
+        ContainerDefinition writer = new ContainerDefinition();
+        writer.setName("writer");
+        writer.setImage("app:latest");
+        writer.setMountPoints(List.of(new MountPoint("shared", "/data", false)));
+        ContainerDefinition reader = new ContainerDefinition();
+        reader.setName("reader");
+        reader.setImage("app:latest");
+        reader.setMountPoints(List.of(new MountPoint("shared", "/data", true)));
+        TaskDefinition definition = new TaskDefinition();
+        definition.setFamily("ephemeral-test");
+        definition.setContainerDefinitions(List.of(writer, reader));
+        definition.setVolumes(List.of(volume, new Volume("unused", null)));
+        return definition;
+    }
+
+    private static EcsTask task(String account, String region) {
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:" + region + ":" + account + ":task/test-cluster/same-task-id");
+        return task;
+    }
+
     @BeforeEach
     void setUp() {
         builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
@@ -69,6 +250,7 @@ class EcsContainerManagerVolumesTest {
         when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.removeVolume(anyString())).thenReturn(true);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         when(lifecycleManager.createAndStart(any()))

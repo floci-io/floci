@@ -59,6 +59,11 @@ public interface CfnResourceProvisioner {
         return false;
     }
 
+    /** Whether a prior failed rollback must be retried before even an outputs-only update commits. */
+    default boolean requiresUpdateRecovery(StackResource resource) {
+        return false;
+    }
+
     /**
      * The physical id of the entity this update's replacement displaced, or null when this type
      * owes no replacement cleanup. {@code CloudFormationService} announces it as DELETE_IN_PROGRESS

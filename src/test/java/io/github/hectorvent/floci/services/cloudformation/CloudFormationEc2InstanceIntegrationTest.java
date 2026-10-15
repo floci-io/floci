@@ -1,8 +1,14 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -21,12 +27,81 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class CloudFormationEc2InstanceIntegrationTest {
 
+    @Inject
+    Ec2Service ec2;
+
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/ap-southeast-2/cloudformation/aws4_request";
     private static final String EC2_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/ap-southeast-2/ec2/aws4_request";
     private static final String IAM_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/iam/aws4_request";
+
+    @Test
+    void tagUpdatesPreserveServiceOwnedInstanceAndSubnetTags() {
+        String region = "ap-southeast-2";
+        String stackName = "cfn-ec2-owned-tags-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+                {"Resources": {
+                  "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.193.0.0/16"}},
+                  "Subnet": {"Type": "AWS::EC2::Subnet", "Properties": {
+                    "VpcId": {"Ref": "Vpc"}, "CidrBlock": "10.193.1.0/24", "Tags": %s}},
+                  "Server": {"Type": "AWS::EC2::Instance", "Properties": {
+                    "ImageId": "ami-12345678", "InstanceType": "t3.micro",
+                    "SubnetId": {"Ref": "Subnet"}, "Tags": %s}}
+                }, "Outputs": {
+                  "InstanceId": {"Value": {"Ref": "Server"}},
+                  "SubnetId": {"Value": {"Ref": "Subnet"}}
+                }}
+                """;
+        String original = """
+                [{"Key": "Name", "Value": "before"}, {"Key": "Removed", "Value": "before"}]
+                """;
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                .formParam("Action", "CreateStack").formParam("StackName", stackName)
+                .formParam("TemplateBody", template.formatted(original, original))
+                .when().post("/").then().statusCode(200);
+        try {
+            String stack = given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                    .formParam("Action", "DescribeStacks").formParam("StackName", stackName)
+                    .when().post("/").then().statusCode(200)
+                    .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>")).extract().asString();
+            List<String> ids = List.of(output(stack, "InstanceId"), output(stack, "SubnetId"));
+            Map<String, String> managed = Map.of("aws:autoscaling:groupName", "attached-group",
+                    "aws:cloudformation:stack-id", stackName, "AWS:service", "owner");
+            ec2.createSystemTags(region, ids, managed.entrySet().stream()
+                    .map(entry -> new Tag(entry.getKey(), entry.getValue())).toList());
+
+            for (String desired : List.of("""
+                    [{"Key": "Name", "Value": "after"}, {"Key": "Added", "Value": "after"}]
+                    """, "[]")) {
+                given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                        .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+                        .formParam("TemplateBody", template.formatted(desired, desired))
+                        .when().post("/").then().statusCode(200);
+                String updated = given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                        .formParam("Action", "DescribeStacks").formParam("StackName", stackName)
+                        .when().post("/").then().statusCode(200)
+                        .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>")).extract().asString();
+                assertEquals(ids, List.of(output(updated, "InstanceId"), output(updated, "SubnetId")));
+                Map<String, String> expected = new HashMap<>(managed);
+                if (!"[]".equals(desired)) {
+                    expected.put("Name", "after");
+                    expected.put("Added", "after");
+                }
+                for (String id : ids) {
+                    Map<String, String> observed = new HashMap<>();
+                    ec2.describeTags(region, Map.of("resource-id", List.of(id)))
+                            .forEach(tag -> observed.put(tag.get("key"), tag.get("value")));
+                    assertEquals(expected, observed);
+                }
+            }
+        } finally {
+            given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+                    .formParam("Action", "DeleteStack").formParam("StackName", stackName)
+                    .when().post("/").then().statusCode(200);
+        }
+    }
 
     @Test
     void createStackProvisionsRealEc2Instance() {

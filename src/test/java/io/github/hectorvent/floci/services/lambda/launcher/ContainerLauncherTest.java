@@ -108,7 +108,9 @@ class ContainerLauncherTest {
         when(config.docker()).thenReturn(docker);
         when(docker.logMaxSize()).thenReturn("10m");
         when(docker.logMaxFile()).thenReturn("3");
-        when(config.baseUrl()).thenReturn("http://localhost:4566");
+        lenient().when(config.baseUrl()).thenReturn("http://localhost:4566");
+        lenient().when(config.port()).thenReturn(4566);
+        lenient().when(config.tls()).thenReturn(mock(EmulatorConfig.TlsConfig.class));
         lenient().when(config.defaultRegion()).thenReturn("us-east-1");
         lenient().when(config.defaultAccountId()).thenReturn("000000000000");
         lenient().when(config.hostname()).thenReturn(Optional.empty());
@@ -131,7 +133,7 @@ class ContainerLauncherTest {
 
         ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
         ContainerReachableEndpoint reachableEndpoint =
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
         LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
         launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
@@ -650,6 +652,27 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchFunction_endpointUsesListenPortNotAdvertisedBaseUrlPort() throws Exception {
+        // docker run -p 4811:4566 -e FLOCI_BASE_URL=http://localhost:4811: 4811 exists only on the
+        // host. The function container reaches Floci over the Docker network, where it listens on
+        // quarkus.http.port (4566, set in setUp), so that is the port AWS_ENDPOINT_URL must carry.
+        Path codePath = Files.createDirectory(tempDir.resolve("endpoint-port"));
+        // lenient: the fixed code never reads base-url here; the stub sets up the mismatch.
+        lenient().when(config.baseUrl()).thenReturn("http://localhost:4811");
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("endpoint-port-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        List<String> env = captureRealContainerSpec().env();
+        assertTrue(env.contains("AWS_ENDPOINT_URL=http://127.0.0.1:4566"), env.toString());
+    }
+
+    @Test
     void launchFunction_injectsConfiguredDefaultRegionWhenArnMissing() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("region-default"));
         when(config.defaultRegion()).thenReturn("eu-central-1");
@@ -994,6 +1017,7 @@ class ContainerLauncherTest {
         fn.setHandler("index.handler");
         fn.setCodeLocalPath(codePath.toString());
         fn.setCodeSha256("large-fn-sha-v1");
+        when(lifecycleManager.create(any())).thenReturn("helper-123", "container-123");
 
         long original = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
         try {
@@ -1019,11 +1043,47 @@ class ContainerLauncherTest {
         // Two creates: the helper + the real container. The helper is discarded.
         verify(lifecycleManager, times(2)).create(any());
         verify(lifecycleManager, atLeastOnce()).ensureVolume(any());
-        verify(lifecycleManager, times(1)).stopAndRemove(any(), any()); // the helper only
+        verify(lifecycleManager).stopAndRemove("helper-123", null, 0);
+        verify(lifecycleManager, never()).stopAndRemove(any(), any());
+        InOrder order = inOrder(lifecycleManager);
+        order.verify(lifecycleManager).stopAndRemove("helper-123", null, 0);
+        order.verify(lifecycleManager).create(any());
+        order.verify(lifecycleManager).startCreated(eq("container-123"), any());
         // A superseded code-version volume is never deleted synchronously within a single launch
         // (see the cleanupSupersededVolumes tests below for the deferred sweep; this fn has no
         // prior volume to supersede, since it's the fn's first deploy here).
         verify(lifecycleManager, never()).removeVolume(any());
+    }
+
+    @Test
+    void launchFunction_failedCodeCopyImmediatelyRemovesOnlyItsHelper() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("failed-code-copy"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]);
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("copy-failure");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setCodeSha256("copy-failure-sha");
+        when(lifecycleManager.create(any())).thenReturn("helper-123");
+        doThrow(new IllegalStateException("fixture copy failed"))
+                .when(dockerClient).copyArchiveToContainerCmd("helper-123");
+
+        withLoweredCodeVolumeThreshold(() -> {
+            RuntimeException failure = assertThrows(RuntimeException.class, () -> launcher.launch(fn));
+            assertTrue(failure.getMessage().contains("fixture copy failed"));
+        });
+
+        InOrder order = inOrder(lifecycleManager, dockerClient);
+        order.verify(lifecycleManager).startCreated(eq("helper-123"), any());
+        order.verify(dockerClient).copyArchiveToContainerCmd("helper-123");
+        order.verify(lifecycleManager).stopAndRemove("helper-123", null, 0);
+        verify(lifecycleManager, times(1)).create(any());
+        verify(lifecycleManager, never()).stopAndRemove(any(), any());
+        verify(lifecycleManager, never()).removeVolume(any());
+        verify(runtimeApiServerFactory).release(runtimeApiServer);
+        assertFalse(Files.exists(tempDir.resolve("lambda-codevol-markers")
+                .resolve(ContainerLauncher.codeVolumeName(fn))));
     }
 
     @Test
@@ -1701,7 +1761,7 @@ class ContainerLauncherTest {
     void launchFunction_forwardsExtensionOutputToCloudWatchLogs() throws Exception {
         CloudWatchLogsService cloudWatchLogs = mock(CloudWatchLogsService.class);
         ContainerReachableEndpoint reachableEndpoint =
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
         ContainerLauncher launcherWithRealStreamer = new ContainerLauncher(
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
                 lifecycleManager,
@@ -1892,4 +1952,14 @@ class ContainerLauncherTest {
         assertEquals(List.of("/opt/extensions/lambda-adapter", "/opt/extensions/otel-collector"),
                 capturedLaunchPaths(launchCmds));
     }
+    private static void withLoweredCodeVolumeThreshold(Runnable action) {
+        long original = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024;
+            action.run();
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = original;
+        }
+    }
+
 }

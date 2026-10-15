@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -329,7 +330,7 @@ class RedshiftInterceptingBridgeTest {
     @Test
     @Timeout(20)
     void locallyHandledQueryInsideTransactionKeepsTheTransactionStatus() throws Exception {
-        SpectrumInterceptor interceptor = Mockito.mock(SpectrumInterceptor.class);
+        SpectrumInterceptor interceptor = inlineMock(SpectrumInterceptor.class);
         Mockito.when(interceptor.intercept(Mockito.anyString(), Mockito.any(), Mockito.any(Socket.class)))
                 .thenReturn(new SpectrumInterceptor.Decision.Forward(), new SpectrumInterceptor.Decision.Handled());
         startBridge(interceptor);

@@ -5,18 +5,20 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.IamService.InlinePolicyChange;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * CloudFormation provisioning for {@code AWS::IAM::Policy}, which in AWS is an <em>inline</em>
@@ -90,36 +92,44 @@ public class IamPolicyCfnProvisioner implements CfnResourceProvisioner {
         List<String> roleTargets = new ArrayList<>();
         List<String> userTargets = new ArrayList<>();
         List<String> groupTargets = new ArrayList<>();
+        List<InlinePolicyUndo> writtenPolicies = new ArrayList<>();
+        List<InlinePolicyUndo> removedPolicies = new ArrayList<>();
         try {
+            List<String> desiredRoles = resolveInlineTargets(props, "Roles", engine);
+            List<String> desiredUsers = resolveInlineTargets(props, "Users", engine);
+            List<String> desiredGroups = resolveInlineTargets(props, "Groups", engine);
             cleanupPendingInlinePolicies(r);
-            putInlinePolicy(props, "Roles", engine, roleTargets,
-                    principal -> iamService.putRolePolicy(principal, name, doc));
-            putInlinePolicy(props, "Users", engine, userTargets,
-                    principal -> iamService.putUserPolicy(principal, name, doc));
-            putInlinePolicy(props, "Groups", engine, groupTargets,
-                    principal -> iamService.putGroupPolicy(principal, name, doc));
+            if (!legacyManagedPolicy && previousPolicyName != null && !previousPolicyName.equals(name)) {
+                removeRenamedInlinePolicies(previousRoleTargets, desiredRoles,
+                        policyAccess("Role", previousPolicyName), removedPolicies);
+                removeRenamedInlinePolicies(previousUserTargets, desiredUsers,
+                        policyAccess("User", previousPolicyName), removedPolicies);
+                removeRenamedInlinePolicies(previousGroupTargets, desiredGroups,
+                        policyAccess("Group", previousPolicyName), removedPolicies);
+            }
+            putInlinePolicy(desiredRoles, roleTargets, doc,
+                    policyAccess("Role", name), previousPolicyName != null, writtenPolicies);
+            putInlinePolicy(desiredUsers, userTargets, doc,
+                    policyAccess("User", name), previousPolicyName != null, writtenPolicies);
+            putInlinePolicy(desiredGroups, groupTargets, doc,
+                    policyAccess("Group", name), previousPolicyName != null, writtenPolicies);
 
             if (legacyManagedPolicy) {
                 migrateLegacyManagedPolicy(r);
             } else {
                 deleteRemovedInlinePolicies(previousRoleTargets, roleTargets,
-                        previousPolicyName, policyName,
-                        principal -> iamService.deleteRolePolicy(principal, previousPolicyName));
+                        previousPolicyName, policyAccess("Role", previousPolicyName), removedPolicies);
                 deleteRemovedInlinePolicies(previousUserTargets, userTargets,
-                        previousPolicyName, policyName,
-                        principal -> iamService.deleteUserPolicy(principal, previousPolicyName));
+                        previousPolicyName, policyAccess("User", previousPolicyName), removedPolicies);
                 deleteRemovedInlinePolicies(previousGroupTargets, groupTargets,
-                        previousPolicyName, policyName,
-                        principal -> iamService.deleteGroupPolicy(principal, previousPolicyName));
+                        previousPolicyName, policyAccess("Group", previousPolicyName), removedPolicies);
             }
         } catch (RuntimeException failure) {
             if (previousPolicyName == null) {
                 r.setPhysicalId(policyName);
                 recordInlinePolicyTargets(r, roleTargets, userTargets, groupTargets);
             } else {
-                rollbackInlinePolicyUpdate(r, failure, previousPolicyName, policyName,
-                        previousRoleTargets, previousUserTargets, previousGroupTargets,
-                        roleTargets, userTargets, groupTargets);
+                rollbackInlinePolicyUpdate(r, failure, policyName, writtenPolicies, removedPolicies);
             }
             throw failure;
         }
@@ -152,18 +162,70 @@ public class IamPolicyCfnProvisioner implements CfnResourceProvisioner {
         return node != null && node.isArray() && !node.isEmpty();
     }
 
-    private void putInlinePolicy(JsonNode props, String propName, CloudFormationTemplateEngine engine,
-                                 List<String> successfulTargets, Consumer<String> op) {
-        if (props == null || !props.has(propName)) {
-            return;
+    private record InlinePolicyAccess(String kind, String name, BiConsumer<String, String> write,
+                                      BiFunction<String, String, InlinePolicyChange> update,
+                                      Function<String, InlinePolicyChange> remove) {}
+
+    private record InlinePolicyUndo(InlinePolicyAccess access, String principal, InlinePolicyChange change) {
+        void restore() {
+            change.rollback().run();
         }
-        for (JsonNode entry : props.get(propName)) {
-            String name = engine.resolve(entry);
-            if (name != null && !name.isBlank()) {
-                op.accept(name);
-                successfulTargets.add(name);
+    }
+
+    private InlinePolicyAccess policyAccess(String kind, String name) {
+        return switch (kind) {
+            case "Role" -> new InlinePolicyAccess(kind, name,
+                    (principal, document) -> iamService.putRolePolicy(principal, name, document),
+                    (principal, document) -> iamService.putRolePolicyWithRollback(principal, name, document),
+                    principal -> iamService.deleteRolePolicyWithRollback(principal, name));
+            case "User" -> new InlinePolicyAccess(kind, name,
+                    (principal, document) -> iamService.putUserPolicy(principal, name, document),
+                    (principal, document) -> iamService.putUserPolicyWithRollback(principal, name, document),
+                    principal -> iamService.deleteUserPolicyWithRollback(principal, name));
+            case "Group" -> new InlinePolicyAccess(kind, name,
+                    (principal, document) -> iamService.putGroupPolicy(principal, name, document),
+                    (principal, document) -> iamService.putGroupPolicyWithRollback(principal, name, document),
+                    principal -> iamService.deleteGroupPolicyWithRollback(principal, name));
+            default -> throw new IllegalArgumentException(kind);
+        };
+    }
+
+    private List<String> resolveInlineTargets(JsonNode props, String propName, CloudFormationTemplateEngine engine) {
+        List<String> targets = new ArrayList<>();
+        if (props != null && props.has(propName)) {
+            for (JsonNode entry : props.get(propName)) {
+                String name = engine.resolve(entry);
+                if (name != null && !name.isBlank()) {
+                    targets.add(name);
+                }
             }
         }
+        return targets;
+    }
+
+    private void putInlinePolicy(List<String> targets, List<String> successfulTargets,
+                                 String document, InlinePolicyAccess access,
+                                 boolean updating, List<InlinePolicyUndo> writtenPolicies) {
+        for (String name : targets) {
+            if (updating) {
+                InlinePolicyChange change = access.update().apply(name, document);
+                writtenPolicies.add(new InlinePolicyUndo(access, name, change));
+            } else {
+                access.write().accept(name, document);
+            }
+            successfulTargets.add(name);
+        }
+    }
+
+    private void removeRenamedInlinePolicies(String previousTargets, List<String> desiredTargets,
+                                             InlinePolicyAccess access, List<InlinePolicyUndo> removedPolicies) {
+        Set<String> retainedTargets = new HashSet<>(desiredTargets);
+        detachInline(previousTargets, name -> {
+            if (retainedTargets.contains(name)) {
+                InlinePolicyChange change = access.remove().apply(name);
+                removedPolicies.add(new InlinePolicyUndo(access, name, change));
+            }
+        });
     }
 
     private void recordInlinePolicyTargets(StackResource resource, List<String> roleTargets,
@@ -178,44 +240,42 @@ public class IamPolicyCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void rollbackInlinePolicyUpdate(StackResource resource, RuntimeException failure,
-                                            String previousPolicyName, String currentPolicyName,
-                                            String previousRoleTargets, String previousUserTargets,
-                                            String previousGroupTargets, List<String> appliedRoleTargets,
-                                            List<String> appliedUserTargets, List<String> appliedGroupTargets) {
-        List<String> pendingRoles = rollbackAppliedInlinePolicies(
-                failure, previousRoleTargets, appliedRoleTargets, previousPolicyName, currentPolicyName,
-                principal -> iamService.deleteRolePolicy(principal, currentPolicyName));
-        List<String> pendingUsers = rollbackAppliedInlinePolicies(
-                failure, previousUserTargets, appliedUserTargets, previousPolicyName, currentPolicyName,
-                principal -> iamService.deleteUserPolicy(principal, currentPolicyName));
-        List<String> pendingGroups = rollbackAppliedInlinePolicies(
-                failure, previousGroupTargets, appliedGroupTargets, previousPolicyName, currentPolicyName,
-                principal -> iamService.deleteGroupPolicy(principal, currentPolicyName));
+                                            String currentPolicyName, List<InlinePolicyUndo> writtenPolicies,
+                                            List<InlinePolicyUndo> removedPolicies) {
+        List<String> pendingRoles = new ArrayList<>();
+        List<String> pendingUsers = new ArrayList<>();
+        List<String> pendingGroups = new ArrayList<>();
+        // Undo puts first so restored old names do not compete with this attempt's new names for quota.
+        List<InlinePolicyUndo> rollback = new ArrayList<>(writtenPolicies.reversed());
+        rollback.addAll(removedPolicies.reversed());
+        boolean restored = true;
+        for (InlinePolicyUndo undo : rollback) {
+            String description = "restore inline policy " + undo.access().name() + " on " + undo.principal();
+            if (!CfnRollback.attemptIamCleanup(failure, description, undo::restore)) {
+                restored = false;
+                Throwable[] cleanupFailures = failure.getSuppressed();
+                Throwable cleanupFailure = cleanupFailures[cleanupFailures.length - 1];
+                boolean ownershipChanged = cleanupFailure instanceof AwsException aws
+                        && "ConcurrentModification".equals(aws.getErrorCode());
+                if (!ownershipChanged && undo.change().previousDocument() == null
+                        && currentPolicyName.equals(undo.access().name())) {
+                    switch (undo.access().kind()) {
+                        case "Role" -> pendingRoles.add(undo.principal());
+                        case "User" -> pendingUsers.add(undo.principal());
+                        case "Group" -> pendingGroups.add(undo.principal());
+                        default -> throw new IllegalArgumentException(undo.access().kind());
+                    }
+                }
+            }
+        }
         recordPendingInlineCleanup(resource, currentPolicyName, pendingRoles, pendingUsers, pendingGroups);
-        resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
-    }
-
-    private List<String> rollbackAppliedInlinePolicies(RuntimeException failure, String previousTargets,
-                                                       List<String> appliedTargets, String previousPolicyName,
-                                                       String currentPolicyName, Consumer<String> cleanup) {
-        Set<String> previous = inlineTargetSet(previousTargets);
-        List<String> rollbackTargets = new ArrayList<>();
-        for (String target : new LinkedHashSet<>(appliedTargets)) {
-            if (!previousPolicyName.equals(currentPolicyName) || !previous.contains(target)) {
-                rollbackTargets.add(target);
-            }
+        resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR);
+        if (restored) {
+            resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+        } else {
+            resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                    "Could not restore inline policies after failed update: " + failure.getMessage());
         }
-        Collections.reverse(rollbackTargets);
-
-        List<String> pendingTargets = new ArrayList<>();
-        for (String target : rollbackTargets) {
-            String description = "delete inline policy " + currentPolicyName + " from " + target;
-            if (!CfnRollback.attemptIamCleanup(failure, description, () -> detachInline(target, cleanup))) {
-                pendingTargets.add(target);
-            }
-        }
-        Collections.reverse(pendingTargets);
-        return pendingTargets;
     }
 
     private void recordPendingInlineCleanup(StackResource resource, String policyName,
@@ -248,27 +308,21 @@ public class IamPolicyCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void deleteRemovedInlinePolicies(String previousTargets, List<String> currentTargets,
-                                             String previousPolicyName, String currentPolicyName,
-                                             Consumer<String> op) {
+                                             String previousPolicyName,
+                                             InlinePolicyAccess access, List<InlinePolicyUndo> removedPolicies) {
         if (previousPolicyName == null) {
             return;
         }
         Set<String> retainedTargets = new HashSet<>(currentTargets);
         detachInline(previousTargets, name -> {
-            if (!previousPolicyName.equals(currentPolicyName) || !retainedTargets.contains(name)) {
-                op.accept(name);
+            if (!retainedTargets.contains(name)) {
+                InlinePolicyChange change = access.remove().apply(name);
+                removedPolicies.add(new InlinePolicyUndo(access, name, change));
             }
         });
     }
 
-    private Set<String> inlineTargetSet(String targets) {
-        if (targets == null || targets.isBlank()) {
-            return Set.of();
-        }
-        return new HashSet<>(Arrays.asList(targets.split("\n")));
-    }
-
-    private void detachInline(String targets, Consumer<String> op) {
+    private static void detachInline(String targets, Consumer<String> op) {
         if (targets == null || targets.isBlank()) {
             return;
         }

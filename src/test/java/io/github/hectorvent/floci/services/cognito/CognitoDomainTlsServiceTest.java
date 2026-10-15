@@ -49,13 +49,7 @@ class CognitoDomainTlsServiceTest {
 
     @BeforeEach
     void setUp() {
-        // Every certificate exists and is issued unless a test says otherwise.
-        when(acmService.describeCertificate(anyString(), eq(REGION))).thenAnswer(invocation -> {
-            Certificate certificate = new Certificate();
-            certificate.setArn(invocation.getArgument(0));
-            certificate.setStatus(CertificateStatus.ISSUED);
-            return certificate;
-        });
+        CognitoCertificateStubs.everyCertificateIsIssued(acmService);
         service = new CognitoService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),

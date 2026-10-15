@@ -62,6 +62,8 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
+        Ec2Tags.validatedTags(desiredTags);
         CloudFormationTemplateEngine engine = ctx.engine();
         String region = ctx.region();
         String groupName = ctx.resolveOptional(props, "GroupName");
@@ -104,7 +106,7 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
                 EGRESS_RULES_ATTR,
                 perms -> ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(), perms),
                 perms -> ec2Service.revokeSecurityGroupEgress(region, sg.getGroupId(), perms));
-        Ec2Tags.reconcile(ec2Service, region, sg.getGroupId(), ctx.resolveTags(props, "Tags"));
+        Ec2Tags.reconcile(ec2Service, region, sg.getGroupId(), desiredTags);
     }
 
     @Override

@@ -97,16 +97,16 @@ class SchedulerContextAttributesIntegrationTest {
         String queueName = uniqueName("ctx-rate-q");
         String queueUrl = createQueue(queueName);
         String scheduleName = uniqueName("ctx-rate");
-        harness.createSchedule(scheduleName, "rate(1 minute)", "ENABLED", queueArn(queueName), CONTEXT_INPUT);
+        Instant firstFire = harness.createRecurringSchedule(scheduleName, "rate(1 minute)", queueArn(queueName),
+                CONTEXT_INPUT);
         Schedule schedule = schedulerService.getSchedule(scheduleName, null, REGION);
-        Instant firstFire = schedule.getCreationDate().plus(1, ChronoUnit.MINUTES);
         ScheduleDispatcher dispatcher = harness.dispatcherFor(scheduleName);
 
         dispatcher.tick(firstFire.plusSeconds(1));
 
         JsonNode body = singleBody(queueUrl);
         assertEquals(schedule.getArn(), body.path("arn").asText());
-        assertEquals(firstFire.truncatedTo(ChronoUnit.SECONDS).toString(), body.path("time").asText());
+        assertEquals(firstFire.toString(), body.path("time").asText());
         assertTrue(body.path("executionId").asText().matches("[0-9a-f]{16}"), body.toString());
         assertEquals(1, body.path("attempt").asInt());
     }
@@ -188,9 +188,8 @@ class SchedulerContextAttributesIntegrationTest {
         String queueName = uniqueName("ctx-ids-q");
         String queueUrl = createQueue(queueName);
         String scheduleName = uniqueName("ctx-ids");
-        harness.createSchedule(scheduleName, "rate(1 minute)", "ENABLED", queueArn(queueName), CONTEXT_INPUT);
-        Schedule schedule = schedulerService.getSchedule(scheduleName, null, REGION);
-        Instant firstFire = schedule.getCreationDate().plus(1, ChronoUnit.MINUTES);
+        Instant firstFire = harness.createRecurringSchedule(scheduleName, "rate(1 minute)", queueArn(queueName),
+                CONTEXT_INPUT);
         ScheduleDispatcher dispatcher = harness.dispatcherFor(scheduleName);
 
         dispatcher.tick(firstFire.plusSeconds(1));

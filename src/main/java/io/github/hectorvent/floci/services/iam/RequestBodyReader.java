@@ -13,7 +13,7 @@ import java.net.URLDecoder;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 
-final class RequestBodyReader {
+public final class RequestBodyReader {
 
     private static final Logger LOG = Logger.getLogger(RequestBodyReader.class);
     private static final String BUFFERED_BODY_PROPERTY =
@@ -44,7 +44,7 @@ final class RequestBodyReader {
         return body;
     }
 
-    static String formField(ContainerRequestContext ctx, String key) {
+    public static String formField(ContainerRequestContext ctx, String key) {
         MediaType mt = ctx.getMediaType();
         if (mt == null
                 || !"application".equalsIgnoreCase(mt.getType())

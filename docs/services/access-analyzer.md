@@ -14,6 +14,7 @@ Floci supports the analyzer lifecycle used by local governance workflows.
 | `ListAnalyzers` | - |
 | `CreateAnalyzer` | - |
 | `DeleteAnalyzer` | - |
+| `GetAnalyzer` | - |
 <!-- floci:actions:end -->
 
 Analyzer state is account and Region scoped and persisted through `StorageFactory`.

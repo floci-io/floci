@@ -75,6 +75,16 @@ public class AccessAnalyzerController {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    @GET
+    @Path("/analyzer/{analyzerName}")
+    public Response getAnalyzer(@Context HttpHeaders headers, @PathParam("analyzerName") String analyzerName) {
+        String region = regionResolver.resolveRegion(headers);
+        Analyzer analyzer = accessAnalyzerService.getAnalyzer(region, analyzerName);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("analyzer", analyzerSummary(analyzer));
+        return Response.ok(response).build();
+    }
+
     private ObjectNode analyzerSummary(Analyzer analyzer) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("arn", analyzer.getArn());

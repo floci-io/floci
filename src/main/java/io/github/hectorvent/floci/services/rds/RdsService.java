@@ -49,6 +49,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbRoleAssociation;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.EventSubscription;
@@ -75,6 +76,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -84,7 +86,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -698,6 +702,19 @@ public class RdsService implements Resettable, ResourceProvider {
                     "DB instance " + id + " already exists.", 400);
         }
 
+        if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
+            if (masterPassword != null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "The requested DB Instance will be a member of a DB Cluster. "
+                                + "Set master user password for the DB Cluster.", 400);
+            }
+            if (masterUsername != null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "The requested DB Instance will be a member of a DB Cluster. "
+                                + "Set master user name for the DB Cluster.", 400);
+            }
+        }
+
         DatabaseEngine engine = resolveEngine(engineParam);
         if (engine == DatabaseEngine.SQLSERVER && dbName != null && !dbName.isBlank()) {
             throw new AwsException("InvalidParameterCombination",
@@ -722,10 +739,12 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "MasterUsername must begin with a letter and contain only alphanumeric characters or underscores.", 400);
         }
-        if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
+        boolean manageInstancePassword = manageMasterUserPassword
+                && (dbClusterIdentifier == null || dbClusterIdentifier.isBlank());
+        if (manageInstancePassword && (masterPassword == null || masterPassword.isBlank())) {
             masterPassword = generatedMasterPassword();
         }
-        String effectiveSecretKmsKeyId = manageMasterUserPassword
+        String effectiveSecretKmsKeyId = manageInstancePassword
                 ? resolveManagedSecretKmsKeyId(masterUserSecretKmsKeyId, effectiveRegion) : null;
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
         // is consistent; mock mode only skips starting the container and auth proxy.
@@ -740,6 +759,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String instanceDockerVolumeName = null;
         String instanceStorageResourceId = dbiResourceId;
         PlacementResolution placement;
+        DbCluster publicationCluster = null;
 
         String engineIdentifier = engineParam != null && !engineParam.isBlank()
                 ? engineParam.toLowerCase() : null;
@@ -754,6 +774,7 @@ public class RdsService implements Resettable, ResourceProvider {
             if (engineIdentifier == null && cluster.getEngineIdentifier() != null) {
                 engineIdentifier = cluster.getEngineIdentifier().toLowerCase();
             }
+            publicationCluster = cluster;
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
             containerId = cluster.getContainerId();
@@ -828,50 +849,79 @@ public class RdsService implements Resettable, ResourceProvider {
 
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);
-        if (manageMasterUserPassword) {
-            attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
-        }
-
         String accountId = accountIdFromArn(instance.getDbInstanceArn());
-        putInstanceForScope(accountId, effectiveRegion, id, instance);
+        // The canonical cluster owns member publication and cluster changes. Standalone
+        // publication and slow relay/storage work do not hold the service-wide monitor.
+        synchronized (publicationCluster != null ? publicationCluster : instance) {
+            DbCluster currentCluster = null;
+            if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
+                currentCluster = findClusterForScope(accountId, effectiveRegion, dbClusterIdentifier);
+                if (currentCluster != publicationCluster) {
+                    releaseProxyPort(proxyPort);
+                    throw new AwsException("InvalidDBClusterStateFault",
+                            "DB cluster changed during member creation.", 400);
+                }
+                if (currentCluster != null) {
+                    if (currentCluster.getStatus() != null
+                            && currentCluster.getStatus() != DbInstanceStatus.AVAILABLE) {
+                        releaseProxyPort(proxyPort);
+                        throw new AwsException("InvalidDBClusterStateFault",
+                                "DB cluster is not available for member creation.", 400);
+                    }
+                    backendHost = currentCluster.getContainerHost();
+                    backendPort = currentCluster.getContainerPort();
+                    instance.setContainerId(currentCluster.getContainerId());
+                    instance.setContainerHost(backendHost);
+                    instance.setContainerPort(backendPort);
+                    iamEnabled = currentCluster.isIamDatabaseAuthenticationEnabled();
+                    instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
+                    // Incomplete cluster records retain the member's existing defaults for missing credentials.
+                    if (currentCluster.getMasterUsername() != null) {
+                        instance.setMasterUsername(currentCluster.getMasterUsername());
+                    }
+                    if (currentCluster.getMasterPassword() != null) {
+                        instance.setMasterPassword(currentCluster.getMasterPassword());
+                    }
+                }
+            }
+            if (manageInstancePassword) {
+                attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
+            }
+            putInstanceForScope(accountId, effectiveRegion, id, instance);
 
-        if (!mock && hasBackend(backendHost, backendPort)) {
-            final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
-            try {
-                proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                        engine, iamEnabled, proxyPort, backendHost, backendPort,
-                        instance.getEndpoint().address(),
-                        masterUsername, masterPassword, dbName,
-                        (user, pw) -> validateDbPasswordForScope(
-                                accountId, instanceRegion, id, user, pw),
-                        proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                instanceRegion, accountId, instance.getDbiResourceId()));
-            } catch (RuntimeException | Error e) {
+            if (!mock && hasBackend(backendHost, backendPort)) {
+                final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
                 try {
-                    deleteInstanceForScope(accountId, effectiveRegion, id);
-                } catch (RuntimeException rollbackFailure) {
-                    e.addSuppressed(rollbackFailure);
+                    proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                            engine, iamEnabled, proxyPort, backendHost, backendPort,
+                            instance.getEndpoint().address(),
+                            instance.getMasterUsername(), instance.getMasterPassword(), dbName,
+                            (user, pw) -> validateDbPasswordForScope(
+                                    accountId, instanceRegion, id, user, pw),
+                            proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
+                                    instanceRegion, accountId, dbUserResourceId(instance)));
+                } catch (RuntimeException | Error e) {
+                    try {
+                        deleteInstanceForScope(accountId, effectiveRegion, id);
+                    } catch (RuntimeException rollbackFailure) {
+                        e.addSuppressed(rollbackFailure);
+                    }
+                    throw e;
                 }
-                throw e;
             }
-        }
 
-        if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
-            DbCluster cluster = findClusterForScope(
-                    currentAccountId(), effectiveRegion, dbClusterIdentifier);
-            if (cluster != null) {
-                cluster.getDbClusterMembers().add(id);
-                if (cluster.resolveWriterIdentifier() == null
-                        || !cluster.getDbClusterMembers().contains(cluster.getClusterWriterIdentifier())) {
-                    cluster.setClusterWriterIdentifier(cluster.resolveWriterIdentifier());
+            if (currentCluster != null) {
+                currentCluster.getDbClusterMembers().add(id);
+                if (currentCluster.resolveWriterIdentifier() == null
+                        || !currentCluster.getDbClusterMembers().contains(currentCluster.getClusterWriterIdentifier())) {
+                    currentCluster.setClusterWriterIdentifier(currentCluster.resolveWriterIdentifier());
                 }
-                putClusterForScope(currentAccountId(), effectiveRegion,
-                        dbClusterIdentifier, cluster);
+                putClusterForScope(accountId, effectiveRegion, dbClusterIdentifier, currentCluster);
             }
-        }
 
-        instance.setStatus(DbInstanceStatus.AVAILABLE);
-        putInstanceForScope(accountId, effectiveRegion, id, instance);
+            instance.setStatus(DbInstanceStatus.AVAILABLE);
+            putInstanceForScope(accountId, effectiveRegion, id, instance);
+        }
         LOG.infov("DB instance {0} created, engine={1}, endpoint={2}:{3}",
                 id, engine, endpoint.address(), String.valueOf(endpoint.port()));
         return instance;
@@ -1569,7 +1619,7 @@ public class RdsService implements Resettable, ResourceProvider {
             replica.setPreferredBackupWindow(backupWindow);
         }
         putInstanceForScope(accountIdFromArn(replica.getDbInstanceArn()), effectiveRegion, id, replica);
-        DbInstance promoted = rebootDbInstance(id, effectiveRegion);
+        DbInstance promoted = doRebootDbInstance(id, effectiveRegion);
         LOG.infov("Read replica {0} promoted to a standalone DB instance", id);
         return promoted;
     }
@@ -2906,7 +2956,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     // synchronized like the tag and delete paths: an unguarded read-modify-write here could
     // write an instance back after deleteDbInstance removed it
-    public synchronized DbInstance modifyDbInstance(
+    public DbInstance modifyDbInstance(
             String id, String newPassword, Boolean iamEnabled,
             String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
             String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
@@ -2917,7 +2967,19 @@ public class RdsService implements Resettable, ResourceProvider {
                 settings, publiclyAccessible, scaling, null);
     }
 
-    public synchronized DbInstance modifyDbInstance(
+    public DbInstance modifyDbInstance(
+            String id, String newPassword, Boolean iamEnabled,
+            String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
+            String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
+            DbInstanceSettings settings, Boolean publiclyAccessible,
+            DbInstanceScalingChanges scaling, Boolean deletionProtection) {
+        return withInstancePublication(id, region, () -> doModifyDbInstance(
+                id, newPassword, iamEnabled, dbSubnetGroupName, vpcSecurityGroupIds,
+                optionGroupName, region, autoMinorVersionUpgrade,
+                settings, publiclyAccessible, scaling, deletionProtection));
+    }
+
+    private synchronized DbInstance doModifyDbInstance(
             String id, String newPassword, Boolean iamEnabled,
             String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
             String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
@@ -2944,7 +3006,10 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setOptionGroupName(optionGroupName);
         }
         boolean passwordRotated = false;
-        if (newPassword != null && !newPassword.isBlank()) {
+        boolean clusterMember = instance.getDbClusterIdentifier() != null
+                && !instance.getDbClusterIdentifier().isBlank();
+        // Aurora member master credentials are owned and changed by the cluster.
+        if (!clusterMember && newPassword != null && !newPassword.isBlank()) {
             String oldPassword = instance.getMasterPassword();
             boolean backendRunning = !config.services().rds().mock()
                     && instance.getDbClusterIdentifier() == null && instance.getContainerId() != null;
@@ -3334,7 +3399,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private void startStandaloneInstanceBackend(DbInstance instance, String id, String effectiveRegion) {
         if (instance.getEndpoint() == null) {
             try {
-                ensureInstanceBackend(id, effectiveRegion);
+                doEnsureInstanceBackend(id, effectiveRegion);
             } catch (RuntimeException | Error e) {
                 instance.setStatus(DbInstanceStatus.FAILED);
                 putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
@@ -3382,7 +3447,11 @@ public class RdsService implements Resettable, ResourceProvider {
      * Stops an available cluster and its members: the cluster's proxy and container go away,
      * every member's proxy with them, and all of them report "stopped" until StartDBCluster.
      */
-    public synchronized DbCluster stopDbCluster(String id, String region) {
+    public DbCluster stopDbCluster(String id, String region) {
+        return withClusterPublication(id, region, () -> doStopDbCluster(id, region));
+    }
+
+    private DbCluster doStopDbCluster(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         DbCluster cluster = getDbCluster(id, effectiveRegion);
@@ -3430,7 +3499,11 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /** Starts a stopped cluster and its members on the cluster's kept volume. */
-    public synchronized DbCluster startDbCluster(String id, String region) {
+    public DbCluster startDbCluster(String id, String region) {
+        return withClusterPublication(id, region, () -> doStartDbCluster(id, region));
+    }
+
+    private DbCluster doStartDbCluster(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         DbCluster cluster = getDbCluster(id, effectiveRegion);
@@ -3453,7 +3526,11 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /** Reboots a cluster: its container and proxies go down and come back on the same volume. */
-    public synchronized DbCluster rebootDbCluster(String id, String region) {
+    public DbCluster rebootDbCluster(String id, String region) {
+        return withClusterPublication(id, region, () -> doRebootDbCluster(id, region));
+    }
+
+    private DbCluster doRebootDbCluster(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         DbCluster cluster = getDbCluster(id, effectiveRegion);
@@ -3551,6 +3628,10 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbInstance rebootDbInstance(String id, String region) {
+        return withInstancePublication(id, region, () -> doRebootDbInstance(id, region));
+    }
+
+    private DbInstance doRebootDbInstance(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
 
@@ -3608,15 +3689,27 @@ public class RdsService implements Resettable, ResourceProvider {
                         (user, pw) -> validateDbPasswordForScope(
                                 accountId, instanceRegion, id, user, pw),
                         proxyBinding(instance.getEngine(), instance.getEndpoint().address(),
-                                instance.getEndpoint().port(), instanceRegion, accountId, instance.getDbiResourceId()));
+                                instance.getEndpoint().port(), instanceRegion, accountId, dbUserResourceId(instance)));
             } else {
                 // No backing container: created or last rebooted while no daemon was reachable.
-                instance = ensureInstanceBackend(id, effectiveRegion);
+                instance = doEnsureInstanceBackend(id, effectiveRegion);
             }
         }
 
         LOG.infov("DB instance {0} rebooted", id);
         return instance;
+    }
+
+    private String dbUserResourceId(DbInstance instance) {
+        String clusterId = instance.getDbClusterIdentifier();
+        if (clusterId != null && !clusterId.isBlank()) {
+            DbCluster cluster = findClusterForScope(accountIdFromArn(instance.getDbInstanceArn()),
+                    regionFromArn(instance.getDbInstanceArn()), clusterId);
+            if (cluster != null) {
+                return cluster.getDbClusterResourceId();
+            }
+        }
+        return instance.getDbiResourceId();
     }
 
     /**
@@ -3659,7 +3752,11 @@ public class RdsService implements Resettable, ResourceProvider {
      *
      * @return the instance, with its container fields populated when a backend became available
      */
-    public synchronized DbInstance ensureInstanceBackend(String id, String region) {
+    public DbInstance ensureInstanceBackend(String id, String region) {
+        return withInstancePublication(id, region, () -> doEnsureInstanceBackend(id, region));
+    }
+
+    private synchronized DbInstance doEnsureInstanceBackend(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
         if (config.services().rds().mock()) {
@@ -3716,7 +3813,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     (user, pw) -> validateDbPasswordForScope(
                             accountId, instanceRegion, id, user, pw),
                     proxyBinding(instance.getEngine(), relayEndpoint.address(),
-                            relayEndpoint.port(), instanceRegion, accountId, instance.getDbiResourceId()));
+                            relayEndpoint.port(), instanceRegion, accountId, dbUserResourceId(instance)));
         } catch (RuntimeException e) {
             if (allocatedRelayPort) {
                 releaseProxyPort(relayPort);
@@ -3747,7 +3844,11 @@ public class RdsService implements Resettable, ResourceProvider {
      *
      * @return the cluster, with its container fields populated when a backend became available
      */
-    public synchronized DbCluster ensureClusterBackend(String id, String region) {
+    public DbCluster ensureClusterBackend(String id, String region) {
+        return withClusterPublication(id, region, () -> doEnsureClusterBackend(id, region));
+    }
+
+    private DbCluster doEnsureClusterBackend(String id, String region) {
         return ensureClusterBackend(id, region, true);
     }
 
@@ -3857,7 +3958,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         member.setContainerPort(0);
                     }
                     // Member retry must not recurse into the cluster's other members.
-                    ensureInstanceBackend(memberId, region);
+                    doEnsureInstanceBackend(memberId, region);
                 } else if (restart) {
                     member.setContainerId(cluster.getContainerId());
                     member.setContainerHost(cluster.getContainerHost());
@@ -3916,11 +4017,55 @@ public class RdsService implements Resettable, ResourceProvider {
         return config.services().rds().mock() || containerManager.isDockerReachable();
     }
 
-    public synchronized void deleteDbInstance(String id) {
+    private <T> T withClusterPublication(String id, String region, Supplier<T> operation) {
+        String accountId = currentAccountId();
+        String scopeRegion = effectiveRegion(region);
+        while (true) {
+            DbCluster cluster = getDbCluster(id, scopeRegion);
+            synchronized (cluster) {
+                synchronized (this) {
+                    if (findClusterForScope(accountId, scopeRegion, id) != cluster) {
+                        continue;
+                    }
+                    return operation.get();
+                }
+            }
+        }
+    }
+
+    private <T> T withInstancePublication(String id, String region, Supplier<T> operation) {
+        String accountId = currentAccountId();
+        String scopeRegion = effectiveRegion(region);
+        while (true) {
+            DbInstance instance = getDbInstance(id, scopeRegion);
+            String clusterId = instance.getDbClusterIdentifier();
+            DbCluster cluster = clusterId == null || clusterId.isBlank() ? null
+                    : findClusterForScope(accountId, scopeRegion, clusterId);
+            synchronized (cluster != null ? cluster : instance) {
+                synchronized (this) {
+                    if (findInstanceForScope(accountId, scopeRegion, id) != instance
+                            || (clusterId != null && !clusterId.isBlank()
+                            && findClusterForScope(accountId, scopeRegion, clusterId) != cluster)) {
+                        continue;
+                    }
+                }
+                return operation.get();
+            }
+        }
+    }
+
+    public void deleteDbInstance(String id) {
         deleteDbInstance(id, regionResolver.getDefaultRegion());
     }
 
-    public synchronized void deleteDbInstance(String id, String region) {
+    public void deleteDbInstance(String id, String region) {
+        withInstancePublication(id, region, () -> {
+            doDeleteDbInstance(id, region);
+            return null;
+        });
+    }
+
+    private synchronized void doDeleteDbInstance(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = Optional.ofNullable(
                         findInstanceForScope(currentAccountId(), effectiveRegion, id))
@@ -4552,7 +4697,29 @@ public class RdsService implements Resettable, ResourceProvider {
                 serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause, null, null, region);
     }
 
-    public synchronized DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+    public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause,
+                                     Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
+                                     String region) {
+        String effectiveRegion = effectiveRegion(region);
+        while (true) {
+            DbCluster cluster = getDbCluster(id, effectiveRegion);
+            // Wait for same-cluster publication before entering the global mutation monitor.
+            synchronized (cluster) {
+                synchronized (this) {
+                    if (findClusterForScope(currentAccountId(), effectiveRegion, id) != cluster) {
+                        continue;
+                    }
+                    return doModifyDbCluster(id, newPassword, iamEnabled, serverlessV2MinCapacity,
+                            serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
+                            manageMasterUserPassword, masterUserSecretKmsKeyId, region);
+                }
+            }
+        }
+    }
+
+    private DbCluster doModifyDbCluster(String id, String newPassword, Boolean iamEnabled,
                                      Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                      Integer serverlessV2SecondsUntilAutoPause,
                                      Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
@@ -4611,8 +4778,9 @@ public class RdsService implements Resettable, ResourceProvider {
         } else {
             changeCredentials.run();
         }
-        boolean passwordRotated = credentialsChanged && rotateBackend;
-        if (credentialsChanged && hasNewPassword) {
+        boolean passwordAccepted = credentialsChanged && hasNewPassword;
+        boolean passwordChanged = passwordAccepted && !newPassword.equals(oldPassword);
+        if (passwordAccepted) {
             cluster.setMasterPassword(newPassword);
         }
         if (iamEnabled != null) {
@@ -4644,35 +4812,60 @@ public class RdsService implements Resettable, ResourceProvider {
             applyAutoPause(cluster);
         }
 
-        // A cluster rotation applies to every endpoint: the cluster's own proxy and each member
-        // instance's proxy hold start-time password snapshots, and member endpoints validate
-        // against the member's stored password, so propagate the rotated credential to all of
-        // them (AWS applies the cluster master password to every member endpoint).
-        if (passwordRotated) {
+        // Accepted credentials belong to every endpoint even before a backend is provisioned.
+        // Running backends have already accepted the rotation before metadata is published.
+        if (passwordChanged) {
             proxyManager.updateMasterPassword(
                     rdsResourceRelayKey(cluster.getDbClusterArn(), id), newPassword);
-            for (String memberId : cluster.getDbClusterMembers()) {
-                DbInstance member = findInstanceForScope(
-                        currentAccountId(), effectiveRegion, memberId);
-                if (member == null) {
-                    continue;
-                }
-                member.setMasterPassword(newPassword);
-                putInstanceForScope(currentAccountId(), effectiveRegion, memberId, member);
-                proxyManager.updateMasterPassword(
-                        rdsResourceRelayKey(member.getDbInstanceArn(), memberId), newPassword);
-            }
+            updateClusterMembers(cluster, effectiveRegion,
+                    member -> member.setMasterPassword(newPassword),
+                    relayKey -> proxyManager.updateMasterPassword(relayKey, newPassword));
+        }
+
+        if (iamEnabled != null) {
+            proxyManager.updateIamEnabled(rdsResourceRelayKey(cluster.getDbClusterArn(), id), iamEnabled);
+            updateClusterMembers(cluster, effectiveRegion,
+                    member -> member.setIamDatabaseAuthenticationEnabled(iamEnabled),
+                    relayKey -> proxyManager.updateIamEnabled(relayKey, iamEnabled));
         }
 
         LOG.infov("DB cluster {0} modified", id);
         return cluster;
     }
 
-    public synchronized void deleteDbCluster(String id) {
+    private void updateClusterMembers(DbCluster cluster, String region,
+                                      Consumer<DbInstance> change, Consumer<String> updateProxy) {
+        String accountId = currentAccountId();
+        for (DbInstance member : listDbInstances(null, region)) {
+            if (Objects.equals(cluster.getDbClusterIdentifier(), member.getDbClusterIdentifier())) {
+                change.accept(member);
+                putInstanceForScope(accountId, region, member.getDbInstanceIdentifier(), member);
+                updateProxy.accept(rdsResourceRelayKey(member.getDbInstanceArn(), member.getDbInstanceIdentifier()));
+            }
+        }
+    }
+
+    public void deleteDbCluster(String id) {
         deleteDbCluster(id, regionResolver.getDefaultRegion());
     }
 
-    public synchronized void deleteDbCluster(String id, String region) {
+    public void deleteDbCluster(String id, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        while (true) {
+            DbCluster cluster = getDbCluster(id, effectiveRegion);
+            synchronized (cluster) {
+                synchronized (this) {
+                    if (findClusterForScope(currentAccountId(), effectiveRegion, id) != cluster) {
+                        continue;
+                    }
+                    doDeleteDbCluster(id, region);
+                    return;
+                }
+            }
+        }
+    }
+
+    private void doDeleteDbCluster(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = Optional.ofNullable(
                         findClusterForScope(currentAccountId(), effectiveRegion, id))
@@ -5080,7 +5273,11 @@ public class RdsService implements Resettable, ResourceProvider {
      * Forces a failover inside a DB cluster: the named member, or the first reader when none is
      * named, becomes the writer. A cluster without a reader has nothing to fail over to.
      */
-    public synchronized DbCluster failoverDbCluster(String id, String targetDbInstanceIdentifier, String region) {
+    public DbCluster failoverDbCluster(String id, String targetDbInstanceIdentifier, String region) {
+        return withClusterPublication(id, region, () -> doFailoverDbCluster(id, targetDbInstanceIdentifier, region));
+    }
+
+    private DbCluster doFailoverDbCluster(String id, String targetDbInstanceIdentifier, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(id, effectiveRegion);
         String writer = cluster.resolveWriterIdentifier();
@@ -7952,7 +8149,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                     accountId, instanceRegion,
                                     instance.getDbInstanceIdentifier(), user, pw),
                             proxyBinding(instance.getEngine(), instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                    instanceRegion, accountId, instance.getDbiResourceId()));
+                                    instanceRegion, accountId, dbUserResourceId(instance)));
                 }
                 instance.setStatus(DbInstanceStatus.AVAILABLE);
                 putInstanceForScope(accountId, instanceRegion,
@@ -9554,6 +9751,205 @@ public class RdsService implements Resettable, ResourceProvider {
             eventSubscriptions.put(eventSubscriptionKey(region, name), subscription);
         }
         return subscription;
+    }
+
+    // ── IAM role associations ─────────────────────────────────────────────────
+
+    /**
+     * Associates an IAM role with a DB cluster. A cluster names each role once, so the same role
+     * twice is refused ({@code DBClusterRoleAlreadyExists} covers the role ARN only). The role is
+     * {@code ACTIVE} at once and is not looked up in IAM.
+     */
+    public synchronized DbCluster addRoleToDbCluster(String region, String clusterId, String roleArn,
+                                                     String featureName) {
+        requireParameter(clusterId, "DBClusterIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAvailableCluster(cluster, clusterId);
+        requireSupportedFeature(engineName(cluster), featureName);
+        requireRoleNotAssociated(cluster, clusterId, roleArn);
+        cluster.getAssociatedRoles().add(new DbRoleAssociation(roleArn, blankToNull(featureName)));
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        LOG.infov("Role {0} associated with DB cluster {1}", roleArn, clusterId);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * Gives a cluster {@code CreateDBCluster} just made the roles the request named, all in one
+     * step: either every role is associated or none is. The handler deletes the new cluster when
+     * this refuses, so a failed create leaves nothing behind.
+     */
+    public synchronized DbCluster addRolesToNewDbCluster(String region, String clusterId,
+                                                         List<DbRoleAssociation> roles) {
+        // The features are checked below against the cluster's own engine.
+        validateClusterRoleAssociations(clusterId, null, roles);
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAvailableCluster(cluster, clusterId);
+        for (DbRoleAssociation role : roles) {
+            requireSupportedFeature(engineName(cluster), role.getFeatureName());
+            requireRoleNotAssociated(cluster, clusterId, role.getRoleArn());
+        }
+        for (DbRoleAssociation role : roles) {
+            cluster.getAssociatedRoles().add(new DbRoleAssociation(role.getRoleArn(),
+                    blankToNull(role.getFeatureName())));
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    private static void requireRoleNotAssociated(DbCluster cluster, String clusterId, String roleArn) {
+        for (DbRoleAssociation existing : cluster.getAssociatedRoles()) {
+            if (existing.getRoleArn().equals(roleArn)) {
+                throw new AwsException("DBClusterRoleAlreadyExists", "Role ARN " + roleArn
+                        + " is already associated with DB cluster " + clusterId + ".", 400);
+            }
+        }
+    }
+
+    /**
+     * Removes a role from a DB cluster. When a feature name is given, the role must be associated
+     * for that feature.
+     */
+    public synchronized DbCluster removeRoleFromDbCluster(String region, String clusterId, String roleArn,
+                                                          String featureName) {
+        requireParameter(clusterId, "DBClusterIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        requireAvailableCluster(cluster, clusterId);
+        String feature = blankToNull(featureName);
+        boolean removed = cluster.getAssociatedRoles().removeIf(existing -> existing.getRoleArn().equals(roleArn)
+                && (feature == null || feature.equalsIgnoreCase(existing.getFeatureName())));
+        if (!removed) {
+            throw new AwsException("DBClusterRoleNotFound", "Role ARN " + roleArn
+                    + (feature == null ? "" : " for feature " + feature)
+                    + " is not associated with DB cluster " + clusterId + ".", 404);
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        LOG.infov("Role {0} disassociated from DB cluster {1}", roleArn, clusterId);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /**
+     * Associates an IAM role with a DB instance for one feature. The role and the feature are each
+     * associated at most once, so either one already present is refused.
+     */
+    public synchronized DbInstance addRoleToDbInstance(String region, String instanceId, String roleArn,
+                                                       String featureName) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        requireParameter(featureName, "FeatureName");
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        requireAvailableInstance(instance, instanceId);
+        requireSupportedFeature(engineName(instance), featureName);
+        for (DbRoleAssociation existing : instance.getAssociatedRoles()) {
+            if (existing.getRoleArn().equals(roleArn) || featureName.equalsIgnoreCase(existing.getFeatureName())) {
+                throw new AwsException("DBInstanceRoleAlreadyExists", "Role ARN " + existing.getRoleArn()
+                        + " is already associated with DB instance " + instanceId + " for feature "
+                        + existing.getFeatureName() + ".", 400);
+            }
+        }
+        instance.getAssociatedRoles().add(new DbRoleAssociation(roleArn, featureName));
+        putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
+        LOG.infov("Role {0} associated with DB instance {1} for feature {2}", roleArn, instanceId, featureName);
+        return RESPONSE_COPIER.convertValue(instance, DbInstance.class);
+    }
+
+    /** Removes a role from a DB instance; the role must be associated for the feature named. */
+    public synchronized DbInstance removeRoleFromDbInstance(String region, String instanceId, String roleArn,
+                                                            String featureName) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireParameter(roleArn, "RoleArn");
+        requireParameter(featureName, "FeatureName");
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        requireAvailableInstance(instance, instanceId);
+        boolean removed = instance.getAssociatedRoles().removeIf(existing -> existing.getRoleArn().equals(roleArn)
+                && featureName.equalsIgnoreCase(existing.getFeatureName()));
+        if (!removed) {
+            throw new AwsException("DBInstanceRoleNotFound", "Role ARN " + roleArn
+                    + " is not associated with DB instance " + instanceId + " for feature " + featureName + ".", 404);
+        }
+        putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
+        LOG.infov("Role {0} disassociated from DB instance {1}", roleArn, instanceId);
+        return RESPONSE_COPIER.convertValue(instance, DbInstance.class);
+    }
+
+    /**
+     * Checks the roles a {@code CreateDBCluster} request names before the cluster exists, by the
+     * rules {@link #addRoleToDbCluster} applies one at a time, so a list that would be refused part
+     * way through refuses the create instead of leaving a cluster with half its roles. The feature
+     * names are checked against {@code engine} when the request names one; a create that takes its
+     * engine from a global cluster has them checked once the cluster exists.
+     */
+    public void validateClusterRoleAssociations(String clusterId, String engine, List<DbRoleAssociation> roles) {
+        Set<String> roleArns = new HashSet<>();
+        for (DbRoleAssociation role : roles) {
+            requireParameter(role.getRoleArn(), "AssociatedRoles.RoleArn");
+            if (!isBlank(engine)) {
+                requireSupportedFeature(engine, role.getFeatureName());
+            }
+            if (!roleArns.add(role.getRoleArn())) {
+                throw new AwsException("DBClusterRoleAlreadyExists", "Role ARN " + role.getRoleArn()
+                        + " is named more than once for DB cluster " + clusterId + ".", 400);
+            }
+        }
+    }
+
+    private static String blankToNull(String value) {
+        return isBlank(value) ? null : value;
+    }
+
+    /**
+     * Refuses a feature name the engine's {@code SupportedFeatureNames} does not list, matched
+     * without regard to case. No feature name (a cluster role may have none) and an engine the
+     * catalogue does not list pass, so Floci never refuses a feature it cannot judge.
+     */
+    private static void requireSupportedFeature(String engine, String featureName) {
+        if (isBlank(featureName)) {
+            return;
+        }
+        List<String> supported = RdsEngineCatalog.featureNamesForEngine(engine);
+        if (supported == null || supported.stream().anyMatch(name -> name.equalsIgnoreCase(featureName))) {
+            return;
+        }
+        throw new AwsException("InvalidParameterValue", "The feature " + featureName
+                + " is not supported for engine " + engine.toLowerCase(Locale.ROOT) + ". Supported features: "
+                + (supported.isEmpty() ? "none" : String.join(", ", supported)) + ".", 400);
+    }
+
+    /** The engine name the request gave, or the engine's own name for state recorded without one. */
+    private static String engineName(DbCluster cluster) {
+        return !isBlank(cluster.getEngineIdentifier()) ? cluster.getEngineIdentifier()
+                : cluster.getEngine() != null ? cluster.getEngine().name() : null;
+    }
+
+    private static String engineName(DbInstance instance) {
+        return !isBlank(instance.getEngineIdentifier()) ? instance.getEngineIdentifier()
+                : instance.getEngine() != null ? instance.getEngine().name() : null;
+    }
+
+    private static void requireParameter(String value, String name) {
+        if (isBlank(value)) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter " + name + ".", 400);
+        }
+    }
+
+    private static void requireAvailableCluster(DbCluster cluster, String clusterId) {
+        if (cluster.getStatus() != null && cluster.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBClusterStateFault",
+                    "DB cluster " + clusterId + " is not in available state.", 400);
+        }
+    }
+
+    private static void requireAvailableInstance(DbInstance instance, String instanceId) {
+        if (instance.getStatus() != null && instance.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "DB instance " + instanceId + " is not in available state.", 400);
+        }
     }
 
     // ── Cluster endpoints ─────────────────────────────────────────────────────

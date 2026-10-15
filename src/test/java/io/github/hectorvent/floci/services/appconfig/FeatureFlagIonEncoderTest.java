@@ -126,4 +126,30 @@ class FeatureFlagIonEncoderTest {
         assertFalse(AppConfigDataService.acceptsFeatureFlagIon("*/*"));
         assertFalse(AppConfigDataService.acceptsFeatureFlagIon(null));
     }
+
+    /** RFC 9110 section 5.6.6: a parameter value is a token or a quoted-string, and both forms are the same value. */
+    @Test
+    void readsAQuotedTypeAsTheSameValueAsAToken() {
+        assertTrue(AppConfigDataService.acceptsFeatureFlagIon("application/ion; type=AWS.AppConfig.FeatureFlags, */*;q=0.1"));
+        assertTrue(AppConfigDataService.acceptsFeatureFlagIon(
+                "application/ion; type=\"AWS.AppConfig.FeatureFlags\", */*;q=0.1"));
+        assertTrue(AppConfigDataService.acceptsFeatureFlagIon("Application/ION;TYPE=\"aws.appconfig.featureflags\";q=1.0"));
+        assertFalse(AppConfigDataService.acceptsFeatureFlagIon("application/ion; type=\"AWS.AppConfig.FeatureFlags\";q=0"));
+    }
+
+    /** RFC 9110 section 5.6.4: a quoted-pair stands for the character after its backslash. */
+    @Test
+    void readsAQuotedPairInATypeAsTheCharacterItEscapes() {
+        assertTrue(AppConfigDataService.acceptsFeatureFlagIon("application/ion; type=\"AWS.AppConfig.Feature\\Flags\""));
+        assertTrue(AppConfigDataService.acceptsFeatureFlagIon("application/ion; type=\"AWS\\.AppConfig\\.FeatureFlags\""));
+        assertFalse(AppConfigDataService.acceptsFeatureFlagIon("application/ion; type=\"AWS.AppConfig.FeatureFlags\\\"\""));
+    }
+
+    @Test
+    void rejectsAQuotedTypeThatIsMalformedOrDifferent() {
+        assertFalse(AppConfigDataService.acceptsFeatureFlagIon("application/ion; type=\"AWS.AppConfig.Other\""));
+        assertFalse(AppConfigDataService.acceptsFeatureFlagIon("application/ion; type=\" AWS.AppConfig.FeatureFlags\""));
+        assertFalse(AppConfigDataService.acceptsFeatureFlagIon("application/ion; type=\"AWS.AppConfig.FeatureFlags"));
+        assertFalse(AppConfigDataService.acceptsFeatureFlagIon("application/ion; type=\"AWS.AppConfig.FeatureFlags\"x"));
+    }
 }

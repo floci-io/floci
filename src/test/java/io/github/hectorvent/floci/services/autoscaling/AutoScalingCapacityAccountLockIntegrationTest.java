@@ -39,7 +39,7 @@ class AutoScalingCapacityAccountLockIntegrationTest {
             AutoScalingGroup group = RequestScopes.callAs(ACCOUNT, REGION, () -> create(REGION, name));
             RequestScopes.runAs(otherAccount, otherRegion, () -> create(otherRegion, name));
             Future<?> adjustment = workers.submit(() -> RequestScopes.runAs(ACCOUNT, REGION,
-                    () -> service.adjustCapacityIfPresent(group, () -> {
+                    () -> service.reconcileIfPresent(group, () -> {
                         entered.countDown();
                         try {
                             assertTrue(release.await(10, TimeUnit.SECONDS));

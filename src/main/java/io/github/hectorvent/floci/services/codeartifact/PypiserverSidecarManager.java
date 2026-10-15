@@ -80,6 +80,10 @@ public class PypiserverSidecarManager implements ContainerTeardown {
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withEmbeddedDns()
                 .withLogRotation()
+                // The image's entrypoint execs pypi-server, which installs no SIGTERM handler. As
+                // PID 1 it would ignore the stop request, and every reset, repository delete and
+                // shutdown would wait out the whole stop timeout for each repository's container.
+                .withInit()
                 .withCmd(List.of(
                         "run",
                         "-p", String.valueOf(PYPISERVER_PORT),

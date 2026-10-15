@@ -1,7 +1,5 @@
 package io.github.hectorvent.floci.config;
 
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
-import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -9,23 +7,14 @@ import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
 import io.restassured.config.RestAssuredConfig;
 import io.restassured.config.SSLConfig;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.security.Security;
-import java.util.List;
-import java.util.Map;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
 
 /**
@@ -35,7 +24,7 @@ import static org.hamcrest.Matchers.startsWith;
  * HTTP server serves HTTPS alongside HTTP (dual-mode, LocalStack parity).
  */
 @QuarkusTest
-@TestProfile(TlsIntegrationTest.TlsEnabledProfile.class)
+@TestProfile(UserCertTlsProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TlsIntegrationTest {
 
@@ -81,7 +70,7 @@ class TlsIntegrationTest {
 
     @Test
     void sqsCreateQueueOverHttps() {
-        given()
+        String queueUrl = given()
             .baseUri("https://localhost:" + testSslPort)
             .header("X-Amz-Target", "AmazonSQS.CreateQueue")
             .contentType("application/x-amz-json-1.0")
@@ -90,7 +79,18 @@ class TlsIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("QueueUrl", startsWith("https://"));
+            .body("QueueUrl", startsWith("https://"))
+            .extract().path("QueueUrl");
+
+        given()
+            .baseUri("https://localhost:" + testSslPort)
+            .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+            .contentType("application/x-amz-json-1.0")
+            .body("{\"QueueUrl\": \"" + queueUrl + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     // ==================== STS via HTTPS ====================
@@ -107,51 +107,5 @@ class TlsIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("GetCallerIdentityResult"));
-    }
-
-    // ==================== Test Profile ====================
-
-    public static final class TlsEnabledProfile implements QuarkusTestProfile {
-
-        private static final Path CERT_DIR = Path.of("/tmp/floci-tls-integration-test");
-        private static final Path CERT_FILE = CERT_DIR.resolve("test.crt");
-        private static final Path KEY_FILE = CERT_DIR.resolve("test.key");
-
-        static {
-            generateCertIfNeeded();
-        }
-
-        private static void generateCertIfNeeded() {
-            if (Files.exists(CERT_FILE) && Files.exists(KEY_FILE)) {
-                return;
-            }
-            try {
-                Files.createDirectories(CERT_DIR);
-                if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-                    Security.addProvider(new BouncyCastleProvider());
-                }
-                CertificateGenerator gen = new CertificateGenerator();
-                CertificateGenerator.GeneratedCertificate cert = gen.generateSelfSignedCertificate(
-                        "localhost", List.of("localhost", "127.0.0.1"), KeyAlgorithm.RSA_2048);
-                Files.writeString(CERT_FILE, cert.certificatePem());
-                Files.writeString(KEY_FILE, cert.privateKeyPem());
-            } catch (IOException e) {
-                throw new RuntimeException("Failed to generate test cert", e);
-            }
-        }
-
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.tls.enabled", "true",
-                    "floci.tls.self-signed", "false",
-                    "floci.tls.cert-path", CERT_FILE.toAbsolutePath().toString(),
-                    "floci.tls.key-path", KEY_FILE.toAbsolutePath().toString(),
-                    "floci.storage.persistent-path", "/tmp/floci-tls-integration-test-data",
-                    "quarkus.http.ssl.certificate.files", CERT_FILE.toAbsolutePath().toString(),
-                    "quarkus.http.ssl.certificate.key-files", KEY_FILE.toAbsolutePath().toString(),
-                    "quarkus.http.insecure-requests", "enabled"
-            );
-        }
     }
 }

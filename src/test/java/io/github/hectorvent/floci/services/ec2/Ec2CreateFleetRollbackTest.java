@@ -18,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -42,7 +43,8 @@ class Ec2CreateFleetRollbackTest {
                 anyList(), nullable(String.class), nullable(String.class), anyList(), nullable(String.class),
                 nullable(String.class), nullable(Boolean.class), nullable(String.class), anyInt(),
                 nullable(String.class), nullable(LaunchTemplateData.MetadataOptions.class),
-                nullable(String.class), nullable(String.class)))
+                nullable(String.class), nullable(String.class), eq(false), nullable(String.class),
+                nullable(String.class), anyList()))
                 .thenReturn(reservation("i-first"))
                 .thenReturn(reservation("i-second"))
                 .thenThrow(new AwsException("InvalidSubnetID.NotFound", "launch failed", 400));

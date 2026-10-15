@@ -2,9 +2,11 @@ package io.github.hectorvent.floci.services.rdsdata;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.sql.Array;
 import java.sql.Date;
 import java.sql.Time;
 import java.sql.Timestamp;
@@ -15,7 +17,11 @@ import java.time.LocalTime;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class RdsDataFieldMapperTest {
 
@@ -74,5 +80,89 @@ class RdsDataFieldMapperTest {
         ObjectNode bitField = RdsDataFieldMapper.toField(objectMapper, 1, Types.BIT);
 
         assertTrue(bitField.get("booleanValue").asBoolean());
+    }
+
+    @Test
+    void mapsPrimitiveAndBoxedArraysToTypedDataApiValues() throws Exception {
+        assertArrayField(Types.INTEGER, new Integer[] {1, 2, 3}, "{\"longValues\":[1,2,3]}");
+        assertArrayField(Types.BIGINT, new long[] {Long.MIN_VALUE, Long.MAX_VALUE},
+                "{\"longValues\":[-9223372036854775808,9223372036854775807]}");
+        assertArrayField(Types.VARCHAR, new String[] {"a", "quotes\" and commas,"},
+                "{\"stringValues\":[\"a\",\"quotes\\\" and commas,\"]}");
+        assertArrayField(Types.BOOLEAN, new boolean[] {true, false}, "{\"booleanValues\":[true,false]}");
+        assertArrayField(Types.DOUBLE, new double[] {1.5, -2.25}, "{\"doubleValues\":[1.5,-2.25]}");
+    }
+
+    @Test
+    void preservesEmptyArrayTypesAndDecimalPrecision() throws Exception {
+        assertArrayField(Types.INTEGER, new Integer[0], "{\"longValues\":[]}");
+        assertArrayField(Types.VARCHAR, new String[0], "{\"stringValues\":[]}");
+        assertArrayField(Types.BOOLEAN, new boolean[0], "{\"booleanValues\":[]}");
+        assertArrayField(Types.DOUBLE, new double[0], "{\"doubleValues\":[]}");
+        assertArrayField(Types.NUMERIC, new BigDecimal[] {new BigDecimal("12345678901234567890.123456789")},
+                "{\"stringValues\":[\"12345678901234567890.123456789\"]}");
+        assertEquals(objectMapper.readTree("{\"isNull\":true}"),
+                RdsDataFieldMapper.toField(objectMapper, null, Types.ARRAY));
+    }
+
+    @Test
+    void rejectsMultidimensionalArraysWithoutFlatteningThem() throws Exception {
+        Array array = sqlArray(Types.INTEGER, new Integer[][] {{1, 2}, {3, 4}});
+        AwsException error = assertThrows(AwsException.class,
+                () -> RdsDataFieldMapper.toField(objectMapper, array, Types.ARRAY));
+
+        assertEquals("UnsupportedResultException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        verify(array).free();
+
+        Array nested = sqlArray(Types.ARRAY, new Object[0]);
+        assertThrows(AwsException.class, () -> RdsDataFieldMapper.toField(objectMapper, nested, Types.ARRAY));
+    }
+
+    @Test
+    void rejectsArrayElementsThatTheDataApiUnionCannotRepresent() throws Exception {
+        Array nullable = sqlArray(Types.INTEGER, new Integer[] {1, null});
+        Array binary = sqlArray(Types.BINARY, new byte[][] {{1, 2}});
+
+        for (Array array : new Array[] {nullable, binary}) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> RdsDataFieldMapper.toField(objectMapper, array, Types.ARRAY));
+            assertEquals("UnsupportedResultException", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+            verify(array).free();
+        }
+    }
+
+    @Test
+    void rejectsPostgresBitStringsWithoutConvertingTheirBitsToBooleans() throws Exception {
+        Array array = sqlArray(Types.BIT, new String[] {"10", "01"});
+        when(array.getBaseTypeName()).thenReturn("bit");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> RdsDataFieldMapper.toField(objectMapper, array, Types.ARRAY));
+        assertEquals("UnsupportedResultException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        verify(array).free();
+
+        Array bool = sqlArray(Types.BIT, new Boolean[] {true, false});
+        when(bool.getBaseTypeName()).thenReturn("bool");
+        assertEquals(objectMapper.readTree("{\"arrayValue\":{\"booleanValues\":[true,false]}}"),
+                RdsDataFieldMapper.toField(objectMapper, bool, Types.ARRAY));
+    }
+
+    private void assertArrayField(int baseType, Object values, String expected) throws Exception {
+        Array array = sqlArray(baseType, values);
+        ObjectNode field = RdsDataFieldMapper.toField(objectMapper, array, Types.ARRAY);
+
+        assertEquals(objectMapper.readTree("{\"arrayValue\":" + expected + "}"),
+                objectMapper.readTree(field.toString()));
+        verify(array).free();
+    }
+
+    private static Array sqlArray(int baseType, Object values) throws Exception {
+        Array array = mock(Array.class);
+        when(array.getBaseType()).thenReturn(baseType);
+        when(array.getArray()).thenReturn(values);
+        return array;
     }
 }

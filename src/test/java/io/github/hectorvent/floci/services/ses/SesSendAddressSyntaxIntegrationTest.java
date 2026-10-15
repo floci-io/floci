@@ -402,6 +402,55 @@ class SesSendAddressSyntaxIntegrationTest {
             .body("ErrorResponse.Error.Message", equalTo(message));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        "sender.example.com | User name is missing: 'sender.example.com'.",
+        "Alice <sender.example.com> | User name is missing: 'Alice <sender.example.com>'.",
+        "sender.example.com (Alice) | User name is missing: 'Alice <sender.example.com>'.",
+        "\"sender example\" | User name is missing: '<\"sender example\">'.",
+        "山田 <sender.example.com> | User name is missing: '=?UTF-8?B?5bGx55Sw?= <sender.example.com>'.",
+        "\"Alice, B\" <sender.example.com> | User name is missing: '\"Alice, B\" <sender.example.com>'.",
+        "sender@example.com <sender.example.com> | User name is missing: '\"sender@example.com\" <sender.example.com>'.",
+        "Alice (Bob) <sender.example.com> | User name is missing: '\"Alice (Bob)\" <sender.example.com>'.",
+        "Alice <sender.example.com> (Bob) | User name is missing: 'Alice <sender.example.com>'.",
+        "\" \" <sender.example.com> (Alice) | User name is missing: 'sender.example.com'.",
+        "<sender.example.com> (Alice) | User name is missing: 'Alice <sender.example.com>'.",
+        "(Bob) <sender.example.com> | User name is missing: 'Bob <sender.example.com>'.",
+        "(Bob) Alice <sender.example.com> | User name is missing: 'Alice <sender.example.com>'."
+    })
+    void v1SendRawEmail_fromHeaderWithoutAtAndSource_isAMissingUserName(String from, String message) {
+        given()
+            .contentType("application/x-www-form-urlencoded; charset=UTF-8")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SendRawEmail")
+            .formParam("Source", "sender@example.com")
+            .formParam("Destinations.member.1", TO)
+            .formParam("RawMessage.Data", rawMessage(from))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+            .body("ErrorResponse.Error.Message", equalTo(message));
+    }
+
+    @Test
+    void v1SendRawEmail_otherFromHeaderViolationIsReportedBeforeMissingUserName() {
+        given()
+            .contentType("application/x-www-form-urlencoded; charset=UTF-8")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SendRawEmail")
+            .formParam("Source", "sender@example.com")
+            .formParam("Destinations.member.1", TO)
+            .formParam("RawMessage.Data", rawMessage("sender.example.com, sender@"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+            .body("ErrorResponse.Error.Message", equalTo("Missing domain"));
+    }
+
     private static String rawMessage(String from) {
         return Base64.getEncoder().encodeToString(("From: " + from + "\r\nTo: " + TO + "\r\nSubject: s\r\n\r\nb")
                 .getBytes(StandardCharsets.UTF_8));

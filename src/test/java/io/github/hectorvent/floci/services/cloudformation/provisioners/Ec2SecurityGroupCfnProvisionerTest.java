@@ -31,6 +31,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -89,6 +90,34 @@ class Ec2SecurityGroupCfnProvisionerTest {
 
         assertEquals("sg-1", r.getPhysicalId());
         verify(ec2, never()).createSecurityGroup(anyString(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void reservedUpdateTagsFailBeforeChangingRulesOrDeletingExistingTags() throws Exception {
+        StackResource r = resource("WebSg");
+        r.setPhysicalId("sg-1");
+        r.getAttributes().put("GroupId", "sg-1");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"GroupName": "web", "GroupDescription": "web tier", "VpcId": "vpc-1",
+                 "SecurityGroupIngress": [{"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443,
+                                           "CidrIp": "10.0.0.0/24"}],
+                 "Tags": [{"Key": "aWs:reserved", "Value": "invalid"}]}
+                """), ctx("sg-1")));
+
+        assertEquals("InvalidParameterValue", failure.getErrorCode());
+        assertEquals("sg-1", r.getPhysicalId());
+        assertEquals(Map.of("GroupId", "sg-1"), r.getAttributes());
+        verifyNoInteractions(ec2);
+    }
+
+    @Test
+    void reservedCreateTagsFailBeforeAllocatingASecurityGroup() throws Exception {
+        assertThrows(AwsException.class, () -> provisioner.provision(resource("WebSg"), props("""
+                {"GroupDescription": "web tier", "Tags": [{"Key": "aws:reserved", "Value": "invalid"}]}
+                """), ctx(null)));
+
+        verifyNoInteractions(ec2);
     }
 
     @Test

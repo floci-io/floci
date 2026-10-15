@@ -82,7 +82,7 @@ class CredentialScopeAliasTest {
                 .filter(scope -> !scope.equals(catalog.canonicalCredentialScope(scope)))
                 .collect(Collectors.toMap(scope -> scope, catalog::canonicalCredentialScope));
 
-        assertEquals(Map.of("s3express", "s3", "iot-jobs-data", "iot", "awsssoportal", "sso"), rewritten);
+        assertEquals(Map.of("s3express", "s3", "iot-jobs-data", "iot", "awsssoportal", "sso", "monitoring", "cloudwatch"), rewritten);
     }
 
     @Test

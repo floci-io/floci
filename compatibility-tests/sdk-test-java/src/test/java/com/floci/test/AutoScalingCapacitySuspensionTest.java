@@ -21,7 +21,7 @@ class AutoScalingCapacitySuspensionTest {
                     .imageId("ami-amazonlinux2023").instanceType("t3.micro"));
             try {
                 asg.createAutoScalingGroup(r -> r.autoScalingGroupName(name).launchConfigurationName(name)
-                        .minSize(0).maxSize(1).desiredCapacity(0).availabilityZones("us-east-1a"));
+                        .minSize(0).maxSize(1).desiredCapacity(0).availabilityZones(TestFixtures.availabilityZone()));
                 try {
                     for (String process : List.of("Launch", "Terminate")) {
                         asg.suspendProcesses(r -> r.autoScalingGroupName(name).scalingProcesses(process));

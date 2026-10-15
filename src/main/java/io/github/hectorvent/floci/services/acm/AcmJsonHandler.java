@@ -100,7 +100,13 @@ public class AcmJsonHandler {
                     "Value null at 'domainName' failed to satisfy constraint: Member must not be null"))
                 .build();
         }
-        List<String> sans = parseStringList(request.path("SubjectAlternativeNames"));
+        JsonNode sanNode = request.path("SubjectAlternativeNames");
+        if (sanNode.isArray() && sanNode.isEmpty()) {
+            throw new AwsException("ValidationException",
+                "1 validation error detected: Value '[]' at 'subjectAlternativeNames' failed to satisfy "
+                    + "constraint: Member must have length greater than or equal to 1", 400);
+        }
+        List<String> sans = parseStringList(sanNode);
         ValidationMethod validationMethod = parseValidationMethod(request.path("ValidationMethod").asText(null));
         String idempotencyToken = request.path("IdempotencyToken").asText(null);
         KeyAlgorithm keyAlgorithm = KeyAlgorithm.fromAwsName(request.path("KeyAlgorithm").asText(null));

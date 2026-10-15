@@ -1,8 +1,13 @@
 """ACM integration tests."""
 
+import json
 import re
+import uuid
+from contextlib import closing
 
+import boto3
 import pytest
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -13,6 +18,55 @@ FAKE_ARN = "arn:aws:acm:us-east-1:000000000000:certificate/00000000-0000-0000-00
 
 class TestACMCertificateLifecycle:
     """Test ACM certificate lifecycle operations."""
+
+    def test_request_certificate_rejects_empty_sans(self, aws_config, client_config):
+        """Disable SDK validation so the empty list reaches the server."""
+        with closing(boto3.client(
+            "acm",
+            config=client_config.merge(Config(parameter_validation=False)),
+            **aws_config,
+        )) as client:
+            with pytest.raises(ClientError) as error:
+                response = client.request_certificate(
+                    DomainName="empty-sans.example.com", SubjectAlternativeNames=[]
+                )
+                client.delete_certificate(CertificateArn=response["CertificateArn"])
+            assert error.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+            assert error.value.response["Error"]["Code"] == "ValidationException"
+
+    @pytest.mark.parametrize("sans", [None, [], ["alt.san-probe.example.com"]])
+    def test_cloudformation_certificate_sans(
+        self, cloudformation_client, acm_client, sans
+    ):
+        stack = f"acm-sans-{uuid.uuid4().hex[:12]}"
+        properties = {
+            "DomainName": "san-probe.example.com",
+            "ValidationMethod": "DNS",
+        }
+        if sans is not None:
+            properties["SubjectAlternativeNames"] = sans
+        template = {"Resources": {"Certificate": {
+            "Type": "AWS::CertificateManager::Certificate",
+            "Properties": properties,
+        }}}
+        cloudformation_client.create_stack(
+            StackName=stack, TemplateBody=json.dumps(template)
+        )
+        try:
+            cloudformation_client.get_waiter("stack_create_complete").wait(
+                StackName=stack, WaiterConfig={"Delay": 1, "MaxAttempts": 60}
+            )
+            resource = cloudformation_client.describe_stack_resource(
+                StackName=stack, LogicalResourceId="Certificate"
+            )["StackResourceDetail"]
+            certificate = acm_client.describe_certificate(
+                CertificateArn=resource["PhysicalResourceId"]
+            )["Certificate"]
+            assert set(certificate["SubjectAlternativeNames"]) == {
+                properties["DomainName"], *(sans or [])
+            }
+        finally:
+            cloudformation_client.delete_stack(StackName=stack)
 
     def test_request_certificate(self, acm_client):
         """Test RequestCertificate creates a certificate and returns a valid ARN."""

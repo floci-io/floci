@@ -26,6 +26,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -47,8 +48,8 @@ class CognitoAttributeVerificationConcurrencyTest {
 
     @Test
     void concurrentUpdatesAreSerializedPerUser() throws Exception {
-        VerificationCodeService codes = mock(VerificationCodeService.class);
-        CognitoMessageDispatcher dispatcher = mock(CognitoMessageDispatcher.class);
+        VerificationCodeService codes = inlineMock(VerificationCodeService.class);
+        CognitoMessageDispatcher dispatcher = inlineMock(CognitoMessageDispatcher.class);
         Harness harness = harness(codes, dispatcher);
         AtomicInteger issues = new AtomicInteger();
         AtomicReference<String> latestCode = new AtomicReference<>();
@@ -108,8 +109,8 @@ class CognitoAttributeVerificationConcurrencyTest {
 
     @Test
     void resendAndUpdateAreSerializedPerUser() throws Exception {
-        VerificationCodeService codes = mock(VerificationCodeService.class);
-        CognitoMessageDispatcher dispatcher = mock(CognitoMessageDispatcher.class);
+        VerificationCodeService codes = inlineMock(VerificationCodeService.class);
+        CognitoMessageDispatcher dispatcher = inlineMock(CognitoMessageDispatcher.class);
         Harness harness = harness(codes, dispatcher);
         AtomicInteger issues = new AtomicInteger();
         AtomicReference<String> latestCode = new AtomicReference<>();
@@ -164,8 +165,8 @@ class CognitoAttributeVerificationConcurrencyTest {
 
     @Test
     void verifyAndUpdateAreSerializedPerUser() throws Exception {
-        VerificationCodeService codes = mock(VerificationCodeService.class);
-        CognitoMessageDispatcher dispatcher = mock(CognitoMessageDispatcher.class);
+        VerificationCodeService codes = inlineMock(VerificationCodeService.class);
+        CognitoMessageDispatcher dispatcher = inlineMock(CognitoMessageDispatcher.class);
         Harness harness = harness(codes, dispatcher);
         AtomicInteger issues = new AtomicInteger();
         CountDownLatch consumeEntered = new CountDownLatch(1);
@@ -212,8 +213,8 @@ class CognitoAttributeVerificationConcurrencyTest {
 
     @Test
     void verificationFinishingAfterAdminUpdateDoesNotOverwriteAdminEmail() throws Exception {
-        VerificationCodeService codes = mock(VerificationCodeService.class);
-        CognitoMessageDispatcher dispatcher = mock(CognitoMessageDispatcher.class);
+        VerificationCodeService codes = inlineMock(VerificationCodeService.class);
+        CognitoMessageDispatcher dispatcher = inlineMock(CognitoMessageDispatcher.class);
         Harness harness = harness(codes, dispatcher);
         CountDownLatch consumeEntered = new CountDownLatch(1);
         CountDownLatch releaseConsume = new CountDownLatch(1);
@@ -260,8 +261,8 @@ class CognitoAttributeVerificationConcurrencyTest {
 
     @Test
     void verificationFinishingAfterAdminDeleteDoesNotRestoreDeletedEmail() throws Exception {
-        VerificationCodeService codes = mock(VerificationCodeService.class);
-        CognitoMessageDispatcher dispatcher = mock(CognitoMessageDispatcher.class);
+        VerificationCodeService codes = inlineMock(VerificationCodeService.class);
+        CognitoMessageDispatcher dispatcher = inlineMock(CognitoMessageDispatcher.class);
         Harness harness = harness(codes, dispatcher);
         CountDownLatch consumeEntered = new CountDownLatch(1);
         CountDownLatch releaseConsume = new CountDownLatch(1);
@@ -308,8 +309,8 @@ class CognitoAttributeVerificationConcurrencyTest {
 
     @Test
     void verificationFinishingAfterAdminUserDeleteDoesNotResurrectTheUser() throws Exception {
-        VerificationCodeService codes = mock(VerificationCodeService.class);
-        CognitoMessageDispatcher dispatcher = mock(CognitoMessageDispatcher.class);
+        VerificationCodeService codes = inlineMock(VerificationCodeService.class);
+        CognitoMessageDispatcher dispatcher = inlineMock(CognitoMessageDispatcher.class);
         Harness harness = harness(codes, dispatcher);
         CountDownLatch consumeEntered = new CountDownLatch(1);
         CountDownLatch releaseConsume = new CountDownLatch(1);
@@ -360,8 +361,8 @@ class CognitoAttributeVerificationConcurrencyTest {
         // five: ChangePassword never touched pending-attribute state before this fix, so
         // nothing stopped it from racing VerifyUserAttribute's read-modify-write on the same
         // whole-object user record.
-        VerificationCodeService codes = mock(VerificationCodeService.class);
-        CognitoMessageDispatcher dispatcher = mock(CognitoMessageDispatcher.class);
+        VerificationCodeService codes = inlineMock(VerificationCodeService.class);
+        CognitoMessageDispatcher dispatcher = inlineMock(CognitoMessageDispatcher.class);
         Harness harness = harness(codes, dispatcher);
         CountDownLatch consumeEntered = new CountDownLatch(1);
         CountDownLatch releaseConsume = new CountDownLatch(1);

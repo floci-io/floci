@@ -69,4 +69,26 @@ class AccessAnalyzerIntegrationTest {
                 .body("{\"analyzerName\":\"bad-analyzer\",\"type\":\"INVALID\"}")
                 .put("/analyzer").then().statusCode(400).body("__type", equalTo("ValidationException"));
     }
+
+    @Test
+    void getAnalyzerReturnsAnalyzer() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"analyzerName\":\"test-analyzer\",\"type\":\"ACCOUNT\"}")
+                .put("/analyzer").then().statusCode(200).body("arn", notNullValue());
+        given().header("Authorization", AUTH).get("/analyzer/test-analyzer")
+                .then().statusCode(200).body("analyzer.name", equalTo("test-analyzer"))
+                .body("analyzer.type", equalTo("ACCOUNT"))
+                .body("analyzer.status", equalTo("ACTIVE"))
+                .body("analyzer.arn", notNullValue());
+        given().header("Authorization", AUTH).delete("/analyzer/test-analyzer").then().statusCode(200);
+    }
+
+    @Test
+    void getAnalyzerNotFoundReturns404() {
+        given().header("Authorization", AUTH).get("/analyzer/nonexistent")
+                .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"))
+                .body("resourceId", equalTo("nonexistent"))
+                .body("resourceType", equalTo("analyzer"));
+    }
 }

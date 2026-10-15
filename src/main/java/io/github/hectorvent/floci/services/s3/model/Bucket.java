@@ -27,6 +27,7 @@ public class Bucket {
     private String encryptionConfiguration; // XML string
     private String replicationConfiguration; // XML string
     private String publicAccessBlockConfiguration; // XML string
+    private boolean publicAccessBlockDeleted;
     private String ownershipControlsConfiguration; // XML string
     private String requestPaymentPayer; // "BucketOwner" (default) or "Requester"; null until first PUT
     private String accelerateStatus; // "Enabled" or "Suspended"; null until first PUT
@@ -111,6 +112,12 @@ public class Bucket {
     public String getPublicAccessBlockConfiguration() { return publicAccessBlockConfiguration; }
     public void setPublicAccessBlockConfiguration(String publicAccessBlockConfiguration) {
         this.publicAccessBlockConfiguration = publicAccessBlockConfiguration;
+    }
+
+    /** True once DeletePublicAccessBlock removed the configuration; a never-configured bucket is false. */
+    public boolean isPublicAccessBlockDeleted() { return publicAccessBlockDeleted; }
+    public void setPublicAccessBlockDeleted(boolean publicAccessBlockDeleted) {
+        this.publicAccessBlockDeleted = publicAccessBlockDeleted;
     }
 
     public String getOwnershipControlsConfiguration() { return ownershipControlsConfiguration; }

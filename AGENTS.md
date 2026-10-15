@@ -15,7 +15,7 @@ Floci acts as an open-source alternative to LocalStack Community.
 - Port: 4566
 - Stack:
   - Java 25
-  - Quarkus 3.39.2
+  - Quarkus 3.40.1
   - JUnit 5
   - RestAssured
   - Jackson

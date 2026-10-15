@@ -73,7 +73,8 @@ class StepFunctionsServiceStartExecutionExpressTest {
         // invokes it explicitly (mirroring what AslExecutor would do on the worker thread).
         executor = mock(AslExecutor.class);
         StepFunctionsService svc =
-                new StepFunctionsService(factory, region, executor, new ObjectMapper(), mock(SfnMockLoader.class));
+                new StepFunctionsService(factory, region, executor, new ObjectMapper(), mock(SfnMockLoader.class),
+                mock(StepFunctionsEventPublisher.class));
 
         StateMachine sm = new StateMachine();
         sm.setStateMachineArn(SM_ARN);

@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution.ActionExecution;
@@ -31,7 +33,7 @@ public class CodePipelineEventPublisher {
 
     private static final Logger LOG = Logger.getLogger(CodePipelineEventPublisher.class);
     private static final int MAX_SNS_SUBJECT_LENGTH = 100;
-    private static final String CONSOLE_URL = "https://console.aws.amazon.com/codepipeline/home";
+    private static final String CONSOLE_PATH = "/codepipeline/home";
     /** The approval message's {@code expires} is to the minute, e.g. 2016-07-07T20:22Z. */
     private static final DateTimeFormatter MINUTE_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm'Z'").withZone(ZoneOffset.UTC);
@@ -107,7 +109,7 @@ public class CodePipelineEventPublisher {
                                String externalEntityLink, double expires) {
         try {
             ObjectNode message = mapper.createObjectNode();
-            String consoleLink = CONSOLE_URL + "?region=" + execution.getRegion()
+            String consoleLink = consoleUrl(execution.getRegion()) + "?region=" + execution.getRegion()
                     + "#/view/" + execution.getPipelineName();
             message.put("region", execution.getRegion());
             message.put("consoleLink", consoleLink);
@@ -136,6 +138,20 @@ public class CodePipelineEventPublisher {
             LOG.warnv("CodePipeline approval notification to {0} skipped: {1}",
                     notificationArn, e.getMessage());
         }
+    }
+
+    /**
+     * The CodePipeline console page on the console host of the pipeline's partition, derived
+     * from the execution's region because this runs with no request context. The user guides
+     * state the host for the commercial, China and GovCloud partitions; the ISO and EUSC
+     * partitions have no published one and keep the commercial host. The path is the commercial
+     * console's in every partition: no source gives the per-service path per partition.
+     */
+    private static String consoleUrl(String region) {
+        String host = AwsRegionFacts.consoleHost(AwsRegions.partitionFor(region))
+                .or(() -> AwsRegionFacts.consoleHost(AwsRegions.DEFAULT_PARTITION))
+                .orElseThrow();
+        return "https://" + host + CONSOLE_PATH;
     }
 
     /** Epoch seconds (with fraction) as the ISO-8601 UTC timestamp CodePipeline emits, e.g. 2023-10-26T13:31:39.604Z. */

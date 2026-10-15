@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudForm
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ProvisionContext;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import org.junit.jupiter.api.Test;
 
@@ -59,6 +60,15 @@ class CfnProvisionerFixtureTest {
                 .logs(mock(CloudWatchLogsService.class));
 
         assertTrue(serves(fixture, "AWS::Logs::LogGroup"));
+    }
+
+    @Test
+    void schedulerWiresBothSchedulesAndGroups() {
+        CfnProvisionerFixture.Builder fixture = CfnProvisionerFixture.builder()
+                .scheduler(mock(SchedulerService.class));
+
+        assertTrue(serves(fixture, "AWS::Scheduler::Schedule"));
+        assertTrue(serves(fixture, "AWS::Scheduler::ScheduleGroup"));
     }
 
     @Test

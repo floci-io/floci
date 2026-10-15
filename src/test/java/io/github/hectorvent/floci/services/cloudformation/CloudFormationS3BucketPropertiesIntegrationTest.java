@@ -133,7 +133,9 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
 
         given().when().get("/" + bucket + "?versioning").then().statusCode(200).body(not(containsString("<Status>")));
         given().when().get("/" + bucket + "?lifecycle").then().statusCode(404);
-        given().when().get("/" + bucket + "?publicAccessBlock").then().statusCode(404);
+        // A bucket nobody configured reports the AWS default rather than a 404.
+        given().when().get("/" + bucket + "?publicAccessBlock").then().statusCode(200)
+                .body(containsString("<BlockPublicAcls>true</BlockPublicAcls>"));
     }
 
     @Test

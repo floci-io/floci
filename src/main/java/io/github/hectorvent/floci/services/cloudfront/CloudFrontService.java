@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudfront;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -126,7 +127,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private final String accountId;
     private final RegionResolver regionResolver;
     private final IamService iamService;
-    private final String domainSuffix;
+    private final String configuredDomainSuffix;
     /**
      * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
      * {@code floci.services.cloudfront.domain-suffix} makes the assigned domain name. They carry the
@@ -182,7 +183,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 new TypeReference<Map<String, MonitoringSubscription>>() {});
         this.accountId = config.defaultAccountId();
         this.regionResolver = regionResolver;
-        this.domainSuffix = config.services().cloudfront().domainSuffix();
+        this.configuredDomainSuffix = config.services().cloudfront().domainSuffix().orElse(null);
         this.localDeliverySuffixes = localDeliverySuffixes(config);
     }
 
@@ -459,10 +460,12 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     /**
      * The domain name a new distribution is served under. AWS assigns a lower-case host, and a
      * browser lower-cases the authority it sends, so an upper-case id in the host would never match
-     * the resource a signed URL was signed for.
+     * the resource a signed URL was signed for. The suffix is the request partition's unless one
+     * is configured.
      */
     private String domainNameFor(String id) {
-        return id.toLowerCase(Locale.ROOT) + "." + domainSuffix;
+        return id.toLowerCase(Locale.ROOT) + "."
+                + CloudFrontEdgeDomain.domainSuffix(configuredDomainSuffix, regionResolver.getPartition());
     }
 
     private static List<String> localDeliverySuffixes(EmulatorConfig config) {

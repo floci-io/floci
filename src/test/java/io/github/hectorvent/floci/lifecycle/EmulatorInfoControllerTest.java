@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
+import org.mockito.MockMakers;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
@@ -40,7 +41,7 @@ class EmulatorInfoControllerTest {
     @Mock private StorageFactory storageFactory;
     @Mock private Instance<Resettable> resettables;
     @Mock private Instance<ContainerTeardown> containerTeardowns;
-    @Mock private FlociCertificateAuthority certificateAuthority;
+    @Mock(mockMaker = MockMakers.INLINE) private FlociCertificateAuthority certificateAuthority;
     @Mock private EmulatorConfig config;
     @Mock private DynamoDbBackendSelector dynamoDbBackendSelector;
     @Mock private ContainerTeardown sageMakerTeardown;

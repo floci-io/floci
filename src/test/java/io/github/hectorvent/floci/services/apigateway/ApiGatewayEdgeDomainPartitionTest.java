@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -41,7 +42,7 @@ class ApiGatewayEdgeDomainPartitionTest {
                 stores.computeIfAbsent(invocation.getArgument(1, String.class),
                         ignored -> AccountAwareStorageBackend.inMemory("000000000000")));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().cloudfront().domainSuffix()).thenReturn("cloudfront.net");
+        when(config.services().cloudfront().domainSuffix()).thenReturn(Optional.empty());
         service = new ApiGatewayService(storageFactory, config, mock(TlsCertificateManager.class),
                 new RegionResolver(GOV_REGION, "000000000000"));
     }

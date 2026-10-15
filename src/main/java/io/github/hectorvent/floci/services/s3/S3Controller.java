@@ -59,6 +59,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.math.BigInteger;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -67,6 +68,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -80,6 +82,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
+import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
@@ -415,8 +418,7 @@ public class S3Controller {
                             httpHeaders.getHeaderString("If-Match"),
                             httpHeaders.getHeaderString("If-None-Match"),
                             uriInfo.getQueryParameters().getFirst("uploadId"),
-                            uriInfo.getQueryParameters().getFirst("partNumber") != null
-                                    ? Integer.parseInt(uriInfo.getQueryParameters().getFirst("partNumber")) : null,
+                            uriInfo.getQueryParameters().getFirst("partNumber"),
                             uriInfo,
                             httpHeaders,
                             body != null ? new ByteArrayInputStream(body) : null);
@@ -798,7 +800,7 @@ public class S3Controller {
                               @HeaderParam("If-Match") String ifMatch,
                               @HeaderParam("If-None-Match") String ifNoneMatch,
                               @QueryParam("uploadId") String uploadId,
-                              @QueryParam("partNumber") Integer partNumber,
+                              @QueryParam("partNumber") String partNumber,
                               @Context UriInfo uriInfo,
                               @Context HttpHeaders httpHeaders,
                               InputStream body) {
@@ -844,12 +846,13 @@ public class S3Controller {
 
             if (uploadId != null && partNumber != null) {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
+                int parsedPartNumber = PartRange.parseUploadPartNumber(partNumber);
                 if (copySource != null && !copySource.isEmpty()) {
                     return handleUploadPartCopy(
-                            copySource, bucket, key, uploadId, partNumber, httpHeaders, authorization);
+                            copySource, bucket, key, uploadId, parsedPartNumber, httpHeaders, authorization);
                 }
                 requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PART_SIZE);
-                Part part = s3Service.storePart(bucket, key, uploadId, partNumber,
+                Part part = s3Service.storePart(bucket, key, uploadId, parsedPartNumber,
                         decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
                         uploadChecksums(httpHeaders, uriInfo),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
@@ -1051,6 +1054,13 @@ public class S3Controller {
                 }
 
                 boolean includeChecksum = "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
+                String partNumber = uriInfo.getQueryParameters().getFirst("partNumber");
+                if (partNumber != null) {
+                    Response partResponse = handlePartRequest("GetObject", bucket, key, obj, read.body(),
+                            partNumber, rangeHeader, overrides, includeChecksum);
+                    bodyHandedOff = partResponse.getEntity() instanceof StreamingOutput;
+                    return partResponse;
+                }
                 if (ByteRange.inBytes(rangeHeader) && ByteRange.rangeApplies(
                         httpHeaders.getHeaderString("If-Range"), obj.getETag(), obj.getLastModified())) {
                     Response rangeResponse = handleRangeRequest(
@@ -1108,8 +1118,15 @@ public class S3Controller {
     private Response.ResponseBuilder objectResponseHeaders(Response.ResponseBuilder resp, S3Object obj,
                                                            ResponseHeaderOverrides overrides,
                                                            boolean includeChecksum) {
+        return objectResponseHeaders(resp, obj, obj.getSize(), overrides, includeChecksum);
+    }
+
+    /** The same headers for a response carrying {@code contentLength} bytes of the object. */
+    private Response.ResponseBuilder objectResponseHeaders(Response.ResponseBuilder resp, S3Object obj,
+                                                           long contentLength, ResponseHeaderOverrides overrides,
+                                                           boolean includeChecksum) {
         resp.header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
-                .header("Content-Length", obj.getSize())
+                .header("Content-Length", contentLength)
                 .header("ETag", obj.getETag())
                 .header("Last-Modified", RFC_822.format(obj.getLastModified()))
                 .header("Accept-Ranges", "bytes");
@@ -1142,19 +1159,49 @@ public class S3Controller {
                 in.transferTo(output);
             }
         };
-        var resp = Response.status(206)
+        Response.ResponseBuilder resp = Response.status(206)
                 .entity(stream)
-                .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
-                .header("Content-Length", range.length())
-                .header("Content-Range", range.contentRange(totalSize))
-                .header("ETag", obj.getETag())
-                .header("Last-Modified", RFC_822.format(obj.getLastModified()))
-                .header("Accept-Ranges", "bytes");
-        if (obj.getVersionId() != null) {
-            resp.header("x-amz-version-id", obj.getVersionId());
+                .header("Content-Range", range.contentRange(totalSize));
+        return objectResponseHeaders(resp, obj, range.length(), overrides,
+                includeChecksum && rangeCarriesObjectChecksum(range, obj)).build();
+    }
+
+    /**
+     * Serves part {@code partNumber} of {@code obj}, as GetObject and HeadObject do for a
+     * {@code partNumber}: like a range covering that part, with the count of the object's parts when it
+     * was uploaded in parts. HeadObject passes no {@code body}. A part of no bytes, which no range
+     * describes, is answered as the whole of an empty object would be.
+     */
+    private Response handlePartRequest(String operation, String bucket, String key, S3Object obj, InputStream body,
+                                       String partNumber, String rangeHeader, ResponseHeaderOverrides overrides,
+                                       boolean includeChecksum) {
+        if (rangeHeader != null) {
+            throw new AwsException("InvalidRequest", PartRange.WITH_RANGE_MESSAGE, 400);
         }
-        appendObjectHeaders(resp, obj, overrides, includeChecksum && rangeCarriesObjectChecksum(range, obj));
-        return resp.build();
+        BigInteger requested = PartRange.parsePartNumber(partNumber);
+        Optional<PartRange> found = PartRange.of(obj, requested);
+        if (found.isEmpty()) {
+            emitCloudTrailEvent(operation, bucket, key, 0L, 0L, "InvalidPartNumber", PartRange.NOT_SATISFIABLE_MESSAGE);
+            return invalidPartNumberResponse(requested, PartRange.partCount(obj));
+        }
+        PartRange part = found.get();
+        emitCloudTrailEvent(operation, bucket, key, 0L, part.length(), null, null);
+        String contentRange = part.contentRange(obj.getSize());
+        Function<StreamingOutput, Response> build = stream -> {
+            Response.ResponseBuilder resp = Response.status(contentRange != null ? 206 : 200).entity(stream);
+            if (contentRange != null) {
+                resp.header("Content-Range", contentRange);
+            }
+            if (part.part() != null) {
+                resp.header("x-amz-mp-parts-count", PartRange.partCount(obj));
+            }
+            objectResponseHeaders(resp, obj, part.length(), overrides, false);
+            if (includeChecksum) {
+                appendChecksumHeaders(resp, partChecksum(obj, part));
+            }
+            return resp.build();
+        };
+        return body == null ? build.apply(null) : streamingResponse(part.slice(body), build);
     }
 
     /**
@@ -1165,10 +1212,39 @@ public class S3Controller {
      * ranges get none.
      */
     private static boolean rangeCarriesObjectChecksum(ByteRange range, S3Object obj) {
+        return range.first() == 0 && range.last() == obj.getSize() - 1 && checksumIsOnlyPartsChecksum(obj);
+    }
+
+    /**
+     * Whether the stored checksum is that of the object's only part: an object stored in one request, or
+     * completed from one part with a full-object checksum. A composite checksum is never one part's own.
+     */
+    private static boolean checksumIsOnlyPartsChecksum(S3Object obj) {
         S3Checksum checksum = obj.getChecksum();
-        return range.first() == 0 && range.last() == obj.getSize() - 1
-                && (obj.getParts() == null || obj.getParts().size() <= 1)
+        return (obj.getParts() == null || obj.getParts().size() <= 1)
                 && checksum != null && checksum.getChecksumType() != ChecksumType.COMPOSITE;
+    }
+
+    /**
+     * The checksum S3 returns with a part: of an object with a composite checksum, the part's own, which
+     * the composite is built from, and otherwise the object's when the part is all of the object, as for
+     * a range covering it.
+     */
+    private static S3Checksum partChecksum(S3Object obj, PartRange part) {
+        S3Checksum checksum = obj.getChecksum();
+        if (checksum != null && checksum.getChecksumType() == ChecksumType.COMPOSITE && part.part() != null) {
+            ChecksumAlgorithm algorithm = checksum.algorithm();
+            S3Checksum stored = part.part().getChecksum();
+            String value = algorithm == null || stored == null ? null : stored.valueFor(algorithm);
+            if (value == null) {
+                return null;
+            }
+            S3Checksum partChecksum = new S3Checksum();
+            partChecksum.setValueFor(algorithm, value);
+            partChecksum.setChecksumType(ChecksumType.COMPOSITE);
+            return partChecksum;
+        }
+        return part.coversObject(obj.getSize()) && checksumIsOnlyPartsChecksum(obj) ? checksum : null;
     }
 
     private Response websiteObjectResponse(S3Service.ObjectRead read, ResponseHeaderOverrides overrides) {
@@ -1191,7 +1267,7 @@ public class S3Controller {
                 .elem("Message", ByteRange.NOT_SATISFIABLE_MESSAGE)
                 .elem("RangeRequested", rangeHeader)
                 .elem("ActualObjectSize", totalSize)
-                .elem("RequestId", java.util.UUID.randomUUID().toString())
+                .elem("RequestId", UUID.randomUUID().toString())
                 .end("Error")
                 .build();
         return Response.status(416)
@@ -1199,6 +1275,21 @@ public class S3Controller {
                 .type(MediaType.APPLICATION_XML)
                 .header("Content-Range", ByteRange.unsatisfiedContentRange(totalSize))
                 .build();
+    }
+
+    /** S3's 416 for a part the object does not have, naming the part asked for and how many it has. */
+    private static Response invalidPartNumberResponse(BigInteger partNumber, int actualPartCount) {
+        String xml = new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("Error")
+                .elem("Code", "InvalidPartNumber")
+                .elem("Message", PartRange.NOT_SATISFIABLE_MESSAGE)
+                .elem("PartNumberRequested", partNumber.toString())
+                .elem("ActualPartCount", actualPartCount)
+                .elem("RequestId", UUID.randomUUID().toString())
+                .end("Error")
+                .build();
+        return Response.status(416).entity(xml).type(MediaType.APPLICATION_XML).build();
     }
 
     @HEAD
@@ -1216,7 +1307,7 @@ public class S3Controller {
                                @HeaderParam("If-None-Match") String ifNoneMatch,
                                @HeaderParam("If-Modified-Since") String ifModifiedSince,
                                @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince,
-                               @HeaderParam("x-amz-checksum-mode") String checksumMode,
+                               @HeaderParam("x-amz-checksum-mode") String checksumModeHeader,
                                @Context UriInfo uriInfo,
                                @Context HttpHeaders httpHeaders) {
         S3Service.RequestAuthorization authorization = S3Service.RequestAuthorization.unsigned();
@@ -1262,6 +1353,13 @@ public class S3Controller {
                 return xmlErrorResponse(new AwsException("InvalidRequest",
                         "Request specific response headers cannot be used for anonymous GET requests.", 400));
             }
+            boolean checksumMode = "ENABLED".equalsIgnoreCase(
+                    resolveHeaderOrQueryParam(checksumModeHeader, uriInfo, "x-amz-checksum-mode"));
+            String partNumber = uriInfo.getQueryParameters().getFirst("partNumber");
+            if (partNumber != null) {
+                return headOnlyResponse(handlePartRequest("HeadObject", bucket, key, obj, null, partNumber,
+                        httpHeaders.getHeaderString("Range"), overrides, checksumMode));
+            }
             // "If the Range is satisfiable, only the ContentLength is affected in the response. If the
             // Range is not satisfiable, S3 returns a 416." A Range that is not one valid range is ignored.
             long contentLength = obj.getSize();
@@ -1279,19 +1377,9 @@ public class S3Controller {
                     return headOnlyResponse(invalidRangeResponse(rangeHeader, obj.getSize()));
                 }
             }
-            var resp = Response.ok()
-                    .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
-                    .header("Content-Length", contentLength)
-                    .header("ETag", obj.getETag())
-                    .header("Last-Modified", RFC_822.format(obj.getLastModified()))
-                    .header("Accept-Ranges", "bytes");
-            if (obj.getVersionId() != null) {
-                resp.header("x-amz-version-id", obj.getVersionId());
-            }
             // As on a ranged GetObject, the stored checksum is sent only for a range it describes.
-            boolean includeChecksum = checksumDescribesRange
-                    && "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
-            appendObjectHeaders(resp, obj, overrides, includeChecksum);
+            Response.ResponseBuilder resp = objectResponseHeaders(Response.ok(), obj, contentLength, overrides,
+                    checksumDescribesRange && checksumMode);
             emitCloudTrailEvent("HeadObject", bucket, key, 0L, obj.getSize(), null, null);
             return resp.build();
         } catch (AwsException e) {
@@ -1557,7 +1645,7 @@ public class S3Controller {
                 S3Checksum expectedChecksum = extractChecksum(httpHeaders, uriInfo);
                 S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
                         completedPartETags(completedParts), completedPartChecksums(completedParts), checksumType,
-                        expectedChecksum);
+                        expectedChecksum, multipartObjectSize(httpHeaders, uriInfo));
                 String baseUrl = uriInfo.getBaseUri().toString();
                 if (baseUrl.endsWith("/")) {
                     baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
@@ -2208,6 +2296,35 @@ public class S3Controller {
         if (size > maxSize) {
             throw S3Service.entityTooLarge(size, maxSize);
         }
+    }
+
+    private static Long multipartObjectSize(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        String name = "x-amz-mp-object-size";
+        String value = httpHeaders != null ? httpHeaders.getHeaderString(name) : null;
+        if (value == null && uriInfo != null && uriInfo.getQueryParameters() != null) {
+            for (Map.Entry<String, List<String>> entry : uriInfo.getQueryParameters().entrySet()) {
+                if (entry.getKey().equalsIgnoreCase(name) && !entry.getValue().isEmpty()) {
+                    value = entry.getValue().getFirst();
+                    break;
+                }
+            }
+        }
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        long size;
+        try {
+            size = Long.parseLong(normalized);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidRequest", "Value for x-amz-mp-object-size header is invalid: '"
+                    + normalized + "'", 400);
+        }
+        if (size < 0) {
+            throw new AwsException("InvalidRequest", "Value for x-amz-mp-object-size header is less than zero: '"
+                    + normalized + "'", 400);
+        }
+        return size;
     }
 
     private static String trailerHeader(HttpHeaders httpHeaders, UriInfo uriInfo) {
@@ -3472,7 +3589,7 @@ public class S3Controller {
             }
         }
         String xml = xmlBuilder
-                .elem("RequestId", java.util.UUID.randomUUID().toString())
+                .elem("RequestId", UUID.randomUUID().toString())
                 .end("Error")
                 .build();
         return Response.status(e.getHttpStatus()).entity(xml).type(MediaType.APPLICATION_XML).build();
@@ -3481,7 +3598,8 @@ public class S3Controller {
     private Response checkPreconditions(S3Object obj, String ifMatch, String ifNoneMatch,
                                          String ifModifiedSince, String ifUnmodifiedSince) {
         String eTag = obj.getETag();
-        Instant lastModified = obj.getLastModified();
+        // Dates compare at second precision, the resolution of an HTTP date and of Last-Modified.
+        Instant lastModified = obj.getLastModified().truncatedTo(ChronoUnit.SECONDS);
 
         if (ifMatch != null && !eTagMatches(ifMatch, eTag)) {
             return preconditionFailedResponse();

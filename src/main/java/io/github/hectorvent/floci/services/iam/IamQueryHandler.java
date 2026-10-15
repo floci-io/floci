@@ -1955,12 +1955,14 @@ public class IamQueryHandler {
     private Response handleGetAccessKeyLastUsed(MultivaluedMap<String, String> params) {
         // Access-key usage is not modeled, so return the IAM API's documented
         // "never used" shape: an AccessKeyLastUsed with ServiceName=N/A and Region=N/A
-        // and NO LastUsedDate. UserName is optional and its type is non-empty
-        // (length 1-128); since the emulator exposes no AccessKeyId→UserName lookup,
-        // the element is omitted rather than emitted empty — an empty string could be
-        // rejected by a strict client, and callers that need the owner already have it
-        // from the preceding ListAccessKeys call.
-        String result = new XmlBuilder()
+        // and NO LastUsedDate. UserName names the key's owner; Terraform's
+        // aws_iam_access_key import reads it and fails on "empty response" without it.
+        // Its type is non-empty (length 1-128), so for a key the emulator does not
+        // hold the element is omitted rather than emitted empty.
+        XmlBuilder xml = new XmlBuilder();
+        iamService.findAccessKeyOwnerInThisAccount(getParam(params, "AccessKeyId"))
+                .ifPresent(userName -> xml.elem("UserName", userName));
+        String result = xml
                 .start("AccessKeyLastUsed")
                 .elem("ServiceName", "N/A")
                 .elem("Region", "N/A")

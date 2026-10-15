@@ -3,8 +3,6 @@ package io.github.hectorvent.floci.services.firehose;
 import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -12,7 +10,6 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
-import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -33,16 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * config override, and a Quarkus test profile applies to the whole class.
  */
 @QuarkusTest
-@TestProfile(FirehoseFlushIntegrationTest.FastTickProfile.class)
 class FirehoseFlushIntegrationTest {
-
-    public static class FastTickProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            // 1s flush tick so the interval test waits seconds, not the 10s default.
-            return Map.of("floci.services.firehose.tick-interval-seconds", "1");
-        }
-    }
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String TARGET_PREFIX = "Firehose_20150804.";

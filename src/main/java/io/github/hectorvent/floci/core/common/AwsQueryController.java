@@ -23,15 +23,17 @@ import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.Context;
-import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
 import java.util.List;
@@ -51,6 +53,8 @@ import java.util.stream.Stream;
  */
 @Path("/")
 public class AwsQueryController {
+
+    static final String CLOUDWATCH_GET_PATH = "/_cloudwatch-query";
 
     private static final Logger LOG = Logger.getLogger(AwsQueryController.class);
 
@@ -298,7 +302,6 @@ public class AwsQueryController {
     @Produces(MediaType.APPLICATION_XML)
     public Response dispatch(
             @HeaderParam("Authorization") String authorization,
-            @Context HttpHeaders httpHeaders,
             MultivaluedMap<String, String> formParams) {
 
         String action = AwsQueryServiceResolver.action(formParams);
@@ -310,7 +313,7 @@ public class AwsQueryController {
         String service = serviceResolver.resolve(authorization, action, formParams.getFirst("Version"));
         LOG.debugv("Query protocol service={0} action={1}", service, action);
 
-        String region = regionResolver.resolveRegion(httpHeaders);
+        String region = regionResolver.resolveRegionFromAuth(authorization);
 
         try {
             return dispatchToHandler(service, action, formParams, authorization, region);
@@ -535,6 +538,8 @@ public class AwsQueryController {
             "ListTagsForResource"
     );
 
+    private static final String CLOUDWATCH_API_VERSION = "2010-08-01";
+
     private static final Set<String> CLOUDWATCH_ACTIONS = Set.of(
             "PutMetricData", "ListMetrics", "GetMetricStatistics", "GetMetricData",
             "PutMetricAlarm", "DescribeAlarms", "DeleteAlarms", "SetAlarmState",
@@ -560,7 +565,7 @@ public class AwsQueryController {
             "CreateDBSubnetGroup", "DescribeDBSubnetGroups", "ModifyDBSubnetGroup", "DeleteDBSubnetGroup",
             "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
             "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
-            "AddRoleToDBCluster", "RemoveRoleFromDBCluster",
+            "AddRoleToDBCluster", "RemoveRoleFromDBCluster", "AddRoleToDBInstance", "RemoveRoleFromDBInstance",
             "DescribeGlobalClusters",
             "CreateDBParameterGroup", "DescribeDBParameterGroups",
             "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters",
@@ -576,6 +581,7 @@ public class AwsQueryController {
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(
             "CreateStack", "DeleteStack", "UpdateStack", "DescribeStacks", "UpdateTerminationProtection",
+            "ContinueUpdateRollback",
             "ListStacks", "ListExports", "GetTemplate", "GetTemplateSummary", "ValidateTemplate",
             "CreateChangeSet", "DeleteChangeSet", "DescribeChangeSet", "ExecuteChangeSet", "ListChangeSets",
             "DescribeStackEvents", "DescribeStackResources", "ListStackResources", "DescribeStackResource",
@@ -651,6 +657,49 @@ public class AwsQueryController {
             "GetClusterCredentials", "GetClusterCredentialsWithIAM"
     );
 
+    /** Root GET requests that can use the CloudWatch Query handler without claiming S3 traffic. */
+    public static boolean isCloudWatchQueryGet(String authorization, String target, String accept,
+                                                MultivaluedMap<String, String> queryParams) {
+        String auth = IamEnforcementFilter.requestAuthorization(authorization, queryParams);
+        if (auth != null) {
+            return SigV4CredentialScope.serviceName(auth).filter("monitoring"::equals).isPresent();
+        }
+        String action = AwsQueryServiceResolver.action(queryParams);
+        return target == null && (accept == null || !accept.contains(MediaType.TEXT_HTML)) && action != null
+                && "monitoring".equals(inferServiceFromAction(action, queryParams.getFirst("Version")));
+    }
+
+    @GET
+    @Path(CLOUDWATCH_GET_PATH)
+    @Produces({MediaType.APPLICATION_XML, MediaType.TEXT_HTML})
+    public Response dispatchCloudWatchQueryGet(@HeaderParam("Authorization") String authorization,
+                                               @Context UriInfo uriInfo,
+                                               @Context ContainerRequestContext request) {
+        // Only the pre-matching Query claim may select this internal route.
+        if (!(request.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim)
+                || claim.protocol() != WireProtocol.AWS_QUERY) {
+            return Response.status(404).build();
+        }
+        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+        String action = AwsQueryServiceResolver.action(queryParams);
+        if (action == null) {
+            return Response.status(404).type(MediaType.APPLICATION_XML)
+                    .entity("<UnknownOperationException/>").build();
+        }
+        String version = queryParams.getFirst("Version");
+        version = version == null ? "2009-05-15" : version;
+        Set<String> actions = switch (version) {
+            case "2009-05-15" -> Set.of("ListMetrics", "GetMetricStatistics");
+            case CLOUDWATCH_API_VERSION -> CLOUDWATCH_ACTIONS;
+            default -> Set.of();
+        };
+        if (!actions.contains(action)) {
+            return xmlErrorResponse("InvalidAction", "Could not find operation " + action + " for version "
+                    + version, 404);
+        }
+        return dispatch(IamEnforcementFilter.requestAuthorization(authorization, queryParams), queryParams);
+    }
+
     /**
      * Tried last, so by name alone SQS takes only what no other service defines, as it takes a name
      * nobody defines. Its {@code Version} is what wins back the two names SNS also defines.
@@ -691,7 +740,7 @@ public class AwsQueryController {
             new QueryService("sns", Set.of("2010-03-31"), SNS_ACTIONS),
             new QueryService("elasticache", Set.of("2015-02-02"), ELASTICACHE_ACTIONS),
             new QueryService("rds", Set.of("2014-10-31"), RDS_ACTIONS),
-            new QueryService("monitoring", Set.of("2010-08-01"), CLOUDWATCH_ACTIONS),
+            new QueryService("monitoring", Set.of(CLOUDWATCH_API_VERSION), CLOUDWATCH_ACTIONS),
             new QueryService("cloudformation", Set.of("2010-05-15"), CLOUDFORMATION_ACTIONS),
             new QueryService("email", Set.of("2010-12-01"), SES_ACTIONS),
             new QueryService("cognito-idp", Set.of(), COGNITO_ACTIONS),

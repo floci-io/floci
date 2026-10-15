@@ -8,6 +8,9 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.github.hectorvent.floci.testutil.IamInlinePolicyMock;
+import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
@@ -37,6 +40,11 @@ class IamUserCfnProvisionerTest {
     private final IamUserCfnProvisioner provisioner = new IamUserCfnProvisioner(iam);
     private final ObjectMapper mapper = new ObjectMapper();
 
+    @BeforeEach
+    void configureInlinePolicyChanges() {
+        IamInlinePolicyMock.configure(iam);
+    }
+
     private ProvisionContext ctx() {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
 
@@ -51,7 +59,7 @@ class IamUserCfnProvisionerTest {
         // tests use it just walks the array and calls resolve(...) per element, stubbed above.
         when(engine.resolveStringList(any())).thenCallRealMethod();
 
-        when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> {
+        when(engine.resolveJsonAttributeStrict(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node != null && node.isTextual() ? node.asText() : node.toString();
         });
@@ -292,7 +300,9 @@ class IamUserCfnProvisionerTest {
         verify(iam).deleteUserPolicy("my-user", "drop-inline");
         verify(iam, never()).removeUserFromGroup("keep-group", "my-user");
         verify(iam, never()).detachUserPolicy("my-user", "arn:aws:iam::aws:policy/Keep");
-        verify(iam, never()).deleteUserPolicy("my-user", "keep-inline");
+        InOrder policyOrder = inOrder(iam);
+        policyOrder.verify(iam).deleteUserPolicy("my-user", "keep-inline");
+        policyOrder.verify(iam).putUserPolicy(eq("my-user"), eq("keep-inline"), any());
         verify(iam).tagUser("my-user", Map.of("update-tag", "new", "add-tag", "added"));
         verify(iam).untagUser("my-user", List.of("drop-tag"));
     }
@@ -368,6 +378,32 @@ class IamUserCfnProvisionerTest {
         assertEquals("EntityAlreadyExists", failure.getErrorCode());
         verify(iam, never()).addUserToGroup(any(), any());
         verify(iam, never()).attachUserPolicy(any(), any());
+    }
+
+    @Test
+    void policyRenameAndFailedReplacementPreserveQuotaAndUntrackedPolicies() throws Exception {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "seed", "{}");
+        IamUserCfnProvisioner realProvisioner = new IamUserCfnProvisioner(realIam);
+        StackResource r = resource();
+        String policy = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\","
+                + "\"Resource\":\"*\",\"Sid\":\"" + "x".repeat(1_200) + "\"}]}";
+        JsonNode original = mapper.readTree("{\"UserName\":\"app-user\",\"Policies\":["
+                + "{\"PolicyName\":\"old\",\"PolicyDocument\":" + policy + "}]}");
+        realProvisioner.provision(r, original, ctx());
+        realIam.putUserPolicy("app-user", "untracked", "{}");
+        JsonNode renamed = mapper.readTree("{\"UserName\":\"app-user\",\"Policies\":["
+                + "{\"PolicyName\":\"new\",\"PolicyDocument\":" + policy + "}]}");
+        realProvisioner.provision(r, renamed, updateCtx("app-user"));
+        assertEquals(Map.of("new", policy, "untracked", "{}"), realIam.getUser("app-user").getInlinePolicies());
+
+        JsonNode overflow = mapper.readTree("{\"UserName\":\"app-user\",\"Policies\":["
+                + "{\"PolicyName\":\"replacement\",\"PolicyDocument\":" + policy + "},"
+                + "{\"PolicyName\":\"overflow\",\"PolicyDocument\":" + policy + "}]}");
+        AwsException failure = assertThrows(AwsException.class,
+                () -> realProvisioner.provision(r, overflow, updateCtx("app-user")));
+        assertEquals("LimitExceeded", failure.getErrorCode());
+        assertEquals(0, failure.getSuppressed().length);
+        assertEquals(Map.of("new", policy, "untracked", "{}"), realIam.getUser("app-user").getInlinePolicies());
     }
 
     @Test

@@ -20,7 +20,7 @@ The standard image is built on Red Hat UBI 9 micro. Besides Floci it contains on
 
 | Channel | Source | Published |
 |---|---|---|
-| **Release** | Tagged version (e.g. `x.y.z`) | 1st and 3rd Tuesday of each month |
+| **Release** | Tagged version (e.g. `x.y.z`) | 15th and last day of each month, 00:30 CT |
 | **Nightly** | Tip of `main` | Every night at 23:00 CT |
 
 Release images are stable and recommended for most use cases. Between trains, `nightly` carries every merged fix from the following morning. Nightly images track active development and may include unreleased changes.

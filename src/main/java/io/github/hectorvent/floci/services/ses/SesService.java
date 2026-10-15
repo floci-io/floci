@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.ses.address.SesAddressLength;
+import io.github.hectorvent.floci.services.ses.address.SesAddressSyntax;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
@@ -563,7 +565,7 @@ public class SesService {
         if (effectiveDestinations.isEmpty()) {
             throw new AwsException("InvalidParameterValue", "Missing required header 'To'.", 400);
         }
-        SesAddressSyntax.requireFallbackFromAt(request, raw, parsed.message());
+        SesAddressSyntax.requireFromHeaderAt(request, raw, parsed.message());
         SesAddressLength.requireRaw(request, raw, parsed.message());
         if (requireVerifiedSender) {
             requireVerifiedSenders(rawSendingAddresses(request, raw, headers), region);
@@ -691,10 +693,15 @@ public class SesService {
             }
             IdentityNotificationTarget target = identityTargets.get(event.eventType());
             if (target != null) {
-                eventPublisher.publishIdentityNotification(target.topicArn(), target.includeHeaders(),
-                        event, messageId, source, sourceArn, sendingAccountId, publishedSubject,
-                        toAddresses, ccAddresses, bccAddresses, envelope, publishedHeaders,
-                        timestamp, region);
+                String identityArn = AwsArnUtils.Arn.of("ses", region, sendingAccountId,
+                        "identity/" + target.identity()).toString();
+                boolean allowed = eventPublisher.publishIdentityNotification(target.topicArn(), identityArn,
+                        target.includeHeaders(), event, messageId, source, sourceArn, sendingAccountId,
+                        publishedSubject, toAddresses, ccAddresses, bccAddresses, envelope,
+                        publishedHeaders, timestamp, region);
+                if (!allowed) {
+                    identityService.dropRefusedNotificationTopic(target.identity(), target.topicArn(), region);
+                }
             }
         }
     }
@@ -736,7 +743,7 @@ public class SesService {
             boolean includeHeaders = Boolean.TRUE.equals(
                     owner.getHeadersInNotificationsEnabled().get(type));
             targets.put(type.toUpperCase(Locale.ROOT),
-                    new IdentityNotificationTarget(topic, includeHeaders));
+                    new IdentityNotificationTarget(owner.getIdentity(), topic, includeHeaders));
         }
         return targets;
     }
@@ -749,7 +756,8 @@ public class SesService {
         return topic != null && !topic.isBlank() ? topic : null;
     }
 
-    private record IdentityNotificationTarget(String topicArn, boolean includeHeaders) {}
+    /** A notification topic and the identity that names it, the sender's own or its domain's. */
+    private record IdentityNotificationTarget(String identity, String topicArn, boolean includeHeaders) {}
 
     // Package-private: the metric aggregation normalizes a stored Source the same way the
     // send path does, so "Name <addr>" still matches an EMAIL_IDENTITY dimension.

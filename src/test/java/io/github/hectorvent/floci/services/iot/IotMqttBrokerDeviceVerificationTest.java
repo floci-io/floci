@@ -93,10 +93,9 @@ class IotMqttBrokerDeviceVerificationTest {
 
     @BeforeEach
     void brokerWithTlsOn() throws IOException {
-        plainPort = FreePorts.anyInterfacePort();
-        do {
-            tlsPort = FreePorts.anyInterfacePort();
-        } while (tlsPort == plainPort);
+        int[] ports = FreePorts.anyInterfacePorts(2);
+        plainPort = ports[0];
+        tlsPort = ports[1];
         when(config.services().iot().enabled()).thenReturn(true);
         when(config.services().iot().mqtt().enabled()).thenReturn(true);
         when(config.services().iot().mqtt().host()).thenReturn("127.0.0.1");

@@ -63,6 +63,19 @@ class AccountAwareStorageBackendTest {
     }
 
     @Test
+    void legacyLookupReadsUnprefixedKeyInPlaceOnlyForDefaultAccount() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("resource", "legacy");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+
+        assertEquals("legacy", storage.getLegacyForAccount("111111111111", "resource").orElseThrow());
+        assertTrue(storage.getLegacyForAccount("222222222222", "resource").isEmpty());
+        assertEquals("legacy", raw.get("resource").orElseThrow());
+        assertTrue(raw.get("111111111111/resource").isEmpty());
+    }
+
+    @Test
     void guardedLegacyLookupLeavesRejectedRawValueUntouched() {
         InMemoryStorage<String, String> raw = new InMemoryStorage<>();
         raw.put("resource", "foreign");

@@ -436,6 +436,160 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     /**
+     * A second real finding found alongside the npm readme redesign itself: the native unpublish
+     * path above cleans up the byte count and the deletion fence, but a first version of that same
+     * fix left {@code packageVersionReadmes} untouched, so {@code GetPackageVersionReadme} would
+     * keep answering for a package a real npm registry (and real CodeArtifact) now 404s on,
+     * forever, since nothing else ever revisits that store once it's written. A throwaway
+     * package, not {@link #PACKAGE_NAME}, for the same reason as the tests above.
+     */
+    @Test
+    @Order(13)
+    void nativeNpmUnpublishCleansUpTheCapturedReadmeToo() {
+        String packageName = "unpublish-readme-pkg";
+        byte[] tarball = "unpublish readme throwaway tarball".getBytes(StandardCharsets.UTF_8);
+        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
+                + "\",\"version\":\"1.0.0\",\"readme\":\"# Soon to be unpublished\",\"dist\":{\"tarball\":"
+                + "\"http://ignored/" + packageName + "-1.0.0.tgz\""
+                + "}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":"
+                + "\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package="
+                        + packageName + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("readme", equalTo("# Soon to be unpublished"));
+
+        String rev = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(200)
+                .extract().jsonPath().getString("_rev");
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .delete("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName + "/-rev/" + rev)
+                .then().statusCode(anyOf201Or200());
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package="
+                        + packageName + "&version=1.0.0")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    /**
+     * Each of a multi-version npm package's versions is published in its own {@code PUT}, exactly
+     * like a real {@code npm publish} (confirmed directly: an earlier draft of this test tried
+     * publishing two versions in one envelope and Verdaccio itself rejected it outright, {@code 400
+     * unsupported registry call}). Proves readme capture is genuinely per-version, not just
+     * per-package: publishing the second version must not disturb the first's already-captured
+     * readme.
+     *
+     * <p>Unpublishing a single version of a multi-version npm package (real wire shape confirmed
+     * against npm/cli's own source: a {@code PUT} to the same {@code /-rev/<rev>} path the
+     * whole-package {@code DELETE} unpublish already uses, carrying the packument with that one
+     * version removed) is not detected anywhere in this proxy, deliberately: see
+     * {@code CodeArtifactNpmDataPlane#nativeUnpublishTarget}'s own javadoc for why, left as a
+     * documented, scoped-out limitation rather than fixed without the request-body-reading
+     * plumbing a correct, narrower fix for it actually needs.
+     */
+    @Test
+    @Order(14)
+    void publishingASecondVersionDoesNotDisturbTheFirstVersionsCapturedReadme() {
+        String packageName = "multi-version-readme-pkg";
+        byte[] tarballV1 = "multi version readme v1".getBytes(StandardCharsets.UTF_8);
+        byte[] tarballV2 = "multi version readme v2".getBytes(StandardCharsets.UTF_8);
+        String envelopeV1 = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\""
+                + packageName + "\",\"version\":\"1.0.0\",\"readme\":\"# v1\",\"dist\":{\"tarball\":"
+                + "\"http://ignored/" + packageName + "-1.0.0.tgz\"}}},\"_attachments\":{\"" + packageName
+                + "-1.0.0.tgz\":{\"content_type\":\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(tarballV1) + "\",\"length\":" + tarballV1.length + "}}}";
+        String envelopeV2 = "{\"name\":\"" + packageName + "\",\"versions\":{\"2.0.0\":{\"name\":\""
+                + packageName + "\",\"version\":\"2.0.0\",\"readme\":\"# v2\",\"dist\":{\"tarball\":"
+                + "\"http://ignored/" + packageName + "-2.0.0.tgz\"}}},\"_attachments\":{\"" + packageName
+                + "-2.0.0.tgz\":{\"content_type\":\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(tarballV2) + "\",\"length\":" + tarballV2.length + "}}}";
+
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelopeV1)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelopeV2)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package="
+                        + packageName + "&version=1.0.0")
+                .then().statusCode(200).body("readme", equalTo("# v1"));
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package="
+                        + packageName + "&version=2.0.0")
+                .then().statusCode(200).body("readme", equalTo("# v2"));
+    }
+
+    /**
+     * The fix for a real finding: a first implementation answered this live from Verdaccio's own
+     * packument, which turned out, checked directly against this same live container, to hoist
+     * {@code readme} to the top level only (the single most-recently-published version), dropping
+     * the per-version field entirely from its own GET response — even though a real npm client's
+     * publish envelope (the real fixture {@link #setUp} loads, captured from an actual {@code npm
+     * publish}) genuinely sends one per version. This exercises the real capture-at-publish-time
+     * path end to end against that same live container: the exact text the fixture's own
+     * {@code versions["1.0.0"].readme} field carries ({@code "ERROR: No README data found!"},
+     * npm's own literal placeholder for a package with no real {@code README.md}, not an absent
+     * field) must come back unchanged.
+     */
+    @Test
+    @Order(15)
+    void getPackageVersionReadmeReturnsWhatTheRealPublishEnvelopeSent() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package="
+                        + PACKAGE_NAME + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("readme", equalTo("ERROR: No README data found!"))
+                .body("package", equalTo(PACKAGE_NAME))
+                .body("version", equalTo("1.0.0"));
+    }
+
+    /**
+     * The follow-up hectorvent asked for on #5644: a version published with no {@code readme}
+     * field at all (unlike {@link #getPackageVersionReadmeReturnsWhatTheRealPublishEnvelopeSent},
+     * whose fixture carries npm's own literal placeholder text, a real string) must still read back
+     * as an empty string, not 404 — the same empty-readme answer pypi's upload path already gives
+     * when twine sends no {@code description} field. Before the fix, {@code checkRepublish} only
+     * added a version to {@code readmeByVersion} when its {@code readme} field was non-null, so a
+     * version published without one was never recorded at all, and {@code GetPackageVersionReadme}
+     * answered {@code ResourceNotFoundException} for a version that genuinely exists on Verdaccio.
+     */
+    @Test
+    @Order(16)
+    void publishingWithNoReadmeFieldStillRecordsAnEmptyReadmeRatherThanNothing() {
+        String packageName = "no-readme-field-pkg";
+        byte[] tarball = "no readme field throwaway tarball".getBytes(StandardCharsets.UTF_8);
+        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
+                + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":"
+                + "\"http://ignored/" + packageName + "-1.0.0.tgz\""
+                + "}}},\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":"
+                + "\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/readme?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&package="
+                        + packageName + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("readme", equalTo(""))
+                .body("package", equalTo(packageName))
+                .body("version", equalTo("1.0.0"));
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code VerdaccioSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container, not the repository-record

@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.zip.GZIPOutputStream;
 
@@ -1155,6 +1156,72 @@ class Ec2IntegrationTest {
                     everyItem(equalTo("3")))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
                     everyItem(equalTo("arm64")));
+    }
+
+    @Test
+    void describeEbsOnlyGravitonInstanceType() {
+        given()
+            .formParam("Action", "DescribeInstanceTypes")
+            .formParam("InstanceType.1", "m6g.large")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.size()", equalTo(1))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.vCpuInfo.defaultVCpus", equalTo("2"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.memoryInfo.sizeInMiB", equalTo("8192"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
+                    equalTo("arm64"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageSupported", equalTo("false"));
+    }
+
+    @Test
+    void describeEbsOnlyGravitonOfferingsWithLocationFilters() {
+        for (String zone : List.of("us-east-1a", "us-east-1b", "us-east-1c")) {
+            given()
+                .formParam("Action", "DescribeInstanceTypeOfferings")
+                .formParam("LocationType", "availability-zone")
+                .formParam("Filter.1.Name", "location")
+                .formParam("Filter.1.Value.1", zone)
+                .formParam("MaxResults", "1000")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType",
+                        hasItems("m6g.large", "m5.large"))
+                .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location", everyItem(equalTo(zone)));
+        }
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "region")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "m6g.large")
+            .formParam("Filter.2.Name", "location")
+            .formParam("Filter.2.Value.1", "us-east-1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(1))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType", equalTo("m6g.large"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location", equalTo("us-east-1"));
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "availability-zone")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "m6g.large")
+            .formParam("Filter.2.Name", "location")
+            .formParam("Filter.2.Value.1", "other-zone")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(0));
     }
 
     @Test
@@ -4219,7 +4286,11 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeVolumesResponse.volumeSet.item.volumeType", equalTo("gp2"));
+            // Earlier tests launch from gp2-rooted catalog AMIs, so the result holds their root
+            // volumes too: assert the filter, not a count.
+            .body("DescribeVolumesResponse.volumeSet.item.findAll { it.volumeType != 'gp2' }.size()", equalTo(0))
+            .body("DescribeVolumesResponse.volumeSet.item.findAll { it.volumeId == '" + volumeId + "' }.size()",
+                    equalTo(1));
     }
 
     @Test
@@ -5575,5 +5646,164 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    @Test
+    @Order(329)
+    void runInstancesRootBlockDeviceMappingOverridesAmiRootVolumeType() {
+        // ami-0abcdef1234567890 is gp2-rooted at /dev/xvda; a root mapping overrides it.
+        assertEquals("gp3", rootVolumeType(launch(Map.of(
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.Ebs.VolumeSize", "8",
+            "BlockDeviceMapping.1.Ebs.VolumeType", "gp3"))));
+        assertEquals("gp2", rootVolumeType(launch(Map.of())));
+    }
+
+    @Test
+    @Order(330)
+    void runInstancesLaunchTemplateRootMappingOverridesAmiAndYieldsToRequest() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "gp3-root-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        assertEquals("gp3", rootVolumeType(launch(Map.of("LaunchTemplate.LaunchTemplateId", templateId))));
+        // A request mapping for the same device wins over the template's.
+        assertEquals("io1", rootVolumeType(launch(Map.of(
+            "LaunchTemplate.LaunchTemplateId", templateId,
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.Ebs.VolumeType", "io1"))));
+    }
+
+    @Test
+    @Order(331)
+    void runInstancesRejectsAnUnknownBlockDeviceMappingVolumeType() {
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("BlockDeviceMapping.1.Ebs.VolumeType", "gp9")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidParameterValue</Code>"))
+            .body(containsString("Value (gp9) for parameter volumeType is invalid. Unknown volume type."));
+    }
+
+    @Test
+    @Order(332)
+    void runInstancesKeepsTemplateDevicesTheRequestDoesNotName() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "gp3-root-data-request-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        // The request maps only a data device, so the template's root mapping still applies.
+        assertEquals("gp3", rootVolumeType(launch(Map.of(
+            "LaunchTemplate.LaunchTemplateId", templateId,
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvdb",
+            "BlockDeviceMapping.1.Ebs.VolumeSize", "10",
+            "BlockDeviceMapping.1.Ebs.VolumeType", "io1"))));
+    }
+
+    @Test
+    @Order(334)
+    void runInstancesRequestEntryForATemplateDeviceChangesOnlyWhatItSets() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "gp3-root-size-override-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        // The request resizes the root but names no type, so the template's gp3 stands.
+        assertEquals("gp3", rootVolumeType(launch(Map.of(
+            "LaunchTemplate.LaunchTemplateId", templateId,
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.Ebs.VolumeSize", "20"))));
+    }
+
+    @Test
+    @Order(333)
+    void launchTemplateWithAnUnknownVolumeTypeIsStoredButFailsAtLaunch() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "unknown-volume-type-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvdb")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp9")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("LaunchTemplate.LaunchTemplateId", templateId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidParameterValue</Code>"))
+            .body(containsString("Value (gp9) for parameter volumeType is invalid. Unknown volume type."));
+    }
+
+    private String launch(Map<String, String> params) {
+        return given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-0abcdef1234567890")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParams(params)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+    }
+
+    private String rootVolumeType(String instanceId) {
+        return given()
+            .formParam("Action", "DescribeVolumes")
+            .formParam("Filter.1.Name", "attachment.instance-id")
+            .formParam("Filter.1.Value.1", instanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("DescribeVolumesResponse.volumeSet.item.volumeType");
     }
 }

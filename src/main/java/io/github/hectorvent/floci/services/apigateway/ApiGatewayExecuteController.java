@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigateway;
 
 // REST and v2 both define Authorizer; the less-used REST type is qualified below.
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -12,6 +13,9 @@ import com.jayway.jsonpath.InvalidPathException;
 import com.jayway.jsonpath.JsonPath;
 import com.jayway.jsonpath.spi.json.JacksonJsonNodeJsonProvider;
 import com.jayway.jsonpath.spi.mapper.JacksonMappingProvider;
+import com.networknt.schema.JsonSchema;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion;
 import com.networknt.schema.ValidationMessage;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
@@ -54,6 +58,7 @@ import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.*;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -1163,31 +1168,43 @@ public class ApiGatewayExecuteController {
 
                 if (modelName != null) {
                     try {
-                        io.github.hectorvent.floci.services.apigateway.model.Model model =
-                                apiGatewayService.getModel(region, apiId, modelName);
-                        String schemaStr = model.getSchema();
+                        Map<String, String> models = apiGatewayService.getDeploymentModelSchemas(region, apiId,
+                                scope.stage() != null ? scope.stage().getDeploymentId() : null);
+                        String schemaStr = models.get(modelName);
                         if (schemaStr != null && !schemaStr.isBlank()) {
                             String bodyStr = body != null ? new String(body, StandardCharsets.UTF_8) : "";
                             if (bodyStr.isBlank()) {
                                 return gatewayResponse(scope, GatewayResponseType.BAD_REQUEST_BODY, 400,
                                         "Invalid request body");
                             }
-                            JsonNode schemaNode = objectMapper.readTree(schemaStr);
+                            JsonNode schemaNode = modelValidationSchema(models, schemaStr);
                             JsonNode bodyNode = objectMapper.readTree(bodyStr);
 
-                            com.networknt.schema.JsonSchemaFactory factory =
-                                    com.networknt.schema.JsonSchemaFactory.getInstance(
-                                            com.networknt.schema.SpecVersion.VersionFlag.V4);
-                            com.networknt.schema.JsonSchema schema = factory.getSchema(schemaNode);
+                            JsonSchemaFactory factory =
+                                    JsonSchemaFactory.getInstance(
+                                            SpecVersion.VersionFlag.V4, builder -> builder.schemaLoaders(
+                                                    loaders -> loaders.add(iri -> {
+                                                        String prefix = "https://apigateway.amazonaws.com/restapis/" // partition-literal: documented model URI uses this host in every partition
+                                                                + apiId + "/models/";
+                                                        String reference = iri.toString();
+                                                        String referencedSchema = reference.startsWith(prefix)
+                                                                ? models.get(reference.substring(prefix.length())) : null;
+                                                        if (referencedSchema == null) {
+                                                            throw new IllegalArgumentException(
+                                                                    "Model reference is not in this deployment");
+                                                        }
+                                                        return () -> new ByteArrayInputStream(
+                                                                modelValidationSchema(models, referencedSchema)
+                                                                        .toString().getBytes(StandardCharsets.UTF_8));
+                                                    })));
+                            JsonSchema schema = factory.getSchema(schemaNode);
                             Set<ValidationMessage> errors = schema.validate(bodyNode);
                             if (!errors.isEmpty()) {
                                 String errorMsg = errors.iterator().next().getMessage();
                                 return gatewayResponse(scope, GatewayResponseType.BAD_REQUEST_BODY, 400,
-                                        "Invalid request body: " + errorMsg, errorMsg);
+                                        "Invalid request body", errorMsg);
                             }
                         }
-                    } catch (AwsException e) {
-                        // Model not found — skip body validation
                     } catch (Exception e) {
                         return gatewayResponse(scope, GatewayResponseType.BAD_REQUEST_BODY, 400,
                                 "Invalid request body");
@@ -1197,6 +1214,30 @@ public class ApiGatewayExecuteController {
         }
 
         return null;
+    }
+
+    private JsonNode modelValidationSchema(Map<String, String> models, String schema) throws JsonProcessingException {
+        JsonNode root = objectMapper.readTree(schema);
+        if (!(root instanceof ObjectNode document)) {
+            return root;
+        }
+        if ((document.has("components") && !document.get("components").isObject())
+                || (document.path("components").has("schemas")
+                && !document.path("components").get("schemas").isObject())) {
+            return root;
+        }
+        ObjectNode definitions = document.withObject("/components/schemas");
+        for (Map.Entry<String, String> model : models.entrySet()) {
+            if (!definitions.has(model.getKey())) {
+                try {
+                    definitions.set(model.getKey(), objectMapper.readTree(model.getValue()));
+                } catch (JsonProcessingException ignored) {
+                    // An unrelated malformed model must not invalidate this request. If referenced,
+                    // its absent definition is rejected by the schema validator itself.
+                }
+            }
+        }
+        return root;
     }
 
     private String toAuthorizerEvent(io.github.hectorvent.floci.services.apigateway.model.Authorizer auth,

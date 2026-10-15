@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.A
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Call;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Reply;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess.TimeToLive;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
@@ -627,6 +628,35 @@ class DynamoDbLocalBackendTest {
         assertFalse(table.isStreamEnabled());
         assertNull(table.getStreamArn());
         neverSent("UpdateTable");
+    }
+
+    @Test
+    void timeToLiveReadsDescribeTimeToLive() throws Exception {
+        answer("DescribeTimeToLive", 200, "{\"TimeToLiveDescription\":"
+                + "{\"TimeToLiveStatus\":\"ENABLED\",\"AttributeName\":\"expiresAt\"}}");
+
+        TimeToLive ttl = backend.timeToLive(SCOPE, "orders");
+
+        assertEquals(new TimeToLive(true, "expiresAt"), ttl);
+        assertEquals(json("{\"TableName\":\"orders\"}"), sent("DescribeTimeToLive"));
+    }
+
+    @Test
+    void timeToLiveDisabledIsOff() throws Exception {
+        answer("DescribeTimeToLive", 200, "{\"TimeToLiveDescription\":{\"TimeToLiveStatus\":\"DISABLED\"}}");
+
+        assertEquals(new TimeToLive(false, null), backend.timeToLive(SCOPE, "orders"));
+    }
+
+    @Test
+    void updateTimeToLiveSendsTheSpecification() throws Exception {
+        answer("UpdateTimeToLive", 200, "{\"TimeToLiveSpecification\":"
+                + "{\"AttributeName\":\"expiresAt\",\"Enabled\":false}}");
+
+        backend.updateTimeToLive(SCOPE, "orders", "expiresAt", false);
+
+        assertEquals(json("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":"
+                + "{\"AttributeName\":\"expiresAt\",\"Enabled\":false}}"), sent("UpdateTimeToLive"));
     }
 
     @Test

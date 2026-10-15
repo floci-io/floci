@@ -19,6 +19,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.sql.Array;
 import java.sql.Blob;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -502,10 +503,12 @@ public class RdsDataService implements Resettable {
             try (ResultSet rs = statement.getResultSet()) {
                 ResultSetMetaData meta = rs.getMetaData();
                 rejectUnsupportedResultTypes(meta, engine);
-                if (includeMetadata) {
-                    response.set("columnMetadata", RdsDataColumnMetadata.toColumnMetadata(objectMapper, meta));
+                ArrayNode columnMetadata = includeMetadata
+                        ? RdsDataColumnMetadata.toColumnMetadata(objectMapper, meta) : null;
+                if (columnMetadata != null) {
+                    response.set("columnMetadata", columnMetadata);
                 }
-                response.set("records", records(rs, meta));
+                response.set("records", records(rs, meta, columnMetadata));
             }
             response.put("numberOfRecordsUpdated", 0L);
         } else {
@@ -561,7 +564,7 @@ public class RdsDataService implements Resettable {
         }
     }
 
-    private ArrayNode records(ResultSet rs, ResultSetMetaData meta) throws SQLException {
+    private ArrayNode records(ResultSet rs, ResultSetMetaData meta, ArrayNode columnMetadata) throws SQLException {
         ArrayNode records = objectMapper.createArrayNode();
         int columnCount = meta.getColumnCount();
         // Serialized size of the records array: its two brackets plus one comma between rows.
@@ -571,6 +574,9 @@ public class RdsDataService implements Resettable {
             long rawRowBytes = 0;
             for (int i = 1; i <= columnCount; i++) {
                 Object value = rs.getObject(i);
+                if (columnMetadata != null && value instanceof Array array) {
+                    ((ObjectNode) columnMetadata.get(i - 1)).put("arrayBaseColumnType", array.getBaseType());
+                }
                 rawRowBytes += valueBytes(value);
                 row.add(RdsDataFieldMapper.toField(objectMapper, value, meta.getColumnType(i)));
             }

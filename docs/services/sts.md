@@ -22,8 +22,10 @@
 
 ## Session Token and Federation Token Permissions
 
-`GetSessionToken` rejects temporary callers with `AccessDenied` before issuing credentials,
+`GetSessionToken` and `GetFederationToken` reject temporary callers with `AccessDenied` before issuing credentials,
 including when IAM policy enforcement is disabled. Use a long-term IAM user or account key.
+For an authenticated temporary caller, `GetFederationToken` returns
+`Cannot call GetFederationToken with session credentials` with either enforcement setting.
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, credentials from `GetSessionToken` and `GetFederationToken`
 are evaluated as the identity whose long-term key signed the call, as on AWS:
@@ -113,5 +115,13 @@ For temporary credentials returned by an assumed-role action, its `Arn` and `Use
 the `AssumedRoleUser.Arn` and `AssumedRoleUser.AssumedRoleId` returned when the session was created.
 For `GetSessionToken` credentials they are those of the IAM user that minted them, and for `GetFederationToken`
 credentials the `FederatedUser.Arn` and `FederatedUser.FederatedUserId` (`<account>:<name>`).
+The response resolves both header and query-string credentials, including the query session token,
+so a presigned request reports the same caller identity. A nonblank Authorization header retains
+precedence over query credentials.
 
 When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded `floci` access key return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.
+
+When `FLOCI_AUTH_VALIDATE_SIGNATURES=true`, the shared signature verifier checks presigned query
+credentials for STS operations, including `GetCallerIdentity`, `GetSessionToken`, `GetFederationToken`
+and `AssumeRole`. It checks the request signature, credential scope, expiry and session token before
+execution. Nonblank Authorization headers retain priority. See [signature checks](../configuration/multi-account.md#signature-validation).

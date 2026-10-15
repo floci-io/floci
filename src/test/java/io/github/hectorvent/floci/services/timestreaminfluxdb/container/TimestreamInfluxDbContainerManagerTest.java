@@ -44,7 +44,7 @@ class TimestreamInfluxDbContainerManagerTest {
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
         portAllocator = mock(PortAllocator.class);
         when(portAllocator.allocate(8086, 8185)).thenReturn(8090);
 

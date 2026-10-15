@@ -6,22 +6,37 @@ import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.Mockito;
 
 import java.time.Clock;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.stream.Stream;
 
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 
 /**
  * Unit test for the extracted identity domain: store ownership, key validation, verification
  * (email and domain), listing, MAIL FROM, the CVET pending registration, identity tags, and the
- * find/save escape hatches the facade's notification flows rely on. The DKIM state machine moved
+ * find/save escape hatches the facade's notification flows rely on, and what SES does to an
+ * identity's notification settings when it may not publish to a topic. The DKIM state machine moved
  * here too and keeps its behavioral coverage in the existing facade-level unit and integration
  * tests, which now exercise it through the delegation; only its creation-time surface is pinned
  * here.
@@ -29,6 +44,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SesIdentityServiceTest {
 
     private static final String REGION = "us-east-1";
+    private static final String TOPIC = "arn:aws:sns:us-east-1:000000000000:feedback";
+    private static final String OTHER_TOPIC = "arn:aws:sns:us-east-1:000000000000:other-feedback";
     private SesIdentityService service;
 
     @BeforeEach
@@ -337,6 +354,123 @@ class SesIdentityServiceTest {
 
     private void create(String identity) {
         service.createEmailIdentity(identity, null, null, REGION, null);
+    }
+
+    @Test
+    void aRefusedTopicIsTakenOutOfEveryBounceAndComplaintSettingThatNamesIt() {
+        service.verifyEmailIdentity("alice@example.com", REGION);
+        for (String type : List.of("Bounce", "Complaint", "Delivery")) {
+            service.setIdentityNotificationTopic("alice@example.com", type, TOPIC, REGION);
+        }
+        service.setFeedbackForwardingEnabled("alice@example.com", false, REGION);
+
+        service.dropRefusedNotificationTopic("alice@example.com", TOPIC, REGION);
+
+        Identity identity = service.find("alice@example.com", REGION).orElseThrow();
+        assertFalse(identity.getNotificationAttributes().containsKey("BounceTopic"));
+        assertFalse(identity.getNotificationAttributes().containsKey("ComplaintTopic"));
+        assertEquals(TOPIC, identity.getNotificationAttributes().get("DeliveryTopic"));
+        assertTrue(identity.isFeedbackForwardingEnabled());
+    }
+
+    @Test
+    void aSettingNamingAnotherTopicIsKept() {
+        service.verifyEmailIdentity("alice@example.com", REGION);
+        service.setIdentityNotificationTopic("alice@example.com", "Bounce", TOPIC, REGION);
+        service.setIdentityNotificationTopic("alice@example.com", "Complaint", OTHER_TOPIC, REGION);
+
+        service.dropRefusedNotificationTopic("alice@example.com", TOPIC, REGION);
+
+        Identity identity = service.find("alice@example.com", REGION).orElseThrow();
+        assertFalse(identity.getNotificationAttributes().containsKey("BounceTopic"));
+        assertEquals(OTHER_TOPIC, identity.getNotificationAttributes().get("ComplaintTopic"));
+    }
+
+    @Test
+    void aTopicNamedOnlyForDeliveriesStaysConfigured() {
+        service.verifyEmailIdentity("alice@example.com", REGION);
+        service.setIdentityNotificationTopic("alice@example.com", "Delivery", TOPIC, REGION);
+        service.setFeedbackForwardingEnabled("alice@example.com", false, REGION);
+
+        service.dropRefusedNotificationTopic("alice@example.com", TOPIC, REGION);
+
+        Identity identity = service.find("alice@example.com", REGION).orElseThrow();
+        assertEquals(TOPIC, identity.getNotificationAttributes().get("DeliveryTopic"));
+        assertFalse(identity.isFeedbackForwardingEnabled());
+    }
+
+    @Test
+    void aTopicSetAgainSinceTheRefusalIsKept() {
+        service.verifyEmailIdentity("alice@example.com", REGION);
+        service.setIdentityNotificationTopic("alice@example.com", "Bounce", OTHER_TOPIC, REGION);
+        service.setFeedbackForwardingEnabled("alice@example.com", false, REGION);
+
+        service.dropRefusedNotificationTopic("alice@example.com", TOPIC, REGION);
+
+        Identity identity = service.find("alice@example.com", REGION).orElseThrow();
+        assertEquals(OTHER_TOPIC, identity.getNotificationAttributes().get("BounceTopic"));
+        assertFalse(identity.isFeedbackForwardingEnabled());
+    }
+
+    static Stream<Arguments> notificationSettings() {
+        return Stream.of(
+                Arguments.of("a topic",
+                        (Consumer<SesIdentityService>) identities -> identities.setIdentityNotificationTopic(
+                                "alice@example.com", "Bounce", OTHER_TOPIC, REGION),
+                        (Predicate<Identity>) identity ->
+                                OTHER_TOPIC.equals(identity.getNotificationAttributes().get("BounceTopic"))),
+                Arguments.of("feedback forwarding",
+                        (Consumer<SesIdentityService>) identities -> identities.setFeedbackForwardingEnabled(
+                                "alice@example.com", false, REGION),
+                        (Predicate<Identity>) identity -> !identity.isFeedbackForwardingEnabled()),
+                Arguments.of("headers in notifications",
+                        (Consumer<SesIdentityService>) identities -> identities.setHeadersInNotificationsEnabled(
+                                "alice@example.com", "Bounce", true, REGION),
+                        (Predicate<Identity>) identity ->
+                                Boolean.TRUE.equals(identity.getHeadersInNotificationsEnabled().get("Bounce"))));
+    }
+
+    @ParameterizedTest(name = "setting {0}")
+    @MethodSource("notificationSettings")
+    void aNotificationSettingWaitsWhileSesDropsARefusedTopic(String setting, Consumer<SesIdentityService> change,
+                                                             Predicate<Identity> applied) throws Exception {
+        InMemoryStorage<String, Identity> store = Mockito.spy(new InMemoryStorage<String, Identity>());
+        SesIdentityService parked = new SesIdentityService(store, null, Clock.systemUTC());
+        parked.verifyEmailIdentity("alice@example.com", REGION);
+        parked.setIdentityNotificationTopic("alice@example.com", "Bounce", TOPIC, REGION);
+        CountDownLatch read = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        // The removal parks right after reading the identity, before writing it back.
+        doAnswer(invocation -> {
+            Object identity = invocation.callRealMethod();
+            read.countDown();
+            release.await(2, TimeUnit.SECONDS);
+            return identity;
+        }).doCallRealMethod().when(store).get(anyString());
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> drop = pool.submit(() ->
+                    parked.dropRefusedNotificationTopic("alice@example.com", TOPIC, REGION));
+            assertTrue(read.await(2, TimeUnit.SECONDS), "the removal must reach its read of the identity");
+            AtomicReference<Thread> settingThread = new AtomicReference<>();
+            Future<?> set = pool.submit(() -> {
+                settingThread.set(Thread.currentThread());
+                change.accept(parked);
+            });
+            awaitBlockedOrDone(settingThread, set);
+            assertFalse(set.isDone(), "setting " + setting + " did not wait for the removal");
+
+            release.countDown();
+            drop.get(2, TimeUnit.SECONDS);
+            set.get(2, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+
+        assertTrue(applied.test(parked.find("alice@example.com", REGION).orElseThrow()),
+                "setting " + setting + " was lost");
     }
 
     @Test

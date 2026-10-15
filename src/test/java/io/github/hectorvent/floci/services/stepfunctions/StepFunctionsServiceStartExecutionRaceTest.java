@@ -135,7 +135,8 @@ class StepFunctionsServiceStartExecutionRaceTest {
 
         AslExecutor executor = mock(AslExecutor.class);
         StepFunctionsService service =
-                new StepFunctionsService(factory, region, executor, new ObjectMapper(), mock(SfnMockLoader.class));
+                new StepFunctionsService(factory, region, executor, new ObjectMapper(), mock(SfnMockLoader.class),
+                mock(StepFunctionsEventPublisher.class));
 
         StateMachine sm = new StateMachine();
         sm.setStateMachineArn(SM_ARN);

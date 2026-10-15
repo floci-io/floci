@@ -1,0 +1,6 @@
+# Mocks are generated subclasses rather than Mockito's default inline mocks. An inline mock
+# redefines its class in the running JVM, which gets slow once a test JVM has loaded the Quarkus
+# applications of the classes that ran before. A final class, record or enum cannot be subclassed:
+# mock one with InlineMocks.inlineMock(...) or @Mock(mockMaker = MockMakers.INLINE), and prefer a
+# real instance of a record.
+mock-maker-subclass

@@ -50,6 +50,63 @@ class EcsServiceRestartLeftoversTest {
             "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/web/0123456789abcdef";
 
     @Test
+    void pendingPreviousRunVolumesDoNotBlockRunTaskOrServiceTasksAndRetryOnTicks() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        persistServiceWithLoadBalancer(storage);
+        EcsContainerManager manager = mock(EcsContainerManager.class);
+        when(manager.removeLeftoverContainers()).thenReturn(true);
+        when(manager.removeLeftoverTaskVolumes()).thenReturn(false, false, true);
+        when(manager.getExitCodeIfStopped(anyString())).thenReturn(null);
+        when(manager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            return new EcsTaskHandle(task.getTaskArn(), Map.of("web", "docker-id"), Map.of());
+        });
+        EcsService restarted = service(storage, false, manager, mock(EcsLoadBalancerRegistrar.class), null);
+        restarted.releasePreviousRunLeftovers();
+        EcsTask task = restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null,
+                null, null, REGION).getFirst();
+        assertEquals("RUNNING", task.getLastStatus());
+        restarted.reconcileServices();
+        verify(manager, times(2)).startTask(any(), any(), any(), anyString());
+        verify(manager).removeLeftoverTaskVolumes();
+
+        restarted.reconcile();
+        restarted.reconcile();
+        restarted.reconcile();
+        verify(manager, times(3)).removeLeftoverTaskVolumes();
+        verify(manager).removeLeftoverContainers();
+        verify(manager, times(2)).startTask(any(), any(), any(), anyString());
+    }
+
+    @Test
+    void volumeCleanupWaitsForContainersAndRetriesWithoutAnyTaskLaunch() {
+        EcsContainerManager manager = mock(EcsContainerManager.class);
+        when(manager.removeLeftoverContainers()).thenReturn(false, true);
+        when(manager.removeLeftoverTaskVolumes()).thenReturn(false, true);
+        when(manager.getExitCodeIfStopped(anyString())).thenReturn(null);
+        when(manager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            return new EcsTaskHandle(task.getTaskArn(), Map.of("web", "docker-id"), Map.of());
+        });
+        EcsService restarted = service(new SharedStorageFactory(), false, manager,
+                mock(EcsLoadBalancerRegistrar.class), null);
+        restarted.releasePreviousRunLeftovers();
+        restarted.reconcile();
+        verify(manager, never()).removeLeftoverTaskVolumes();
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("web");
+        definition.setImage("busybox:stable");
+        restarted.registerTaskDefinition("web", List.of(definition), NetworkMode.bridge, null, null,
+                null, null, List.of(), REGION);
+        restarted.runTask(null, "web", 1, LaunchType.EC2, null, null, null, null, REGION);
+        restarted.reconcile();
+        restarted.reconcile();
+        restarted.reconcile();
+        verify(manager, times(2)).removeLeftoverTaskVolumes();
+        verify(manager, times(2)).removeLeftoverContainers();
+    }
+
+    @Test
     void releasesTheRegistrationsThePreviousRunRecorded() {
         EcsLoadBalancerRegistrar lbRegistrar = mock(EcsLoadBalancerRegistrar.class);
         EcsServiceDiscoveryRegistrar discoveryRegistrar = mock(EcsServiceDiscoveryRegistrar.class);
@@ -138,6 +195,7 @@ class EcsServiceRestartLeftoversTest {
                 mock(EcsLoadBalancerRegistrar.class), null).releasePreviousRunLeftovers();
 
         verify(containerManager, never()).removeLeftoverContainers();
+        verify(containerManager, never()).removeLeftoverTaskVolumes();
     }
 
     @Test
@@ -158,6 +216,7 @@ class EcsServiceRestartLeftoversTest {
         restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION);
 
         verify(containerManager, never()).removeLeftoverContainers();
+        verify(containerManager, never()).removeLeftoverTaskVolumes();
         verify(containerManager).startTask(any(), any(), any(), anyString());
         verify(lbRegistrar).releaseRecordedTargets();
         verify(discoveryRegistrar).releaseRecordedInstances();

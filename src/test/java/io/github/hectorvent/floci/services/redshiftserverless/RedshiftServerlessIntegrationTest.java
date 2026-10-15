@@ -230,6 +230,14 @@ class RedshiftServerlessIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
 
+        call("UpdateSnapshot", "{\"snapshotName\":\"snap-life\",\"retentionPeriod\":30}")
+                .statusCode(200)
+                .body("snapshot.snapshotRetentionPeriod", equalTo(30))
+                .body("snapshot.snapshotRemainingDays", equalTo(30));
+        call("UpdateSnapshot", "{\"snapshotName\":\"snap-life\",\"retentionPeriod\":0}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+
         call("ListSnapshots", "{\"namespaceName\":\"snap-life-ns\",\"maxResults\":1}")
                 .statusCode(200)
                 .body("snapshots.snapshotName", hasItem("snap-life"));

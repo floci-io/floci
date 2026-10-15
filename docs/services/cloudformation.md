@@ -12,6 +12,7 @@
 | `CreateStack` | Deploy a CloudFormation template |
 | `UpdateStack` | Update an existing stack |
 | `DeleteStack` | Delete a stack and its resources |
+| `ContinueUpdateRollback` | Retry the rollback of a stack in `UPDATE_ROLLBACK_FAILED`, optionally skipping resources or forcing past every failed one (see [Failed update rollbacks](#failed-update-rollbacks)) |
 | `UpdateTerminationProtection` | - |
 | `CreateChangeSet` | Create a change set |
 | `DescribeChangeSet` | Get change set details with a computed Add/Modify/Remove resource diff |
@@ -127,10 +128,8 @@ owed cleanup while their retry budget remains. Exhausted historical records are 
 later updates and stack-delete retries. Historical cleanup is address-based and does not provide
 an atomic ownership check against another stack or a direct Cognito API writer reusing the address.
 
-Failed in-place restoration preserves the original name and scopes for a later update retry.
-Deleting the current server keeps this snapshot if deletion fails. An update that skips a server
-with pending restoration can remain in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`, blocking another
-update. `ContinueUpdateRollback` remains unsupported.
+Failed in-place restoration preserves the original name and scopes for a `ContinueUpdateRollback`
+retry. Deleting the current server keeps this snapshot if deletion fails.
 
 ## Supported Resource Types
 
@@ -148,7 +147,8 @@ cross-resource references.
 | S3 | `Bucket`, `BucketPolicy` (document stored on the bucket; S3 does not evaluate it) |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription`, `TopicPolicy` |
-| DynamoDB | `Table`, `GlobalTable` |
+| SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment) |
+| DynamoDB | `Table` (`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one), `GlobalTable` |
 | Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig` (also what a SAM function's `EventInvokeConfig` expands into), `MicrovmImage`, `NetworkConnector`, `Url`. Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
 | IAM | `Role`, `User` (template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete), `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | Organizations | `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy` |
@@ -178,7 +178,7 @@ cross-resource references.
 | Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `ApiDestination`, `Archive` (`KmsKeyIdentifier` is ignored) |
-| EventBridge Scheduler | `ScheduleGroup` |
+| EventBridge Scheduler | `Schedule`, `ScheduleGroup` |
 | Transfer Family | `Server` (management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported), `User` (management plane only; Ref returns the user ARN; Arn attribute supported; Policy and PosixProfile are not supported; a ServerId or UserName change replaces the user) |
 | Backup | `BackupVault` |
 | GuardDuty | `MalwareProtectionPlan` (management plane only: no scan runs, so the plan stays ACTIVE; Ref returns the plan id; a BucketName change is rejected) |
@@ -211,6 +211,48 @@ Set `floci.services.cloudformation.allow-stub-unsupported-resource-types` to `fa
 (`FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_UNSUPPORTED_RESOURCE_TYPES=false`) to fail such a
 resource instead: it reaches `CREATE_FAILED` and the stack rolls back. Use it in a pipeline that
 must not pass over a resource it never got.
+
+## SES Email Identities
+
+`AWS::SES::EmailIdentity` provisions an SES identity and supports in-place option updates and
+replacement when `EmailIdentity` changes. Change-set previews also mark the replacement and its
+`Ref` dependents.
+
+If an update rollback cannot restore the identity snapshot, the stack remains in
+`UPDATE_ROLLBACK_FAILED`. `ContinueUpdateRollback` retries the restoration; `UpdateStack` is
+rejected until rollback completes. A successful retry permits later updates. `DeleteStack` can
+delete the current managed identity without first restoring its snapshot.
+
+Cleanup keeps displaced-identity records while deletion attempts remain. After three cleanup
+attempts, an exhausted entry is removed from stack management and a later `DeleteStack` does not
+retry it. Committed update cleanup uses the same three-attempt limit.
+
+## EventBridge Scheduler Schedules
+
+`AWS::Scheduler::Schedule` creates a real schedule. `Ref` returns its name and `Fn::GetAtt Arn`
+returns its ARN. A group move preserves the name, removes the old group address, and restores the
+original configuration if the stack update rolls back.
+
+`Fn::If` values that select `AWS::NoValue` omit optional schedule properties and nested target
+or time-window fields. `ScheduleExpression`, `Target`, `FlexibleTimeWindow`, and their required
+fields still must be present and valid.
+
+Floci uses its main engine's bounded replacement-cleanup policy for committed updates and
+`DeleteStack`: each displaced address has up to three cleanup attempts, and exhausted entries are
+dropped. A failed cleanup leaves the first stack deletion in `DELETE_FAILED`, even if the current
+schedule was deleted; a later retry does not retry the dropped addresses. Schedules left after
+exhausted cleanup require manual deletion through the Scheduler API. A failed current-schedule
+delete preserves pending recovery state for a later deletion retry. This is Floci's shared cleanup
+policy, not a claim that AWS guarantees three attempts for `DeleteStack`.
+`UpdateReplacePolicy: Retain` keeps a name replacement's old schedule, but does not keep a group
+move's old address or an orphan created by a failed update.
+
+Schedules are addressed by group and name, as in the Scheduler API. If another client removes a
+managed schedule and recreates the same address, an in-place stack update applies the template to
+the current schedule there. Stack deletion and replacement cleanup delete the current schedule
+at a tracked address, and rollback restores its saved configuration at that address.
+A historical cleanup entry with attempts remaining can still affect a new occupant of its
+address. Dropping exhausted debt prevents later retries, but does not establish resource ownership.
 
 ## EventBridge Event Buses
 
@@ -339,6 +381,16 @@ references in `MasterUsername` and `MasterUserPassword` during resource creation
 
 Dynamic-reference expansion is currently scoped to these RDS credential properties.
 
+## RDS Associated Roles
+
+`AWS::RDS::DBCluster` and `AWS::RDS::DBInstance` apply `AssociatedRoles` through the same checks as
+`AddRoleToDBCluster` / `AddRoleToDBInstance` (see [RDS IAM role associations](rds.md#iam-role-associations)):
+
+- `Fn::If` may select the whole list or a single entry, and `AWS::NoValue` leaves it out. A value that is not a list of roles is a `ValidationError`.
+- On create, the roles are associated with the new cluster or instance. A list RDS refuses (a missing `RoleArn`, an instance role without `FeatureName`, or a cluster role named twice) fails the resource, and the new database is deleted again. As in AWS, an instance role or feature the list repeats is skipped, not refused. A renamed instance keeps its predecessor until the new one has its roles.
+- On `UpdateStack` (no interruption, as in AWS), a cluster's list is checked first, then the roles the template gained are added, and the roles the previous template declared and the new one drops are removed. A role associated outside the stack is kept while the template leaves it out; declaring it fails the update with `DBClusterRoleAlreadyExists`, as in AWS. If any step of an update is refused, the roles it already added are removed and the ones it removed are put back, so the database matches what the stack still records and a retry starts from there. A rolled-back cluster replacement restores the record of which roles the stack declared.
+- An Aurora cluster member (`AWS::RDS::DBInstance` with `DBClusterIdentifier`) cannot carry `AssociatedRoles`: the schema documents the property as not applicable there, since the cluster manages its roles. The resource fails with a `ValidationError` pointing at the cluster's `AssociatedRoles`.
+
 ## Account-Aware Provisioning
 
 Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace
@@ -466,6 +518,55 @@ logged and does not fail the rollback. When the rollback's own `Update` returns 
 was sent gets a `Delete` straight away for the same reason. An update that changes `ServiceToken`
 reaches no handler: it fails with `Modifying service token is not allowed.`, as on AWS, and its
 rollback sends nothing.
+
+## Failed update rollbacks
+
+When an update fails, Floci rolls back the resources it changed. A resource whose rollback fails
+is left `UPDATE_FAILED`, and the stack settles in `UPDATE_ROLLBACK_FAILED`. As on AWS, `UpdateStack`
+and an `UPDATE` change set are then refused with `ValidationError` (`Stack:<arn> is in
+UPDATE_ROLLBACK_FAILED state and can not be updated.`). Two ways out remain:
+
+- `DeleteStack` deletes the stack and its resources, the `UPDATE_FAILED` ones included (see
+  [Deletion Policies](#deletion-policies)).
+- `ContinueUpdateRollback` runs the rollback again for the resources still owed one, starting with
+  an `UPDATE_ROLLBACK_IN_PROGRESS` stack event whose reason is `User Initiated`. A retry re-runs
+  the restore of each resource still owed one, including the delete of a replacement whose earlier
+  delete failed; a resource whose restore cannot be redone fails again, leaving the stack in
+  `UPDATE_ROLLBACK_FAILED`, and can be passed in `ResourcesToSkip`. `ResourcesToSkip` names
+  `UPDATE_FAILED` resources to report as `UPDATE_COMPLETE` with the reason `Resource skipped
+  during UpdateRollback`, without rolling them back; a skipped resource keeps the state the failed
+  update left it in. Once every other resource rolled back, the stack reaches
+  `UPDATE_ROLLBACK_COMPLETE` with the template, parameters and outputs from before the failed
+  update, and takes updates again.
+
+`ForceRollback=true` skips every `UPDATE_FAILED` resource of the stack, each reported as a
+`ResourcesToSkip` skip is. When a forced rollback skipped a resource and completes, the stack's
+`StackStatusReason` and the reason of its `UPDATE_ROLLBACK_COMPLETE` event are `One or more
+resources were skipped during UpdateRollback. These resources were not rolled back and may have
+drifted from the template. Run drift detection (DetectStackDrift) to review their current state
+before your next update.` A rollback completed with `ResourcesToSkip` has no stack reason, as on
+AWS.
+
+As on AWS, a malformed `ContinueUpdateRollback` is refused with `ValidationError` before the stack
+is looked up, listing every violation: a `StackName` that is missing, empty, or does not match
+`[a-zA-Z][-a-zA-Z0-9]*|arn:[-a-zA-Z0-9:/._+]*`, and a `ResourcesToSkip` member that does not
+match `[a-zA-Z0-9]+|[a-zA-Z][-a-zA-Z0-9]*\.[a-zA-Z0-9]+`. `ForceRollback=true` with a non-empty
+`ResourcesToSkip` is then refused with `ForceRollback and ResourcesToSkip are mutually exclusive`,
+a stack that does not exist with `Stack: <StackName> does not exist`, and a stack in any status
+other than `UPDATE_ROLLBACK_FAILED` with `RollbackUpdatedStack cannot be called from current stack
+status`. `ResourcesToSkip` is checked against the stack after the call is accepted: a skip that is
+not a resource of the stack, or not `UPDATE_FAILED`, returns the stack to `UPDATE_ROLLBACK_FAILED`
+with the reason, touching no resource, and a later call can still finish the rollback. `RoleARN`
+and `ClientRequestToken` are accepted and have no effect.
+
+Known difference: `ResourcesToSkip` does not support a nested stack's resource
+(`NestedStackName.ResourceLogicalID`). When the prefix names a nested stack of the stack, the
+rollback fails again with a reason saying Floci does not support it, where AWS would skip that
+resource.
+
+A stack that reached `UPDATE_ROLLBACK_FAILED` under an earlier Floci version kept no record of its
+state before the update. `ContinueUpdateRollback` then retries every `UPDATE_FAILED` resource and
+keeps the template the stack holds.
 
 ## Deleted Stacks
 

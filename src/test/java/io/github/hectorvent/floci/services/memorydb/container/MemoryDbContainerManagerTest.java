@@ -142,7 +142,7 @@ class MemoryDbContainerManagerTest {
             ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
             ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(mock(ContainerSpec.class));
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
             EmulatorConfig config = mock(EmulatorConfig.class);
             EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -170,7 +170,7 @@ class MemoryDbContainerManagerTest {
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(mock(ContainerSpec.class));
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");

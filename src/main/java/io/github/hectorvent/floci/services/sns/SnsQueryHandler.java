@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.sns;
 import io.github.hectorvent.floci.core.common.*;
 import io.github.hectorvent.floci.services.sns.model.PlatformApplication;
 import io.github.hectorvent.floci.services.sns.model.PlatformEndpoint;
+import io.github.hectorvent.floci.services.sns.model.SmsSandboxPhoneNumber;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
@@ -17,6 +18,7 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Query-protocol handler for SNS actions.
@@ -43,8 +45,18 @@ public class SnsQueryHandler {
             case "ListTopics" -> handleListTopics(params, region);
             case "GetTopicAttributes" -> handleGetTopicAttributes(params, region);
             case "SetTopicAttributes" -> handleSetTopicAttributes(params, region);
+            case "AddPermission" -> handleAddPermission(params, region);
+            case "RemovePermission" -> handleRemovePermission(params, region);
             case "SetSMSAttributes" -> handleSetSmsAttributes(params, region);
             case "GetSMSAttributes" -> handleGetSmsAttributes(params, region);
+            case "GetSMSSandboxAccountStatus" -> handleGetSmsSandboxAccountStatus();
+            case "CreateSMSSandboxPhoneNumber" -> handleCreateSmsSandboxPhoneNumber(params, region);
+            case "VerifySMSSandboxPhoneNumber" -> handleVerifySmsSandboxPhoneNumber(params, region);
+            case "DeleteSMSSandboxPhoneNumber" -> handleDeleteSmsSandboxPhoneNumber(params, region);
+            case "ListSMSSandboxPhoneNumbers" -> handleListSmsSandboxPhoneNumbers(params, region);
+            case "CheckIfPhoneNumberIsOptedOut" -> handleCheckIfPhoneNumberIsOptedOut(params);
+            case "ListPhoneNumbersOptedOut" -> handleListPhoneNumbersOptedOut();
+            case "OptInPhoneNumber" -> handleOptInPhoneNumber(params);
             case "Subscribe" -> handleSubscribe(params, region);
             case "Unsubscribe" -> handleUnsubscribe(params, region);
             case "ListSubscriptions" -> handleListSubscriptions(params, region);
@@ -88,7 +100,7 @@ public class SnsQueryHandler {
             snsService.deleteTopic(topicArn, region);
             return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteTopic", AwsNamespaces.SNS)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -118,7 +130,7 @@ public class SnsQueryHandler {
             xml.end("Attributes");
             return Response.ok(AwsQueryResponse.envelope("GetTopicAttributes", AwsNamespaces.SNS, xml.build())).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -130,7 +142,26 @@ public class SnsQueryHandler {
             snsService.setTopicAttributes(topicArn, attributeName, attributeValue, region);
             return Response.ok(AwsQueryResponse.envelopeNoResult("SetTopicAttributes", AwsNamespaces.SNS)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleAddPermission(MultivaluedMap<String, String> params, String region) {
+        try {
+            snsService.addPermission(getParam(params, "TopicArn"), getParam(params, "Label"),
+                    memberList(params, "AWSAccountId"), memberList(params, "ActionName"), region);
+            return Response.ok(AwsQueryResponse.envelopeNoResult("AddPermission", AwsNamespaces.SNS)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleRemovePermission(MultivaluedMap<String, String> params, String region) {
+        try {
+            snsService.removePermission(getParam(params, "TopicArn"), getParam(params, "Label"), region);
+            return Response.ok(AwsQueryResponse.envelopeNoResult("RemovePermission", AwsNamespaces.SNS)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
         }
     }
 
@@ -161,6 +192,102 @@ public class SnsQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("GetSMSAttributes", AwsNamespaces.SNS, xml.build())).build();
     }
 
+    private Response handleGetSmsSandboxAccountStatus() {
+        String result = new XmlBuilder()
+                .elem("IsInSandbox", String.valueOf(snsService.isInSmsSandbox()))
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("GetSMSSandboxAccountStatus", AwsNamespaces.SNS, result))
+                .build();
+    }
+
+    private Response handleCreateSmsSandboxPhoneNumber(MultivaluedMap<String, String> params, String region) {
+        try {
+            snsService.createSmsSandboxPhoneNumber(getParam(params, "PhoneNumber"),
+                    getParam(params, "LanguageCode"), region);
+            return Response.ok(AwsQueryResponse.envelopeEmptyResult("CreateSMSSandboxPhoneNumber",
+                    AwsNamespaces.SNS)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleVerifySmsSandboxPhoneNumber(MultivaluedMap<String, String> params, String region) {
+        try {
+            snsService.verifySmsSandboxPhoneNumber(getParam(params, "PhoneNumber"),
+                    getParam(params, "OneTimePassword"), region);
+            return Response.ok(AwsQueryResponse.envelopeEmptyResult("VerifySMSSandboxPhoneNumber",
+                    AwsNamespaces.SNS)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleDeleteSmsSandboxPhoneNumber(MultivaluedMap<String, String> params, String region) {
+        try {
+            snsService.deleteSmsSandboxPhoneNumber(getParam(params, "PhoneNumber"), region);
+            return Response.ok(AwsQueryResponse.envelopeEmptyResult("DeleteSMSSandboxPhoneNumber",
+                    AwsNamespaces.SNS)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleListSmsSandboxPhoneNumbers(MultivaluedMap<String, String> params, String region) {
+        try {
+            PaginatedResult<SmsSandboxPhoneNumber> page = snsService.listSmsSandboxPhoneNumbers(
+                    Pagination.parseMaxResults(getParam(params, "MaxResults"), "InvalidParameter"),
+                    getParam(params, "NextToken"), region);
+            XmlBuilder xml = new XmlBuilder().start("PhoneNumbers");
+            for (SmsSandboxPhoneNumber number : page.items()) {
+                xml.start("member")
+                   .elem("PhoneNumber", number.getPhoneNumber())
+                   .elem("Status", number.getStatus())
+                   .end("member");
+            }
+            xml.end("PhoneNumbers");
+            if (page.nextToken() != null) {
+                xml.elem("NextToken", page.nextToken());
+            }
+            return Response.ok(AwsQueryResponse.envelope("ListSMSSandboxPhoneNumbers", AwsNamespaces.SNS,
+                    xml.build())).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleCheckIfPhoneNumberIsOptedOut(MultivaluedMap<String, String> params) {
+        try {
+            String result = new XmlBuilder()
+                    .elem("isOptedOut", String.valueOf(snsService.isPhoneNumberOptedOut(
+                            getParam(params, "phoneNumber"))))
+                    .build();
+            return Response.ok(AwsQueryResponse.envelope("CheckIfPhoneNumberIsOptedOut", AwsNamespaces.SNS,
+                    result)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleListPhoneNumbersOptedOut() {
+        XmlBuilder xml = new XmlBuilder().start("phoneNumbers");
+        for (String phoneNumber : snsService.listPhoneNumbersOptedOut()) {
+            xml.elem("member", phoneNumber);
+        }
+        xml.end("phoneNumbers");
+        return Response.ok(AwsQueryResponse.envelope("ListPhoneNumbersOptedOut", AwsNamespaces.SNS,
+                xml.build())).build();
+    }
+
+    private Response handleOptInPhoneNumber(MultivaluedMap<String, String> params) {
+        try {
+            snsService.optInPhoneNumber(getParam(params, "phoneNumber"));
+            return Response.ok(AwsQueryResponse.envelopeEmptyResult("OptInPhoneNumber", AwsNamespaces.SNS))
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
     private Response handleSubscribe(MultivaluedMap<String, String> params, String region) {
         String topicArn = getParam(params, "TopicArn");
         String protocol = getParam(params, "Protocol");
@@ -172,7 +299,7 @@ public class SnsQueryHandler {
             String result = new XmlBuilder().elem("SubscriptionArn", sub.getSubscriptionArn()).build();
             return Response.ok(AwsQueryResponse.envelope("Subscribe", AwsNamespaces.SNS, result)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -182,7 +309,7 @@ public class SnsQueryHandler {
             snsService.unsubscribe(subscriptionArn, region);
             return Response.ok(AwsQueryResponse.envelopeNoResult("Unsubscribe", AwsNamespaces.SNS)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -197,7 +324,7 @@ public class SnsQueryHandler {
             List<Subscription> subs = snsService.listSubscriptionsByTopic(topicArn, region);
             return buildSubscriptionListResponse("ListSubscriptionsByTopic", subs);
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -230,7 +357,7 @@ public class SnsQueryHandler {
         try {
             attributes = parseMessageAttributes(params, "MessageAttributes.entry.");
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
 
         try {
@@ -240,7 +367,7 @@ public class SnsQueryHandler {
             String result = new XmlBuilder().elem("MessageId", messageId).build();
             return Response.ok(AwsQueryResponse.envelope("Publish", AwsNamespaces.SNS, result)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -253,7 +380,7 @@ public class SnsQueryHandler {
             String result = new XmlBuilder().elem("PlatformApplicationArn", app.getArn()).build();
             return Response.ok(AwsQueryResponse.envelope("CreatePlatformApplication", AwsNamespaces.SNS, result)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -274,7 +401,7 @@ public class SnsQueryHandler {
             xml.end("Attributes");
             return Response.ok(AwsQueryResponse.envelope("GetPlatformApplicationAttributes", AwsNamespaces.SNS, xml.build())).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -285,7 +412,7 @@ public class SnsQueryHandler {
             snsService.setPlatformApplicationAttributes(arn, attrs, region);
             return Response.ok(AwsQueryResponse.envelopeNoResult("SetPlatformApplicationAttributes", AwsNamespaces.SNS)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -313,7 +440,7 @@ public class SnsQueryHandler {
             String result = new XmlBuilder().elem("EndpointArn", endpoint.getArn()).build();
             return Response.ok(AwsQueryResponse.envelope("CreatePlatformEndpoint", AwsNamespaces.SNS, result)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -334,7 +461,7 @@ public class SnsQueryHandler {
             xml.end("Attributes");
             return Response.ok(AwsQueryResponse.envelope("GetEndpointAttributes", AwsNamespaces.SNS, xml.build())).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -345,7 +472,7 @@ public class SnsQueryHandler {
             snsService.setEndpointAttributes(arn, attrs, region);
             return Response.ok(AwsQueryResponse.envelopeNoResult("SetEndpointAttributes", AwsNamespaces.SNS)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -364,7 +491,7 @@ public class SnsQueryHandler {
             xml.end("Endpoints");
             return Response.ok(AwsQueryResponse.envelope("ListEndpointsByPlatformApplication", AwsNamespaces.SNS, xml.build())).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -412,7 +539,7 @@ public class SnsQueryHandler {
             xml.end("Failed");
             return Response.ok(AwsQueryResponse.envelope("PublishBatch", AwsNamespaces.SNS, xml.build())).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -427,7 +554,7 @@ public class SnsQueryHandler {
             xml.end("Attributes");
             return Response.ok(AwsQueryResponse.envelope("GetSubscriptionAttributes", AwsNamespaces.SNS, xml.build())).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -439,7 +566,7 @@ public class SnsQueryHandler {
             snsService.setSubscriptionAttribute(subscriptionArn, attributeName, attributeValue, region);
             return Response.ok(AwsQueryResponse.envelopeNoResult("SetSubscriptionAttributes", AwsNamespaces.SNS)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -451,7 +578,7 @@ public class SnsQueryHandler {
             String result = new XmlBuilder().elem("SubscriptionArn", subscriptionArn).build();
             return Response.ok(AwsQueryResponse.envelope("ConfirmSubscription", AwsNamespaces.SNS, result)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -462,7 +589,7 @@ public class SnsQueryHandler {
             snsService.tagResource(resourceArn, tags, region);
             return Response.ok(AwsQueryResponse.envelopeNoResult("TagResource", AwsNamespaces.SNS)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -478,7 +605,7 @@ public class SnsQueryHandler {
             snsService.untagResource(resourceArn, tagKeys, region);
             return Response.ok(AwsQueryResponse.envelopeNoResult("UntagResource", AwsNamespaces.SNS)).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -497,7 +624,7 @@ public class SnsQueryHandler {
             xml.end("Tags");
             return Response.ok(AwsQueryResponse.envelope("ListTagsForResource", AwsNamespaces.SNS, xml.build())).build();
         } catch (AwsException e) {
-            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return xmlErrorResponse(e);
         }
     }
 
@@ -529,6 +656,18 @@ public class SnsQueryHandler {
         return params.getFirst(name);
     }
 
+    /** A list parameter's {@code <name>.member.N} values, in order, up to the first gap. */
+    private List<String> memberList(MultivaluedMap<String, String> params, String name) {
+        List<String> values = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String value = getParam(params, name + ".member." + i);
+            if (value == null) {
+                return values;
+            }
+            values.add(value);
+        }
+    }
+
     private Map<String, MessageAttributeValue> parseMessageAttributes(
             MultivaluedMap<String, String> params, String prefix) {
         Map<String, MessageAttributeValue> attributes = new HashMap<>();
@@ -556,5 +695,15 @@ public class SnsQueryHandler {
 
     Response xmlErrorResponse(String code, String message, int status) {
         return AwsQueryResponse.error(code, message, AwsNamespaces.SNS, status);
+    }
+
+    /** The error {@code e} raises, with the members its shape declares beyond the message. */
+    Response xmlErrorResponse(AwsException e) {
+        Map<String, String> members = new TreeMap<>();
+        if (e.getExtendedData() != null) {
+            e.getExtendedData().forEach((name, value) -> members.put(name, String.valueOf(value)));
+        }
+        return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.SNS, e.getHttpStatus(),
+                members);
     }
 }

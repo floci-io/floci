@@ -207,6 +207,19 @@ instanceTypes:
       - networkCardIndex: 0
         maximumNetworkInterfaces: 3
 
+  - instanceType: m6g.large
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+      - arm64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
+
   - instanceType: m6gd.large
     vcpu: 2
     memoryMib: 8192

@@ -76,12 +76,20 @@ class ContainerLifecycleManagerCpuLimitTest {
     }
 
     @Test
+    void initReachesHostConfig() {
+        HostConfig hostConfig = createHostConfig(EIGHT_CPU_HOST, ContainerBuilder.Builder::withInit);
+
+        assertTrue(hostConfig.getInit());
+    }
+
+    @Test
     void containerThatAskedForNoCpuLimitGetsNone() {
         HostConfig hostConfig = createHostConfig(EIGHT_CPU_HOST, UnaryOperator.identity());
 
         assertNull(hostConfig.getNanoCPUs());
         assertNull(hostConfig.getCpuShares());
         assertNull(hostConfig.getReadonlyRootfs());
+        assertNull(hostConfig.getInit());
     }
 
     /**

@@ -61,7 +61,8 @@ class TestCognitoUserPoolClient:
             omitted = cognito_client.update_user_pool_client(
                 UserPoolId=pool_id, ClientId=client_id, ClientName="renamed"
             )["UserPoolClient"]
-            assert omitted["AuthSessionValidity"] == updated_minutes
+            # As on AWS, an update that omits a setting resets it to its default.
+            assert omitted["AuthSessionValidity"] == 3
         finally:
             cognito_client.delete_user_pool(UserPoolId=pool_id)
 

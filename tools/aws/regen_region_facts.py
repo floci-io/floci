@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Regenerate src/main/resources/aws/region-facts.json from the AWS CDK and Terraform sources.
+"""Regenerate src/main/resources/aws/region-facts.json from the AWS CDK, Terraform, botocore and user-guide sources.
 
 AWS publishes a handful of per-region and per-partition constants only as prose tables (the
-General Reference), never as SDK data. The two open-source projects that transcribe them are the
-sources here, read from the `local/aws` checkouts:
+General Reference), never as SDK data. The two open-source projects that transcribe them, and the
+China and GovCloud user guides for what neither transcribes, are the sources here, read from the
+`local/aws` checkouts:
 
 - Route 53 hosted zone ids for Classic and Application load balancers (one map, byte-identical
   in `terraform-provider-aws`), for Network load balancers (a different map), and for S3 static
@@ -20,6 +21,29 @@ sources here, read from the `local/aws` checkouts:
   (China and the ISO/EUSC partitions reverse their DNS suffix, but only for the listed services)
   plus the `.cn` suffix exceptions; the per-partition `<reversed suffix>.vpce` prefix from
   `region-info/build-tools/generate-static-data.ts`.
+- The management console host per partition, for `aws`, `aws-cn` and `aws-us-gov`: one sentence
+  each from the user-guide snapshots under `aws-docs/partition-guides` (`CONSOLE_HOST_SENTENCES`).
+  No source states it for the ISO or EUSC partitions, which get no field. The snapshots are these
+  three pages, saved under the path after the arrow:
+    https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-organizations.html -> gov/govcloud-organizations.md
+    https://docs.amazonaws.cn/en_us/aws/latest/userguide/console.html -> cn/console.md
+    https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/configure-account.html -> gov/configure-account.md
+  Either rendering parses: the page's text (what the `aws-refs` skill's docs driver extracts from
+  the `.html`), or the Markdown AWS serves at the same URL with `.md` in place of `.html`, which
+  writes the China host as a link.
+- The suffix of a CloudFront distribution's domain name: `cloudfront.net` from the example the
+  botocore CloudFront model gives for `Distribution$DomainName` and
+  `DistributionSummary$DomainName`, and `cloudfront.cn` for `aws-cn` from the China guide's
+  CloudFront page (`CLOUDFRONT_SUFFIX_SENTENCES`),
+  https://docs.amazonaws.cn/en_us/aws/latest/userguide/cloudfront.html -> cn/cloudfront.md, whose
+  Markdown rendering escapes the asterisk (`\\*.cloudfront.cn`). The other partitions have no
+  CloudFront.
+- The Route 53 hosted zone of an API Gateway regional endpoint, for the two GovCloud regions only:
+  the GovCloud guide's API Gateway page (`APIGATEWAY_REGIONAL_ZONE_SENTENCE`),
+  https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-abp.html -> gov/govcloud-abp.md,
+  with the region
+  resolved through the region descriptions in `partitions.json`. No source in `local/aws` gives
+  the zone for any other region.
 
 Nothing is hand-typed. When the checkouts are absent (CI), `--check` only verifies the vendored
 file parses and keeps its shape; a regeneration needs `local/aws`.
@@ -41,6 +65,8 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/region-facts.json"
 PARTITIONS = REPO_ROOT / "src/main/resources/aws/partitions.json"
 LOCAL_TERRAFORM = REPO_ROOT / "local/aws/terraform-provider-aws"
 LOCAL_CDK = REPO_ROOT / "local/aws/aws-cdk"
+LOCAL_GUIDES = REPO_ROOT / "local/aws/aws-docs/partition-guides"
+LOCAL_BOTOCORE_DATA = REPO_ROOT / "local/aws/botocore/botocore/data"
 
 TF_ELB = "internal/service/elb/hosted_zone_id_data_source.go"
 TF_ELBV2 = "internal/service/elbv2/hosted_zone_id_data_source.go"
@@ -49,6 +75,7 @@ TF_CLIENT = "internal/conns/awsclient.go"
 CDK_FACT_TABLES = "packages/aws-cdk-lib/region-info/build-tools/fact-tables.ts"
 CDK_CLOUDFRONT_TARGET = "packages/aws-cdk-lib/aws-route53-targets/lib/cloudfront-target.ts"
 CDK_VPC_ENDPOINT = "packages/aws-cdk-lib/aws-ec2/lib/vpc-endpoint.ts"
+BOTOCORE_CLOUDFRONT = "cloudfront/2020-05-31/service-2.json"
 
 GO_ROW_RE = re.compile(r'^\s*endpoints\.([A-Za-z0-9]+)RegionID:\s*"([A-Z0-9]+)",')
 TS_ROW_RE = re.compile(r"^\s*'([a-z0-9-]+)':\s*'([A-Z0-9]+)',")
@@ -59,6 +86,39 @@ GO_CLOUDFRONT_DEFAULT_RE = re.compile(r'\}\s*\n\s*return "([A-Z0-9]+)" // See ht
 CDK_CLOUDFRONT_RE = re.compile(r"\['([a-z-]+)'\]:\s*\{\s*zoneId:\s*'([A-Z0-9]+)'")
 VPCE_LIST_RE = re.compile(r"'([a-z0-9-]+)':\s*\[([^\]]*)\]", re.DOTALL)
 VPCE_CASE_RE = re.compile(r"((?:\s*case '[a-z0-9-]+':\n)+)\s*return '([a-z0-9.-]+)';")
+# partition -> (guide page, the sentence that states the console host). The China guide spells the
+# host two ways: `console.amazonaws.cn` on its console page (cn/console.md, and again in
+# cn/accounts-and-credentials.md) and `console.www.amazonaws.cn` once (cn/managing-aws.md). The
+# console page's own statement is the one vendored. The commercial host is taken from the GovCloud
+# guide, which names it where it sends the reader back to the commercial Region. AWS's Markdown
+# rendering of the China page writes the host as a link, `[https://host](https://host).`, where the
+# page text has `https://host .`; the pattern takes both.
+CONSOLE_HOST_SENTENCES = {
+    "aws": ("gov/govcloud-organizations.md", re.compile(
+        r"in the commercial Region, sign in to the Organizations console at https://([a-z0-9.-]+)/organizations")),
+    "aws-cn": ("cn/console.md", re.compile(
+        r"Management Console is available in both Chinese and English and can be accessed at \[?https://([a-z0-9.-]+)[\] ]")),
+    "aws-us-gov": ("gov/configure-account.md", re.compile(
+        r"Sign in to the AWS GovCloud \(US\) console and open the IAM console at https://([a-z0-9.-]+)/iam")),
+}
+# The commercial suffix is the one in the example distribution name of these two model members.
+BOTOCORE_CLOUDFRONT_DOMAIN_SHAPES = ("Distribution", "DistributionSummary")
+BOTOCORE_CLOUDFRONT_EXAMPLE_RE = re.compile(r"<code>d[0-9a-z]+\.(cloudfront\.[a-z]+)</code>")
+CLOUDFRONT_SUFFIX_SENTENCES = {
+    "aws-cn": ("cn/cloudfront.md", re.compile(
+        r"You can.t use the default CloudFront domain, \\?\*\.(cloudfront\.[a-z]+), to serve content\.")),
+}
+# One sentence per region, each naming the region by the description partitions.json carries. The
+# page writes "Route 53" with a no-break space.
+APIGATEWAY_REGIONAL_ZONE_PAGE = "gov/govcloud-abp.md"
+# The page states a zone for every region of this partition, so a run that finds fewer is refused.
+APIGATEWAY_REGIONAL_ZONE_PARTITION = "aws-us-gov"
+APIGATEWAY_REGIONAL_ZONE_SENTENCE = re.compile(
+    r"The Amazon Route\s53 Hosted Zone ID for the regional endpoint in the (AWS GovCloud \([A-Za-z-]+\)) Region"
+    r" is (Z[0-9A-Z]+)\.")
+GUIDE_PAGES = sorted({page for page, _ in CONSOLE_HOST_SENTENCES.values()}
+                     | {page for page, _ in CLOUDFRONT_SUFFIX_SENTENCES.values()}
+                     | {APIGATEWAY_REGIONAL_ZONE_PAGE})
 GO_PARTITION_IDS = {"AwsCn": "aws-cn", "AwsUsGov": "aws-us-gov", "AwsIso": "aws-iso", "AwsIsoB": "aws-iso-b",
                     "AwsIsoE": "aws-iso-e", "AwsIsoF": "aws-iso-f", "Aws": "aws"}
 
@@ -149,10 +209,79 @@ def parse_vpc_endpoint_exceptions(text: str) -> tuple[dict[str, list[str]], dict
     return services, prefixes, cn_suffix
 
 
+def parse_guide_sentence(text: str, sentence: re.Pattern[str], page: str) -> str:
+    """The one value `sentence` states in a guide page; a page that lost the sentence, or states two
+    different values with it, is an error rather than a guess."""
+    values = sorted({match.group(1).rstrip(".") for match in sentence.finditer(text)})
+    if len(values) != 1:
+        raise ValueError(f"{page}: expected one value from /{sentence.pattern}/, found {values}")
+    return values[0]
+
+
+def parse_guide_sentences(guides: Path, sentences: dict[str, tuple[str, re.Pattern[str]]]) -> dict[str, str]:
+    return {partition: parse_guide_sentence((guides / page).read_text(encoding="utf-8"), sentence, page)
+            for partition, (page, sentence) in sentences.items()}
+
+
+def parse_console_hosts(guides: Path) -> dict[str, str]:
+    return parse_guide_sentences(guides, CONSOLE_HOST_SENTENCES)
+
+
+def parse_botocore_cloudfront_suffix(text: str) -> str:
+    """The suffix of the example distribution name in the model's `DomainName` documentation."""
+    shapes = json.loads(text)["shapes"]
+    suffixes = set()
+    for shape in BOTOCORE_CLOUDFRONT_DOMAIN_SHAPES:
+        documentation = shapes[shape]["members"]["DomainName"].get("documentation", "")
+        found = set(BOTOCORE_CLOUDFRONT_EXAMPLE_RE.findall(documentation))
+        if len(found) != 1:
+            raise ValueError(f"cloudfront model: {shape}$DomainName gives no single example distribution name: {found}")
+        suffixes |= found
+    if len(suffixes) != 1:
+        raise ValueError(f"cloudfront model: the DomainName examples disagree on the suffix: {sorted(suffixes)}")
+    return suffixes.pop()
+
+
+def parse_cloudfront_suffixes(botocore_data: Path, guides: Path) -> dict[str, str]:
+    suffixes = {"aws": parse_botocore_cloudfront_suffix((botocore_data / BOTOCORE_CLOUDFRONT).read_text(encoding="utf-8"))}
+    suffixes.update(parse_guide_sentences(guides, CLOUDFRONT_SUFFIX_SENTENCES))
+    return suffixes
+
+
+def parse_apigateway_regional_zones(text: str, partitions_doc: dict) -> dict[str, str]:
+    """region id -> hosted zone for every GovCloud region, from the GovCloud API Gateway page."""
+    by_description = {r["description"]: r["id"] for p in partitions_doc["partitions"] for r in p["regions"]
+                      if r.get("description")}
+    zones: dict[str, str] = {}
+    for description, zone in APIGATEWAY_REGIONAL_ZONE_SENTENCE.findall(text):
+        region = by_description.get(description)
+        if region is None:
+            raise ValueError(f"{APIGATEWAY_REGIONAL_ZONE_PAGE}: {description!r} is not a region description "
+                             "in partitions.json")
+        if zones.setdefault(region, zone) != zone:
+            raise ValueError(f"{APIGATEWAY_REGIONAL_ZONE_PAGE}: two regional hosted zones for {region}")
+    if not zones:
+        raise ValueError(f"{APIGATEWAY_REGIONAL_ZONE_PAGE}: no regional endpoint hosted zone sentence found")
+    missing = sorted(apigateway_zone_regions(partitions_doc) - zones.keys())
+    if missing:
+        raise ValueError(f"{APIGATEWAY_REGIONAL_ZONE_PAGE}: no regional endpoint hosted zone for {', '.join(missing)}")
+    return zones
+
+
+def apigateway_zone_regions(partitions_doc: dict) -> set[str]:
+    """The regions the GovCloud API Gateway page must state a regional hosted zone for."""
+    return {region["id"] for partition in partitions_doc["partitions"]
+            if partition["id"] == APIGATEWAY_REGIONAL_ZONE_PARTITION for region in partition["regions"]}
+
+
+def guides_present(guides: Path) -> bool:
+    return all((guides / page).exists() for page in GUIDE_PAGES)
+
+
 # --------------------------------------------------------------------------- #
 # Generation
 # --------------------------------------------------------------------------- #
-def build(terraform: Path, cdk: Path, partitions_doc: dict) -> dict:
+def build(terraform: Path, cdk: Path, guides: Path, botocore_data: Path, partitions_doc: dict) -> dict:
     elb = parse_go_map((terraform / TF_ELB).read_text(encoding="utf-8"), "hostedZoneIDPerRegionMap")
     elbv2_text = (terraform / TF_ELBV2).read_text(encoding="utf-8")
     alb = parse_go_map(elbv2_text, "hostedZoneIDPerRegionALBMap")
@@ -170,6 +299,10 @@ def build(terraform: Path, cdk: Path, partitions_doc: dict) -> dict:
         (cdk / CDK_VPC_ENDPOINT).read_text(encoding="utf-8"))
     if elb != alb:
         raise ValueError("the Classic and ALB hosted-zone maps differ; the generator assumed they are one table")
+    console_hosts = parse_console_hosts(guides)
+    cloudfront_suffixes = parse_cloudfront_suffixes(botocore_data, guides)
+    apigateway_zones = parse_apigateway_regional_zones(
+        (guides / APIGATEWAY_REGIONAL_ZONE_PAGE).read_text(encoding="utf-8"), partitions_doc)
 
     partition_ids = [p["id"] for p in partitions_doc["partitions"]]
     region_partition = {r["id"]: p for p in partitions_doc["partitions"] for r in p["regions"]}
@@ -177,7 +310,7 @@ def build(terraform: Path, cdk: Path, partitions_doc: dict) -> dict:
 
     s3_website = dict(s3_cdk)
     s3_website.update(s3_tf)  # Terraform cites the website-endpoint table; it wins on conflicts
-    region_ids = sorted(set(alb) | set(nlb) | set(s3_website) | set(vpce_services))
+    region_ids = sorted(set(alb) | set(nlb) | set(s3_website) | set(vpce_services) | set(apigateway_zones))
     regions = {}
     for region in region_ids:
         if region not in region_partition:
@@ -195,6 +328,8 @@ def build(terraform: Path, cdk: Path, partitions_doc: dict) -> dict:
             entry["vpcEndpointPrefixServices"] = vpce_services[region]
         if region in vpce_cn_suffix:
             entry["vpcEndpointCnSuffixServices"] = vpce_cn_suffix[region]
+        if region in apigateway_zones:
+            entry["apiGatewayRegionalHostedZoneId"] = apigateway_zones[region]
         regions[region] = entry
 
     partitions = {}
@@ -204,6 +339,10 @@ def build(terraform: Path, cdk: Path, partitions_doc: dict) -> dict:
             entry["cloudfrontHostedZoneId"] = cloudfront_tf[partition_id]
         if partition_id in saml:
             entry["samlSignOnUrl"] = saml[partition_id]
+        if partition_id in console_hosts:
+            entry["consoleHost"] = console_hosts[partition_id]
+        if partition_id in cloudfront_suffixes:
+            entry["cloudfrontDomainSuffix"] = cloudfront_suffixes[partition_id]
         partitions[partition_id] = entry
 
     return {
@@ -211,6 +350,8 @@ def build(terraform: Path, cdk: Path, partitions_doc: dict) -> dict:
             "generator": "tools/aws/regen_region_facts.py",
             "terraform": f"terraform-provider-aws {TF_ELB}, {TF_ELBV2}, {TF_S3}, {TF_CLIENT}",
             "cdk": f"aws-cdk {CDK_FACT_TABLES}, {CDK_CLOUDFRONT_TARGET}, {CDK_VPC_ENDPOINT}",
+            "docs": "aws-docs/partition-guides (snapshots of the China and GovCloud user guides) " + ", ".join(GUIDE_PAGES),
+            "botocore": f"botocore {BOTOCORE_CLOUDFRONT} (Distribution$DomainName, DistributionSummary$DomainName)",
             "s3WebsiteConflicts": "terraform wins over the CDK where they disagree (it cites the S3 website-endpoint table)",
         },
         "partitions": partitions,
@@ -234,6 +375,8 @@ HOSTED_ZONE_ID_RE = re.compile(r"Z[0-9A-Z]{9,31}")
 SAML_URL_RE = re.compile(r"https://[a-z0-9.-]+/saml")
 VPCE_PREFIX_RE = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)*\.vpce")
 REVERSED_DNS_RE = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+")
+CONSOLE_HOST_RE = re.compile(r"console(\.[a-z0-9-]+){2,}")
+CLOUDFRONT_SUFFIX_RE = re.compile(r"cloudfront\.[a-z]+")
 
 
 def self_check(path: Path, partitions_path: Path = PARTITIONS) -> list[str]:
@@ -269,6 +412,13 @@ def self_check(path: Path, partitions_path: Path = PARTITIONS) -> list[str]:
         expected = ".".join(reversed(partition["dnsSuffix"].split("."))) + ".vpce"
         if entry.get("vpcEndpointServiceNamePrefix") != expected:
             problems.append(f"{path}: {partition['id']}.vpcEndpointServiceNamePrefix should be {expected!r}")
+        if partition["id"] in CONSOLE_HOST_SENTENCES and "consoleHost" not in entry:
+            problems.append(f"{path}: {partition['id']}.consoleHost is missing")
+        if partition["id"] in {"aws"} | CLOUDFRONT_SUFFIX_SENTENCES.keys() and "cloudfrontDomainSuffix" not in entry:
+            problems.append(f"{path}: {partition['id']}.cloudfrontDomainSuffix is missing")
+    for region in sorted(apigateway_zone_regions({"partitions": partitions_doc})):
+        if "apiGatewayRegionalHostedZoneId" not in document["regions"].get(region, {}):
+            problems.append(f"{path}: {region}.apiGatewayRegionalHostedZoneId is missing")
     known = {region["id"] for partition in partitions_doc for region in partition["regions"]}
     for region in document["regions"]:
         if region not in known:
@@ -277,7 +427,8 @@ def self_check(path: Path, partitions_path: Path = PARTITIONS) -> list[str]:
     for partition, entry in document["partitions"].items():
         for key, value in entry.items():
             pattern = {"cloudfrontHostedZoneId": HOSTED_ZONE_ID_RE, "samlSignOnUrl": SAML_URL_RE,
-                       "vpcEndpointServiceNamePrefix": VPCE_PREFIX_RE}.get(key)
+                       "vpcEndpointServiceNamePrefix": VPCE_PREFIX_RE, "consoleHost": CONSOLE_HOST_RE,
+                       "cloudfrontDomainSuffix": CLOUDFRONT_SUFFIX_RE}.get(key)
             if pattern is None:
                 problems.append(f"{path}: {partition}.{key} is not a known field")
             elif not isinstance(value, str) or not pattern.fullmatch(value):
@@ -303,12 +454,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="exit 1 when the vendored file differs from a fresh generation")
     parser.add_argument("--terraform", type=Path, default=LOCAL_TERRAFORM, help="terraform-provider-aws checkout")
     parser.add_argument("--cdk", type=Path, default=LOCAL_CDK, help="aws-cdk checkout")
+    parser.add_argument("--guides", type=Path, default=LOCAL_GUIDES, help="aws-docs/partition-guides snapshots")
+    parser.add_argument("--botocore-data", type=Path, default=LOCAL_BOTOCORE_DATA, help="botocore data directory")
     parser.add_argument("--partitions", type=Path, default=PARTITIONS, help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, default=OUTPUT, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     rel = args.output.relative_to(REPO_ROOT) if args.output.is_relative_to(REPO_ROOT) else args.output
 
-    sources_present = (args.terraform / TF_ELB).exists() and (args.cdk / CDK_FACT_TABLES).exists()
+    sources_present = ((args.terraform / TF_ELB).exists() and (args.cdk / CDK_FACT_TABLES).exists()
+                       and guides_present(args.guides) and (args.botocore_data / BOTOCORE_CLOUDFRONT).exists())
     if not sources_present:
         if args.check:
             problems = self_check(args.output, args.partitions)
@@ -318,9 +472,11 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"{rel}: sources not checked out, shape verified only")
             return 0
-        raise SystemExit("error: regenerating needs the terraform-provider-aws and aws-cdk checkouts under local/aws")
+        raise SystemExit("error: regenerating needs the terraform-provider-aws, aws-cdk and botocore checkouts "
+                         "and the aws-docs/partition-guides snapshots under local/aws")
 
-    document = build(args.terraform, args.cdk, json.loads(args.partitions.read_text(encoding="utf-8")))
+    document = build(args.terraform, args.cdk, args.guides, args.botocore_data,
+                     json.loads(args.partitions.read_text(encoding="utf-8")))
     rendered = render(document)
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""

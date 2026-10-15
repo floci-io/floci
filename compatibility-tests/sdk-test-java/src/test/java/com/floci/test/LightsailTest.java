@@ -56,7 +56,7 @@ class LightsailTest {
 
         CreateInstancesResponse createInstances = lightsail.createInstances(CreateInstancesRequest.builder()
                 .instanceNames(instanceName)
-                .availabilityZone("us-east-1a")
+                .availabilityZone(TestFixtures.availabilityZone())
                 .blueprintId("ubuntu_22_04")
                 .bundleId("nano_3_0")
                 .keyPairName(keyPairName)
@@ -68,8 +68,8 @@ class LightsailTest {
         Instance instance = lightsail.getInstance(r -> r.instanceName(instanceName)).instance();
         assertThat(instance.name()).isEqualTo(instanceName);
         assertThat(instance.arn()).startsWith("arn:aws:lightsail:");
-        assertThat(instance.location().regionNameAsString()).isEqualTo("us-east-1");
-        assertThat(instance.location().availabilityZone()).isEqualTo("us-east-1a");
+        assertThat(instance.location().regionNameAsString()).isEqualTo(TestFixtures.region().id());
+        assertThat(instance.location().availabilityZone()).isEqualTo(TestFixtures.availabilityZone());
         assertThat(instance.state().name()).isEqualTo("running");
         assertThat(instance.tags()).extracting(Tag::key).contains("component");
 
@@ -96,7 +96,7 @@ class LightsailTest {
                     assertThat(port.stateAsString()).isEqualTo("open");
                 });
 
-        lightsail.createDisk(r -> r.diskName(diskName).availabilityZone("us-east-1a").sizeInGb(8));
+        lightsail.createDisk(r -> r.diskName(diskName).availabilityZone(TestFixtures.availabilityZone()).sizeInGb(8));
         lightsail.attachDisk(r -> r.diskName(diskName).instanceName(instanceName).diskPath("/dev/xvdf"));
         Disk disk = lightsail.getDisk(r -> r.diskName(diskName)).disk();
         assertThat(disk.name()).isEqualTo(diskName);

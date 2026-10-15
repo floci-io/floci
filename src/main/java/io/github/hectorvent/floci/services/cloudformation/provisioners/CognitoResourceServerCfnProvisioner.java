@@ -49,6 +49,11 @@ public class CognitoResourceServerCfnProvisioner implements CfnResourceProvision
         validateString(name, "Name", 256, "[\\w\\s+=,.@-]+");
         List<ResourceServerScope> scopes = scopes(properties, ctx);
 
+        if (ctx.isUpdate()) {
+            // Rolling this update back undoes it alone; only ContinueUpdateRollback retries the
+            // delete the last rollback could not make.
+            ReplacementCleanup.endRollbackRetry(resource);
+        }
         if (ctx.isUpdate() && retainsFailedUpdateState(resource)) {
             try {
                 rollbackUpdate(resource);

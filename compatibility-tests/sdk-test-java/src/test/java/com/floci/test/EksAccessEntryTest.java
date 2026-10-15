@@ -67,8 +67,8 @@ class EksAccessEntryTest {
                         .bootstrapClusterCreatorAdminPermissions(false).build()));
         try (EksWaiter waiter = eks.waiter()) {
             WaiterResponse<DescribeClusterResponse> result = waiter.waitUntilClusterActive(
-                    request -> request.name(name),
-                    configuration -> configuration.waitTimeout(Duration.ofMinutes(3)));
+                    DescribeClusterRequest.builder().name(name).build(),
+                    TestFixtures.waiterOverride(Duration.ofMinutes(3)));
             assertThat(result.matched().response())
                     .withFailMessage("Cluster %s did not become ACTIVE: %s", name, result.matched().exception())
                     .isPresent();

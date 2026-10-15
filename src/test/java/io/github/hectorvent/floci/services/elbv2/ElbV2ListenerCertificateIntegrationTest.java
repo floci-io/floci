@@ -345,4 +345,51 @@ class ElbV2ListenerCertificateIntegrationTest {
         assertTrue(listenerCertificates(listenerArn).containsAll(List.of(first, second)),
                 "both certificates should be on the listener");
     }
+    @Test
+    void removingTheOnlyDefaultCertificateReturnsOperationNotPermitted() {
+        String certificate = uploadCertificate();
+        String listener = listenerServing(certificate);
+        assertEquals(List.of(certificate), listenerCertificates(listener));
+        given().header("Authorization", ELB_AUTH)
+                .formParam("Action", "RemoveListenerCertificates").formParam("ListenerArn", listener)
+                .formParam("Certificates.member.1.CertificateArn", certificate)
+                .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("OperationNotPermitted"));
+        assertEquals(List.of(certificate), listenerCertificates(listener));
+    }
+
+    @Test
+    void defaultRemovalKeepsAdditionalCertificatesAndModifyCanReplaceTheDefault() {
+        String first = uploadCertificate();
+        String additional = uploadCertificate();
+        String listener = listenerServing(first);
+        given().header("Authorization", ELB_AUTH)
+                .formParam("Action", "AddListenerCertificates").formParam("ListenerArn", listener)
+                .formParam("Certificates.member.1.CertificateArn", additional)
+                .when().post("/").then().statusCode(200);
+        assertEquals(List.of(first, additional), listenerCertificates(listener));
+        given().header("Authorization", ELB_AUTH)
+                .formParam("Action", "RemoveListenerCertificates").formParam("ListenerArn", listener)
+                .formParam("Certificates.member.1.CertificateArn", first)
+                .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("OperationNotPermitted"));
+        assertEquals(List.of(first, additional), listenerCertificates(listener));
+        given().header("Authorization", ELB_AUTH)
+                .formParam("Action", "RemoveListenerCertificates").formParam("ListenerArn", listener)
+                .formParam("Certificates.member.1.CertificateArn", additional)
+                .when().post("/").then().statusCode(200);
+        assertEquals(List.of(first), listenerCertificates(listener));
+        given().header("Authorization", ELB_AUTH)
+                .formParam("Action", "ModifyListener").formParam("ListenerArn", listener)
+                .formParam("Certificates.member.1.CertificateArn", additional)
+                .when().post("/").then().statusCode(200);
+        assertEquals(List.of(additional), listenerCertificates(listener));
+        given().header("Authorization", ELB_AUTH)
+                .formParam("Action", "RemoveListenerCertificates").formParam("ListenerArn", listener)
+                .formParam("Certificates.member.1.CertificateArn", additional)
+                .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("OperationNotPermitted"));
+        assertEquals(List.of(additional), listenerCertificates(listener));
+    }
+
 }

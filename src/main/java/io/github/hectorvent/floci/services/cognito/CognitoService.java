@@ -9,8 +9,11 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -96,6 +99,10 @@ import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownR
 @ApplicationScoped
 public class CognitoService implements ResourceProvider {
     private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
+    private static final Duration MIN_ACCESS_AND_ID_TOKEN_VALIDITY = Duration.ofMinutes(5);
+    private static final Duration MAX_ACCESS_AND_ID_TOKEN_VALIDITY = Duration.ofDays(1);
+    private static final Duration MIN_REFRESH_TOKEN_VALIDITY = Duration.ofMinutes(60);
+    private static final Duration MAX_REFRESH_TOKEN_VALIDITY = Duration.ofDays(3650);
     static final List<String> DEFAULT_EXPLICIT_AUTH_FLOWS =
             List.of("ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_CUSTOM_AUTH");
     private static final String COGNITO_PASSWORD_SYMBOLS =
@@ -105,11 +112,15 @@ public class CognitoService implements ResourceProvider {
     private static final List<String> DELIVERY_MEDIUMS = List.of("SMS", "EMAIL");
     // JVM-local stripes bound lock memory without retaining one lock for every user key.
     private static final int USER_LOCK_STRIPES = 512;
+    // A Cognito email attribute is one address, not an SES display-name or recipient list.
+    private static final Pattern EMAIL_ATTRIBUTE_PATTERN =
+            Pattern.compile("[^\\s\\p{Cntrl}@<>,;]+@[^\\s\\p{Cntrl}@<>,;]+");
+    private static final int EMAIL_ATTRIBUTE_MAX_LENGTH = 2048;
     /**
-     * The commercial CloudFront suffix for the test constructors; CDI wires
-     * {@code floci.services.cloudfront.domain-suffix}.
+     * No configured CloudFront suffix, for the test constructors: the suffix then follows the
+     * request's partition. CDI wires {@code floci.services.cloudfront.domain-suffix}.
      */
-    private static final String DEFAULT_CLOUDFRONT_DOMAIN_SUFFIX = "cloudfront.net"; // partition-literal: test-shaped constructor default
+    private static final String UNCONFIGURED_CLOUDFRONT_DOMAIN_SUFFIX = null;
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -166,6 +177,7 @@ public class CognitoService implements ResourceProvider {
     private final VerificationCodeService verificationCodeService;
     private final CognitoMessageDispatcher messageDispatcher;
     private final TlsCertificateManager certificateManager;
+    private final boolean enforceTokenValidityLimits;
     private final Object[] userLocks = newUserLockStripes();
     // The userKey of each username an AdminCreateUser is creating, from before its existence check
     // until it stores the user or fails, so an overlapping request for the same username is refused
@@ -212,14 +224,15 @@ public class CognitoService implements ResourceProvider {
                 storageFactory.create("cognito", "cognito-revoked-tokens.json",
                         new TypeReference<Map<String, RevokedTokenInfo>>() {}),
                 trimTrailingSlash(emulatorConfig.effectiveBaseUrl()),
-                emulatorConfig.services().cloudfront().domainSuffix(),
+                emulatorConfig.services().cloudfront().domainSuffix().orElse(null),
                 regionResolver,
                 lambdaService,
                 acmService,
                 new VerificationCodeService(storageFactory, clock),
                 new CognitoMessageDispatcher(sesService, snsService, regionResolver.getDefaultRegion()),
                 certificateManager,
-                clock
+                clock,
+                emulatorConfig.services().cognito().enforceTokenValidityLimits()
         );
     }
 
@@ -234,7 +247,7 @@ public class CognitoService implements ResourceProvider {
                    LambdaService lambdaService,
                    AcmService acmService) {
         this(poolStore, clientStore, resourceServerStore, userStore, groupStore, revokedTokenStore, baseUrl,
-                DEFAULT_CLOUDFRONT_DOMAIN_SUFFIX, regionResolver, lambdaService, acmService);
+                UNCONFIGURED_CLOUDFRONT_DOMAIN_SUFFIX, regionResolver, lambdaService, acmService);
     }
 
     CognitoService(StorageBackend<String, UserPool> poolStore,
@@ -251,7 +264,7 @@ public class CognitoService implements ResourceProvider {
             CognitoMessageDispatcher messageDispatcher,
             TlsCertificateManager certificateManager) {
         this(poolStore, clientStore, resourceServerStore, domainStore, identityProviderStore, userStore,
-                groupStore, revokedTokenStore, baseUrl, DEFAULT_CLOUDFRONT_DOMAIN_SUFFIX, regionResolver,
+                groupStore, revokedTokenStore, baseUrl, UNCONFIGURED_CLOUDFRONT_DOMAIN_SUFFIX, regionResolver,
                 lambdaService, acmService, verificationCodeService, messageDispatcher, certificateManager);
     }
 
@@ -291,10 +304,10 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * Full constructor accepting the {@link Clock} used to time-bound Cognito auth challenge
-     * sessions (see {@link CognitoAuthFlowHandler}). Production code reaches this through the
-     * {@code @Inject} constructor above with the CDI-managed clock; every other constructor here
-     * defaults to {@link Clock#systemUTC()} so existing call sites are unaffected.
+     * Accepts the {@link Clock} used to time-bound Cognito auth challenge sessions (see
+     * {@link CognitoAuthFlowHandler}); every constructor above defaults to {@link Clock#systemUTC()}
+     * so existing call sites are unaffected. Enforces AWS's token validity limits, as Floci does by
+     * default.
      */
     CognitoService(StorageBackend<String, UserPool> poolStore,
             StorageBackend<String, UserPoolClient> clientStore,
@@ -311,6 +324,34 @@ public class CognitoService implements ResourceProvider {
             CognitoMessageDispatcher messageDispatcher,
             TlsCertificateManager certificateManager,
             Clock clock) {
+        this(poolStore, clientStore, resourceServerStore, domainStore, identityProviderStore, userStore,
+                groupStore, revokedTokenStore, baseUrl, cloudFrontDomainSuffix, regionResolver, lambdaService,
+                acmService, verificationCodeService, messageDispatcher, certificateManager, clock, true);
+    }
+
+    /**
+     * Full constructor. Production code reaches this through the {@code @Inject} constructor above,
+     * with the CDI-managed clock and {@code floci.services.cognito.enforce-token-validity-limits}.
+     *
+     * @param enforceTokenValidityLimits whether an app client's token validity must be within AWS's
+     *                                   limits; see {@link #validateTokenValidityLimits}
+     */
+    CognitoService(StorageBackend<String, UserPool> poolStore,
+            StorageBackend<String, UserPoolClient> clientStore,
+            StorageBackend<String, ResourceServer> resourceServerStore,
+            StorageBackend<String, UserPoolDomain> domainStore,
+            StorageBackend<String, IdentityProvider> identityProviderStore,
+            StorageBackend<String, CognitoUser> userStore,
+            StorageBackend<String, CognitoGroup> groupStore,
+            StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
+            String baseUrl,
+            String cloudFrontDomainSuffix,
+            RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
+            VerificationCodeService verificationCodeService,
+            CognitoMessageDispatcher messageDispatcher,
+            TlsCertificateManager certificateManager,
+            Clock clock,
+            boolean enforceTokenValidityLimits) {
         this.poolStore = poolStore;
         this.clientStore = clientStore;
         this.resourceServerStore = resourceServerStore;
@@ -327,6 +368,7 @@ public class CognitoService implements ResourceProvider {
         this.verificationCodeService = verificationCodeService;
         this.messageDispatcher = messageDispatcher;
         this.certificateManager = certificateManager;
+        this.enforceTokenValidityLimits = enforceTokenValidityLimits;
         this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver, clock);
         this.webAuthn = new CognitoWebAuthn(clock);
     }
@@ -1053,59 +1095,17 @@ public class CognitoService implements ResourceProvider {
         validateAuthSessionValidity(authSessionValidity);
         UserPool userPool = describeUserPool(userPoolId);
         String clientId = clientIdFor(userPool, clientName);
-        List<String> normalizedAllowedOAuthFlows = normalizeStringList(allowedOAuthFlows);
-        List<String> normalizedAllowedOAuthScopes = normalizeStringList(allowedOAuthScopes);
-        List<String> normalizedCallbackUrls = normalizeStringList(callbackURLs);
-        String normalizedDefaultRedirectUri = normalizeOptionalString(defaultRedirectURI);
-        List<String> normalizedExplicitAuthFlows = normalizeStringList(explicitAuthFlows);
-        List<String> normalizedLogoutUrls = normalizeStringList(logoutURLs);
-        List<String> normalizedReadAttributes = normalizeStringList(readAttributes);
-        List<String> normalizedSupportedIdentityProviders = normalizeStringList(supportedIdentityProviders);
-        Map<String, String> copiedTokenValidityUnits = copyStringMap(tokenValidityUnits);
-        List<String> normalizedWriteAttributes = normalizeStringList(writeAttributes);
-        Integer normalizedRefreshTokenValidity = normalizeRefreshTokenValidity(refreshTokenValidity);
-
-        validateUserPoolClientConfiguration(
-                allowedOAuthFlowsUserPoolClient,
-                normalizedAllowedOAuthFlows,
-                normalizedAllowedOAuthScopes,
-                normalizedCallbackUrls,
-                normalizedDefaultRedirectUri,
-                accessTokenValidity,
-                idTokenValidity,
-                normalizedRefreshTokenValidity,
-                normalizedLogoutUrls,
-                copiedTokenValidityUnits
-        );
-
-        UserPoolClient client = new UserPoolClient();
+        UserPoolClient client = requestedClientSettings(clientName, allowedOAuthFlowsUserPoolClient,
+                allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs, defaultRedirectURI,
+                explicitAuthFlows, accessTokenValidity, idTokenValidity, logoutURLs, preventUserExistenceErrors,
+                readAttributes, refreshTokenValidity, supportedIdentityProviders, tokenValidityUnits,
+                writeAttributes, refreshTokenRotation, enableTokenRevocation, authSessionValidity);
+        if (client.getSupportedIdentityProviders().isEmpty()) {
+            client.setSupportedIdentityProviders(List.of("COGNITO"));
+        }
         client.setClientId(clientId);
         client.setUserPoolId(userPoolId);
-        client.setClientName(clientName);
         client.setGenerateSecret(generateSecret);
-        client.setAllowedOAuthFlowsUserPoolClient(allowedOAuthFlowsUserPoolClient);
-        client.setAllowedOAuthFlows(normalizedAllowedOAuthFlows);
-        client.setAllowedOAuthScopes(normalizedAllowedOAuthScopes);
-        client.setAnalyticsConfiguration(copyObjectMap(analyticsConfiguration));
-        client.setCallbackURLs(normalizedCallbackUrls);
-        client.setDefaultRedirectURI(normalizedDefaultRedirectUri);
-        client.setExplicitAuthFlows(normalizedExplicitAuthFlows);
-        client.setAccessTokenValidity(accessTokenValidity);
-        client.setIdTokenValidity(idTokenValidity);
-        if (authSessionValidity != null) {
-            client.setAuthSessionValidity(authSessionValidity);
-        }
-        client.setLogoutURLs(normalizedLogoutUrls);
-        client.setPreventUserExistenceErrors(preventUserExistenceErrors);
-        client.setReadAttributes(normalizedReadAttributes);
-        client.setRefreshTokenValidity(normalizedRefreshTokenValidity);
-        client.setSupportedIdentityProviders(normalizedSupportedIdentityProviders.isEmpty()
-                ? List.of("COGNITO")
-                : normalizedSupportedIdentityProviders);
-        client.setTokenValidityUnits(copiedTokenValidityUnits);
-        client.setWriteAttributes(normalizedWriteAttributes);
-        client.setRefreshTokenRotation(copyObjectMap(refreshTokenRotation));
-        client.setEnableTokenRevocation(enableTokenRevocation != null ? enableTokenRevocation : Boolean.TRUE);
         if (generateSecret) {
             String clientSecret = generateSecretValue();
             if (userPool.getClientSecretOverride() != null) {
@@ -1239,6 +1239,12 @@ public class CognitoService implements ResourceProvider {
                 enableTokenRevocation, null);
     }
 
+    /**
+     * AWS: "If you don't provide a value for an attribute, Amazon Cognito sets it to its default value."
+     * So a setting the request leaves out, null here, takes the default a new client gets rather than
+     * keeping its stored value. The name is the exception: the API documents no default for it, so an
+     * update without one keeps the client's.
+     */
     public UserPoolClient updateUserPoolClient(String userPoolId, String clientId, String clientName,
                                                Boolean allowedOAuthFlowsUserPoolClient,
                                                List<String> allowedOAuthFlows, List<String> allowedOAuthScopes,
@@ -1252,108 +1258,13 @@ public class CognitoService implements ResourceProvider {
                                                Boolean enableTokenRevocation, Integer authSessionValidity) {
         validateAuthSessionValidity(authSessionValidity);
         UserPoolClient client = describeUserPoolClient(userPoolId, clientId);
-        boolean effectiveAllowedOAuthFlowsUserPoolClient = allowedOAuthFlowsUserPoolClient != null
-                ? allowedOAuthFlowsUserPoolClient
-                : client.isAllowedOAuthFlowsUserPoolClient();
-        List<String> effectiveAllowedOAuthFlows = allowedOAuthFlows != null
-                ? normalizeStringList(allowedOAuthFlows)
-                : client.getAllowedOAuthFlows();
-        List<String> effectiveAllowedOAuthScopes = allowedOAuthScopes != null
-                ? normalizeStringList(allowedOAuthScopes)
-                : client.getAllowedOAuthScopes();
-        List<String> effectiveCallbackUrls = callbackURLs != null
-                ? normalizeStringList(callbackURLs)
-                : client.getCallbackURLs();
-        String effectiveDefaultRedirectUri = defaultRedirectURI != null
-                ? normalizeOptionalString(defaultRedirectURI)
-                : client.getDefaultRedirectURI();
-        Integer effectiveAccessTokenValidity = accessTokenValidity != null
-                ? accessTokenValidity
-                : client.getAccessTokenValidity();
-        Integer effectiveIdTokenValidity = idTokenValidity != null
-                ? idTokenValidity
-                : client.getIdTokenValidity();
-        Integer effectiveRefreshTokenValidity = refreshTokenValidity != null
-                ? normalizeRefreshTokenValidity(refreshTokenValidity)
-                : client.getRefreshTokenValidity();
-        Map<String, String> effectiveTokenValidityUnits = tokenValidityUnits != null
-                ? copyStringMap(tokenValidityUnits)
-                : client.getTokenValidityUnits();
-        List<String> effectiveLogoutUrls = logoutURLs != null
-                ? normalizeStringList(logoutURLs)
-                : client.getLogoutURLs();
-
-        validateUserPoolClientConfiguration(
-                effectiveAllowedOAuthFlowsUserPoolClient,
-                effectiveAllowedOAuthFlows,
-                effectiveAllowedOAuthScopes,
-                effectiveCallbackUrls,
-                effectiveDefaultRedirectUri,
-                effectiveAccessTokenValidity,
-                effectiveIdTokenValidity,
-                effectiveRefreshTokenValidity,
-                effectiveLogoutUrls,
-                effectiveTokenValidityUnits
-        );
-
-        if (clientName != null) client.setClientName(clientName);
-        if (allowedOAuthFlowsUserPoolClient != null) {
-            client.setAllowedOAuthFlowsUserPoolClient(allowedOAuthFlowsUserPoolClient);
-        }
-        if (allowedOAuthFlows != null) {
-            client.setAllowedOAuthFlows(effectiveAllowedOAuthFlows);
-        }
-        if (allowedOAuthScopes != null) {
-            client.setAllowedOAuthScopes(effectiveAllowedOAuthScopes);
-        }
-        if (analyticsConfiguration != null) {
-            client.setAnalyticsConfiguration(copyObjectMap(analyticsConfiguration));
-        }
-        if (callbackURLs != null) {
-            client.setCallbackURLs(effectiveCallbackUrls);
-        }
-        if (defaultRedirectURI != null) {
-            client.setDefaultRedirectURI(effectiveDefaultRedirectUri);
-        }
-        if (explicitAuthFlows != null) {
-            client.setExplicitAuthFlows(normalizeStringList(explicitAuthFlows));
-        }
-        if (accessTokenValidity != null) {
-            client.setAccessTokenValidity(accessTokenValidity);
-        }
-        if (idTokenValidity != null) {
-            client.setIdTokenValidity(idTokenValidity);
-        }
-        if (logoutURLs != null) {
-            client.setLogoutURLs(effectiveLogoutUrls);
-        }
-        if (preventUserExistenceErrors != null) {
-            client.setPreventUserExistenceErrors(preventUserExistenceErrors);
-        }
-        if (readAttributes != null) {
-            client.setReadAttributes(normalizeStringList(readAttributes));
-        }
-        if (refreshTokenValidity != null) {
-            client.setRefreshTokenValidity(effectiveRefreshTokenValidity);
-        }
-        if (supportedIdentityProviders != null) {
-            client.setSupportedIdentityProviders(normalizeStringList(supportedIdentityProviders));
-        }
-        if (tokenValidityUnits != null) {
-            client.setTokenValidityUnits(effectiveTokenValidityUnits);
-        }
-        if (writeAttributes != null) {
-            client.setWriteAttributes(normalizeStringList(writeAttributes));
-        }
-        if (refreshTokenRotation != null) {
-            client.setRefreshTokenRotation(copyObjectMap(refreshTokenRotation));
-        }
-        if (enableTokenRevocation != null) {
-            client.setEnableTokenRevocation(enableTokenRevocation);
-        }
-        if (authSessionValidity != null) {
-            client.setAuthSessionValidity(authSessionValidity);
-        }
+        UserPoolClient settings = requestedClientSettings(clientName != null ? clientName : client.getClientName(),
+                Boolean.TRUE.equals(allowedOAuthFlowsUserPoolClient), allowedOAuthFlows, allowedOAuthScopes,
+                analyticsConfiguration, callbackURLs, defaultRedirectURI, explicitAuthFlows, accessTokenValidity,
+                idTokenValidity, logoutURLs, preventUserExistenceErrors, readAttributes, refreshTokenValidity,
+                supportedIdentityProviders, tokenValidityUnits, writeAttributes, refreshTokenRotation,
+                enableTokenRevocation, authSessionValidity);
+        copyUserPoolClientSettings(settings, client);
 
         client.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         clientStore.put(clientId, client);
@@ -1375,9 +1286,9 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
-     * Puts back the settings {@link #userPoolClientSettings} copied, including clearing one the
-     * update added, which {@link #updateUserPoolClient} cannot do since a null there keeps the
-     * current value. The client's id, secrets and branding stay as they are now.
+     * Puts back the settings {@link #userPoolClientSettings} copied, exactly as they were, which
+     * {@link #updateUserPoolClient} cannot do since it applies a create's defaults and normalization.
+     * The client's id, secrets and branding stay as they are now.
      */
     public UserPoolClient restoreUserPoolClientSettings(UserPoolClient settings) {
         UserPoolClient client = describeUserPoolClient(settings.getUserPoolId(), settings.getClientId());
@@ -1388,6 +1299,75 @@ public class CognitoService implements ResourceProvider {
         LOG.infov("Restored User Pool Client settings: {0} for pool {1}", restored.getClientId(),
                 restored.getUserPoolId());
         return restored;
+    }
+
+    /**
+     * The settings a create or an update sets, from the request: normalized, checked, and with the
+     * default a new client gets for each one the request omits. The client's id, pool, secret and dates
+     * are the caller's.
+     */
+    private UserPoolClient requestedClientSettings(String clientName, boolean allowedOAuthFlowsUserPoolClient,
+                                                   List<String> allowedOAuthFlows, List<String> allowedOAuthScopes,
+                                                   Map<String, Object> analyticsConfiguration,
+                                                   List<String> callbackURLs,
+                                                   String defaultRedirectURI, List<String> explicitAuthFlows,
+                                                   Integer accessTokenValidity, Integer idTokenValidity,
+                                                   List<String> logoutURLs, String preventUserExistenceErrors,
+                                                   List<String> readAttributes, Integer refreshTokenValidity,
+                                                   List<String> supportedIdentityProviders,
+                                                   Map<String, String> tokenValidityUnits, List<String> writeAttributes,
+                                                   Map<String, Object> refreshTokenRotation,
+                                                   Boolean enableTokenRevocation, Integer authSessionValidity) {
+        List<String> normalizedAllowedOAuthFlows = normalizeStringList(allowedOAuthFlows);
+        List<String> normalizedAllowedOAuthScopes = normalizeStringList(allowedOAuthScopes);
+        List<String> normalizedCallbackUrls = normalizeStringList(callbackURLs);
+        String normalizedDefaultRedirectUri = normalizeOptionalString(defaultRedirectURI);
+        List<String> normalizedLogoutUrls = normalizeStringList(logoutURLs);
+        Map<String, String> copiedTokenValidityUnits = copyStringMap(tokenValidityUnits);
+        Integer normalizedRefreshTokenValidity = normalizeRefreshTokenValidity(refreshTokenValidity,
+                copiedTokenValidityUnits);
+
+        validateUserPoolClientConfiguration(
+                allowedOAuthFlowsUserPoolClient,
+                normalizedAllowedOAuthFlows,
+                normalizedAllowedOAuthScopes,
+                normalizedCallbackUrls,
+                normalizedDefaultRedirectUri,
+                accessTokenValidity,
+                idTokenValidity,
+                normalizedRefreshTokenValidity,
+                normalizedLogoutUrls,
+                copiedTokenValidityUnits
+        );
+        validateTokenValidityLimits(accessTokenValidity, idTokenValidity, normalizedRefreshTokenValidity,
+                copiedTokenValidityUnits);
+
+        UserPoolClient settings = new UserPoolClient();
+        settings.setClientName(clientName);
+        settings.setAllowedOAuthFlowsUserPoolClient(allowedOAuthFlowsUserPoolClient);
+        settings.setAllowedOAuthFlows(normalizedAllowedOAuthFlows);
+        settings.setAllowedOAuthScopes(normalizedAllowedOAuthScopes);
+        settings.setAnalyticsConfiguration(copyObjectMap(analyticsConfiguration));
+        settings.setCallbackURLs(normalizedCallbackUrls);
+        settings.setDefaultRedirectURI(normalizedDefaultRedirectUri);
+        settings.setExplicitAuthFlows(normalizeStringList(explicitAuthFlows));
+        settings.setAccessTokenValidity(accessTokenValidity);
+        settings.setIdTokenValidity(idTokenValidity);
+        if (authSessionValidity != null) {
+            settings.setAuthSessionValidity(authSessionValidity);
+        }
+        settings.setLogoutURLs(normalizedLogoutUrls);
+        settings.setPreventUserExistenceErrors(preventUserExistenceErrors);
+        settings.setReadAttributes(normalizeStringList(readAttributes));
+        settings.setRefreshTokenValidity(normalizedRefreshTokenValidity);
+        settings.setSupportedIdentityProviders(supportedIdentityProviders == null
+                ? List.of("COGNITO")
+                : normalizeStringList(supportedIdentityProviders));
+        settings.setTokenValidityUnits(copiedTokenValidityUnits);
+        settings.setWriteAttributes(normalizeStringList(writeAttributes));
+        settings.setRefreshTokenRotation(copyObjectMap(refreshTokenRotation));
+        settings.setEnableTokenRevocation(enableTokenRevocation != null ? enableTokenRevocation : Boolean.TRUE);
+        return settings;
     }
 
     /** The name and every field {@link #updateUserPoolClient} sets. */
@@ -1683,6 +1663,8 @@ public class CognitoService implements ResourceProvider {
     private static final String CERTIFICATE_REGION = "us-east-1"; // partition-literal: CloudFront certificates live in us-east-1 by AWS's rule
     private static final String CERTIFICATE_NOT_USABLE = "The specified SSL certificate doesn't exist, "
             + "isn't in us-east-1 region, isn't valid, or doesn't include a valid certificate chain."; // partition-literal: AWS's message text
+    /** The partitions where AWS documents user pool custom domains as not available. */
+    private static final Set<String> CUSTOM_DOMAIN_UNAVAILABLE_PARTITIONS = Set.of("aws-us-gov", "aws-eusc");
 
     /**
      * Creates either an Amazon Cognito prefix domain ({@code customDomainConfig == null})
@@ -1710,6 +1692,7 @@ public class CognitoService implements ResourceProvider {
         userPoolDomain.setS3Bucket("aws-cognito-prod-" + regionResolver.getRegion() + "-assets");
 
         if (customDomainConfig != null) {
+            requireCustomDomainsAvailable(regionResolver.getRegion());
             String certificateArn = (String) customDomainConfig.get("CertificateArn");
             if (certificateArn == null || certificateArn.isBlank()) {
                 throw new AwsException("InvalidParameterException",
@@ -1835,6 +1818,7 @@ public class CognitoService implements ResourceProvider {
         String previousCertificateArn = userPoolDomain.getCertificateArn();
         String certificateArn = previousCertificateArn;
         if (customDomainConfig != null) {
+            requireCustomDomainsAvailable(regionResolver.getRegion());
             if (!userPoolDomain.isCustomDomain()) {
                 throw new AwsException("InvalidParameterException",
                         "CustomDomainConfig cannot be set on an Amazon Cognito prefix domain", 400);
@@ -1901,6 +1885,21 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
+     * User pool custom domains are not available in AWS GovCloud (US) or in the AWS European
+     * Sovereign Cloud: both guides say "Custom domains for user pools are not available"
+     * (https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-cog.html,
+     * https://docs.aws.eu/esc/latest/userguide/cognito.html). Prefix domains are. No source shows
+     * AWS's message for the refusal, so the wording is Floci's own.
+     */
+    private static void requireCustomDomainsAvailable(String region) {
+        AwsPartition partition = AwsPartitions.forRegionOrCommercial(region);
+        if (CUSTOM_DOMAIN_UNAVAILABLE_PARTITIONS.contains(partition.id())) {
+            throw new AwsException("InvalidParameterException",
+                    "Custom domains for user pools are not available in partition " + partition.id() + ".", 400);
+        }
+    }
+
+    /**
      * AWS accepts only an issued ACM certificate from us-east-1 behind a custom domain, and answers
      * anything else with this one message.
      */
@@ -1940,8 +1939,10 @@ public class CognitoService implements ResourceProvider {
         return AwsArnUtils.Arn.global(partition, "cloudfront", userPoolDomain.getAwsAccountId(), "distribution/" + id).toString();
     }
 
+    /** A distribution name on the configured CloudFront suffix, or the request partition's when none is. */
     private String generateCloudFrontDomain() {
-        return UUID.randomUUID().toString().replace("-", "").substring(0, 14) + "." + cloudFrontDomainSuffix;
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 14) + "."
+                + CloudFrontEdgeDomain.domainSuffix(cloudFrontDomainSuffix, regionResolver.getPartition());
     }
 
     private String generateDomainVersion() {
@@ -2331,6 +2332,8 @@ public class CognitoService implements ResourceProvider {
             resolvedAttributes.put("sub", canonicalUsername);
         }
 
+        validateEmailAttribute(resolvedAttributes, false);
+
         CognitoUser user = new CognitoUser();
         user.setUsername(canonicalUsername);
         user.setUserPoolId(pool.getId());
@@ -2631,10 +2634,11 @@ public class CognitoService implements ResourceProvider {
             String userPoolId, String username, Map<String, String> attributes) {
         CognitoUser user = adminGetUser(userPoolId, username);
         UserPool pool = describeUserPool(userPoolId);
+        validateEmailAttribute(attributes, true);
         if (usesAliasUsernames(pool)) {
             for (String aliasAttribute : pool.getUsernameAttributes()) {
                 String newValue = attributes.get(aliasAttribute);
-                if (newValue == null || newValue.equals(user.getAttributes().get(aliasAttribute))) {
+                if (blankToNull(newValue) == null || newValue.equals(user.getAttributes().get(aliasAttribute))) {
                     continue;
                 }
                 CognitoUser other = findUserByAlias(userPoolId, aliasAttribute, newValue);
@@ -2646,7 +2650,16 @@ public class CognitoService implements ResourceProvider {
         }
         attributes.keySet().forEach(attributeName ->
                 clearPendingAttributeVerification(userPoolId, user, attributeName));
-        user.getAttributes().putAll(attributes);
+        for (Map.Entry<String, String> attribute : attributes.entrySet()) {
+            String attributeName = attribute.getKey();
+            String value = attribute.getValue();
+            if (blankToNull(value) == null) {
+                user.getAttributes().remove(attributeName);
+                user.getAttributes().remove(attributeName + "_verified");
+            } else {
+                user.getAttributes().put(attributeName, value);
+            }
+        }
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(userPoolId, user.getUsername()), user);
     }
@@ -3264,6 +3277,8 @@ public class CognitoService implements ResourceProvider {
         } else if (userStore.get(userKey(userPoolId, username)).isPresent()) {
             throw new AwsException("UsernameExistsException", "User already exists", 400);
         }
+
+        validateEmailAttribute(resolvedAttributes, false);
 
         String key = userKey(userPoolId, canonicalUsername);
 
@@ -4046,6 +4061,7 @@ public class CognitoService implements ResourceProvider {
             String poolId, String username, Map<String, String> attributes) {
         UserPool pool = describeUserPool(poolId);
         CognitoUser currentUser = adminGetUser(poolId, username);
+        validateEmailAttribute(attributes, true);
 
         // Validate every entry (alias availability) before mutating the user or issuing any
         // verification code. Otherwise a later entry failing leaves an earlier entry's code
@@ -4114,6 +4130,36 @@ public class CognitoService implements ResourceProvider {
         updatedUser.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(poolId, updatedUser.getUsername()), updatedUser);
         return deliveryDetails;
+    }
+
+    private static void validateEmailAttribute(Map<String, String> attributes, boolean allowDeletion) {
+        if (attributes == null || !attributes.containsKey("email")) {
+            return;
+        }
+        String email = attributes.get("email");
+        if (allowDeletion && email != null && email.isBlank()) {
+            return;
+        }
+        // Use Cognito's 2048-character attribute limit, not SES's envelope-address limit.
+        if (email == null || email.length() > EMAIL_ATTRIBUTE_MAX_LENGTH
+                || !EMAIL_ATTRIBUTE_PATTERN.matcher(email).matches() || !hasEmailSeparator(email)) {
+            throw new AwsException("InvalidParameterException", "Invalid email address format.", 400);
+        }
+    }
+
+    private static boolean hasEmailSeparator(String email) {
+        boolean quoted = false;
+        for (int i = 0; i < email.length(); i++) {
+            char character = email.charAt(i);
+            if (character == '\\') {
+                i++;
+            } else if (character == '"') {
+                quoted = !quoted;
+            } else if (character == '@' && !quoted) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void deleteUserAttributes(String accessToken, List<String> attributeNames) {
@@ -4855,11 +4901,66 @@ public class CognitoService implements ResourceProvider {
         }
     }
 
-    private Integer normalizeRefreshTokenValidity(Integer value) {
-        if (value != null && value == 0) {
-            return DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS;
+    /**
+     * AWS: access and ID tokens "Must be set to a value between 5 minutes and 1 day", refresh tokens
+     * "between 60 minutes and 3,650 days", each in its TokenValidityUnits unit: hours for access and ID
+     * tokens and days for refresh tokens when the client names none. Runs after
+     * {@link #validateTokenValidityUnits}, so every unit is a known one, and after
+     * {@link #normalizeRefreshTokenValidity}, so a refresh token validity of 0 is already AWS's 30-day
+     * default. {@code floci.services.cognito.enforce-token-validity-limits=false} turns it off.
+     */
+    private void validateTokenValidityLimits(Integer accessTokenValidity, Integer idTokenValidity,
+                                             Integer refreshTokenValidity, Map<String, String> tokenValidityUnits) {
+        if (!enforceTokenValidityLimits) {
+            return;
         }
-        return value;
+        boolean outOfRange = outsideLimits(accessTokenValidity,
+                        tokenValidityUnit(tokenValidityUnits, "AccessToken", "hours"),
+                        MIN_ACCESS_AND_ID_TOKEN_VALIDITY, MAX_ACCESS_AND_ID_TOKEN_VALIDITY)
+                || outsideLimits(idTokenValidity, tokenValidityUnit(tokenValidityUnits, "IdToken", "hours"),
+                        MIN_ACCESS_AND_ID_TOKEN_VALIDITY, MAX_ACCESS_AND_ID_TOKEN_VALIDITY)
+                || outsideLimits(refreshTokenValidity, tokenValidityUnit(tokenValidityUnits, "RefreshToken", "days"),
+                        MIN_REFRESH_TOKEN_VALIDITY, MAX_REFRESH_TOKEN_VALIDITY);
+        if (outOfRange) {
+            // AWS's message names neither the token nor the limit.
+            throw new AwsException("InvalidParameterException", "Invalid range for token validity.", 400);
+        }
+    }
+
+    private static String tokenValidityUnit(Map<String, String> tokenValidityUnits, String token, String defaultUnit) {
+        String unit = tokenValidityUnits == null ? null : tokenValidityUnits.get(token);
+        return unit == null || unit.isBlank() ? defaultUnit : unit.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean outsideLimits(Integer value, String unit, Duration min, Duration max) {
+        if (value == null) {
+            return false;
+        }
+        Duration validity = switch (unit) {
+            case "seconds" -> Duration.ofSeconds(value);
+            case "minutes" -> Duration.ofMinutes(value);
+            case "hours" -> Duration.ofHours(value);
+            default -> Duration.ofDays(value);
+        };
+        return validity.compareTo(min) < 0 || validity.compareTo(max) > 0;
+    }
+
+    /**
+     * AWS: "You can't set RefreshTokenValidity to 0. If you do, Amazon Cognito overrides the value with the
+     * default value of 30 days." The 30 days are kept in the client's refresh token unit, so a client in
+     * minutes stores 43200 rather than 30 minutes.
+     */
+    private Integer normalizeRefreshTokenValidity(Integer value, Map<String, String> tokenValidityUnits) {
+        if (value == null || value != 0) {
+            return value;
+        }
+        Duration defaultValidity = Duration.ofDays(DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS);
+        return switch (tokenValidityUnit(tokenValidityUnits, "RefreshToken", "days")) {
+            case "seconds" -> (int) defaultValidity.toSeconds();
+            case "minutes" -> (int) defaultValidity.toMinutes();
+            case "hours" -> (int) defaultValidity.toHours();
+            default -> DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS;
+        };
     }
 
     private List<ResourceServerScope> normalizeScopes(List<ResourceServerScope> scopes) {

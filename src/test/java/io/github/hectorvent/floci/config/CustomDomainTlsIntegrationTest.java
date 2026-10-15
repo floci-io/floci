@@ -1,12 +1,8 @@
 package io.github.hectorvent.floci.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.services.acm.CertificateGenerator;
-import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -20,17 +16,13 @@ import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -51,11 +43,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * by IP, so the SNI name is the only one the identity check can match.
  */
 @QuarkusTest
-@TestProfile(CustomDomainTlsIntegrationTest.Profile.class)
+@TestProfile(SelfSignedTlsProfile.class)
 class CustomDomainTlsIntegrationTest {
 
-    static final Path DATA_DIR = Path.of("target", "floci-custom-domain-tls-test").toAbsolutePath();
-    static final Path TLS_DIR = DATA_DIR.resolve("tls");
     static final String API_DOMAIN = "api.custom-domain-it.localhost.floci.io";
     static final String IOT_DOMAIN = "iot.custom-domain-it.localhost.floci.io";
     static final String AUTH_DOMAIN = "auth.custom-domain-it.localhost.floci.io";
@@ -151,43 +141,5 @@ class CustomDomainTlsIntegrationTest {
             sans.add(String.valueOf(entry.get(1)));
         }
         return sans;
-    }
-
-    /**
-     * Boots with TLS on and a CA-issued leaf like the one TlsConfigSource writes, in a directory
-     * of its own. The wildcard covers one label only, so the three-label names are uncovered
-     * until the operations add them.
-     */
-    public static final class Profile implements QuarkusTestProfile {
-
-        static {
-            try {
-                Files.createDirectories(TLS_DIR);
-                for (String name : List.of("floci-server.crt", "floci-server.key", "floci-server.metadata.json")) {
-                    Files.deleteIfExists(TLS_DIR.resolve(name));
-                }
-                FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(TLS_DIR);
-                List<String> sans = List.of("localhost", "*.localhost.floci.io");
-                CertificateGenerator.GeneratedCertificate leaf = ca.issueServerCertificate("localhost", sans, KeyAlgorithm.RSA_2048, null);
-                Files.writeString(TLS_DIR.resolve("floci-server.crt"), leaf.certificatePem());
-                Files.writeString(TLS_DIR.resolve("floci-server.key"), leaf.privateKeyPem());
-                Files.writeString(TLS_DIR.resolve("floci-server.metadata.json"),
-                        new ObjectMapper().writeValueAsString(CertificateMetadata.create(sans, "dev")));
-            } catch (IOException e) {
-                throw new IllegalStateException("could not prepare the TLS fixtures", e);
-            }
-        }
-
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.tls.enabled", "true",
-                    "floci.tls.self-signed", "true",
-                    "floci.tls.aws-https-port", "0",
-                    "floci.storage.persistent-path", DATA_DIR.toString(),
-                    "quarkus.tls.key-store.pem.0.cert", TLS_DIR.resolve("floci-server.crt").toString(),
-                    "quarkus.tls.key-store.pem.0.key", TLS_DIR.resolve("floci-server.key").toString(),
-                    "quarkus.http.insecure-requests", "enabled");
-        }
     }
 }

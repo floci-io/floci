@@ -1131,6 +1131,29 @@ class IamEnforcementFilterTest {
     }
 
     @Test
+    void temporaryFederationCallerIsRefusedWithoutReachingTheHandler() {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20261013/us-east-1/sts/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASESSION");
+        when(request.getHeaderString("Authorization")).thenReturn(auth);
+        when(request.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
+        when(actionRegistry.resolve("sts", request)).thenReturn("sts:GetFederationToken");
+        when(iamService.isKnownAccessKey("ASIASESSION")).thenReturn(true);
+
+        newFilter().filter(request);
+
+        ArgumentCaptor<Response> response = ArgumentCaptor.captor();
+        verify(request).abortWith(response.capture());
+        assertEquals(403, response.getValue().getStatus());
+        assertTrue(entityString(response.getValue()).contains("<Code>AccessDenied</Code>"));
+        assertTrue(entityString(response.getValue()).contains(
+                "<Message>Cannot call GetFederationToken with session credentials</Message>"));
+        verifyNoInteractions(evaluator);
+    }
+
+    @Test
     void getCallerIdentityBypassesPolicyEnforcement() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260720/us-east-1/sts/aws4_request, "
