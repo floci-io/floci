@@ -2764,9 +2764,18 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, Boolean> conditions = resolveConditions(template,
                     resolvedParameters.isEmpty() ? stack.parametersSnapshot() : resolvedParameters,
                     stack, region, regionResolver.getAccountId());
+            // A resource the stack holds was provisioned, so it is ordered by its dependencies
+            // whatever its condition reads now: a ContinueUpdateRollback retry walks the failed
+            // update's template with the parameters the first pass already restored.
+            ObjectNode heldResources = resources.deepCopy();
+            for (String logicalId : stack.resourcesSnapshot().keySet()) {
+                if (heldResources.get(logicalId) instanceof ObjectNode definition) {
+                    definition.remove("Condition");
+                }
+            }
             // A stack saved before circular templates were rejected may still have one; order it
             // by its dependencies anyway rather than giving up.
-            List<String> creationOrder = creationOrder(resources, conditions).sorted();
+            List<String> creationOrder = creationOrder(heldResources, conditions).sorted();
             Map<String, Integer> rank = new HashMap<>();
             for (int i = 0; i < creationOrder.size(); i++) {
                 rank.put(creationOrder.get(i), i);

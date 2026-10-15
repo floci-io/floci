@@ -593,6 +593,52 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
+     * A retry walks the failed update's template with the parameters the first pass already
+     * restored, so a condition the update turned on can read false again. A resource the stack
+     * holds is still ordered by its dependencies, so the load balancer the update created on the
+     * subnet it added is deleted before that subnet, not after it.
+     */
+    @Test
+    void resumeUpdateRollback_ordersAHeldResourceByItsDependenciesWhateverItsConditionReadsNow() {
+        Stack stack = new Stack();
+        stack.setStackName("retry-flipped-condition");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setTemplateBody("""
+                {
+                  "Parameters": {"Env": {"Type": "String"}},
+                  "Conditions": {"IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}},
+                  "Resources": {
+                    "SubnetC": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": "vpc-1", "CidrBlock": "10.0.3.0/24"}},
+                    "ProdAlb": {
+                      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                      "Condition": "IsProd",
+                      "Properties": {"Subnets": [{"Ref": "SubnetC"}]}
+                    }
+                  }
+                }
+                """);
+        stack.replaceParameters(Map.of("Env", "dev"));
+        stack.replaceResolvedParameters(Map.of("Env", "dev"));
+        StackResource subnet = resource("SubnetC", "subnet-c", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        StackResource loadBalancer = resource("ProdAlb", "arn:aws:elasticloadbalancing:us-east-1:000000000000:"
+                + "loadbalancer/app/prod/1", "AWS::ElasticLoadBalancingV2::LoadBalancer", "CREATE_COMPLETE");
+        stack.getResources().put(subnet.getLogicalId(), subnet);
+        stack.getResources().put(loadBalancer.getLogicalId(), loadBalancer);
+        stack.setUpdateRollbackSnapshot(new StackUpdateSnapshot("previous-template", "previous-original",
+                Map.of("Env", "dev"), Map.of("Env", "dev"), Map.of(), Map.of(), Map.of(), Map.of()));
+        stack.setUpdateRollbackResourceIds(List.of("SubnetC", "ProdAlb"));
+        stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+
+        service.resumeUpdateRollback(stack, List.of(), false, REGION);
+
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", stack.getStatus());
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(eq(loadBalancer), anyString());
+        deletes.verify(provisioner).delete(eq(subnet), anyString());
+    }
+
+    /**
      * The resume runs on the operation executor, whose future nobody reads. An unexpected failure
      * must still settle the stack in UPDATE_ROLLBACK_FAILED, keeping what a retry needs, instead
      * of stranding it in UPDATE_ROLLBACK_IN_PROGRESS, where ContinueUpdateRollback refuses it.
