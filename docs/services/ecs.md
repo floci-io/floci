@@ -914,7 +914,11 @@ A rejected `sourcePath` fails `RegisterTaskDefinition` with `InvalidParameterExc
 
 ### EFS volume ownership
 
-A task's `efsVolumeConfiguration` volumes are backed by shared local Docker volumes (Floci cannot mount a real EFS file system). A Docker named volume is created `root:root 0755`, so a task whose image runs as a non-root `USER` cannot write it. To emulate an [EFS access point](https://docs.aws.amazon.com/efs/latest/ug/efs-access-points.html)'s `RootDirectory.CreationInfo` and `PosixUser`, configure `floci.storage.efs.*` (all opt-in; the default is a plain named volume, so existing behaviour is unchanged):
+A task's `efsVolumeConfiguration` volumes are backed by shared local Docker volumes (Floci cannot mount a real EFS file system). When `authorizationConfig.accessPointId` identifies an access point stored by the EFS service in the task's region, Floci initialises the volume root using that access point's `RootDirectory.CreationInfo` (`OwnerUid`, `OwnerGid`, and `Permissions`). Its `PosixUser` adds the access point's GID and secondary GIDs to the mounting container as supplementary groups, preserving the container's own user. Access points with different settings initialise their own isolated volumes without requiring environment variables.
+
+The `floci.storage.efs.*` settings below provide the fallback: ownership and permissions when the access point has no `CreationInfo`, and user and supplementary group when it has no `PosixUser`. They also apply when no access point is specified or its metadata is unavailable; unavailable metadata produces a warning. Without access point settings or fallback configuration, a plain named volume retains Docker's `root:root 0755` defaults.
+
+Unlike [real EFS user enforcement](https://docs.aws.amazon.com/efs/latest/ug/enforce-identity-access-points.html), which applies identity per file system request, this local emulation preserves the container process identity and grants volume access by attaching the POSIX user's group and secondary groups as container supplementary groups. Explicit user overrides remain available via `floci.storage.efs.mount-user`. Root ownership retains unsigned 32-bit IDs, but the Docker runtime can reject supplementary group IDs above `2147483647`.
 
 | Key (`floci.storage.efs.`) | Env | AWS equivalent | Description |
 |---|---|---|---|
@@ -923,9 +927,9 @@ A task's `efsVolumeConfiguration` volumes are backed by shared local Docker volu
 | `root-permissions` | `FLOCI_STORAGE_EFS_ROOT_PERMISSIONS` | `CreationInfo.Permissions` | 3-4 octal digits, e.g. `0777`, or `2775` for the setgid bit |
 | `mount-user` | `FLOCI_STORAGE_EFS_MOUNT_USER` | `PosixUser {Uid,Gid}` | Run mounting containers as `uid[:gid]` |
 | `mount-group-add` | `FLOCI_STORAGE_EFS_MOUNT_GROUP_ADD` | `PosixUser` supplementary | Supplementary gid added to mounting containers |
-| `init-image` | `FLOCI_STORAGE_EFS_INIT_IMAGE` | — | Image for the one-off `chown`/`chmod` of the volume root (default `busybox:stable`) |
+| `init-image` | `FLOCI_STORAGE_EFS_INIT_IMAGE` | N/A | Image for the one-off `chown`/`chmod` of the volume root (default `busybox:stable`) |
 
-`owner-uid` and `owner-gid` must be set together (a partial `CreationInfo` is not valid on AWS). The volume root is initialised once per volume; express the setgid bit through a 4-digit `root-permissions` (e.g. `2775`) so subdirectories inherit the owner gid.
+`owner-uid` and `owner-gid` must be set together (a partial `CreationInfo` is not valid on AWS). The volume root is initialised once per volume per Floci process; express the setgid bit through a 4-digit `root-permissions` (e.g. `2775`) so subdirectories inherit the owner gid. Initialisation changes only the root's ownership and permissions and preserves existing files. A Floci restart reapplies these settings on the next mount, unlike real EFS, which preserves permissions on an existing root directory.
 
 ### Mock mode
 

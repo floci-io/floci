@@ -44,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -73,6 +74,9 @@ public class ContainerLifecycleManager {
     // per uid) this reads as a disk-space problem and sends operators looking in the wrong place.
     private static final Pattern KEYRING_QUOTA_PATTERN =
             Pattern.compile("join keyctl.*disk quota exceeded", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
+    /** Matches 3-4 octal digits (e.g. "0755", "755", "2775"), matching CreationInfo.Permissions. */
+    public static final Pattern PERMISSIONS_PATTERN = Pattern.compile("^[0-7]{3,4}$");
 
     private static final long NANO_CPUS_PER_CPU = 1_000_000_000L;
     private static final String CONTAINER_NETWORK_MODE_PREFIX = "container:";
@@ -656,6 +660,26 @@ public class ContainerLifecycleManager {
      */
     public void ensureSharedVolume(String volumeName, OptionalInt ownerUid, OptionalInt ownerGid,
                                    Optional<String> rootPermissions, String initImage) {
+        ensureSharedVolumeRoot(volumeName,
+                ownerUid.isPresent() ? OptionalLong.of(ownerUid.getAsInt()) : OptionalLong.empty(),
+                ownerGid.isPresent() ? OptionalLong.of(ownerGid.getAsInt()) : OptionalLong.empty(),
+                rootPermissions, initImage);
+    }
+
+    /** True when {@code permissions} is 3 to 4 octal digits (e.g. "0755", "755", "2775"). */
+    public static boolean isValidPermissions(String permissions) {
+        return permissions != null && PERMISSIONS_PATTERN.matcher(permissions).matches();
+    }
+
+    /** Initialises an access point's root without narrowing AWS's unsigned 32-bit POSIX ids. */
+    public void ensureSharedVolume(String volumeName, long ownerUid, long ownerGid,
+                                   String rootPermissions, String initImage) {
+        ensureSharedVolumeRoot(volumeName, OptionalLong.of(ownerUid), OptionalLong.of(ownerGid),
+                Optional.of(rootPermissions), initImage);
+    }
+
+    private void ensureSharedVolumeRoot(String volumeName, OptionalLong ownerUid, OptionalLong ownerGid,
+                                        Optional<String> rootPermissions, String initImage) {
         // A volume created now is root:root 0755 again, so a memo left by a volume of the same name
         // that was removed since (e.g. DeleteApplication, docker volume rm) is stale.
         if (createVolumeIfAbsent(volumeName, ContainerStorageHelper.defaultLabels(config))) {
@@ -674,7 +698,7 @@ public class ContainerLifecycleManager {
         // Validate before splicing into the helper's `sh -c`, matching CreationInfo.Permissions
         // (^[0-7]{3,4}$), so a typo can't produce a mangled script that soft-fails.
         rootPermissions.ifPresent(p -> {
-            if (!p.matches("^[0-7]{3,4}$")) {
+            if (!isValidPermissions(p)) {
                 throw new IllegalArgumentException(
                         "floci.storage.efs root-permissions must be 3-4 octal digits (e.g. \"0777\","
                                 + " or \"2775\" for setgid): " + p);
@@ -694,7 +718,7 @@ public class ContainerLifecycleManager {
         });
     }
 
-    private void initSharedVolumeRoot(String volumeName, OptionalInt ownerUid, OptionalInt ownerGid,
+    private void initSharedVolumeRoot(String volumeName, OptionalLong ownerUid, OptionalLong ownerGid,
                                       Optional<String> rootPermissions, String initImage) {
         String mount = "/floci-shared-volume";
         StringBuilder script = new StringBuilder();
@@ -702,7 +726,7 @@ public class ContainerLifecycleManager {
         // always has both operands (no trailing colon). setgid is expressed via a 4-digit octal
         // rootPermissions (e.g. "2775"), matching CreationInfo.Permissions.
         if (ownerUid.isPresent() && ownerGid.isPresent()) {
-            script.append("chown ").append(ownerUid.getAsInt()).append(':').append(ownerGid.getAsInt())
+            script.append("chown ").append(ownerUid.getAsLong()).append(':').append(ownerGid.getAsLong())
                     .append(' ').append(mount).append(" && ");
         }
         rootPermissions.ifPresent(p -> script.append("chmod ").append(p).append(' ').append(mount).append(" && "));
@@ -1041,6 +1065,18 @@ public class ContainerLifecycleManager {
     public EndpointInfo resolveEndpoint(String containerId, int containerPort) {
         InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
         return resolveEndpoint(inspect, containerPort);
+    }
+
+    /**
+     * Like {@link #resolveEndpoint(String, int)}, but prefers the container's address on
+     * {@code preferredNetwork}, as {@link #createAndStart} does with the spec's network. A
+     * container that publishes ports is created on the default bridge and connected to its
+     * service network after start, so without a preference the bridge address, which Floci
+     * usually cannot reach, can be returned instead.
+     */
+    public EndpointInfo resolveEndpoint(String containerId, int containerPort, String preferredNetwork) {
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        return resolveEndpoint(inspect, containerPort, preferredNetwork);
     }
 
     /**

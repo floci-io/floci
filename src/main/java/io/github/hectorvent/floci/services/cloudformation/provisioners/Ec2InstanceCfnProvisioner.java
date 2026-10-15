@@ -41,6 +41,9 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     private static final String DECLARED_IAM_PROFILE_ATTR = "__FlociDeclaredIamInstanceProfile";
 
     private final Ec2Service ec2Service;
+    /** How long {@link #delete} waits for a terminated instance; package-visible so tests can shorten it. */
+    long terminateTimeoutMillis = 90_000L;
+    long terminatePollMillis = 250L;
 
     @Inject
     public Ec2InstanceCfnProvisioner(Ec2Service ec2Service) {
@@ -393,11 +396,63 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         return ReplacementCleanup.rollback(resource, this::delete);
     }
 
+    /**
+     * Terminates the instance and waits until EC2 reports it {@code terminated} (or gone). With
+     * real containers the instance sits in {@code shutting-down} until the container manager's
+     * executor finishes, and a subnet or VPC delete that follows in the same stack delete refuses
+     * a resident that is still shutting down. In mock mode the terminate is synchronous, so the
+     * first describe already sees {@code terminated}.
+     */
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         // Tolerate an instance already terminated out of band, so DeleteStack does not fail on it.
         CfnDeletes.safeDelete("EC2 instance", physicalId,
                 () -> ec2Service.terminateInstances(region, List.of(physicalId)),
                 "InvalidInstanceID.NotFound");
+        awaitTerminated(region, physicalId);
+    }
+
+    private void awaitTerminated(String region, String instanceId) {
+        long deadline = System.currentTimeMillis() + terminateTimeoutMillis;
+        while (true) {
+            if (isTerminatedOrGone(region, instanceId)) {
+                return;
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                throw new AwsException("ValidationError", "Instance " + instanceId
+                        + " did not reach terminated within " + (terminateTimeoutMillis / 1000) + "s", 400);
+            }
+            try {
+                Thread.sleep(terminatePollMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AwsException("ValidationError",
+                        "Interrupted while waiting for instance " + instanceId + " to terminate", 400);
+            }
+        }
+    }
+
+    private boolean isTerminatedOrGone(String region, String instanceId) {
+        List<Reservation> reservations;
+        try {
+            reservations = ec2Service.describeInstances(region, List.of(instanceId), null);
+        } catch (AwsException e) {
+            if ("InvalidInstanceID.NotFound".equals(e.getErrorCode())) {
+                return true;
+            }
+            throw e;
+        }
+        if (reservations == null) {
+            return true;
+        }
+        for (Reservation reservation : reservations) {
+            for (Instance instance : reservation.getInstances()) {
+                if (instanceId.equals(instance.getInstanceId())) {
+                    InstanceState state = instance.getState();
+                    return state != null && "terminated".equals(state.getName());
+                }
+            }
+        }
+        return true;
     }
 }

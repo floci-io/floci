@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
+import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAssociation;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceListResult;
@@ -408,6 +409,123 @@ class Ec2ServiceTest {
 
         service.detachInternetGateway(region, igwId, vpcId);
         service.deleteVpc(region, vpcId);
+    }
+
+    @Test
+    void deleteSubnetFailsUntilItsInstanceIsTerminated() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.81.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(region, vpcId, "10.81.1.0/24", "us-east-1a").getSubnetId();
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null).getInstances().getFirst();
+
+        AwsException running = assertThrows(AwsException.class, () -> service.deleteSubnet(region, subnetId));
+        assertEquals("DependencyViolation", running.getErrorCode());
+        assertEquals("The subnet '" + subnetId + "' has dependencies and cannot be deleted.", running.getMessage());
+
+        // Still holds its network interface while shutting down, so the subnet stays pinned.
+        instance.setState(InstanceState.shuttingDown());
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteSubnet(region, subnetId)).getErrorCode());
+
+        instance.setState(InstanceState.terminated());
+        service.deleteSubnet(region, subnetId);
+        assertTrue(service.describeSubnets(region, List.of(), Map.of()).stream()
+                .noneMatch(subnet -> subnetId.equals(subnet.getSubnetId())));
+    }
+
+    @Test
+    void deleteSubnetFailsUntilItsNatGatewayIsDeleted() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.82.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(region, vpcId, "10.82.1.0/24", "us-east-1a").getSubnetId();
+        NatGateway natGateway = service.createNatGateway(region, subnetId, null, "private", List.of());
+
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteSubnet(region, subnetId)).getErrorCode());
+
+        // Still holds its address while deleting, so the subnet stays pinned.
+        natGateway.setState("deleting");
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteSubnet(region, subnetId)).getErrorCode());
+
+        service.deleteNatGateway(region, natGateway.getNatGatewayId());
+        service.deleteSubnet(region, subnetId);
+        assertTrue(service.describeSubnets(region, List.of(), Map.of()).stream()
+                .noneMatch(subnet -> subnetId.equals(subnet.getSubnetId())));
+    }
+
+    @Test
+    void deleteSubnetFailsUntilItsStandaloneNetworkInterfaceIsDeleted() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.83.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(region, vpcId, "10.83.1.0/24", "us-east-1a").getSubnetId();
+        String eniId = service.createNetworkInterface(region, subnetId, null, null, List.of(), List.of(), List.of())
+                .getNetworkInterfaceId();
+
+        // An available interface is still an interface in the subnet, so the subnet stays pinned.
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteSubnet(region, subnetId)).getErrorCode());
+
+        service.deleteNetworkInterface(region, eniId);
+        service.deleteSubnet(region, subnetId);
+    }
+
+    @Test
+    void deleteSubnetFailsUntilItsInterfaceEndpointIsDeleted() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.84.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(region, vpcId, "10.84.1.0/24", "us-east-1a").getSubnetId();
+        String endpointId = service.createVpcEndpoint(region, vpcId, "com.amazonaws.us-east-1.sqs", "Interface",
+                List.of(), List.of(subnetId), List.of(), null, null, List.of()).getVpcEndpointId();
+
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteSubnet(region, subnetId)).getErrorCode());
+
+        service.deleteVpcEndpoints(region, List.of(endpointId));
+        service.deleteSubnet(region, subnetId);
+    }
+
+    @Test
+    void deleteVpcFailsWhileAnInstanceSitsInOneOfItsSubnets() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.83.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(region, vpcId, "10.83.1.0/24", "us-east-1a").getSubnetId();
+        String instanceId = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null)
+                .getInstances().getFirst().getInstanceId();
+
+        AwsException pinned = assertThrows(AwsException.class, () -> service.deleteVpc(region, vpcId));
+        assertEquals("DependencyViolation", pinned.getErrorCode());
+        assertEquals("The vpc '" + vpcId + "' has dependencies and cannot be deleted.", pinned.getMessage());
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteSubnet(region, subnetId)).getErrorCode());
+
+        service.terminateInstances(region, List.of(instanceId));
+        service.deleteSubnet(region, subnetId);
+        service.deleteVpc(region, vpcId);
+        assertTrue(service.describeVpcs(region, List.of(), Map.of()).stream()
+                .noneMatch(vpc -> vpcId.equals(vpc.getVpcId())));
     }
 
     @Test

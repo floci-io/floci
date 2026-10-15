@@ -297,6 +297,25 @@ class Ec2NetworkCfnProvisionerTest {
     }
 
     @Test
+    void aRestoreThatThrowsKeepsTheSnapshotForTheRetry() {
+        when(ec2.describeSubnets(REGION, List.of(SUBNET_ID), Map.of())).thenReturn(List.of(subnet()));
+        StackResource r = prior("AWS::EC2::Subnet", "Subnet", SUBNET_ID, Map.of("SubnetId", SUBNET_ID, "VpcId", VPC_ID, "AvailabilityZone", "us-east-1a"));
+        ObjectNode props = mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.0/24")
+                .put("AvailabilityZone", "us-east-1a").put("MapPublicIpOnLaunch", true);
+        provisioner.provision(r, props, ctx(SUBNET_ID));
+        String snapshot = r.getAttributes().get(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR);
+        assertTrue(snapshot != null, "the prior MapPublicIpOnLaunch is snapshotted");
+        doThrow(new AwsException("InternalError", "ec2 is down", 500))
+                .when(ec2).modifySubnetAttribute(REGION, SUBNET_ID, "mapPublicIpOnLaunch", "false");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertEquals("InternalError", failure.getErrorCode());
+        assertEquals(snapshot, r.getAttributes().get(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR),
+                "a failed restore keeps the snapshot for a ContinueUpdateRollback retry");
+    }
+
+    @Test
     void anUnchangedSubnetWhoseTemplateCidrHasHostBitsIsKept() {
         Subnet current = subnet();
         current.setCidrBlock("10.0.1.0/24");

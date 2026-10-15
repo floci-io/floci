@@ -507,6 +507,18 @@ class ContainerLifecycleManagerVolumeTest {
     }
 
     @Test
+    void isValidPermissions_matchesThreeOrFourOctalDigits() {
+        assertTrue(ContainerLifecycleManager.isValidPermissions("755"));
+        assertTrue(ContainerLifecycleManager.isValidPermissions("0755"));
+        assertTrue(ContainerLifecycleManager.isValidPermissions("2775"));
+        assertFalse(ContainerLifecycleManager.isValidPermissions(null));
+        assertFalse(ContainerLifecycleManager.isValidPermissions(""));
+        assertFalse(ContainerLifecycleManager.isValidPermissions("888"));
+        assertFalse(ContainerLifecycleManager.isValidPermissions("07777"));
+        assertFalse(ContainerLifecycleManager.isValidPermissions("rwxr-xr-x"));
+    }
+
+    @Test
     void ensureSharedVolume_helperNonZeroExit_retriesOnNextLaunch() {
         InspectVolumeCmd ivc = mock(InspectVolumeCmd.class);
         when(dockerClient.inspectVolumeCmd("shared")).thenReturn(ivc);

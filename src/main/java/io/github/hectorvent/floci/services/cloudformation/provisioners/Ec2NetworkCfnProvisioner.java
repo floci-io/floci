@@ -122,10 +122,12 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
     /**
      * A replacement is undone through the cleanup record: the displaced entity was never touched.
      * A reused entity that an update changed in place (tags, a subnet's MapPublicIpOnLaunch, a
-     * route's target) is put back from the snapshot taken before the change. Without either, the
-     * update changed nothing about the entity. A provision that fails mid-way restores its own
-     * snapshot before the failure propagates (see {@link #guarded}), so the previous metadata the
-     * engine restores for that resource matches the entity again.
+     * route's target) is put back from the snapshot taken before the change; the snapshot is
+     * removed only after the restore succeeds, so a restore that throws keeps it for a
+     * ContinueUpdateRollback retry. Without either, the update changed nothing about the entity.
+     * A provision that fails mid-way restores its own snapshot before the failure propagates (see
+     * {@link #guarded}), so the previous metadata the engine restores for that resource matches
+     * the entity again.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
@@ -133,10 +135,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
             return true;
         }
-        String snapshot = resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
-        if (snapshot != null) {
-            restoreInPlace(resource, snapshot);
-        }
+        undoInPlace(resource);
         return true;
     }
 

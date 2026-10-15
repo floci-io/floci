@@ -9,6 +9,13 @@ import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.efs.EfsService;
+import io.github.hectorvent.floci.services.efs.model.AccessPointDescription;
+import io.github.hectorvent.floci.services.efs.model.CreateAccessPointRequest;
+import io.github.hectorvent.floci.services.efs.model.CreateFileSystemRequest;
+import io.github.hectorvent.floci.services.efs.model.CreationInfo;
+import io.github.hectorvent.floci.services.efs.model.PosixUser;
+import io.github.hectorvent.floci.services.efs.model.RootDirectory;
 import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -44,6 +51,9 @@ class EcsContainerManagerEfsIsolationDockerIntegrationTest {
 
     @Inject
     DockerClient dockerClient;
+
+    @Inject
+    EfsService efsService;
 
     private final List<String> volumesToCleanUp = new ArrayList<>();
 
@@ -123,6 +133,47 @@ class EcsContainerManagerEfsIsolationDockerIntegrationTest {
                 "a second task through the same access point must share its data");
     }
 
+    @Test
+    void accessPointsApplyTheirOwnOwnershipPermissionsAndIdentity() {
+        CreateFileSystemRequest fileSystem = new CreateFileSystemRequest();
+        fileSystem.setCreationToken(UUID.randomUUID().toString());
+        String fileSystemId = efsService.createFileSystem(fileSystem, "us-east-1").getFileSystemId();
+        List<String> accessPoints = new ArrayList<>();
+        try {
+            for (long uid : List.of(10001L, 10002L, 3000000000L)) {
+                long processUid = uid == 3000000000L ? 10003L : uid;
+                CreationInfo creation = new CreationInfo();
+                creation.setOwnerUid(uid);
+                creation.setOwnerGid(processUid);
+                String mode = uid == 10001 ? "750" : uid == 10002 ? "700" : "770";
+                creation.setPermissions("0" + mode);
+                RootDirectory root = new RootDirectory();
+                root.setPath("/user-" + uid);
+                root.setCreationInfo(creation);
+                PosixUser user = new PosixUser();
+                user.setUid(processUid);
+                user.setGid(processUid);
+                user.setSecondaryGids(List.of(20001L, 20002L));
+                CreateAccessPointRequest request = new CreateAccessPointRequest();
+                request.setFileSystemId(fileSystemId);
+                request.setRootDirectory(root);
+                request.setPosixUser(user);
+                AccessPointDescription ap = efsService.createAccessPoint("us-east-1", request);
+                accessPoints.add(ap.getAccessPointId());
+                String check = "test \"$(stat -c '%u:%g %a' /mnt/efs)\" = '" + uid + ":" + processUid + " " + mode
+                        + "' && id -G | grep -qw " + processUid
+                        + " && id -G | grep -qw 20001 && id -G | grep -qw 20002";
+                assertEquals(0, runEfsCommand(fileSystemId, null, ap.getAccessPointId(),
+                        check + " && mkdir /mnt/efs/sub && echo persisted > /mnt/efs/sub/marker"));
+                assertEquals(0, runEfsCommand(fileSystemId, null, ap.getAccessPointId(),
+                        check + " && grep -qx persisted /mnt/efs/sub/marker"));
+            }
+        } finally {
+            accessPoints.forEach(id -> efsService.deleteAccessPoint("us-east-1", id));
+            efsService.deleteFileSystem("us-east-1", fileSystemId);
+        }
+    }
+
     /**
      * Runs a single-container ECS task that mounts {@code fileSystemId} (scoped by
      * {@code rootDirectory}/{@code accessPointId}) at {@code /mnt/efs} and executes
@@ -156,6 +207,7 @@ class EcsContainerManagerEfsIsolationDockerIntegrationTest {
                     .awaitStatusCode(60, TimeUnit.SECONDS);
         } finally {
             containerManager.stopTask(handle);
+            containerManager.cleanupStoppedTask(handle);
         }
     }
 

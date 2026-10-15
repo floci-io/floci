@@ -4789,12 +4789,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * DeleteVpc only removes the resources AWS creates with the VPC (default security group, main
      * route table, default network ACL). A subnet, or a security group, route table or network ACL the
-     * caller made, an internet gateway still attached, or a VPC endpoint must be removed first,
-     * otherwise AWS answers {@code DependencyViolation}.
+     * caller made, an internet gateway still attached, a VPC endpoint, or an instance or NAT gateway
+     * still sitting in one of its subnets must be removed first, otherwise AWS answers
+     * {@code DependencyViolation}.
      */
     private void requireNoVpcDependents(String region, String vpcId) {
-        boolean hasDependents = subnets.scan(k -> k.startsWith(region + "::")).stream()
-                        .anyMatch(subnet -> vpcId.equals(subnet.getVpcId()))
+        String message = "The vpc '" + vpcId + "' has dependencies and cannot be deleted.";
+        Set<String> vpcSubnetIds = subnets.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(subnet -> vpcId.equals(subnet.getVpcId()))
+                .map(Subnet::getSubnetId)
+                .collect(Collectors.toSet());
+        boolean hasDependents = !vpcSubnetIds.isEmpty()
                 || securityGroups.scan(k -> k.startsWith(region + "::")).stream()
                         .anyMatch(group -> vpcId.equals(group.getVpcId())
                                 && !"default".equals(group.getGroupName()))
@@ -4809,8 +4814,38 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 || vpcEndpoints.scan(k -> k.startsWith(region + "::")).stream()
                         .anyMatch(endpoint -> vpcId.equals(endpoint.getVpcId()));
         if (hasDependents) {
-            throw new AwsException("DependencyViolation",
-                    "The vpc '" + vpcId + "' has dependencies and cannot be deleted.", 400);
+            throw new AwsException("DependencyViolation", message, 400);
+        }
+        requireNoSubnetResidents(region, vpcSubnetIds, message);
+    }
+
+    /**
+     * Anything still holding a network interface in one of the subnets pins the subnet, and through
+     * it the VPC: an instance, a NAT gateway, a standalone network interface, or an interface or
+     * Gateway Load Balancer endpoint. A {@code shutting-down} instance still holds its interface and
+     * a {@code deleting} NAT gateway still holds its address, so only {@code terminated} and
+     * {@code deleted} release the subnet; a standalone interface is removed from the store on
+     * delete, so its presence alone counts. AWS answers {@code DependencyViolation} until then.
+     */
+    private void requireNoSubnetResidents(String region, Set<String> subnetIds, String message) {
+        if (subnetIds.isEmpty()) {
+            return;
+        }
+        String regionPrefix = region + "::";
+        boolean occupied = instances.scan(k -> k.startsWith(regionPrefix)).stream()
+                        .anyMatch(instance -> subnetIds.contains(instance.getSubnetId())
+                                && (instance.getState() == null
+                                        || !"terminated".equals(instance.getState().getName())))
+                || natGateways.scan(k -> k.startsWith(regionPrefix)).stream()
+                        .anyMatch(natGateway -> subnetIds.contains(natGateway.getSubnetId())
+                                && !"deleted".equals(natGateway.getState()))
+                || networkInterfaces.scan(k -> k.startsWith(regionPrefix)).stream()
+                        .anyMatch(ni -> subnetIds.contains(ni.getSubnetId()))
+                || vpcEndpoints.scan(k -> k.startsWith(regionPrefix)).stream()
+                        .anyMatch(endpoint -> !"deleted".equals(endpoint.getState())
+                                && nullToEmpty(endpoint.getSubnetIds()).stream().anyMatch(subnetIds::contains));
+        if (occupied) {
+            throw new AwsException("DependencyViolation", message, 400);
         }
     }
 
@@ -5953,6 +5988,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (attachmentTopologyLock(region)) {
             requireNoTransitGatewayAttachment(region,
                     attachment -> attachment.getSubnetIds().contains(subnetId),
+                    "The subnet '" + subnetId + "' has dependencies and cannot be deleted.");
+            requireNoSubnetResidents(region, Set.of(subnetId),
                     "The subnet '" + subnetId + "' has dependencies and cannot be deleted.");
             requireNoProviderDependency(provider -> provider.hasSubnetDependency(region, subnetId),
                     "The subnet '" + subnetId + "' has dependencies and cannot be deleted.");

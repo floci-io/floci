@@ -9,9 +9,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Tag reconciliation shared by the EC2 provisioners ({@code Ec2InstanceCfnProvisioner} and
- * {@code Ec2SecurityGroupCfnProvisioner}). Both drive it from the desired tags resolved via
- * {@link ProvisionContext#resolveTags}; the reconcile itself is identical.
+ * Tag reconciliation shared by the EC2 provisioners ({@code Ec2InstanceCfnProvisioner},
+ * {@code Ec2SecurityGroupCfnProvisioner} and {@code Ec2VpcCfnProvisioner}). They drive it from the
+ * desired tags resolved via {@link ProvisionContext#resolveTags}; the reconcile itself is identical.
  */
 final class Ec2Tags {
 
@@ -26,17 +26,27 @@ final class Ec2Tags {
     }
 
     /**
-     * Brings a resource's tags to {@code desired}: removes the keys AWS currently has that the
-     * template no longer declares, then creates or overwrites the declared ones.
+     * The user tags EC2 currently holds for the resource, keyed by tag key in DescribeTags order.
+     * Reserved {@code aws:} keys are never part of the user tag set, so neither {@link #reconcile}
+     * nor a rollback snapshot taken from this map can try to write one.
      */
-    static void reconcile(Ec2Service ec2Service, String region, String resourceId, Map<String, String> desired) {
-        List<Tag> add = validatedTags(desired);
+    static Map<String, String> current(Ec2Service ec2Service, String region, String resourceId) {
         Map<String, String> current = new LinkedHashMap<>();
         for (Map<String, String> entry : ec2Service.describeTags(region, Map.of("resource-id", List.of(resourceId)))) {
             if (!Ec2Service.isAwsTagKey(entry.get("key"))) {
                 current.put(entry.get("key"), entry.get("value"));
             }
         }
+        return current;
+    }
+
+    /**
+     * Brings a resource's tags to {@code desired}: removes the keys AWS currently has that the
+     * template no longer declares, then creates or overwrites the declared ones.
+     */
+    static void reconcile(Ec2Service ec2Service, String region, String resourceId, Map<String, String> desired) {
+        List<Tag> add = validatedTags(desired);
+        Map<String, String> current = current(ec2Service, region, resourceId);
         List<String> stale = ProvisionContext.staleTagKeys(current, desired);
         if (!stale.isEmpty()) {
             List<Tag> remove = new ArrayList<>();

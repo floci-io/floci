@@ -209,6 +209,50 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     @Test
+    void deleteWaitsUntilTheInstanceIsTerminated() {
+        provisioner.terminatePollMillis = 1L;
+        Instance shuttingDown = new Instance();
+        shuttingDown.setInstanceId("i-1");
+        shuttingDown.setState(InstanceState.shuttingDown());
+        Instance terminated = new Instance();
+        terminated.setInstanceId("i-1");
+        terminated.setState(InstanceState.terminated());
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(shuttingDown)))
+                .thenReturn(List.of(reservationOf(shuttingDown)))
+                .thenReturn(List.of(reservationOf(terminated)));
+
+        assertDoesNotThrow(() -> provisioner.delete(TYPE, "i-1", "us-east-1"));
+
+        InOrder order = inOrder(ec2);
+        order.verify(ec2).terminateInstances("us-east-1", List.of("i-1"));
+        order.verify(ec2, times(3)).describeInstances("us-east-1", List.of("i-1"), null);
+    }
+
+    @Test
+    void deleteTreatsAnInstanceGoneAfterTerminateAsTerminated() {
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenThrow(new AwsException("InvalidInstanceID.NotFound", "gone", 400));
+
+        assertDoesNotThrow(() -> provisioner.delete(TYPE, "i-1", "us-east-1"));
+    }
+
+    @Test
+    void deleteFailsWhenTheInstanceNeverReachesTerminated() {
+        provisioner.terminateTimeoutMillis = 20L;
+        provisioner.terminatePollMillis = 1L;
+        Instance shuttingDown = new Instance();
+        shuttingDown.setInstanceId("i-1");
+        shuttingDown.setState(InstanceState.shuttingDown());
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                .thenReturn(List.of(reservationOf(shuttingDown)));
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.delete(TYPE, "i-1", "us-east-1"));
+        assertTrue(failure.getMessage().contains("Instance i-1 did not reach terminated"), failure.getMessage());
+    }
+
+    @Test
     void updateWithoutACreateOnlyChangeReusesTheInstance() throws Exception {
         Instance i1 = new Instance();
         i1.setInstanceId("i-1");

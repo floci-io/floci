@@ -17,6 +17,11 @@ import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.efs.EfsService;
+import io.github.hectorvent.floci.services.efs.model.AccessPointDescription;
+import io.github.hectorvent.floci.services.efs.model.CreationInfo;
+import io.github.hectorvent.floci.services.efs.model.PosixUser;
+import io.github.hectorvent.floci.services.efs.model.RootDirectory;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -28,6 +33,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -73,6 +80,7 @@ class EcsContainerManagerVolumesTest {
     private LaunchedContainerAwsEnv awsEnv;
     private EcrRegistryManager ecrRegistryManager;
     private EcsContainerManager manager;
+    private EfsService efsService;
 
     private static Stream<Volume> ephemeralVolumes() {
         return Stream.of(new Volume("shared", null),
@@ -244,6 +252,7 @@ class EcsContainerManagerVolumesTest {
 
     @BeforeEach
     void setUp() {
+        efsService = mock(EfsService.class);
         builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         containerBuilder = mock(ContainerBuilder.class);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
@@ -290,9 +299,12 @@ class EcsContainerManagerVolumesTest {
         TaskDefinition taskDef = new TaskDefinition();
         taskDef.setFamily("test-family");
         taskDef.setContainerDefinitions(List.of(app));
+        // "/host/abs" has no drive letter on Windows, so build the absolute paths per platform.
+        String configHostPath = Path.of("/host/abs/app/config.yml").toAbsolutePath().toString();
+        String awsHostPath = Path.of("/host/abs/home/.aws").toAbsolutePath().toString();
         taskDef.setVolumes(List.of(
-                new Volume("config-vol", "/host/abs/app/config.yml"),
-                new Volume("aws-vol", "/host/abs/home/.aws")));
+                new Volume("config-vol", configHostPath),
+                new Volume("aws-vol", awsHostPath)));
 
         EcsTask task = new EcsTask();
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
@@ -303,14 +315,14 @@ class EcsContainerManagerVolumesTest {
         ArgumentCaptor<String> roHost = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> roPath = ArgumentCaptor.forClass(String.class);
         verify(builder, times(1)).withReadOnlyBind(roHost.capture(), roPath.capture());
-        assertEquals("/host/abs/app/config.yml", roHost.getValue());
+        assertEquals(configHostPath, roHost.getValue());
         assertEquals("/app/config.yml", roPath.getValue());
 
         // Read-write mountPoint -> withBind(hostSourcePath, containerPath).
         ArgumentCaptor<String> rwHost = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> rwPath = ArgumentCaptor.forClass(String.class);
         verify(builder, times(1)).withBind(rwHost.capture(), rwPath.capture());
-        assertEquals("/host/abs/home/.aws", rwHost.getValue());
+        assertEquals(awsHostPath, rwHost.getValue());
         assertEquals("/root/.aws", rwPath.getValue());
 
         // The unresolved "missing-vol" mountPoint contributes no bind beyond the two above.
@@ -392,6 +404,150 @@ class EcsContainerManagerVolumesTest {
         verify(lifecycleManager, times(1)).ensureSharedVolume(
                 "floci-aws-" + EcsContainerManager.efsVolumeToken("fs-abc", null, "/dps"),
                 OptionalInt.of(1001), OptionalInt.of(1001), Optional.of("2775"), "busybox:stable");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void accessPointSettingsOverrideEachFallbackIndependently(boolean creationInfo) {
+        EmulatorConfig cfg = efsFallbackConfig();
+        AccessPointDescription ap = new AccessPointDescription();
+        ap.setFileSystemId("fs-test");
+        if (creationInfo) {
+            CreationInfo creation = new CreationInfo();
+            creation.setOwnerUid(3000000000L);
+            creation.setOwnerGid(3000000001L);
+            creation.setPermissions("0750");
+            RootDirectory root = new RootDirectory();
+            root.setCreationInfo(creation);
+            ap.setRootDirectory(root);
+        } else {
+            PosixUser user = new PosixUser();
+            user.setUid(10001L);
+            user.setGid(10002L);
+            user.setSecondaryGids(List.of(20001L, 20002L));
+            ap.setPosixUser(user);
+        }
+        when(efsService.describeAccessPoints("eu-west-1", null, "fsap-test")).thenReturn(List.of(ap));
+        managerWithEfs(cfg).startTask(task("000000000000", "eu-west-1"),
+                accessPointDefinition("fsap-test"), List.of(), "eu-west-1");
+        if (creationInfo) {
+            verify(lifecycleManager).ensureSharedVolume(anyString(), eq(3000000000L), eq(3000000001L),
+                    eq("0750"), eq("busybox:stable"));
+            verify(builder).withUser("3001:3002");
+            verify(builder).withGroupAdd("4001");
+        } else {
+            verifyFallbackOwnership();
+            verify(builder).withUser("42:42");
+            verify(builder).withGroupAdd("10002");
+            verify(builder).withGroupAdd("20001");
+            verify(builder).withGroupAdd("20002");
+            verify(builder, never()).withUser("10001:10002");
+            verify(builder, never()).withUser("3001:3002");
+            verify(builder, never()).withGroupAdd("4001");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void accessPointWithoutSettingsOrUnavailableMetadataUsesFallback(boolean exists) {
+        AccessPointDescription ap = new AccessPointDescription();
+        ap.setFileSystemId("fs-test");
+        when(efsService.describeAccessPoints("us-east-1", null, "fsap-test"))
+                .thenReturn(exists ? List.of(ap) : List.of());
+        managerWithEfs(efsFallbackConfig()).startTask(task("000000000000", "us-east-1"),
+                accessPointDefinition("fsap-test"), List.of(), "us-east-1");
+        verifyFallbackOwnership();
+        verify(builder).withUser("3001:3002");
+        verify(builder).withGroupAdd("4001");
+    }
+
+    @Test
+    void accessPointOnAnotherFileSystemRejectsLaunch() {
+        AccessPointDescription ap = new AccessPointDescription();
+        ap.setFileSystemId("fs-other");
+        when(efsService.describeAccessPoints("us-east-1", null, "fsap-test")).thenReturn(List.of(ap));
+        AwsException failure = assertThrows(AwsException.class,
+                () -> managerWithEfs(efsFallbackConfig()).startTask(task("000000000000", "us-east-1"),
+                        accessPointDefinition("fsap-test"), List.of(), "us-east-1"));
+        assertEquals("ClientException", failure.getErrorCode());
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void accessPointPosixUserWithNullSecondaryGidSkipsNull() {
+        EmulatorConfig cfg = efsFallbackConfig();
+        AccessPointDescription ap = new AccessPointDescription();
+        ap.setFileSystemId("fs-test");
+        PosixUser user = new PosixUser();
+        user.setUid(10001L);
+        user.setGid(10002L);
+        user.setSecondaryGids(Arrays.asList(20001L, null, 20002L));
+        ap.setPosixUser(user);
+        when(efsService.describeAccessPoints("eu-west-1", null, "fsap-test")).thenReturn(List.of(ap));
+        managerWithEfs(cfg).startTask(task("000000000000", "eu-west-1"),
+                accessPointDefinition("fsap-test"), List.of(), "eu-west-1");
+        verify(builder).withGroupAdd("10002");
+        verify(builder).withGroupAdd("20001");
+        verify(builder).withGroupAdd("20002");
+        verify(builder, never()).withGroupAdd("null");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"invalid", "888", "07777", ""})
+    void accessPointWithInvalidCreationInfoPermissionsRejectsLaunch(String permissions) {
+        AccessPointDescription ap = new AccessPointDescription();
+        ap.setFileSystemId("fs-test");
+        CreationInfo creation = new CreationInfo();
+        creation.setOwnerUid(1000L);
+        creation.setOwnerGid(1000L);
+        creation.setPermissions(permissions);
+        RootDirectory root = new RootDirectory();
+        root.setCreationInfo(creation);
+        ap.setRootDirectory(root);
+        when(efsService.describeAccessPoints("us-east-1", null, "fsap-test")).thenReturn(List.of(ap));
+        AwsException failure = assertThrows(AwsException.class,
+                () -> managerWithEfs(efsFallbackConfig()).startTask(task("000000000000", "us-east-1"),
+                        accessPointDefinition("fsap-test"), List.of(), "us-east-1"));
+        assertEquals("ClientException", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("permissions"));
+    }
+
+    private EmulatorConfig efsFallbackConfig() {
+        EmulatorConfig cfg = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(cfg.storage().efs().ownerUid()).thenReturn(OptionalInt.of(1001));
+        when(cfg.storage().efs().ownerGid()).thenReturn(OptionalInt.of(1002));
+        when(cfg.storage().efs().rootPermissions()).thenReturn(Optional.of("0775"));
+        when(cfg.storage().efs().initImage()).thenReturn("busybox:stable");
+        when(cfg.storage().efs().mountUser()).thenReturn(Optional.of("3001:3002"));
+        when(cfg.storage().efs().mountGroupAdd()).thenReturn(OptionalInt.of(4001));
+        return cfg;
+    }
+
+    private EcsContainerManager managerWithEfs(EmulatorConfig cfg) {
+        return new EcsContainerManager(containerBuilder, lifecycleManager,
+                mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
+                mock(RegionResolver.class), awsEnv, mock(SsmService.class),
+                mock(SecretsManagerService.class), mock(S3Service.class), ecrRegistryManager, new HostVolumePolicy(cfg),
+                null, null, null, null, null, efsService);
+    }
+
+    private static TaskDefinition accessPointDefinition(String accessPointId) {
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+        app.setUser("42:42");
+        app.setMountPoints(List.of(new MountPoint("data", "/data", false)));
+        TaskDefinition definition = new TaskDefinition();
+        definition.setFamily("efs-access-point");
+        definition.setContainerDefinitions(List.of(app));
+        definition.setVolumes(List.of(new Volume("data", null,
+                new EfsVolumeConfiguration("fs-test", null, "ENABLED", null, accessPointId, null))));
+        return definition;
+    }
+
+    private void verifyFallbackOwnership() {
+        verify(lifecycleManager).ensureSharedVolume(anyString(), eq(OptionalInt.of(1001)), eq(OptionalInt.of(1002)),
+                eq(Optional.of("0775")), eq("busybox:stable"));
     }
 
     @Test

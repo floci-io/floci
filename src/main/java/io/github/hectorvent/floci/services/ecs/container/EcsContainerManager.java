@@ -53,6 +53,10 @@ import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskNetworkInterface;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
 import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
+import io.github.hectorvent.floci.services.efs.EfsService;
+import io.github.hectorvent.floci.services.efs.model.AccessPointDescription;
+import io.github.hectorvent.floci.services.efs.model.CreationInfo;
+import io.github.hectorvent.floci.services.efs.model.PosixUser;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -142,6 +146,7 @@ public class EcsContainerManager {
     private final EcsTaskRoleCredentials taskRoleCredentials;
     private final EcsCredentialsProxy credentialsProxy;
     private final EcsTaskLinkLocalAddresses linkLocalAddresses;
+    private final EfsService efsService;
     // Stamped as RUN_LABEL on every container this process creates, so a sweep can tell its own apart.
     private final String runId = UUID.randomUUID().toString();
     // A sweep failure is retried before each task launch; each distinct failure is a WARN once.
@@ -167,7 +172,8 @@ public class EcsContainerManager {
                                SecurityGroupFirewallManager firewallManager,
                                EcsTaskRoleCredentials taskRoleCredentials,
                                EcsCredentialsProxy credentialsProxy,
-                               EcsTaskLinkLocalAddresses linkLocalAddresses) {
+                               EcsTaskLinkLocalAddresses linkLocalAddresses,
+                               EfsService efsService) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -185,6 +191,29 @@ public class EcsContainerManager {
         this.taskRoleCredentials = taskRoleCredentials;
         this.credentialsProxy = credentialsProxy;
         this.linkLocalAddresses = linkLocalAddresses;
+        this.efsService = efsService;
+    }
+
+    public EcsContainerManager(ContainerBuilder containerBuilder,
+                               ContainerLifecycleManager lifecycleManager,
+                               ContainerLogStreamer logStreamer,
+                               ContainerDetector containerDetector,
+                               EmulatorConfig config,
+                               RegionResolver regionResolver,
+                               LaunchedContainerAwsEnv awsEnv,
+                               SsmService ssmService,
+                               SecretsManagerService secretsManagerService,
+                               S3Service s3Service,
+                               EcrRegistryManager ecrRegistryManager,
+                               HostVolumePolicy hostVolumePolicy,
+                               Ec2Service ec2Service,
+                               SecurityGroupFirewallManager firewallManager,
+                               EcsTaskRoleCredentials taskRoleCredentials,
+                               EcsCredentialsProxy credentialsProxy,
+                               EcsTaskLinkLocalAddresses linkLocalAddresses) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, config, regionResolver,
+                awsEnv, ssmService, secretsManagerService, s3Service, ecrRegistryManager, hostVolumePolicy,
+                ec2Service, firewallManager, taskRoleCredentials, credentialsProxy, linkLocalAddresses, null);
     }
 
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -476,7 +505,7 @@ public class EcsContainerManager {
                                 specBuilder.withBind(sourcePath, mp.containerPath());
                             }
                         } else if (efs != null) {
-                            mountEfsVolume(specBuilder, efs, mp);
+                            mountEfsVolume(specBuilder, efs, mp, region);
                         } else if (ephemeralVolume != null) {
                             if (taskVolumeNames.add(ephemeralVolume)) {
                                 Map<String, String> labels = new LinkedHashMap<>(ownerLabels());
@@ -2281,17 +2310,50 @@ public class EcsContainerManager {
      * Materialises an EFS-configured task volume as a shared local Docker named volume scoped to
      * both the file system and the mount's effective root (see {@link #efsVolumeToken}), then
      * initialises the volume root's POSIX ownership to emulate the EFS access point's
-     * RootDirectory.CreationInfo (no-op unless {@code floci.storage.efs} configures owner/permissions)
-     * and applies the configured PosixUser emulation (uid[:gid] and/or supplementary group) so a
-     * non-root task image can read/write the shared volume.
+     * RootDirectory.CreationInfo and PosixUser. Missing access point metadata falls back to
+     * {@code floci.storage.efs}. Identity is emulated by changing the container's user and groups.
      */
-    private void mountEfsVolume(ContainerBuilder.Builder specBuilder, EfsVolumeConfiguration efs, MountPoint mp) {
+    private void mountEfsVolume(ContainerBuilder.Builder specBuilder, EfsVolumeConfiguration efs, MountPoint mp,
+                                String region) {
         String efsVolumeName = efsVolumeName(efs.fileSystemId(), efs.accessPointId(), efs.rootDirectory());
         EmulatorConfig.EfsSharingConfig efsCfg = config.storage().efs();
-        lifecycleManager.ensureSharedVolume(efsVolumeName,
-                efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
-                efsCfg.initImage());
+        AccessPointDescription accessPoint = resolveEfsAccessPoint(efs, region);
+        CreationInfo creation = accessPoint != null && accessPoint.getRootDirectory() != null
+                ? accessPoint.getRootDirectory().getCreationInfo() : null;
+        if (creation != null) {
+            if (creation.getOwnerUid() == null || creation.getOwnerGid() == null
+                    || creation.getPermissions() == null) {
+                throw new AwsException("ClientException",
+                        "EFS access point " + efs.accessPointId() + " has incomplete CreationInfo", 400);
+            }
+            if (!ContainerLifecycleManager.isValidPermissions(creation.getPermissions())) {
+                throw new AwsException("ClientException",
+                        "EFS access point " + efs.accessPointId() + " has invalid CreationInfo permissions: "
+                                + creation.getPermissions(), 400);
+            }
+            lifecycleManager.ensureSharedVolume(efsVolumeName, creation.getOwnerUid(), creation.getOwnerGid(),
+                    creation.getPermissions(), efsCfg.initImage());
+        } else {
+            lifecycleManager.ensureSharedVolume(efsVolumeName,
+                    efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(), efsCfg.initImage());
+        }
         specBuilder.withNamedVolume(efsVolumeName, mp.containerPath(), mp.readOnly());
+        PosixUser posixUser = accessPoint != null ? accessPoint.getPosixUser() : null;
+        if (posixUser != null) {
+            if (posixUser.getUid() == null || posixUser.getGid() == null) {
+                throw new AwsException("ClientException",
+                        "EFS access point " + efs.accessPointId() + " has incomplete PosixUser", 400);
+            }
+            specBuilder.withGroupAdd(String.valueOf(posixUser.getGid()));
+            if (posixUser.getSecondaryGids() != null) {
+                for (Long gid : posixUser.getSecondaryGids()) {
+                    if (gid != null) {
+                        specBuilder.withGroupAdd(String.valueOf(gid));
+                    }
+                }
+            }
+            return;
+        }
         efsCfg.mountUser().ifPresent(u -> {
             if (!u.matches("^\\d+(:\\d+)?$")) {
                 throw new IllegalArgumentException(
@@ -2300,6 +2362,26 @@ public class EcsContainerManager {
             specBuilder.withUser(u);
         });
         efsCfg.mountGroupAdd().ifPresent(gid -> specBuilder.withGroupAdd(String.valueOf(gid)));
+    }
+
+    private AccessPointDescription resolveEfsAccessPoint(EfsVolumeConfiguration efs, String region) {
+        if (efs.accessPointId() == null || efs.accessPointId().isBlank()) {
+            return null;
+        }
+        List<AccessPointDescription> accessPoints = efsService != null
+                ? efsService.describeAccessPoints(region, null, efs.accessPointId()) : List.of();
+        if (accessPoints.isEmpty()) {
+            LOG.warnv("EFS access point {0} metadata unavailable in region {1}; using floci.storage.efs fallback",
+                    efs.accessPointId(), region);
+            return null;
+        }
+        AccessPointDescription accessPoint = accessPoints.getFirst();
+        if (!efs.fileSystemId().equals(accessPoint.getFileSystemId())) {
+            throw new AwsException("ClientException",
+                    "EFS access point " + efs.accessPointId() + " does not belong to file system " + efs.fileSystemId(),
+                    400);
+        }
+        return accessPoint;
     }
 
     /**

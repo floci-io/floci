@@ -27,6 +27,7 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -233,6 +234,23 @@ class ContainerLifecycleManagerNetworkTest {
         ContainerInfo info = manager().createAndStart(spec("container:sibling", Map.of(9200, 9400), List.of(9200)));
 
         assertEquals(new EndpointInfo("localhost", 9200), info.getEndpoint(9200));
+    }
+
+    @Test
+    void resolveEndpointPrefersTheServiceNetworkOverTheDefaultBridge() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        InspectContainerResponse inspect = inspectOf("container-id");
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(inspect.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
+        when(inspect.getNetworkSettings()).thenReturn(networks);
+        // Docker lists a container's networks by name, so the default bridge usually comes first.
+        Map<String, ContainerNetwork> attached = new LinkedHashMap<>();
+        attached.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.4"));
+        attached.put("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.4"));
+        when(networks.getNetworks()).thenReturn(attached);
+
+        assertEquals(new EndpointInfo("172.20.0.4", 9644),
+                manager().resolveEndpoint("container-id", 9644, "floci-net"));
     }
 
     private InspectContainerResponse inspectOf(String containerId) {
