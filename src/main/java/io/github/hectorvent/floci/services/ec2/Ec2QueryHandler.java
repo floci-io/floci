@@ -5151,6 +5151,8 @@ public class Ec2QueryHandler {
                 .elem("subnetId", natGateway.getSubnetId())
                 .elem("vpcId", natGateway.getVpcId())
                 .elem("state", natGateway.getState())
+                .elem("failureCode", natGateway.getFailureCode())
+                .elem("failureMessage", natGateway.getFailureMessage())
                 .elem("connectivityType", natGateway.getConnectivityType());
         if (natGateway.getCreateTime() != null) {
             xml.elem("createTime", ISO_FMT.format(natGateway.getCreateTime()));

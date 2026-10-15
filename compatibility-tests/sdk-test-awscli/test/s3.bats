@@ -266,7 +266,7 @@ teardown() {
     local part1_file part2_file
     part1_file=$(mktemp)
     part2_file=$(mktemp)
-    echo -n "part-one" > "$part1_file"
+    dd if=/dev/zero of="$part1_file" bs=1048576 count=5 2>/dev/null
     echo -n "part-two" > "$part2_file"
 
     output=$(aws_cmd s3api upload-part \

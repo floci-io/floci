@@ -573,6 +573,11 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
                 && connectivityType.equalsIgnoreCase(existing.getConnectivityType() == null ? "public" : existing.getConnectivityType());
         NatGateway nat = reuse ? existing
                 : ec2Service.createNatGateway(ctx.region(), subnetId, allocationId, connectivityType, tagList(props, ctx));
+        if ("failed".equals(nat.getState())) {
+            // The resource fails and its failed gateway is not left behind.
+            ec2Service.deleteNatGateway(ctx.region(), nat.getNatGatewayId());
+            throw new AwsException(nat.getFailureCode(), nat.getFailureMessage(), 400);
+        }
         if (reuse) {
             CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> applyTags(r, true, nat.getNatGatewayId(), existing.getTags(), props, ctx));
         }

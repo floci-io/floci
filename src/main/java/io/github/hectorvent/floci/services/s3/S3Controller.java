@@ -3554,12 +3554,13 @@ public class S3Controller {
         }
         // S3 InvalidArgument responses carry ArgumentName and ArgumentValue so the SDK can
         // surface which input was rejected, and EntityTooSmall and EntityTooLarge the proposed and
-        // allowed sizes. They travel through AwsException.extendedData.
+        // allowed sizes. Multipart size errors also identify the rejected part.
+        // They travel through AwsException.extendedData.
         if (e.getExtendedData() != null) {
-            for (String sizeField : List.of("ProposedSize", "MinSizeAllowed", "MaxSizeAllowed")) {
-                Object size = e.getExtendedData().get(sizeField);
-                if (size != null) {
-                    xmlBuilder.elem(sizeField, size.toString());
+            for (String field : List.of("ProposedSize", "MinSizeAllowed", "MaxSizeAllowed", "PartNumber", "ETag")) {
+                Object value = e.getExtendedData().get(field);
+                if (value != null) {
+                    xmlBuilder.elem(field, value.toString());
                 }
             }
             Object resource = e.getExtendedData().get("Resource");

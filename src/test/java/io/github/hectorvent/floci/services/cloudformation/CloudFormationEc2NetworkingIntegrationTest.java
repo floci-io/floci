@@ -86,6 +86,28 @@ class CloudFormationEc2NetworkingIntegrationTest {
         ec2("DeleteVpc", Map.of("VpcId", vpcId));
     }
 
+    /**
+     * CreateNatGateway with an Elastic IP another gateway holds succeeds on AWS and leaves the
+     * gateway failed; CloudFormation must still fail the resource rather than report it created.
+     */
+    @Test
+    void aNatGatewayGivenAnAlreadyHeldElasticIpFailsTheStack() {
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.42.0.0/16")), "<vpcId>", "</vpcId>");
+        String nat = "{\"Type\": \"AWS::EC2::NatGateway\", %s\"Properties\": {\"SubnetId\": {\"Ref\": \"Subnet\"},"
+                + " \"AllocationId\": {\"Fn::GetAtt\": [\"Eip\", \"AllocationId\"]}}}";
+        cloudFormation("ec2-nat-shared-eip-it", "CreateStack", """
+        {"Resources": {
+          "Subnet": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": "%s", "CidrBlock": "10.42.0.0/24"}},
+          "Eip": {"Type": "AWS::EC2::EIP", "Properties": {"Domain": "vpc"}},
+          "NatA": %s,
+          "NatB": %s
+        }}
+        """.formatted(vpcId, nat.formatted(""), nat.formatted("\"DependsOn\": \"NatA\", ")));
+
+        describeStacks("ec2-nat-shared-eip-it", "ROLLBACK_COMPLETE");
+        assertFalse(ec2("DescribeNatGateways").contains(vpcId), "no gateway, failed or not, is left behind");
+    }
+
     private static String subnetXml(String subnetId) {
         return ec2("DescribeSubnets", Map.of("SubnetId.1", subnetId));
     }
@@ -187,14 +209,27 @@ class CloudFormationEc2NetworkingIntegrationTest {
         assertFalse(retagged.contains("<key>tier</key>"), "the dropped tag must be removed");
 
         // CidrBlock is createOnly: the public subnet is replaced, and with it the NAT gateway and the
-        // association that name it; the gateway, EIP and route tables stay.
-        cloudFormation("UpdateStack", template(vpcId, "10.40.2.0/24"));
+        // association that name it; the gateway and route tables stay. The replacement gateway gets a
+        // new EIP: CloudFormation creates it before deleting the old one, and on AWS a gateway given
+        // an Elastic IP the displaced gateway still holds is created failed. The old EIP stays in
+        // the template for a second reason: Floci's update cleanup deletes removed resources before
+        // the old copies of replaced ones (AWS deletes in reverse dependency order), so dropping the
+        // EIP while replacing its gateway would try to release it while the old gateway still holds
+        // it. Keeping NatEip sidesteps that; the cleanup order is a separate issue. The old EIP is
+        // free once the displaced gateway is gone. oldEip is NatEip: out is NatEipB's outputs below.
+        cloudFormation("UpdateStack", template(vpcId, "10.40.2.0/24").replace("NatEip", "NatEipB")
+                .replace("\"NatEipB\": {\"Type\"",
+                        "\"NatEip\": {\"Type\": \"AWS::EC2::EIP\", \"Properties\": {\"Domain\": \"vpc\"}},\n"
+                        + "            \"NatEipB\": {\"Type\""));
         Map<String, String> replaced = XmlParser.extractPairs(describeStacks("UPDATE_COMPLETE"), "Outputs", "OutputKey", "OutputValue");
         assertFalse(out.get("SubnetId").equals(replaced.get("SubnetId")), "a changed CIDR must replace the subnet");
         assertFalse(out.get("NatId").equals(replaced.get("NatId")), "the NAT gateway follows its subnet");
         assertFalse(out.get("AssocId").equals(replaced.get("AssocId")), "the association follows its subnet");
         assertEquals(out.get("IgwId"), replaced.get("IgwId"));
-        assertEquals(out.get("EipAllocationId"), replaced.get("EipAllocationId"));
+        assertFalse(out.get("EipAllocationId").equals(replaced.get("EipAllocationId")), "the gateway takes the new EIP");
+        assertFalse(ec2("DescribeAddresses", Map.of("AllocationId.1", out.get("EipAllocationId"))).contains("<associationId>"),
+                "the displaced gateway's EIP must be free");
+        String oldEip = out.get("EipAllocationId");
         assertEquals(out.get("PublicRtId"), replaced.get("PublicRtId"));
         assertEquals(out.get("PrivateRtId"), replaced.get("PrivateRtId"));
         assertFalse(ec2("DescribeSubnets").contains(out.get("SubnetId")), "the displaced subnet must be gone");
@@ -206,7 +241,7 @@ class CloudFormationEc2NetworkingIntegrationTest {
         CfnStackWaits.awaitStackDeleted(STACK);
 
         for (String id : List.of(out.get("SubnetId"), out.get("PublicRtId"), out.get("PrivateRtId"),
-                out.get("AssocId"), out.get("NatId"), out.get("EipAllocationId"), out.get("IgwId"))) {
+                out.get("AssocId"), out.get("NatId"), out.get("EipAllocationId"), oldEip, out.get("IgwId"))) {
             String everything = ec2("DescribeSubnets") + ec2("DescribeRouteTables") + ec2("DescribeNatGateways")
                     + ec2("DescribeAddresses") + ec2("DescribeInternetGateways");
             assertFalse(everything.contains(id), "stack delete must remove " + id);

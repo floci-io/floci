@@ -54,8 +54,8 @@ class S3MultipartDiskAssemblyTest {
 
     @Test
     void assembledObjectConcatenatesPartsInAscendingOrderRegardlessOfUploadOrder() {
-        byte[] part1 = repeatingBytes((byte) 'A', 17_000);
-        byte[] part2 = repeatingBytes((byte) 'B', 3);
+        byte[] part1 = repeatingBytes((byte) 'A', 5 * 1024 * 1024);
+        byte[] part2 = repeatingBytes((byte) 'B', 5 * 1024 * 1024);
         byte[] part3 = repeatingBytes((byte) 'C', 65_537);
 
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "assembled.bin", null);
@@ -73,7 +73,7 @@ class S3MultipartDiskAssemblyTest {
 
     @Test
     void assembledObjectSkipsGapsWhenPartNumbersAreNonConsecutive() {
-        byte[] part1 = "part-one".getBytes(StandardCharsets.UTF_8);
+        byte[] part1 = new byte[5 * 1024 * 1024];
         byte[] part5 = "part-five".getBytes(StandardCharsets.UTF_8);
 
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "gapped.bin", null);
@@ -88,7 +88,7 @@ class S3MultipartDiskAssemblyTest {
 
     @Test
     void compositeETagIsTheMd5OfTheConcatenatedPartMd5s() throws NoSuchAlgorithmException {
-        byte[] part1 = repeatingBytes((byte) 'X', 9_001);
+        byte[] part1 = repeatingBytes((byte) 'X', 5 * 1024 * 1024);
         byte[] part2 = repeatingBytes((byte) 'Y', 4_096);
 
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "etag.bin", null);
@@ -111,7 +111,7 @@ class S3MultipartDiskAssemblyTest {
 
     @Test
     void defaultFullObjectChecksumCoversTheAssembledBytesInOrder() {
-        byte[] part1 = repeatingBytes((byte) 'M', 12_345);
+        byte[] part1 = repeatingBytes((byte) 'M', 5 * 1024 * 1024);
         byte[] part2 = repeatingBytes((byte) 'N', 6_789);
 
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "checksum.bin", null);
@@ -129,7 +129,7 @@ class S3MultipartDiskAssemblyTest {
     @Test
     void noObjectIsCreatedWhenAPartFileGoesMissingDuringAssembly() throws Exception {
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "vanished.bin", null);
-        s3Service.uploadPart("test-bucket", "vanished.bin", upload.getUploadId(), 1, "part1".getBytes(StandardCharsets.UTF_8));
+        s3Service.uploadPart("test-bucket", "vanished.bin", upload.getUploadId(), 1, new byte[5 * 1024 * 1024]);
         s3Service.uploadPart("test-bucket", "vanished.bin", upload.getUploadId(), 2, "part2".getBytes(StandardCharsets.UTF_8));
 
         // Metadata (the Part record with its ETag) lives in memory, separate from the on-disk part
@@ -149,9 +149,10 @@ class S3MultipartDiskAssemblyTest {
 
     @Test
     void failedStoreRemovesTheAssembledFileAndKeepsThePartsForARetry() throws Exception {
+        byte[] firstPart = new byte[5 * 1024 * 1024];
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "public.bin", null,
                 null, null, null, null, "public-read");
-        s3Service.uploadPart("test-bucket", "public.bin", upload.getUploadId(), 1, "part1".getBytes(StandardCharsets.UTF_8));
+        s3Service.uploadPart("test-bucket", "public.bin", upload.getUploadId(), 1, firstPart);
         s3Service.uploadPart("test-bucket", "public.bin", upload.getUploadId(), 2, "part2".getBytes(StandardCharsets.UTF_8));
         // The public ACL is only rejected once the parts are assembled, when the object is stored.
         s3Service.putPublicAccessBlock("test-bucket",
@@ -164,7 +165,7 @@ class S3MultipartDiskAssemblyTest {
         s3Service.putPublicAccessBlock("test-bucket",
                 "<PublicAccessBlockConfiguration><BlockPublicAcls>false</BlockPublicAcls></PublicAccessBlockConfiguration>");
         s3Service.completeMultipartUpload("test-bucket", "public.bin", upload.getUploadId(), List.of(1, 2), null, null);
-        assertArrayEquals("part1part2".getBytes(StandardCharsets.UTF_8),
+        assertArrayEquals(concat(firstPart, "part2".getBytes(StandardCharsets.UTF_8)),
                 s3Service.getObject("test-bucket", "public.bin").getData());
         assertFalse(Files.exists(partsDir(upload)), "a completed upload should leave no files behind");
     }
@@ -172,7 +173,7 @@ class S3MultipartDiskAssemblyTest {
     @Test
     void versionedMultipartObjectIsStoredOnceAndKeepsItsBytesWhenTheKeyIsOverwritten() throws Exception {
         s3Service.putBucketVersioning("test-bucket", "Enabled");
-        byte[] part1 = repeatingBytes((byte) 'V', 9_000);
+        byte[] part1 = repeatingBytes((byte) 'V', 5 * 1024 * 1024);
         byte[] part2 = repeatingBytes((byte) 'W', 1_000);
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "versioned.bin", null);
         s3Service.uploadPart("test-bucket", "versioned.bin", upload.getUploadId(), 1, part1);

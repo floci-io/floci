@@ -43,15 +43,18 @@ public class RedshiftServerlessJsonHandler {
     private final ObjectMapper objectMapper;
     private final RedshiftIamDbUserResolver iamDbUserResolver;
     private final RedshiftServerlessUsageLimitService usageLimits;
+    private final RedshiftServerlessAdminJsonHandler admin;
 
     @Inject
     public RedshiftServerlessJsonHandler(RedshiftServerlessService service, ObjectMapper objectMapper,
                                          RedshiftIamDbUserResolver iamDbUserResolver,
-                                         RedshiftServerlessUsageLimitService usageLimits) {
+                                         RedshiftServerlessUsageLimitService usageLimits,
+                                         RedshiftServerlessAdminJsonHandler admin) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.iamDbUserResolver = iamDbUserResolver;
         this.usageLimits = usageLimits;
+        this.admin = admin;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -87,7 +90,7 @@ public class RedshiftServerlessJsonHandler {
                 case "ListTagsForResource" -> () -> handleListTagsForResource(request, region);
                 case "TagResource" -> () -> handleTagResource(request, region);
                 case "UntagResource" -> () -> handleUntagResource(request, region);
-                default -> null;
+                default -> admin.operation(action, request, region);
             };
             if (operation == null) {
                 return Response.status(400)

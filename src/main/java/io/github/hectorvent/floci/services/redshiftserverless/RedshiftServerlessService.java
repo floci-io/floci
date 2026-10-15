@@ -88,6 +88,7 @@ public class RedshiftServerlessService implements Resettable {
     public static final int DEFAULT_BASE_CAPACITY = 128;
     public static final int DEFAULT_PORT = 5439;
     public static final String DEFAULT_TRACK_NAME = "current";
+    public static final List<String> TRACK_NAMES = List.of("current", "trailing");
     public static final String DEFAULT_IP_ADDRESS_TYPE = "ipv4";
     public static final String DEFAULT_ADMIN_USERNAME = "admin";
     public static final int DEFAULT_CREDENTIAL_DURATION_SECONDS = 900;
@@ -97,7 +98,6 @@ public class RedshiftServerlessService implements Resettable {
     private static final int MAX_RETENTION_DAYS = 3653;
     private static final Pattern SNAPSHOT_NAME = Pattern.compile("[a-z0-9-]+");
     private static final Pattern WORKGROUP_NAME = Pattern.compile("[a-z0-9-]+");
-    private static final Pattern TRACK_NAME = Pattern.compile("[a-zA-Z0-9_]+");
     private static final Set<String> IP_ADDRESS_TYPES = Set.of("ipv4", "dualstack");
     private static final Set<String> PERFORMANCE_TARGET_STATUSES = Set.of("ENABLED", "DISABLED");
 
@@ -993,10 +993,8 @@ public class RedshiftServerlessService implements Resettable {
         if (settings.ipAddressType() != null && !IP_ADDRESS_TYPES.contains(settings.ipAddressType())) {
             throw ServerlessSupport.validation("ipAddressType must be ipv4 or dualstack.");
         }
-        if (settings.trackName() != null
-                && (settings.trackName().isEmpty() || settings.trackName().length() > 256
-                || !TRACK_NAME.matcher(settings.trackName()).matches())) {
-            throw ServerlessSupport.validation("trackName must be 1-256 characters of letters, numbers, and underscores.");
+        if (settings.trackName() != null && !TRACK_NAMES.contains(settings.trackName())) {
+            throw ServerlessSupport.validation("trackName must be one of " + TRACK_NAMES + ".");
         }
         PricePerformanceTarget target = settings.pricePerformanceTarget();
         if (target != null) {

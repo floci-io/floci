@@ -323,6 +323,7 @@ services:
     doc: docs/services/redshift-serverless.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/redshiftserverless/RedshiftServerlessJsonHandler.java, mode: switch }
+      - { path: src/main/java/io/github/hectorvent/floci/services/redshiftserverless/RedshiftServerlessAdminJsonHandler.java, mode: switch }
   - service: cognitoidentity
     doc: docs/services/cognitoidentity.md
     sources:

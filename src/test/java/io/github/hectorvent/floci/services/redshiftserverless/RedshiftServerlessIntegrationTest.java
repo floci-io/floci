@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -479,6 +480,32 @@ class RedshiftServerlessIntegrationTest {
                 + "\",\"usageType\":\"serverless-compute\",\"amount\":1}")
                 .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void releaseTracksAndEmptyListsRoundTripOverTheWire() {
+        call("ListTracks", "{}")
+                .statusCode(200)
+                .body("tracks.trackName", equalTo(List.of("current", "trailing")));
+        call("GetTrack", "{\"trackName\":\"trailing\"}")
+                .statusCode(200)
+                .body("track.trackName", equalTo("trailing"));
+        call("GetTrack", "{\"trackName\":\"preview\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        call("GetTrack", "{}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+
+        call("ListManagedWorkgroups", "{}").statusCode(200).body("managedWorkgroups", hasSize(0));
+        call("ListReservations", "{}").statusCode(200).body("reservationsList", hasSize(0));
+        call("ListReservationOfferings", "{}").statusCode(200).body("reservationOfferingsList", hasSize(0));
+        call("GetReservation", "{\"reservationId\":\"r-1\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        call("CreateReservation", "{\"offeringId\":\"o-1\"}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
     }
 
     private static io.restassured.response.ValidatableResponse call(String action, String body) {

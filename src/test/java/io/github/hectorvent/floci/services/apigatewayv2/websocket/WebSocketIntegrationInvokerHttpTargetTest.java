@@ -11,7 +11,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -155,6 +157,21 @@ class WebSocketIntegrationInvokerHttpTargetTest {
         ServerSocket server = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
         Thread.ofVirtual().start(() -> {
             try (Socket socket = server.accept()) {
+                socket.setSoTimeout(10_000);
+                BufferedReader input = new BufferedReader(
+                        new InputStreamReader(socket.getInputStream(), StandardCharsets.ISO_8859_1));
+                int contentLength = 0;
+                String header;
+                while ((header = input.readLine()) != null && !header.isEmpty()) {
+                    if (header.regionMatches(true, 0, "Content-Length:", 0, "Content-Length:".length())) {
+                        contentLength = Integer.parseInt(header.substring("Content-Length:".length()).trim());
+                    }
+                }
+                for (int i = 0; i < contentLength; i++) {
+                    if (input.read() == -1) {
+                        throw new IOException("Request ended before its body");
+                    }
+                }
                 OutputStream out = socket.getOutputStream();
                 out.write(("HTTP/1.1 200 OK\r\nContent-Length: " + (10 * 1024 * 1024 + 1) + "\r\n\r\n")
                         .getBytes(StandardCharsets.ISO_8859_1));

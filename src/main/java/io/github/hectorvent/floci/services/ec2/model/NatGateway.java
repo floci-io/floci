@@ -17,6 +17,8 @@ public class NatGateway {
     private String allocationId;
     private String state = "available";
     private String connectivityType = "public";
+    private String failureCode;
+    private String failureMessage;
     private Instant createTime;
     private String region;
     private List<NatGatewayAddress> natGatewayAddresses = new ArrayList<>();
@@ -38,6 +40,12 @@ public class NatGateway {
 
     public String getState() { return state; }
     public void setState(String state) { this.state = state; }
+
+    public String getFailureCode() { return failureCode; }
+    public void setFailureCode(String failureCode) { this.failureCode = failureCode; }
+
+    public String getFailureMessage() { return failureMessage; }
+    public void setFailureMessage(String failureMessage) { this.failureMessage = failureMessage; }
 
     public String getConnectivityType() { return connectivityType; }
     public void setConnectivityType(String connectivityType) { this.connectivityType = connectivityType; }

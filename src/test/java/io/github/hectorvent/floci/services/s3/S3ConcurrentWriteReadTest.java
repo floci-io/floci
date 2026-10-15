@@ -3,14 +3,14 @@ package io.github.hectorvent.floci.services.s3;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
@@ -32,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  * secondary source and {@code ENOENT: global-config.yaml}. getObject must therefore never return
  * a torn view of a key that always holds the same full-size payload.
  */
+@Timeout(150)
 class S3ConcurrentWriteReadTest {
 
     @TempDir
@@ -60,51 +62,29 @@ class S3ConcurrentWriteReadTest {
         AtomicInteger reads = new AtomicInteger();
         CountDownLatch writersDone = new CountDownLatch(writers);
 
-        CountDownLatch start = new CountDownLatch(1);
-        ExecutorService executor = Executors.newFixedThreadPool(writers + readers);
-        List<Future<Void>> futures = new ArrayList<>(writers + readers);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
-        try {
-            for (int w = 0; w < writers; w++) {
-                futures.add(executor.submit(() -> {
-                    try {
-                        start.await();
-                        for (int i = 0; i < iterations && firstTear.get() == null; i++) {
-                            s3.putObject(bucket, key, payload, "application/zip", Map.of());
-                        }
-                    } finally {
-                        writersDone.countDown();
-                    }
-                    return null;
-                }));
+        runConcurrently(writers, readers, () -> {
+            try {
+                for (int i = 0; i < iterations && firstTear.get() == null
+                        && !Thread.currentThread().isInterrupted(); i++) {
+                    s3.putObject(bucket, key, payload, "application/zip", Map.of());
+                }
+            } finally {
+                writersDone.countDown();
             }
-            for (int r = 0; r < readers; r++) {
-                futures.add(executor.submit(() -> {
-                    start.await();
-                    while (writersDone.getCount() > 0 && firstTear.get() == null) {
-                        S3Object obj = s3.getObject(bucket, key);
-                        byte[] data = obj.getData();
-                        reads.incrementAndGet();
-                        if (data == null || data.length != payload.length) {
-                            firstTear.compareAndSet(null,
-                                    "torn read: length=" + (data == null ? "null" : data.length)
-                                            + " expected=" + payload.length);
-                            return null;
-                        }
-                    }
-                    return null;
-                }));
+        }, () -> {
+            while (writersDone.getCount() > 0 && firstTear.get() == null
+                    && !Thread.currentThread().isInterrupted()) {
+                S3Object obj = s3.getObject(bucket, key);
+                byte[] data = obj.getData();
+                reads.incrementAndGet();
+                if (data == null || data.length != payload.length) {
+                    firstTear.compareAndSet(null,
+                            "torn read: length=" + (data == null ? "null" : data.length)
+                                    + " expected=" + payload.length);
+                    return;
+                }
             }
-            start.countDown();
-            for (Future<Void> future : futures) {
-                long remaining = deadline - System.nanoTime();
-                assertFalse(remaining <= 0, "concurrent overwrite test exceeded its deadline");
-                future.get(remaining, TimeUnit.NANOSECONDS);
-            }
-        } finally {
-            executor.shutdownNow();
-            executor.awaitTermination(10, TimeUnit.SECONDS);
-        }
+        });
 
         assertNull(firstTear.get(), firstTear.get());
         // Guard against a vacuous pass: the readers must actually have run.
@@ -142,54 +122,71 @@ class S3ConcurrentWriteReadTest {
         int iterations = 4000;
         AtomicReference<String> firstTear = new AtomicReference<>();
         AtomicInteger reads = new AtomicInteger();
-        volatileDone done = new volatileDone();
-
-        Thread[] threads = new Thread[writers + readers];
-        for (int w = 0; w < writers; w++) {
-            threads[w] = new Thread(() -> {
-                for (int i = 0; i < iterations && firstTear.get() == null; i++) {
+        CountDownLatch writersDone = new CountDownLatch(writers);
+        runConcurrently(writers, readers, () -> {
+            try {
+                for (int i = 0; i < iterations && firstTear.get() == null
+                        && !Thread.currentThread().isInterrupted(); i++) {
                     s3.putObject(bucket, key, i % 2 == 0 ? bodyA : bodyB,
                             "application/octet-stream", Map.of());
                 }
-                done.count.incrementAndGet();
-            });
-        }
-        for (int r = 0; r < readers; r++) {
-            threads[writers + r] = new Thread(() -> {
-                while (done.count.get() < writers && firstTear.get() == null) {
-                    S3Object obj = s3.getObject(bucket, key);
-                    byte[] data = obj.getData();
-                    reads.incrementAndGet();
-                    String tear = null;
-                    if (data == null || (!Arrays.equals(data, bodyA) && !Arrays.equals(data, bodyB))) {
-                        tear = "body is neither version: length="
-                                + (data == null ? "null" : data.length);
-                    } else if (obj.getSize() != data.length) {
-                        tear = "declared size=" + obj.getSize() + " but body has " + data.length
-                                + " bytes (Content-Length/body mismatch)";
-                    } else if (!obj.getETag().equals(data.length == bodyA.length ? eTagA : eTagB)) {
-                        tear = "ETag " + obj.getETag() + " does not match the returned "
-                                + data.length + "-byte body";
-                    }
-                    if (tear != null) {
-                        firstTear.compareAndSet(null, tear);
-                        return;
-                    }
+            } finally {
+                writersDone.countDown();
+            }
+        }, () -> {
+            while (writersDone.getCount() > 0 && firstTear.get() == null
+                    && !Thread.currentThread().isInterrupted()) {
+                S3Object obj = s3.getObject(bucket, key);
+                byte[] data = obj.getData();
+                reads.incrementAndGet();
+                String tear = null;
+                if (data == null || (!Arrays.equals(data, bodyA) && !Arrays.equals(data, bodyB))) {
+                    tear = "body is neither version: length="
+                            + (data == null ? "null" : data.length);
+                } else if (obj.getSize() != data.length) {
+                    tear = "declared size=" + obj.getSize() + " but body has " + data.length
+                            + " bytes (Content-Length/body mismatch)";
+                } else if (!obj.getETag().equals(data.length == bodyA.length ? eTagA : eTagB)) {
+                    tear = "ETag " + obj.getETag() + " does not match the returned "
+                            + data.length + "-byte body";
                 }
-            });
-        }
-        for (Thread t : threads) t.start();
-        for (Thread t : threads) {
-            t.join(60_000);
-            assertFalse(t.isAlive(), "thread did not finish within the join timeout");
-        }
+                if (tear != null) {
+                    firstTear.compareAndSet(null, tear);
+                    return;
+                }
+            }
+        });
 
         assertNull(firstTear.get(), firstTear.get());
         assertEquals(true, reads.get() > 0, "reader threads never observed the object");
     }
 
-    /** Tiny holder so the metadata/body reader loop can see writers finishing. */
-    private static final class volatileDone {
-        final AtomicInteger count = new AtomicInteger();
+    private static void runConcurrently(int writers, int readers, Runnable writer, Runnable reader) throws Exception {
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(writers + readers);
+        ExecutorCompletionService<Void> completions = new ExecutorCompletionService<>(executor);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
+        try {
+            for (int worker = 0; worker < writers + readers; worker++) {
+                Runnable task = worker < writers ? writer : reader;
+                completions.submit(() -> {
+                    start.await();
+                    task.run();
+                    return null;
+                });
+            }
+            start.countDown();
+            for (int completed = 0; completed < writers + readers; completed++) {
+                long remaining = deadline - System.nanoTime();
+                assertFalse(remaining <= 0, "concurrent overwrite test exceeded its deadline");
+                Future<Void> future = completions.poll(remaining, TimeUnit.NANOSECONDS);
+                assertNotNull(future, "concurrent overwrite test exceeded its deadline");
+                future.get();
+            }
+        } finally {
+            executor.shutdownNow();
+            executor.awaitTermination(10, TimeUnit.SECONDS);
+        }
     }
+
 }

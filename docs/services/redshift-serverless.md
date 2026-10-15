@@ -37,6 +37,14 @@ For the upstream API shape, see the [Amazon Redshift Serverless API Reference](h
 | `ListTagsForResource` | Return the tags on the namespace or workgroup named by `resourceArn` |
 | `TagResource` | Merge tags into the namespace or workgroup named by `resourceArn` |
 | `UntagResource` | Remove tags by key from the namespace or workgroup named by `resourceArn` |
+| `GetTrack` | Return one of the release tracks `current` and `trailing`; a track carries no `workgroupVersion` |
+| `ListTracks` | Page through the two release tracks |
+| `ListManagedWorkgroups` | Always an empty list: Floci models no Glue zero-ETL managed workgroups |
+| `ListReservations` | Always an empty list: Floci offers no reservations |
+| `ListReservationOfferings` | Always an empty list: Floci publishes no reservation offerings |
+| `GetReservation` | Always `ResourceNotFoundException`, as no reservation exists |
+| `GetReservationOffering` | Always `ResourceNotFoundException`, as no offering exists |
+| `CreateReservation` | Validates `capacity` and `offeringId`, then answers `ResourceNotFoundException` because no offering exists |
 <!-- floci:actions:end -->
 
 Namespace and workgroup state is account and Region scoped and persisted through `StorageFactory`.

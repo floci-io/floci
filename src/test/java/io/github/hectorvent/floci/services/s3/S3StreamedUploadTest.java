@@ -167,22 +167,23 @@ class S3StreamedUploadTest {
 
     @Test
     void aStreamedPartStoresWhatTheBytePathStores() {
+        byte[] part1 = Arrays.copyOf(BODY, 5 * 1024 * 1024);
         byte[] part2 = "and a second part".getBytes(StandardCharsets.UTF_8);
         MultipartUpload upload = s3Service.initiateMultipartUpload("bucket", "multipart.bin", null);
-        Part fromBytes = s3Service.storePart("bucket", "multipart.bin", upload.getUploadId(), 1, BODY, null, null, null);
+        Part fromBytes = s3Service.storePart("bucket", "multipart.bin", upload.getUploadId(), 1, part1, null, null, null);
 
         Part streamed = s3Service.storePart("bucket", "multipart.bin", upload.getUploadId(), 2,
                 new ByteArrayInputStream(part2), NO_CHECKSUMS, null, null, null);
         Part streamedAgain = s3Service.storePart("bucket", "multipart.bin", upload.getUploadId(), 1,
-                new ByteArrayInputStream(BODY), NO_CHECKSUMS, null, null, null);
+                new ByteArrayInputStream(part1), NO_CHECKSUMS, null, null, null);
 
         assertEquals(fromBytes.getETag(), streamedAgain.getETag());
         assertEquals(fromBytes.getChecksum().getChecksumCRC64NVME(), streamedAgain.getChecksum().getChecksumCRC64NVME());
         assertEquals(part2.length, streamed.getSize());
         s3Service.completeMultipartUpload("bucket", "multipart.bin", upload.getUploadId(), List.of(1, 2), null, null);
-        byte[] whole = new byte[BODY.length + part2.length];
-        System.arraycopy(BODY, 0, whole, 0, BODY.length);
-        System.arraycopy(part2, 0, whole, BODY.length, part2.length);
+        byte[] whole = new byte[part1.length + part2.length];
+        System.arraycopy(part1, 0, whole, 0, part1.length);
+        System.arraycopy(part2, 0, whole, part1.length, part2.length);
         assertArrayEquals(whole, s3Service.getObject("bucket", "multipart.bin").getData());
         assertNothingStaged();
     }
@@ -246,17 +247,17 @@ class S3StreamedUploadTest {
 
     @Test
     void anUploadPartCopyStreamsItsRangeIntoThePart() {
-        byte[] source = new byte[300_000];
+        byte[] source = new byte[5 * 1024 * 1024 + 1000];
         new Random(5034).nextBytes(source);
         s3Service.putObject("bucket", "source.bin", source, "application/octet-stream", Map.of());
         MultipartUpload upload = s3Service.initiateMultipartUpload("bucket", "copy.bin", null);
 
         String rangeETag = s3Service.uploadPartCopy("bucket", "copy.bin", upload.getUploadId(), 1,
-                "bucket", "source.bin", null, "bytes=1000-200999");
+                "bucket", "source.bin", null, "bytes=1000-" + (source.length - 1));
         String wholeETag = s3Service.uploadPartCopy("bucket", "copy.bin", upload.getUploadId(), 2,
                 "bucket", "source.bin", null, null);
 
-        byte[] range = Arrays.copyOfRange(source, 1000, 201_000);
+        byte[] range = Arrays.copyOfRange(source, 1000, source.length);
         assertEquals(S3Object.computeETag(range), rangeETag);
         assertEquals(S3Object.computeETag(source), wholeETag);
         s3Service.completeMultipartUpload("bucket", "copy.bin", upload.getUploadId(), List.of(1, 2), null, null);

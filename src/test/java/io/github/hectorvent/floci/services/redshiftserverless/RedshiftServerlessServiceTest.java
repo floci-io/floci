@@ -1069,6 +1069,23 @@ class RedshiftServerlessServiceTest {
         assertThrows(AwsException.class, () -> service.updateSnapshot(null, 5, REGION));
     }
 
+    @Test
+    void creatingWorkgroupWithUnknownTrackNameIsRejected() {
+        create("tr-ns");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createWorkgroup("tr-wg", "tr-ns", settings(null, null, null, "nightly"), null, REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void updatingWorkgroupWithUnknownTrackNameIsRejected() {
+        create("upd-tr-ns");
+        createWorkgroup("upd-tr-wg", "upd-tr-ns");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateWorkgroup("upd-tr-wg", settings(null, null, null, "preview"), REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
     private Namespace create(String namespaceName) {
         return service.createNamespace(namespaceName, "admin", null, null, null, null, null, Map.of(), REGION);
     }

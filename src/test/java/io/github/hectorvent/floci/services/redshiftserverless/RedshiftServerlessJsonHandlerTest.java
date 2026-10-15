@@ -86,7 +86,8 @@ class RedshiftServerlessJsonHandlerTest {
         RedshiftServerlessService service =
                 new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
         handler = new RedshiftServerlessJsonHandler(service, mapper, iamDbUserResolver,
-                new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, service));
+                new RedshiftServerlessUsageLimitService(storageFactory, regionResolver, service),
+                new RedshiftServerlessAdminJsonHandler(mapper));
     }
 
     @Test
