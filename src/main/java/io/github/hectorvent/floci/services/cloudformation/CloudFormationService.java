@@ -2748,9 +2748,10 @@ public class CloudFormationService implements ResourceProvider {
      * order, and a resource added by a later update sits after the resources that depend on it, so
      * reversing the map would delete it first: a certificate still used by a user pool domain, for
      * one. Resources the template no longer names, left behind by a failed cleanup, sort first here
-     * so they are deleted last, after anything that might still use them. Conditions are evaluated
-     * with the SSM-resolved parameter values the stack operation itself used, when there are any.
-     * Insertion order is the fallback when the template cannot be read.
+     * so they are deleted last, after anything that might still use them. Resource conditions are
+     * ignored, since every walked resource was provisioned; conditions still choose {@code Fn::If}
+     * branches, evaluated with the SSM-resolved parameter values when there are any. Insertion order
+     * is the fallback when the template cannot be read.
      */
     private List<StackResource> resourcesInCreationOrder(Stack stack, String region) {
         List<StackResource> ordered = new ArrayList<>(stack.resourcesSnapshot().values());
@@ -2764,18 +2765,20 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, Boolean> conditions = resolveConditions(template,
                     resolvedParameters.isEmpty() ? stack.parametersSnapshot() : resolvedParameters,
                     stack, region, regionResolver.getAccountId());
-            // A resource the stack holds was provisioned, so it is ordered by its dependencies
-            // whatever its condition reads now: a ContinueUpdateRollback retry walks the failed
-            // update's template with the parameters the first pass already restored.
-            ObjectNode heldResources = resources.deepCopy();
-            for (String logicalId : stack.resourcesSnapshot().keySet()) {
-                if (heldResources.get(logicalId) instanceof ObjectNode definition) {
+            // Ordered without conditions: only the resources the stack holds are walked, and each
+            // was provisioned, so its dependencies count whatever its condition reads now. A
+            // ContinueUpdateRollback retry reads the failed update's template with the parameters
+            // the first pass already restored, and a held resource may depend on a condition-false
+            // one an earlier cleanup deleted, which would otherwise fail the whole ordering.
+            ObjectNode unconditional = resources.deepCopy();
+            for (Map.Entry<String, JsonNode> entry : unconditional.properties()) {
+                if (entry.getValue() instanceof ObjectNode definition) {
                     definition.remove("Condition");
                 }
             }
             // A stack saved before circular templates were rejected may still have one; order it
             // by its dependencies anyway rather than giving up.
-            List<String> creationOrder = creationOrder(heldResources, conditions).sorted();
+            List<String> creationOrder = creationOrder(unconditional, conditions).sorted();
             Map<String, Integer> rank = new HashMap<>();
             for (int i = 0; i < creationOrder.size(); i++) {
                 rank.put(creationOrder.get(i), i);

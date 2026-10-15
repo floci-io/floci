@@ -596,7 +596,8 @@ class CloudFormationServiceRollbackTest {
      * A retry walks the failed update's template with the parameters the first pass already
      * restored, so a condition the update turned on can read false again. A resource the stack
      * holds is still ordered by its dependencies, so the load balancer the update created on the
-     * subnet it added is deleted before that subnet, not after it.
+     * subnet it added is deleted before that subnet, not after it. The load balancer is inserted
+     * first, so falling back to the map's order would delete the subnet first too.
      */
     @Test
     void resumeUpdateRollback_ordersAHeldResourceByItsDependenciesWhateverItsConditionReadsNow() {
@@ -623,8 +624,8 @@ class CloudFormationServiceRollbackTest {
         StackResource subnet = resource("SubnetC", "subnet-c", "AWS::EC2::Subnet", "CREATE_COMPLETE");
         StackResource loadBalancer = resource("ProdAlb", "arn:aws:elasticloadbalancing:us-east-1:000000000000:"
                 + "loadbalancer/app/prod/1", "AWS::ElasticLoadBalancingV2::LoadBalancer", "CREATE_COMPLETE");
-        stack.getResources().put(subnet.getLogicalId(), subnet);
         stack.getResources().put(loadBalancer.getLogicalId(), loadBalancer);
+        stack.getResources().put(subnet.getLogicalId(), subnet);
         stack.setUpdateRollbackSnapshot(new StackUpdateSnapshot("previous-template", "previous-original",
                 Map.of("Env", "dev"), Map.of("Env", "dev"), Map.of(), Map.of(), Map.of(), Map.of()));
         stack.setUpdateRollbackResourceIds(List.of("SubnetC", "ProdAlb"));
@@ -636,6 +637,50 @@ class CloudFormationServiceRollbackTest {
         InOrder deletes = inOrder(provisioner);
         deletes.verify(provisioner).delete(eq(loadBalancer), anyString());
         deletes.verify(provisioner).delete(eq(subnet), anyString());
+    }
+
+    /**
+     * A held resource can depend on a condition-false one the stack no longer holds, such as a role
+     * an earlier cleanup deleted while the load balancer on it failed to delete. Ordering must not
+     * then give up on the whole template: the load balancer still goes before the subnet it uses.
+     */
+    @Test
+    void deleteStack_withAHeldResourceOnAGoneConditionFalseOne_stillDeletesDependentsFirst() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-held-on-gone-conditional");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_COMPLETE");
+        stack.setTemplateBody("""
+                {
+                  "Parameters": {"Env": {"Type": "String"}},
+                  "Conditions": {"IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}},
+                  "Resources": {
+                    "ProdRole": {"Type": "AWS::IAM::Role", "Condition": "IsProd"},
+                    "SubnetC": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": "vpc-1", "CidrBlock": "10.0.3.0/24"}},
+                    "ProdAlb": {
+                      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                      "Condition": "IsProd",
+                      "DependsOn": "ProdRole",
+                      "Properties": {"Subnets": [{"Ref": "SubnetC"}]}
+                    }
+                  }
+                }
+                """);
+        stack.replaceParameters(Map.of("Env", "dev"));
+        stack.replaceResolvedParameters(Map.of("Env", "dev"));
+        StackResource loadBalancer = resource("ProdAlb", "arn:aws:elasticloadbalancing:us-east-1:000000000000:"
+                + "loadbalancer/app/prod/1", "AWS::ElasticLoadBalancingV2::LoadBalancer", "DELETE_FAILED");
+        StackResource subnet = resource("SubnetC", "subnet-c", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        stack.getResources().put(loadBalancer.getLogicalId(), loadBalancer);
+        stack.getResources().put(subnet.getLogicalId(), subnet);
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(loadBalancer, REGION);
+        deletes.verify(provisioner).delete(subnet, REGION);
     }
 
     /**
