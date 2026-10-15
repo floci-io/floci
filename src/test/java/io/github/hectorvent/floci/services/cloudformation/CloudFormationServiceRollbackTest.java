@@ -684,6 +684,46 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
+     * A resource the template no longer names, such as a subnet ContinueUpdateRollback skipped, has
+     * no template entry left to order it by. It still goes as late as possible, after the load
+     * balancer that may still use it, but before the VPC its attributes name, or that VPC delete
+     * fails while the subnet exists.
+     */
+    @Test
+    void deleteStack_deletesALeftoverResourceBeforeTheResourceItsAttributesName() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-leftover-subnet");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
+        stack.setTemplateBody("""
+                {"Resources": {
+                  "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.0.0.0/16"}},
+                  "SubnetA": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": {"Ref": "Vpc"}, "CidrBlock": "10.0.1.0/24"}},
+                  "Alb": {"Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                          "Properties": {"Subnets": [{"Ref": "SubnetA"}]}}
+                }}""");
+        StackResource leftover = resource("SubnetC", "subnet-c", "AWS::EC2::Subnet", "UPDATE_COMPLETE");
+        leftover.getAttributes().put("VpcId", "vpc-1");
+        StackResource vpc = resource("Vpc", "vpc-1", "AWS::EC2::VPC", "CREATE_COMPLETE");
+        StackResource subnet = resource("SubnetA", "subnet-a", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        subnet.getAttributes().put("VpcId", "vpc-1");
+        StackResource loadBalancer = resource("Alb", "arn:aws:elasticloadbalancing:us-east-1:000000000000:"
+                + "loadbalancer/app/web/1", "AWS::ElasticLoadBalancingV2::LoadBalancer", "UPDATE_COMPLETE");
+        for (StackResource resource : new StackResource[] {vpc, subnet, loadBalancer, leftover}) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(loadBalancer, REGION);
+        deletes.verify(provisioner).delete(leftover, REGION);
+        deletes.verify(provisioner).delete(vpc, REGION);
+    }
+
+    /**
      * The resume runs on the operation executor, whose future nobody reads. An unexpected failure
      * must still settle the stack in UPDATE_ROLLBACK_FAILED, keeping what a retry needs, instead
      * of stranding it in UPDATE_ROLLBACK_IN_PROGRESS, where ContinueUpdateRollback refuses it.

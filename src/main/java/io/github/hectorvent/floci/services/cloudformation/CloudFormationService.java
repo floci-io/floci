@@ -2747,8 +2747,11 @@ public class CloudFormationService implements ResourceProvider {
      * cleanup or an update rollback that walks them backwards. The resource map keeps insertion
      * order, and a resource added by a later update sits after the resources that depend on it, so
      * reversing the map would delete it first: a certificate still used by a user pool domain, for
-     * one. Resources the template no longer names, left behind by a failed cleanup, sort first here
-     * so they are deleted last, after anything that might still use them. Resource conditions are
+     * one. Resources the template no longer names, left behind by a failed cleanup or skipped by
+     * ContinueUpdateRollback, are deleted as late as possible, after anything that might still use
+     * them, but before any resource whose physical id their attributes name, such as a subnet's
+     * {@code VpcId}: with their template entry gone, that is the only record of what they depend on.
+     * Resource conditions are
      * ignored, since every walked resource was provisioned; conditions still choose {@code Fn::If}
      * branches, evaluated with the SSM-resolved parameter values when there are any. Insertion order
      * is the fallback when the template cannot be read.
@@ -2783,7 +2786,28 @@ public class CloudFormationService implements ResourceProvider {
             for (int i = 0; i < creationOrder.size(); i++) {
                 rank.put(creationOrder.get(i), i);
             }
-            ordered.sort(Comparator.comparingInt(r -> rank.getOrDefault(r.getLogicalId(), -1)));
+            Map<String, Integer> rankByPhysicalId = new HashMap<>();
+            for (StackResource resource : ordered) {
+                Integer resourceRank = rank.get(resource.getLogicalId());
+                if (resourceRank != null && resource.getPhysicalId() != null) {
+                    rankByPhysicalId.put(resource.getPhysicalId(), resourceRank);
+                }
+            }
+            Map<String, Double> position = new HashMap<>();
+            for (StackResource resource : ordered) {
+                Integer resourceRank = rank.get(resource.getLogicalId());
+                double resourcePosition = resourceRank == null ? -1 : resourceRank;
+                if (resourceRank == null) {
+                    for (String value : resource.getAttributes().values()) {
+                        Integer referenced = rankByPhysicalId.get(value);
+                        if (referenced != null) {
+                            resourcePosition = Math.max(resourcePosition, referenced + 0.5);
+                        }
+                    }
+                }
+                position.put(resource.getLogicalId(), resourcePosition);
+            }
+            ordered.sort(Comparator.comparingDouble(r -> position.get(r.getLogicalId())));
         } catch (Exception e) {
             LOG.debugv("Walking stack {0} in insertion order, its template could not be ordered: {1}",
                     stack.getStackName(), e.getMessage());
