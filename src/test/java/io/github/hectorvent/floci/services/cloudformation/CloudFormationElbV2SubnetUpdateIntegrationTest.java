@@ -226,6 +226,91 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
         request(CFN_AUTH, "ContinueUpdateRollback", values).statusCode(200);
     }
 
+    /** CloudFormation deletes a VPC too, so the load balancer has to go before its subnets and they before the VPC. */
+    @Test
+    void deleteStackRemovesTheLoadBalancerBeforeTheSubnetsAndTheVpcUnderIt() {
+        String stack = "alb-vpc-delete-" + Long.toString(System.nanoTime(), 36);
+        Map<String, String> created = createStack(stack, template(CIDR_B, false, List.of("SubnetA", "SubnetB"), ""));
+
+        deleteStack(stack);
+
+        ec2("DescribeVpcs", "VpcId.1", created.get("Vpc")).statusCode(400)
+                .body(containsString("InvalidVpcID.NotFound"));
+        request(ELB_AUTH, "DescribeLoadBalancers", "LoadBalancerArns.member.1", created.get("Alb")).statusCode(400)
+                .body(containsString("LoadBalancerNotFound"));
+    }
+
+    /**
+     * A load balancer outside the stack on the stack's subnets pins them, and through them the VPC,
+     * so DeleteStack fails until that load balancer is gone, and then deletes everything.
+     */
+    @Test
+    void aLoadBalancerOutsideTheStackKeepsItsSubnetsAndVpcUntilItIsDeleted() {
+        String stack = "alb-vpc-outside-" + Long.toString(System.nanoTime(), 36);
+        Map<String, String> created = createStack(stack, template(CIDR_B, false, List.of("SubnetA", "SubnetB"), ""));
+        String outside = request(ELB_AUTH, "CreateLoadBalancer", "Name", "outside-" + stack.substring(stack.length() - 8),
+                "Type", "application", "Scheme", "internal",
+                "Subnets.member.1", created.get("SubnetA"), "Subnets.member.2", created.get("SubnetB"))
+                .statusCode(200).extract()
+                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+        try {
+            request(CFN_AUTH, "DeleteStack", "StackName", stack).statusCode(200);
+            CfnStackWaits.StackState failed = CfnStackWaits.awaitTerminal(stack, CFN_AUTH);
+            assertEquals("DELETE_FAILED", failed.status());
+            assertTrue(failed.reason().contains("SubnetA") && failed.reason().contains("SubnetB")
+                    && failed.reason().contains("Vpc"), failed.reason());
+        } finally {
+            request(ELB_AUTH, "DeleteLoadBalancer", "LoadBalancerArn", outside).statusCode(200);
+        }
+
+        deleteStack(stack);
+
+        ec2("DescribeVpcs", "VpcId.1", created.get("Vpc")).statusCode(400)
+                .body(containsString("InvalidVpcID.NotFound"));
+    }
+
+    /**
+     * An update that adds a VPC, subnets in it and a load balancer on them, then fails, rolls them
+     * back dependents first: the load balancer before its subnets, and the subnets before the VPC,
+     * so nothing the update added is left behind.
+     */
+    @Test
+    void aFailedUpdateDeletesTheLoadBalancerItAddedBeforeTheSubnetsAndVpcUnderIt() {
+        String stack = "alb-vpc-rollback-" + Long.toString(System.nanoTime(), 36);
+        try {
+            Map<String, String> created = createStack(stack,
+                    template(CIDR_B, false, List.of("SubnetA", "SubnetB"), ""));
+            String added = """
+                ,
+                    "Vpc2": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.95.0.0/16",
+                             "Tags": [{"Key": "floci-it", "Value": "%1$s"}]}},
+                    "SubnetX": {
+                      "Type": "AWS::EC2::Subnet",
+                      "Properties": {"VpcId": {"Ref": "Vpc2"}, "CidrBlock": "10.95.1.0/24", "AvailabilityZone": "us-east-1a"}
+                    },
+                    "SubnetY": {
+                      "Type": "AWS::EC2::Subnet",
+                      "Properties": {"VpcId": {"Ref": "Vpc2"}, "CidrBlock": "10.95.2.0/24", "AvailabilityZone": "us-east-1b"}
+                    },
+                    "Alb2": {
+                      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                      "Properties": {"Type": "application", "Scheme": "internal",
+                                     "Subnets": [{"Ref": "SubnetX"}, {"Ref": "SubnetY"}]}
+                    }""".formatted(stack);
+
+            updateStack(stack, template(CIDR_B, false, List.of("SubnetA", "SubnetB"),
+                    added + failingSecret(stack, "Alb2")), "UPDATE_ROLLBACK_COMPLETE");
+
+            String vpcs = ec2("DescribeVpcs", "Filter.1.Name", "tag:floci-it", "Filter.1.Value.1", stack)
+                    .statusCode(200).extract().asString();
+            assertEquals(List.of(), XmlParser.extractAll(vpcs, "vpcId"));
+            assertEquals(Set.of(created.get("SubnetA"), created.get("SubnetB")),
+                    Set.copyOf(loadBalancerSubnets(created.get("Alb"))));
+        } finally {
+            deleteStack(stack);
+        }
+    }
+
     /**
      * The rollback orders resources by the template's conditions, evaluated with the SSM-resolved
      * parameter value the update itself used. With the raw value, the parameter's name, the load
