@@ -724,6 +724,40 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
+     * A leftover may name another leftover: a VPC an update added and a subnet in it, both left by
+     * a failed rollback. The subnet goes before its VPC, which names only itself.
+     */
+    @Test
+    void deleteStack_deletesALeftoverBeforeTheLeftoverItsAttributesName() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-leftover-chain");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_FAILED");
+        stack.setTemplateBody("""
+                {"Resources": {
+                  "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.0.0.0/16"}}
+                }}""");
+        StackResource vpc = resource("Vpc", "vpc-1", "AWS::EC2::VPC", "CREATE_COMPLETE");
+        vpc.getAttributes().put("VpcId", "vpc-1");
+        StackResource leftoverSubnet = resource("SubnetX", "subnet-x", "AWS::EC2::Subnet", "UPDATE_COMPLETE");
+        leftoverSubnet.getAttributes().put("SubnetId", "subnet-x");
+        leftoverSubnet.getAttributes().put("VpcId", "vpc-2");
+        StackResource leftoverVpc = resource("Vpc2", "vpc-2", "AWS::EC2::VPC", "UPDATE_COMPLETE");
+        leftoverVpc.getAttributes().put("VpcId", "vpc-2");
+        for (StackResource resource : new StackResource[] {vpc, leftoverSubnet, leftoverVpc}) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(leftoverSubnet, REGION);
+        deletes.verify(provisioner).delete(leftoverVpc, REGION);
+    }
+
+    /**
      * The resume runs on the operation executor, whose future nobody reads. An unexpected failure
      * must still settle the stack in UPDATE_ROLLBACK_FAILED, keeping what a retry needs, instead
      * of stranding it in UPDATE_ROLLBACK_IN_PROGRESS, where ContinueUpdateRollback refuses it.

@@ -2749,12 +2749,12 @@ public class CloudFormationService implements ResourceProvider {
      * reversing the map would delete it first: a certificate still used by a user pool domain, for
      * one. Resources the template no longer names, left behind by a failed cleanup or skipped by
      * ContinueUpdateRollback, are deleted as late as possible, after anything that might still use
-     * them, but before any resource whose physical id their attributes name, such as a subnet's
-     * {@code VpcId}: with their template entry gone, that is the only record of what they depend on.
-     * Resource conditions are
-     * ignored, since every walked resource was provisioned; conditions still choose {@code Fn::If}
-     * branches, evaluated with the SSM-resolved parameter values when there are any. Insertion order
-     * is the fallback when the template cannot be read.
+     * them, but before any held resource whose physical id one of their attributes names, such as a
+     * subnet's {@code VpcId}: with their template entry gone, that is the only record of what they
+     * depend on, so a leftover whose attributes name nothing it uses is still deleted last. Resource
+     * conditions are ignored, since every walked resource was provisioned; conditions still choose
+     * {@code Fn::If} branches, evaluated with the SSM-resolved parameter values when there are any.
+     * Insertion order is the fallback when the template cannot be read.
      */
     private List<StackResource> resourcesInCreationOrder(Stack stack, String region) {
         List<StackResource> ordered = new ArrayList<>(stack.resourcesSnapshot().values());
@@ -2786,26 +2786,22 @@ public class CloudFormationService implements ResourceProvider {
             for (int i = 0; i < creationOrder.size(); i++) {
                 rank.put(creationOrder.get(i), i);
             }
-            Map<String, Integer> rankByPhysicalId = new HashMap<>();
+            Map<String, List<StackResource>> holdersByPhysicalId = new HashMap<>();
+            int leftovers = 0;
             for (StackResource resource : ordered) {
-                Integer resourceRank = rank.get(resource.getLogicalId());
-                if (resourceRank != null && resource.getPhysicalId() != null) {
-                    rankByPhysicalId.put(resource.getPhysicalId(), resourceRank);
+                if (!rank.containsKey(resource.getLogicalId())) {
+                    leftovers++;
+                }
+                if (resource.getPhysicalId() != null) {
+                    holdersByPhysicalId.computeIfAbsent(resource.getPhysicalId(), id -> new ArrayList<>())
+                            .add(resource);
                 }
             }
+            double step = 1.0 / (leftovers + 1);
             Map<String, Double> position = new HashMap<>();
             for (StackResource resource : ordered) {
-                Integer resourceRank = rank.get(resource.getLogicalId());
-                double resourcePosition = resourceRank == null ? -1 : resourceRank;
-                if (resourceRank == null) {
-                    for (String value : resource.getAttributes().values()) {
-                        Integer referenced = rankByPhysicalId.get(value);
-                        if (referenced != null) {
-                            resourcePosition = Math.max(resourcePosition, referenced + 0.5);
-                        }
-                    }
-                }
-                position.put(resource.getLogicalId(), resourcePosition);
+                position.put(resource.getLogicalId(),
+                        leftoverPosition(resource, rank, holdersByPhysicalId, step, position, new HashSet<>()));
             }
             ordered.sort(Comparator.comparingDouble(r -> position.get(r.getLogicalId())));
         } catch (Exception e) {
@@ -2813,6 +2809,38 @@ public class CloudFormationService implements ResourceProvider {
                     stack.getStackName(), e.getMessage());
         }
         return ordered;
+    }
+
+    /**
+     * A resource's place in {@link #resourcesInCreationOrder}: its template rank, or for a leftover
+     * one step after the latest held resource its attributes name, leftovers included, or else -1.
+     * A chain of leftovers stays below the next template rank, and a cycle among them is cut where
+     * it closes.
+     */
+    private static double leftoverPosition(StackResource resource, Map<String, Integer> rank,
+                                           Map<String, List<StackResource>> holdersByPhysicalId,
+                                           double step, Map<String, Double> position, Set<String> visiting) {
+        Integer resourceRank = rank.get(resource.getLogicalId());
+        if (resourceRank != null) {
+            return resourceRank;
+        }
+        Double known = position.get(resource.getLogicalId());
+        if (known != null) {
+            return known;
+        }
+        visiting.add(resource.getLogicalId());
+        double placed = -1;
+        for (String value : resource.getAttributes().values()) {
+            for (StackResource holder : holdersByPhysicalId.getOrDefault(value, List.of())) {
+                if (!visiting.contains(holder.getLogicalId())) {
+                    placed = Math.max(placed,
+                            leftoverPosition(holder, rank, holdersByPhysicalId, step, position, visiting) + step);
+                }
+            }
+        }
+        visiting.remove(resource.getLogicalId());
+        position.put(resource.getLogicalId(), placed);
+        return placed;
     }
 
     void deleteStackResources(Stack stack, String region, String accountId) {

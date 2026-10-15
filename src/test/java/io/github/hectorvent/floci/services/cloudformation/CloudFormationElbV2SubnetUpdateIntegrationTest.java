@@ -248,22 +248,26 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
     void aLoadBalancerOutsideTheStackKeepsItsSubnetsAndVpcUntilItIsDeleted() {
         String stack = "alb-vpc-outside-" + Long.toString(System.nanoTime(), 36);
         Map<String, String> created = createStack(stack, template(CIDR_B, false, List.of("SubnetA", "SubnetB"), ""));
-        String outside = request(ELB_AUTH, "CreateLoadBalancer", "Name", "outside-" + stack.substring(stack.length() - 8),
-                "Type", "application", "Scheme", "internal",
-                "Subnets.member.1", created.get("SubnetA"), "Subnets.member.2", created.get("SubnetB"))
-                .statusCode(200).extract()
-                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
         try {
-            request(CFN_AUTH, "DeleteStack", "StackName", stack).statusCode(200);
-            CfnStackWaits.StackState failed = CfnStackWaits.awaitTerminal(stack, CFN_AUTH);
-            assertEquals("DELETE_FAILED", failed.status());
-            assertTrue(failed.reason().contains("SubnetA") && failed.reason().contains("SubnetB")
-                    && failed.reason().contains("Vpc"), failed.reason());
+            String outside = request(ELB_AUTH, "CreateLoadBalancer",
+                    "Name", "outside-" + stack.substring(stack.length() - 8), "Type", "application",
+                    "Scheme", "internal",
+                    "Subnets.member.1", created.get("SubnetA"), "Subnets.member.2", created.get("SubnetB"))
+                    .statusCode(200).extract()
+                    .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+            try {
+                request(CFN_AUTH, "DeleteStack", "StackName", stack).statusCode(200);
+                CfnStackWaits.StackState failed = CfnStackWaits.awaitTerminal(stack, CFN_AUTH);
+                assertEquals("DELETE_FAILED", failed.status());
+                String reason = failed.reason();
+                assertEquals(Set.of("SubnetA", "SubnetB", "Vpc"),
+                        Set.of(reason.substring(reason.indexOf('[') + 1, reason.indexOf(']')).split(", ")), reason);
+            } finally {
+                request(ELB_AUTH, "DeleteLoadBalancer", "LoadBalancerArn", outside).statusCode(200);
+            }
         } finally {
-            request(ELB_AUTH, "DeleteLoadBalancer", "LoadBalancerArn", outside).statusCode(200);
+            deleteStack(stack);
         }
-
-        deleteStack(stack);
 
         ec2("DescribeVpcs", "VpcId.1", created.get("Vpc")).statusCode(400)
                 .body(containsString("InvalidVpcID.NotFound"));
