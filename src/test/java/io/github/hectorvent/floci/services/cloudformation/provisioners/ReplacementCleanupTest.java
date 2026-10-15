@@ -285,6 +285,29 @@ class ReplacementCleanupTest {
         assertEquals(List.of("subnet-2"), deleted);
     }
 
+    /**
+     * A revert puts back what the prior entity uses, as it does its public attributes, while other
+     * hidden keys, rollback bookkeeping, stay as they are.
+     */
+    @Test
+    void rollback_restoresThePriorUsesAttributesAndKeepsOtherHiddenKeys() {
+        StackResource r = resource("subnet-1");
+        r.getAttributes().put("VpcId", "vpc-new");
+        r.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "PublicIp", "203.0.113.2");
+        r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+        Map<String, String> before = Map.of("VpcId", "vpc-old",
+                CfnRollback.USES_ATTR_PREFIX + "PublicIp", "203.0.113.1", CfnRollback.ROLLBACK_OWNED_ATTR, "false");
+        r.setPhysicalId("subnet-2");
+        ReplacementCleanup.record(r, update("subnet-1"), before);
+
+        assertTrue(ReplacementCleanup.rollback(r, (type, id, region) -> { }));
+
+        assertEquals("subnet-1", r.getPhysicalId());
+        assertEquals("vpc-old", r.getAttributes().get("VpcId"));
+        assertEquals("203.0.113.1", r.getAttributes().get(CfnRollback.USES_ATTR_PREFIX + "PublicIp"));
+        assertEquals("true", r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
     /** A new provision supersedes the failed rollback; the replacement stays owed to the next cleanup instead. */
     @Test
     void record_afterAFailedRollbackDelete_doesNotRetryThatDeleteOnTheNextRollback() {
