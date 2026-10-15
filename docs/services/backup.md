@@ -109,6 +109,13 @@ FLOCI_SERVICES_BACKUP_JOB_COMPLETION_DELAY_SECONDS=3
 
 Use a shorter delay (e.g. `1`) in test environments to speed up job-completion assertions.
 
+With persistent storage, unfinished jobs resume after restart in their original account and
+region. `CREATED` and `RUNNING` jobs use their stored completion deadline; an elapsed deadline
+completes the simulated backup immediately. A `CREATED` job whose start window has expired
+becomes `EXPIRED`, a job whose vault no longer exists becomes `FAILED`, and an `ABORTING` job
+becomes `ABORTED`. Terminal jobs are left unchanged. Retrying completion reuses the job's
+recovery point and reconciles the vault count to avoid duplicates after an interrupted write.
+
 ## Supported Resource Types
 
 `GetSupportedResourceTypes` returns the following resource type codes:
