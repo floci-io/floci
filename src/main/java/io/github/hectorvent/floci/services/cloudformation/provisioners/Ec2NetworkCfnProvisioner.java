@@ -583,6 +583,17 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         }
         r.setPhysicalId(nat.getNatGatewayId());
         r.getAttributes().put("NatGatewayId", nat.getNatGatewayId());
+        // The gateway holds its subnet and Elastic IP until it is deleted; an EIP's physical id is
+        // its public IP.
+        if (nat.getSubnetId() != null) {
+            r.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "SubnetId", nat.getSubnetId());
+        }
+        Address eip = allocationId == null || allocationId.isBlank() ? null : findAddress(allocationId, null, ctx.region());
+        if (eip != null && eip.getPublicIp() != null) {
+            r.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "PublicIp", eip.getPublicIp());
+        } else {
+            r.getAttributes().remove(CfnRollback.USES_ATTR_PREFIX + "PublicIp");
+        }
     }
 
     private void provisionEip(StackResource r, JsonNode props, ProvisionContext ctx) {

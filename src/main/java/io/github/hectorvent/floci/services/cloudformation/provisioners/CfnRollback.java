@@ -51,6 +51,14 @@ public final class CfnRollback {
     public static final String LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR = "__FlociLoadBalancerSubnetsUpdateSnapshot";
 
     /**
+     * Prefixes attributes that name, by physical id, a resource this one uses where none of its
+     * public attributes does, such as a NAT gateway's subnet and Elastic IP. {@code
+     * CloudFormationService} reads every attribute value of a resource the template no longer
+     * names to delete it before what it uses; these keep {@code Fn::GetAtt} to what AWS resolves.
+     */
+    public static final String USES_ATTR_PREFIX = "__FlociUses";
+
+    /**
      * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
      * with the rule name, bus and region needed to address them again, so a failed stack update can
      * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent
