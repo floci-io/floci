@@ -401,6 +401,104 @@ public class EmrService {
         secConfigStore.delete(name);
     }
 
+    // ──────────────────────────── Release catalogue ────────────────────────────
+
+    /** One page of results and the token for the next page, or null at the end. */
+    public record Page<T>(List<T> items, String nextToken) {}
+
+    private static final int MIN_MAX_RESULTS = 1;
+    private static final int MAX_MAX_RESULTS = 100;
+    private static final int INSTANCE_TYPE_PAGE = 50;
+
+    /**
+     * The catalogue's releases, newest first. Floci's configured default release label is always
+     * among them, with no applications when the catalogue does not describe it, so a non-default
+     * setting never makes Floci's own default unknown.
+     */
+    List<EmrReleaseCatalog.Release> releases() {
+        if (EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
+            return EmrReleaseCatalog.RELEASES;
+        }
+        List<EmrReleaseCatalog.Release> all = new ArrayList<>(EmrReleaseCatalog.RELEASES);
+        all.add(new EmrReleaseCatalog.Release(defaultReleaseLabel, List.of(), List.of()));
+        all.sort((a, b) -> EmrReleaseCatalog.NEWEST_FIRST.compare(a.label(), b.label()));
+        return all;
+    }
+
+    /**
+     * Release labels, newest first, narrowed by {@code prefix} (such as {@code emr-6}) and by
+     * {@code application}, a name or {@code name@version} (such as {@code spark@3.5.2}) matched
+     * without regard to case.
+     */
+    public Page<String> listReleaseLabels(String prefix, String application, String nextToken, Integer maxResults) {
+        String appName = null;
+        String appVersion = null;
+        if (application != null && !application.isBlank()) {
+            int at = application.indexOf('@');
+            appName = (at < 0 ? application : application.substring(0, at)).trim();
+            appVersion = at < 0 ? null : application.substring(at + 1).trim();
+        }
+        String name = appName;
+        String version = appVersion;
+        List<String> labels = releases().stream()
+                .filter(r -> prefix == null || prefix.isBlank() || r.label().startsWith(prefix))
+                .filter(r -> name == null || r.applications().stream().anyMatch(a -> a.name().equalsIgnoreCase(name)
+                        && (version == null || version.isEmpty() || a.version().equalsIgnoreCase(version))))
+                .map(EmrReleaseCatalog.Release::label)
+                .toList();
+        return page(labels, nextToken, maxResults, MAX_MAX_RESULTS);
+    }
+
+    /** A release's applications, paged, with its OS releases; no label means the latest release. */
+    public record ReleaseDescription(String label, Page<EmrReleaseCatalog.Application> applications,
+                                     List<String> osReleases) {}
+
+    public ReleaseDescription describeReleaseLabel(String label, String nextToken, Integer maxResults) {
+        EmrReleaseCatalog.Release release = label == null || label.isBlank()
+                ? releases().get(0)
+                : requireRelease(label);
+        return new ReleaseDescription(release.label(),
+                page(release.applications(), nextToken, maxResults, MAX_MAX_RESULTS), release.osReleases());
+    }
+
+    public Page<EmrReleaseCatalog.InstanceType> listSupportedInstanceTypes(String label, String marker) {
+        if (label == null || label.isBlank()) {
+            throw new AwsException("InvalidRequestException", "ReleaseLabel is required.", 400);
+        }
+        requireRelease(label);
+        return page(EmrReleaseCatalog.INSTANCE_TYPES, marker, INSTANCE_TYPE_PAGE, INSTANCE_TYPE_PAGE);
+    }
+
+    private EmrReleaseCatalog.Release requireRelease(String label) {
+        return releases().stream()
+                .filter(r -> r.label().equals(label))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "The specified release label " + label + " is not valid.", 400));
+    }
+
+    /** Offset paging: the token is the index the next page starts at. */
+    private static <T> Page<T> page(List<T> items, String token, Integer maxResults, int defaultSize) {
+        if (maxResults != null && (maxResults < MIN_MAX_RESULTS || maxResults > MAX_MAX_RESULTS)) {
+            throw new AwsException("InvalidRequestException",
+                    "MaxResults must be between " + MIN_MAX_RESULTS + " and " + MAX_MAX_RESULTS + ".", 400);
+        }
+        int start = 0;
+        if (token != null && !token.isBlank()) {
+            try {
+                start = Integer.parseInt(token);
+            } catch (NumberFormatException e) {
+                start = -1;
+            }
+            if (start < 0 || start > items.size()) {
+                throw new AwsException("InvalidRequestException", "Invalid pagination token: " + token, 400);
+            }
+        }
+        int size = maxResults != null ? maxResults : defaultSize;
+        int end = Math.min(items.size(), start + size);
+        return new Page<>(items.subList(start, end), end < items.size() ? Integer.toString(end) : null);
+    }
+
     public List<SecurityConfiguration> listSecurityConfigurations() {
         return new ArrayList<>(secConfigStore.scan(k -> true));
     }

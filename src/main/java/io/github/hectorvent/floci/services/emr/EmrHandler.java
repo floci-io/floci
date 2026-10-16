@@ -83,6 +83,9 @@ public class EmrHandler {
                 case "RemoveAutoTerminationPolicy" -> handleRemoveAutoTerminationPolicy(request);
                 case "PutAutoScalingPolicy" -> handlePutAutoScalingPolicy(request);
                 case "RemoveAutoScalingPolicy" -> handleRemoveAutoScalingPolicy(request);
+                case "ListReleaseLabels" -> handleListReleaseLabels(request);
+                case "DescribeReleaseLabel" -> handleDescribeReleaseLabel(request);
+                case "ListSupportedInstanceTypes" -> handleListSupportedInstanceTypes(request);
                 case "GetBlockPublicAccessConfiguration" -> handleGetBlockPublicAccessConfiguration(region);
                 case "PutBlockPublicAccessConfiguration" -> handlePutBlockPublicAccessConfiguration(request, region);
                 default -> Response.status(400)
@@ -327,6 +330,79 @@ public class EmrHandler {
     private Response handleDeleteSecurityConfiguration(JsonNode request) {
         service.deleteSecurityConfiguration(text(request, "Name"));
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    // ──────────────────────────── Release catalogue ────────────────────────────
+
+    private Response handleListReleaseLabels(JsonNode request) {
+        JsonNode filters = request.path("Filters");
+        EmrService.Page<String> page = service.listReleaseLabels(
+                textOrNull(filters.path("Prefix")), textOrNull(filters.path("Application")),
+                textOrNull(request.path("NextToken")), intOrNull(request.path("MaxResults")));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode labels = response.putArray("ReleaseLabels");
+        page.items().forEach(labels::add);
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeReleaseLabel(JsonNode request) {
+        EmrService.ReleaseDescription release = service.describeReleaseLabel(
+                textOrNull(request.path("ReleaseLabel")), textOrNull(request.path("NextToken")),
+                intOrNull(request.path("MaxResults")));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ReleaseLabel", release.label());
+        ArrayNode apps = response.putArray("Applications");
+        for (EmrReleaseCatalog.Application app : release.applications().items()) {
+            apps.addObject().put("Name", app.name()).put("Version", app.version());
+        }
+        if (release.applications().nextToken() != null) {
+            response.put("NextToken", release.applications().nextToken());
+        }
+        ArrayNode os = response.putArray("AvailableOSReleases");
+        release.osReleases().forEach(label -> os.addObject().put("Label", label));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListSupportedInstanceTypes(JsonNode request) {
+        EmrService.Page<EmrReleaseCatalog.InstanceType> page = service.listSupportedInstanceTypes(
+                textOrNull(request.path("ReleaseLabel")), textOrNull(request.path("Marker")));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode types = response.putArray("SupportedInstanceTypes");
+        for (EmrReleaseCatalog.InstanceType t : page.items()) {
+            types.addObject()
+                    .put("Type", t.type())
+                    .put("MemoryGB", t.memoryGb())
+                    .put("StorageGB", t.storageGb())
+                    .put("VCPU", t.vcpu())
+                    .put("Is64BitsOnly", true)
+                    .put("InstanceFamilyId", t.instanceFamilyId())
+                    .put("EbsOptimizedAvailable", true)
+                    .put("EbsOptimizedByDefault", true)
+                    .put("NumberOfDisks", t.numberOfDisks())
+                    .put("EbsStorageOnly", t.ebsStorageOnly())
+                    .put("Architecture", t.architecture());
+        }
+        if (page.nextToken() != null) {
+            response.put("Marker", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private static String textOrNull(JsonNode node) {
+        return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
+    }
+
+    private static Integer intOrNull(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.canConvertToInt()) {
+            throw new AwsException("InvalidRequestException", "MaxResults must be an integer.", 400);
+        }
+        return node.asInt();
     }
 
     private Response handleListSecurityConfigurations() {

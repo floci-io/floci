@@ -46,9 +46,28 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `RemoveAutoTerminationPolicy` | Removes a cluster's auto termination policy |
 | `PutAutoScalingPolicy` | Attaches an automatic scaling policy to a core or task instance group |
 | `RemoveAutoScalingPolicy` | Removes an instance group's automatic scaling policy |
+| `ListReleaseLabels` | List release labels, newest first, by prefix or application; see [Release catalogue](#release-catalogue) |
+| `DescribeReleaseLabel` | A release's applications and Amazon Linux releases (the latest release without a label) |
+| `ListSupportedInstanceTypes` | The instance types a release supports, with vCPU, memory, storage and architecture |
 | `GetBlockPublicAccessConfiguration` | Returns the account's block public access configuration for the Region |
 | `PutBlockPublicAccessConfiguration` | Sets the account's block public access configuration for the Region |
 <!-- floci:actions:end -->
+
+## Release catalogue
+
+`ListReleaseLabels`, `DescribeReleaseLabel` and `ListSupportedInstanceTypes` read a curated catalogue,
+not AWS's full list: `emr-7.5.0` (Floci's default), `emr-7.4.0`, `emr-6.15.0`, `emr-6.14.0` and
+`emr-5.36.2`. Each release's applications and versions come from its page in the Amazon EMR Release
+Guide, with names lowercased and AWS's `-amzn-N` build suffix dropped, as the API reports them, and
+its two most recent Amazon Linux releases. A `floci.services.emr.default-release-label` outside the
+catalogue is still listed, with no applications.
+
+`ListReleaseLabels` filters by `Prefix` (such as `emr-6`) and `Application` (`spark` or
+`spark@3.4.1`, matched without regard to case) and pages with `MaxResults` (1 to 100) /
+`NextToken`. `ListSupportedInstanceTypes` reports common families (c5, m5, m5d, m6g, r5, r6g) with
+their EC2 sizes. An unknown release label, a bad token or an out-of-range `MaxResults` is
+`InvalidRequestException`. `RunJobFlow` does not check its release label or instance types against
+the catalogue.
 
 ## Example
 

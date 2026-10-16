@@ -323,4 +323,26 @@ class EmrTest {
         assertThatThrownBy(() -> emr.describeCluster(r -> r.clusterId("j-DOESNOTEXIST0")))
                 .isInstanceOf(InvalidRequestException.class);
     }
+
+    @Test
+    @Order(22)
+    void releaseCatalogue() {
+        assertThat(emr.listReleaseLabels(r -> r.filters(f -> f.prefix("emr-7"))).releaseLabels())
+                .containsExactly("emr-7.5.0", "emr-7.4.0");
+        DescribeReleaseLabelResponse release = emr.describeReleaseLabel(r -> r.releaseLabel("emr-6.15.0"));
+        assertThat(release.applications())
+                .anySatisfy(a -> {
+                    assertThat(a.name()).isEqualTo("spark");
+                    assertThat(a.version()).isEqualTo("3.4.1");
+                });
+        assertThat(release.availableOSReleases()).isNotEmpty();
+        assertThat(emr.listSupportedInstanceTypes(r -> r.releaseLabel("emr-7.5.0")).supportedInstanceTypes())
+                .anySatisfy(t -> {
+                    assertThat(t.type()).isEqualTo("r5.xlarge");
+                    assertThat(t.vcpu()).isEqualTo(4);
+                    assertThat(t.memoryGB()).isEqualTo(32f);
+                });
+        assertThatThrownBy(() -> emr.listSupportedInstanceTypes(r -> r.releaseLabel("emr-1.0.0")))
+                .isInstanceOf(InvalidRequestException.class);
+    }
 }
