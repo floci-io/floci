@@ -20,6 +20,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -80,6 +81,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionBucket(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         String bucketName = ctx.stablePhysicalName(ctx.resolveOptional(props, "BucketName"),
                 r.getLogicalId(), BUCKET_NAME_MAX_LENGTH, true);
         // provision is also the update path. CreateBucket on a bucket this account already owns is
@@ -138,6 +140,10 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         }
         r.getAttributes().put("WebsiteURL", AwsEndpoints.s3WebsiteUrl(bucketName, ctx.region()));
         r.getAttributes().put("BucketName", bucketName);
+        // A change to BucketName is create-only, so the engine replaces the resource: this update
+        // created the bucket above, and the one the prior physical id named is left for the cleanup
+        // once the update commits, or put back when a later resource fails the update.
+        ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
     private void applyBucketCorsConfiguration(String bucketName, JsonNode props, ProvisionContext ctx) {
@@ -307,28 +313,27 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        if (!BUCKET.equals(resource.getResourceType())) {
-            return false;
-        }
         String snapshot = resource.getAttributes().get(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
-        if (snapshot == null) {
-            return false;
+        if (snapshot != null) {
+            s3Service.restoreBucketConfiguration(resource.getPhysicalId(), snapshot);
+            resource.getAttributes().remove(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
+            return true;
         }
-        s3Service.restoreBucketConfiguration(resource.getPhysicalId(), snapshot);
-        resource.getAttributes().remove(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
-        return true;
+        return ReplacementCleanup.rollback(resource, this::delete);
     }
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
-        return resource.getAttributes().containsKey(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR)
-                ? new UpdateCleanupResult(true, true, null, 0, null)
-                : UpdateCleanupResult.notApplicable();
+        if (resource.getAttributes().containsKey(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR)) {
+            return new UpdateCleanupResult(true, true, null, 0, null);
+        }
+        return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
+        ReplacementCleanup.clear(resource);
     }
 
     private static boolean sameConfiguration(NotificationConfiguration desired, NotificationConfiguration current) {
@@ -619,13 +624,25 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
     public void delete(String resourceType, String physicalId, String region) {
         if (BUCKET.equals(resourceType)) {
             // Deleting a non-empty bucket raises BucketNotEmpty, which propagates so the stack
-            // reports DELETE_FAILED as AWS does.
-            s3Service.deleteBucket(physicalId);
+            // reports DELETE_FAILED as AWS does; a bucket already gone is treated as deleted, so a
+            // cleanup the update committed reaches an already-removed bucket without failing.
+            CfnDeletes.safeDelete("S3 bucket", physicalId,
+                    () -> s3Service.deleteBucket(physicalId), "NoSuchBucket");
             return;
         }
         if (BUCKET_POLICY.equals(resourceType)) {
             deleteBucketPolicyIfPresent(physicalId);
         }
+    }
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
     }
 
     /**

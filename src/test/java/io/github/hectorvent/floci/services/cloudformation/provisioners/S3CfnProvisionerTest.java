@@ -20,8 +20,10 @@ import org.mockito.ArgumentCaptor;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -167,6 +169,80 @@ class S3CfnProvisionerTest {
         // be created. This is why the guard asks reusesPriorEntity and not isUpdate.
         assertEquals("renamed", r.getPhysicalId());
         verify(s3).createBucket("renamed", REGION);
+    }
+
+    /**
+     * A rename is a replacing update: the prior bucket is reported for the post-commit cleanup and
+     * deleted once the update commits, exactly as AWS replaces a bucket whose BucketName changed.
+     */
+    @Test
+    void renamingTheBucketReplacesItAndReportsTheOldNameForCleanup() {
+        StackResource r = resource("Bucket", "AWS::S3::Bucket");
+        r.setPhysicalId("old-bucket");
+        provisioner.provision(r, props("{\"BucketName\": \"new-bucket\"}"), replacingContext("old-bucket"));
+
+        assertEquals("new-bucket", r.getPhysicalId());
+        verify(s3).createBucket("new-bucket", REGION);
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("old-bucket", provisioner.updateCleanupPhysicalId(r));
+
+        UpdateCleanupResult result = provisioner.completeUpdate(r);
+        verify(s3).deleteBucket("old-bucket");
+        assertEquals(new UpdateCleanupResult(true, true, "old-bucket", 0, null), result);
+
+        provisioner.clearUpdate(r);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        assertNull(provisioner.updateCleanupPhysicalId(r));
+    }
+
+    /** A rename whose delete is finally done leaves nothing owed. */
+    @Test
+    void aCommittedReplacementWhoseOldBucketIsAlreadyGoneCompletesCleanup() {
+        doThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404))
+                .when(s3).deleteBucket("old-bucket");
+        StackResource r = resource("Bucket", "AWS::S3::Bucket");
+        r.setPhysicalId("old-bucket");
+        provisioner.provision(r, props("{\"BucketName\": \"new-bucket\"}"), replacingContext("old-bucket"));
+
+        assertDoesNotThrow(() -> provisioner.completeUpdate(r));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    /**
+     * A later resource failing the update rolls the rename back: the resource names the old bucket
+     * again, with the attributes it had, and the replacement the attempt created is deleted.
+     */
+    @Test
+    void rollingBackAReplacingUpdateRestoresTheOldBucketAndDeletesTheReplacement() {
+        StackResource r = resource("Bucket", "AWS::S3::Bucket");
+        r.setPhysicalId("old-bucket");
+        r.getAttributes().put("BucketName", "old-bucket");
+        r.getAttributes().put("Arn", "arn:aws:s3:::old-bucket");
+        provisioner.provision(r, props("{\"BucketName\": \"new-bucket\"}"), replacingContext("old-bucket"));
+
+        assertEquals("new-bucket", r.getPhysicalId());
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals("old-bucket", r.getPhysicalId());
+        assertEquals("arn:aws:s3:::old-bucket", r.getAttributes().get("Arn"));
+        verify(s3).deleteBucket("new-bucket");
+    }
+
+    /** A bucket already gone when its replacement is undone is not a rollback failure. */
+    @Test
+    void aReplacementAlreadyGoneWhenRolledBackDoesNotFailTheRollback() {
+        doThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404))
+                .when(s3).deleteBucket("new-bucket");
+        StackResource r = resource("Bucket", "AWS::S3::Bucket");
+        r.setPhysicalId("old-bucket");
+        provisioner.provision(r, props("{\"BucketName\": \"new-bucket\"}"), replacingContext("old-bucket"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        assertEquals("old-bucket", r.getPhysicalId());
+    }
+
+    private ProvisionContext replacingContext(String priorPhysicalId) {
+        return new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", priorPhysicalId);
     }
 
     /** ISO-E publishes no S3 dual-stack endpoint, so the attribute is absent rather than invented. */
@@ -582,6 +658,38 @@ class S3CfnProvisionerTest {
         assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
     }
 
+    /** A committed in-place update reports the snapshot cleanup done, so the engine drops the snapshot. */
+    @Test
+    void completingAnInPlaceUpdateClearsTheSnapshot() {
+        StackResource r = resource("Bucket", "AWS::S3::Bucket");
+        r.setPhysicalId("b");
+        provisioner.provision(r, props("{\"BucketName\": \"b\", \"VersioningConfiguration\": {\"Status\": \"Enabled\"}}"),
+                new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", "b", event -> { },
+                        props("{\"BucketName\": \"b\"}")));
+        assertTrue(r.getAttributes().containsKey(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR));
+
+        assertEquals(new UpdateCleanupResult(true, true, null, 0, null), provisioner.completeUpdate(r));
+        provisioner.clearUpdate(r);
+        assertFalse(r.getAttributes().containsKey(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    /**
+     * A later resource failing an update that changed the bucket in place restores the settings from
+     * the snapshot, the engine calling the same hook a replacement rollback uses.
+     */
+    @Test
+    void rollingBackAnInPlaceUpdateRestoresTheBucketSnapshot() {
+        StackResource r = resource("Bucket", "AWS::S3::Bucket");
+        r.setPhysicalId("b");
+        provisioner.provision(r, props("{\"BucketName\": \"b\", \"VersioningConfiguration\": {\"Status\": \"Enabled\"}}"),
+                new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", "b", event -> { },
+                        props("{\"BucketName\": \"b\"}")));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(s3).restoreBucketConfiguration("b", "snapshot");
+        assertFalse(r.getAttributes().containsKey(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR));
+    }
+
     @Test
     void aLaterFailureOnCreateDeletesTheBucketItCreated() {
         doThrow(new AwsException("MalformedXML", "bad", 400)).when(s3).putBucketVersioning("b", "Bogus");
@@ -690,6 +798,32 @@ class S3CfnProvisionerTest {
 
         verify(s3).deleteBucket("b");
         verify(s3, never()).deleteBucketPolicy(anyString());
+    }
+
+    /** A bucket already gone is treated as deleted, not as a failure. */
+    @Test
+    void deletingAnAlreadyGoneBucketIsTolerated() {
+        doThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404))
+                .when(s3).deleteBucket("gone");
+
+        assertDoesNotThrow(() -> provisioner.delete("AWS::S3::Bucket", "gone", REGION));
+
+        verify(s3).deleteBucket("gone");
+    }
+
+    /**
+     * A non-empty bucket cannot be deleted, and that failure has to reach the stack so it reports
+     * DELETE_FAILED rather than a clean deletion over a bucket that is still there.
+     */
+    @Test
+    void deletingANonEmptyBucketPropagatesBucketNotEmpty() {
+        doThrow(new AwsException("BucketNotEmpty", "The bucket you tried to delete is not empty.", 409))
+                .when(s3).deleteBucket("b");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.delete("AWS::S3::Bucket", "b", REGION));
+
+        assertEquals("BucketNotEmpty", e.getErrorCode());
     }
 
     @Test
