@@ -382,9 +382,13 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
         }
         try {
             containerManager.discardExport(volumeId);
-            containerManager.stopByRuntimeId(task.getRuntimeArn());
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not remove the export container and volume {0}", volumeId);
+        }
+        try {
+            containerManager.stopByRuntimeId(task.getRuntimeArn());
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not release the export runtime {0}", task.getRuntimeArn());
         }
     }
 
