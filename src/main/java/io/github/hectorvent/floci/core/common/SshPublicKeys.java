@@ -150,9 +150,10 @@ public final class SshPublicKeys {
     /**
      * Whether a blob carries a whole public key of the type it declares: an {@code ssh-rsa}
      * exponent and modulus that make a usable key, a 32-byte ed25519 key, or an uncompressed point
-     * on the curve an ECDSA type names, each with the application field a security-key type adds.
-     * A type field alone, or a field of the wrong size, is not a key, and neither is a type this
-     * does not know. Fields after the key do not count against it, as for {@link #rsaKeyOf}.
+     * of the size of the curve an ECDSA type names, each with the application field a security-key
+     * type adds. A type field alone, or a field of the wrong size, is not a key, and neither is a
+     * type other than these, such as {@code ssh-dss} or a certificate. Fields after the key do not
+     * count against it, as for {@link #rsaKeyOf}.
      */
     public static boolean carriesAKey(byte[] blob) {
         if (blob == null) {
@@ -165,11 +166,11 @@ public final class SshPublicKeys {
                 case "ssh-rsa" -> rsaKeyOf(blob) != null;
                 case "ssh-ed25519" -> reader.readField().length == ED25519_KEY_LENGTH;
                 case "sk-ssh-ed25519@openssh.com" ->
-                        reader.readField().length == ED25519_KEY_LENGTH && reader.readField() != null;
+                        reader.readField().length == ED25519_KEY_LENGTH && hasAnotherField(reader);
                 case "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521" ->
                         carriesAPointOn(reader, type.substring("ecdsa-sha2-".length()));
                 case "sk-ecdsa-sha2-nistp256@openssh.com" ->
-                        carriesAPointOn(reader, "nistp256") && reader.readField() != null;
+                        carriesAPointOn(reader, "nistp256") && hasAnotherField(reader);
                 default -> false;
             };
         } catch (SshPublicKeyException | NumberFormatException ignored) {
@@ -178,7 +179,17 @@ public final class SshPublicKeys {
         }
     }
 
-    /** Whether the next fields name the curve and hold an uncompressed point of its size on it. */
+    /** Whether the blob has a further well-formed field, such as a security key's application. */
+    private static boolean hasAnotherField(Reader reader) {
+        try {
+            reader.readField();
+            return true;
+        } catch (SshPublicKeyException ignored) {
+            return false;
+        }
+    }
+
+    /** Whether the next fields name the curve and hold an uncompressed point of its size. */
     private static boolean carriesAPointOn(Reader reader, String curve) {
         if (!curve.equals(new String(reader.readField(), StandardCharsets.UTF_8))) {
             return false;

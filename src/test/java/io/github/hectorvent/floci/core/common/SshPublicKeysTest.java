@@ -192,13 +192,17 @@ class SshPublicKeysTest {
 
     /**
      * A blob carries a key only when it has every field its type requires: a type field alone, or
-     * an ed25519 key or ECDSA point of the wrong size, is not a public key.
+     * an ed25519 key or ECDSA point of the wrong size, is not a public key, and neither is a type
+     * other than RSA, ed25519, ECDSA and their security-key forms.
      */
     @Test
     void aBlobCarriesAKeyOnlyWithEveryFieldItsTypeRequires() {
         assertTrue(SshPublicKeys.carriesAKey(SshPublicKeys.openSshBlob(KEY)));
         assertFalse(SshPublicKeys.carriesAKey(blob("ssh-rsa")));
         assertFalse(SshPublicKeys.carriesAKey(blob("ssh-rsa", new byte[] {1, 0, 1})));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-rsa", new byte[0], new byte[] {1})));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-dss", new byte[] {1}, new byte[] {1}, new byte[] {1},
+                new byte[] {1})));
         assertTrue(SshPublicKeys.carriesAKey(blob("ssh-ed25519", new byte[32])));
         assertFalse(SshPublicKeys.carriesAKey(blob("ssh-ed25519", new byte[31])));
         assertFalse(SshPublicKeys.carriesAKey(blob("ssh-ed25519")));

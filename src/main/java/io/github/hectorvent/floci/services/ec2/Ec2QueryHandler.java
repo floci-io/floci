@@ -3358,10 +3358,10 @@ public class Ec2QueryHandler {
     /**
      * The stored public key as an OpenSSH line whose comment is the key-pair name, the form
      * DescribeKeyPairs reports for created and imported keys alike. Null when the stored material is
-     * not an OpenSSH public key line, or its blob lacks a field its key type requires: ImportKeyPair
-     * keeps what it was given, and rewriting the fields
-     * of a PEM or RFC 4716 body, or of text in another encoding, would report a key that does not
-     * exist and could put characters XML cannot carry into the response.
+     * not an OpenSSH public key line, or its blob is not a whole key of a type {@link
+     * SshPublicKeys#carriesAKey} knows: ImportKeyPair keeps what it was given, and rewriting the
+     * fields of a PEM or RFC 4716 body, or of text in another encoding, would report a key that
+     * does not exist and could put characters XML cannot carry into the response.
      */
     private static String openSshPublicKeyNamedFor(KeyPair kp) {
         String material = kp.getPublicKey();
