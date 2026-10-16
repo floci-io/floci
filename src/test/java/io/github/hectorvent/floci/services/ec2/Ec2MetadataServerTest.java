@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2instanceconnect.InstanceConnectKeys;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -15,7 +16,7 @@ class Ec2MetadataServerTest {
 
     @Test
     void reconciliationAndTerminationPreserveOtherInstances() {
-        Ec2MetadataServer server = new Ec2MetadataServer(null, null, null);
+        Ec2MetadataServer server = new Ec2MetadataServer(null, null, null, (InstanceConnectKeys) null);
         Instance first = new Instance();
         first.setInstanceId("i-first");
         Instance second = new Instance();
@@ -100,7 +101,7 @@ class Ec2MetadataServerTest {
 
     @Test
     void staleContainerUnregisterDoesNotRemoveCurrentRegistration() {
-        Ec2MetadataServer server = new Ec2MetadataServer(null, null, null);
+        Ec2MetadataServer server = new Ec2MetadataServer(null, null, null, (InstanceConnectKeys) null);
         Instance oldInstance = new Instance();
         oldInstance.setInstanceId("i-old");
         Instance currentInstance = new Instance();
