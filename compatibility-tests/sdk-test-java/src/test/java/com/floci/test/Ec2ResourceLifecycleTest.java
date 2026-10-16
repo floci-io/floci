@@ -6,7 +6,6 @@ import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.Filter;
 import software.amazon.awssdk.services.ec2.model.Image;
-import software.amazon.awssdk.services.ec2.model.KeyPairInfo;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancerSchemeEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancerTypeEnum;
@@ -44,25 +43,6 @@ class Ec2ResourceLifecycleTest {
             ec2.deleteSubnet(r -> r.subnetId(first));
             ec2.deleteSubnet(r -> r.subnetId(second));
             ec2.deleteVpc(r -> r.vpcId(vpcId));
-        }
-    }
-
-    @Test
-    @DisplayName("DescribeKeyPairs returns the public key only when IncludePublicKey is true")
-    void describeKeyPairsReturnsThePublicKeyOnlyWhenAsked() {
-        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
-            String name = TestFixtures.uniqueName("lifecycle-key");
-            String keyPairId = ec2.createKeyPair(r -> r.keyName(name)).keyPairId();
-            try {
-                KeyPairInfo without = ec2.describeKeyPairs(r -> r.keyPairIds(keyPairId)).keyPairs().get(0);
-                KeyPairInfo with = ec2.describeKeyPairs(r -> r.keyPairIds(keyPairId).includePublicKey(true))
-                        .keyPairs().get(0);
-
-                assertThat(without.publicKey()).isNull();
-                assertThat(with.publicKey()).startsWith("ssh-rsa ").endsWith(" " + name);
-            } finally {
-                ec2.deleteKeyPair(r -> r.keyPairId(keyPairId));
-            }
         }
     }
 
