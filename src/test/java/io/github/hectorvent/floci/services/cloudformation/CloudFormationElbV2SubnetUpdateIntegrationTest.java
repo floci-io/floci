@@ -226,6 +226,40 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
         request(CFN_AUTH, "ContinueUpdateRollback", values).statusCode(200);
     }
 
+    /**
+     * A failed rollback restores the parameters but can leave a resource on the branch the failed
+     * update chose: here the load balancer stays on the subnets an Fn::If picked for the new
+     * parameter value. Deleting the stack has to delete it before those subnets too, whichever
+     * branch the restored parameters now select.
+     */
+    @Test
+    void deleteStackAfterAFailedRollbackDeletesTheLoadBalancerBeforeTheSubnetsOfEitherBranch() {
+        String stack = "alb-fnif-branch-" + Long.toString(System.nanoTime(), 36);
+        try {
+            Map<String, String> created = createStack(stack, branchTemplate(""), "first");
+            failTheFirstMoveBack();
+            request(CFN_AUTH, "UpdateStack", "StackName", stack, "TemplateBody",
+                    branchTemplate(failingSecret(stack, "Alb")),
+                    "Parameters.member.1.ParameterKey", "Placement",
+                    "Parameters.member.1.ParameterValue", "second").statusCode(200);
+            String reason = CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_FAILED").reason();
+            assertTrue(reason.contains("Alb"), reason);
+            assertEquals(Set.of(created.get("SubnetC"), created.get("SubnetD")),
+                    Set.copyOf(loadBalancerSubnets(created.get("Alb"))), "the move back failed");
+            reset(elbService);
+
+            deleteStack(stack);
+
+            ec2("DescribeVpcs", "VpcId.1", created.get("Vpc")).statusCode(400)
+                    .body(containsString("InvalidVpcID.NotFound"));
+        } finally {
+            reset(elbService);
+            if (request(CFN_AUTH, "DescribeStacks", "StackName", stack).extract().statusCode() == 200) {
+                request(CFN_AUTH, "DeleteStack", "StackName", stack);
+            }
+        }
+    }
+
     /** CloudFormation deletes a VPC too, so the load balancer has to go before its subnets and they before the VPC. */
     @Test
     void deleteStackRemovesTheLoadBalancerBeforeTheSubnetsAndTheVpcUnderIt() {
@@ -418,6 +452,44 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
             """.formatted(CIDR_A, cidrB, subnetC, refs, extraResources, subnetCOutput);
     }
 
+    /**
+     * A VPC with four subnets and an ALB whose subnets an Fn::If picks by the Placement parameter:
+     * SubnetA and SubnetB for "first", SubnetC and SubnetD for "second". The ALB is declared before
+     * the subnets, and SubnetC is created after SubnetD after SubnetB, so whichever branch the
+     * ordering reads, SubnetC is not created before the ALB unless the ALB depends on it.
+     */
+    private static String branchTemplate(String extraResources) {
+        return """
+            {
+              "Parameters": {"Placement": {"Type": "String", "Default": "first"}},
+              "Conditions": {"Second": {"Fn::Equals": [{"Ref": "Placement"}, "second"]}},
+              "Resources": {
+                "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.93.0.0/16"}},
+                "Alb": {
+                  "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                  "Properties": {"Type": "application", "Scheme": "internal",
+                                 "Subnets": {"Fn::If": ["Second", [{"Ref": "SubnetC"}, {"Ref": "SubnetD"}],
+                                                        [{"Ref": "SubnetA"}, {"Ref": "SubnetB"}]]}}
+                },
+                "SubnetA": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": {"Ref": "Vpc"},
+                            "CidrBlock": "10.93.1.0/24", "AvailabilityZone": "us-east-1a"}},
+                "SubnetB": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": {"Ref": "Vpc"},
+                            "CidrBlock": "10.93.2.0/24", "AvailabilityZone": "us-east-1b"}},
+                "SubnetC": {"Type": "AWS::EC2::Subnet", "DependsOn": "SubnetD", "Properties": {"VpcId": {"Ref": "Vpc"},
+                            "CidrBlock": "10.93.3.0/24", "AvailabilityZone": "us-east-1a"}},
+                "SubnetD": {"Type": "AWS::EC2::Subnet", "DependsOn": "SubnetB", "Properties": {"VpcId": {"Ref": "Vpc"},
+                            "CidrBlock": "10.93.4.0/24", "AvailabilityZone": "us-east-1b"}}%s
+              },
+              "Outputs": {
+                "Vpc": {"Value": {"Ref": "Vpc"}},
+                "SubnetC": {"Value": {"Ref": "SubnetC"}},
+                "SubnetD": {"Value": {"Ref": "SubnetD"}},
+                "Alb": {"Value": {"Ref": "Alb"}}
+              }
+            }
+            """.formatted(extraResources);
+    }
+
     /** A VPC and two subnets, with an IsProd condition on an SSM-typed parameter. */
     private static String ssmConditionTemplate(String parameterName, String extraResources) {
         return """
@@ -459,6 +531,14 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
         String xml = ec2("DescribeSubnets", "Filter.1.Name", "vpc-id", "Filter.1.Value.1", vpcId)
                 .statusCode(200).extract().asString();
         return XmlParser.extractAll(xml, "subnetId");
+    }
+
+    private static Map<String, String> createStack(String stack, String templateBody, String placement) {
+        request(CFN_AUTH, "CreateStack", "StackName", stack, "TemplateBody", templateBody,
+                "Parameters.member.1.ParameterKey", "Placement",
+                "Parameters.member.1.ParameterValue", placement).statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE");
+        return outputs(stack);
     }
 
     private static Map<String, String> createStack(String stack, String templateBody) {

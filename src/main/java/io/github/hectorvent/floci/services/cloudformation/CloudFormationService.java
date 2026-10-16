@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -2112,7 +2114,7 @@ public class CloudFormationService implements ResourceProvider {
         // delete fails ResourceInUse three times and leaves the group behind. The template's
         // order, not the map's: a resource a later update added sits after the resources that
         // depend on it, so reversing the map would delete it first.
-        List<StackResource> resources = resourcesInCreationOrder(stack, region);
+        List<StackResource> resources = resourcesInCreationOrder(stack);
         Collections.reverse(resources);
         for (StackResource resource : resources) {
             String cleanupPhysicalId = dispatcher.updateCleanupPhysicalId(resource);
@@ -2427,7 +2429,7 @@ public class CloudFormationService implements ResourceProvider {
         // walks it: a resource the update added sits after the resources that depend on it, so
         // reversing the map would delete a subnet the update moved a load balancer onto before the
         // load balancer is moved back, and EC2 refuses that delete.
-        List<StackResource> resources = resourcesInCreationOrder(stack, region);
+        List<StackResource> resources = resourcesInCreationOrder(stack);
         Collections.reverse(resources);
         List<String> failures = new ArrayList<>();
         List<String> removedResources = new ArrayList<>();
@@ -2751,12 +2753,14 @@ public class CloudFormationService implements ResourceProvider {
      * ContinueUpdateRollback, are deleted as late as possible, after anything that might still use
      * them, but before any held resource whose physical id one of their attributes names, such as a
      * subnet's {@code VpcId}: with their template entry gone, that is the only record of what they
-     * depend on, so a leftover whose attributes name nothing it uses is still deleted last. Resource
-     * conditions are ignored, since every walked resource was provisioned; conditions still choose
-     * {@code Fn::If} branches, evaluated with the SSM-resolved parameter values when there are any.
-     * Insertion order is the fallback when the template cannot be read.
+     * depend on, so a leftover whose attributes name nothing it uses is still deleted last.
+     * Conditions are ignored, both on resources and in {@code Fn::If}: a resource depends on what
+     * every branch names. The conditions read now need not be the ones a held resource was
+     * provisioned under, since a failed rollback restores the parameters but can leave a resource
+     * on the branch the failed update chose. Insertion order is the fallback when the template
+     * cannot be read.
      */
-    private List<StackResource> resourcesInCreationOrder(Stack stack, String region) {
+    private List<StackResource> resourcesInCreationOrder(Stack stack) {
         List<StackResource> ordered = new ArrayList<>(stack.resourcesSnapshot().values());
         try {
             JsonNode template = parseTemplate(stack.getTemplateBody());
@@ -2764,10 +2768,6 @@ public class CloudFormationService implements ResourceProvider {
             if (!resources.isObject()) {
                 return ordered;
             }
-            Map<String, String> resolvedParameters = stack.resolvedParametersSnapshot();
-            Map<String, Boolean> conditions = resolveConditions(template,
-                    resolvedParameters.isEmpty() ? stack.parametersSnapshot() : resolvedParameters,
-                    stack, region, regionResolver.getAccountId());
             // Ordered without conditions: only the resources the stack holds are walked, and each
             // was provisioned, so its dependencies count whatever its condition reads now. A
             // ContinueUpdateRollback retry reads the failed update's template with the parameters
@@ -2777,11 +2777,13 @@ public class CloudFormationService implements ResourceProvider {
             for (Map.Entry<String, JsonNode> entry : unconditional.properties()) {
                 if (entry.getValue() instanceof ObjectNode definition) {
                     definition.remove("Condition");
+                    definition.set("Properties", everyIfBranch(definition.path("Properties")));
                 }
             }
-            // A stack saved before circular templates were rejected may still have one; order it
-            // by its dependencies anyway rather than giving up.
-            List<String> creationOrder = creationOrder(unconditional, conditions).sorted();
+            // A stack saved before circular templates were rejected may still have one, and naming
+            // every branch can close a cycle no single choice of branches has; order it by its
+            // dependencies anyway rather than giving up.
+            List<String> creationOrder = creationOrder(unconditional, Map.of()).sorted();
             Map<String, Integer> rank = new HashMap<>();
             for (int i = 0; i < creationOrder.size(); i++) {
                 rank.put(creationOrder.get(i), i);
@@ -2809,6 +2811,31 @@ public class CloudFormationService implements ResourceProvider {
                     stack.getStackName(), e.getMessage());
         }
         return ordered;
+    }
+
+    /**
+     * A copy of a template value with each {@code Fn::If} replaced by a list of both its branches,
+     * so the dependencies collected from it are what either branch names.
+     */
+    private static JsonNode everyIfBranch(JsonNode node) {
+        if (node.isObject()) {
+            JsonNode fnIf = node.path("Fn::If");
+            if (node.size() == 1 && fnIf.isArray() && fnIf.size() == 3) {
+                ArrayNode branches = JsonNodeFactory.instance.arrayNode();
+                branches.add(everyIfBranch(fnIf.get(1)));
+                branches.add(everyIfBranch(fnIf.get(2)));
+                return branches;
+            }
+            ObjectNode copy = JsonNodeFactory.instance.objectNode();
+            node.properties().forEach(e -> copy.set(e.getKey(), everyIfBranch(e.getValue())));
+            return copy;
+        }
+        if (node.isArray()) {
+            ArrayNode copy = JsonNodeFactory.instance.arrayNode();
+            node.forEach(item -> copy.add(everyIfBranch(item)));
+            return copy;
+        }
+        return node;
     }
 
     /**
@@ -2845,7 +2872,7 @@ public class CloudFormationService implements ResourceProvider {
 
     void deleteStackResources(Stack stack, String region, String accountId) {
         try {
-            List<StackResource> resources = resourcesInCreationOrder(stack, region);
+            List<StackResource> resources = resourcesInCreationOrder(stack);
             Collections.reverse(resources); // Dependents go before what they depend on
 
             List<String> failedResources = new ArrayList<>();
