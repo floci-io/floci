@@ -143,19 +143,6 @@ class RdsExportTaskServiceTest {
     }
 
     @Test
-    void outsideMockModeATaskFailsUntilSnapshotDataCanBeWritten() {
-        RdsExportTaskService service = service(new UnsupportedSnapshotExporter());
-        start(service, "appdb-export", List.of());
-
-        runWorkers();
-
-        ExportTask failed = describe(service, "appdb-export");
-        assertThat(failed.getStatus(), equalTo("FAILED"));
-        assertThat(failed.getFailureCause(), equalTo(UnsupportedSnapshotExporter.FAILURE_CAUSE));
-        assertThat(failed.getTaskEndTime(), equalTo(CLOCK.instant()));
-    }
-
-    @Test
     void aFailureWithoutAMessageStillReportsACause() {
         RdsExportTaskService service = service((task, source, progress) -> {
             throw new NullPointerException();

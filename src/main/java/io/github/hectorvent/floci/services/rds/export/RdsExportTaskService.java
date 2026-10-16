@@ -79,7 +79,7 @@ public class RdsExportTaskService implements Resettable {
 
     @Inject
     public RdsExportTaskService(StorageFactory storageFactory, RdsService rdsService, S3Service s3Service,
-                                UnsupportedSnapshotExporter exporter, RegionResolver regionResolver,
+                                PostgresSnapshotExporter exporter, RegionResolver regionResolver,
                                 EmulatorConfig config, Clock clock) {
         this(storageFactory.create("rds", "rds-export-tasks.json",
                         new TypeReference<Map<String, ExportTask>>() {}),
