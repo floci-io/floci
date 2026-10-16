@@ -904,7 +904,8 @@ completed, failed or was canceled. Each table's rows are streamed out of the res
 `FLOCI_SERVICES_RDS_EXPORT_STAGING_BUCKET` (`floci-rds-export-staging`, created on first use); only
 the finished Parquet object is written to the export's bucket, so a failed table leaves nothing
 there. The Parquet is written by the floci-duck sidecar, the one Athena uses, so an export needs
-Docker for both. In [mock mode](#mock-mode-ci-tests) a task completes without writing anything.
+Docker for both. In [mock mode](#mock-mode-ci-tests) a task completes without writing anything,
+unless its bucket is in another region (see below).
 
 Each table goes under `<S3Prefix>/<ExportTaskIdentifier>/<database>/<schema>.<table>/1/` as
 `part-00000-<uuid>.gz.parquet`, compressed with GZIP. Floci reads a table in one batch and one
