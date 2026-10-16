@@ -53,7 +53,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
     // Ordinary and partitioned tables, but not a partition on its own, since reading the parent
     // reads its partitions. Temporary and unlogged tables are skipped, as RDS skips them.
     private static final String COLUMNS_SQL = "SELECT json_build_object('schema', n.nspname, "
-            + "'table', c.relname, 'column', a.attname, 'type', t.typname) "
+            + "'table', c.relname, 'kind', c.relkind, 'column', a.attname, 'type', t.typname) "
             + "FROM pg_class c "
             + "JOIN pg_namespace n ON n.oid = c.relnamespace "
             + "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
@@ -90,7 +90,7 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
         this.stagingBucket = config.services().rds().exportStagingBucket();
     }
 
-    record Table(String database, String schema, String name, List<ExportColumn> columns) {
+    record Table(String database, String schema, String name, boolean partitioned, List<ExportColumn> columns) {
 
         String target() {
             return database + "." + schema + "." + name;
@@ -167,8 +167,9 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
             JsonNode row = readTree(line);
             String schema = row.get("schema").asText();
             String name = row.get("table").asText();
+            boolean partitioned = "p".equals(row.path("kind").asText());
             tables.computeIfAbsent(schema + "\u0000" + name,
-                            key -> new Table(database, schema, name, new ArrayList<>()))
+                            key -> new Table(database, schema, name, partitioned, new ArrayList<>()))
                     .columns()
                     .add(new ExportColumn(row.get("column").asText(), row.get("type").asText()));
         }
@@ -189,9 +190,9 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
             write.add(column.writeExpression());
             types.add("'" + escapeLiteral(column.name()) + "': '" + column.stagedType() + "'");
         }
-        String select = "SELECT row_to_json(r) FROM (SELECT " + String.join(", ", extract) + " FROM "
-                + ExportColumn.quoteIdentifier(table.schema()) + "." + ExportColumn.quoteIdentifier(table.name())
-                + ") r";
+        String select = "SELECT row_to_json(r) FROM (SELECT " + String.join(", ", extract)
+                + (table.partitioned() ? " FROM " : " FROM ONLY ") + ExportColumn.quoteIdentifier(table.schema())
+                + "." + ExportColumn.quoteIdentifier(table.name()) + ") r";
 
         Path rows = null;
         List<String> staged = new ArrayList<>();

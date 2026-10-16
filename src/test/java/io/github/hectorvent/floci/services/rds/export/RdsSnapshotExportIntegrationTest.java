@@ -183,6 +183,56 @@ class RdsSnapshotExportIntegrationTest {
         }
     }
 
+    @Test
+    void anInheritanceParentAndItsChildEachExportOnlyTheirOwnRows() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String dbId = "export-inh-" + suffix;
+        String bucket = "rds-export-" + suffix;
+        String taskId = "export-" + suffix;
+        s3Service.createBucket(bucket, "us-east-1");
+        try (RdsClient rds = rdsClient()) {
+            DBInstance instance = rds.createDBInstance(request -> request
+                    .dbInstanceIdentifier(dbId)
+                    .engine("postgres")
+                    .masterUsername(MASTER_USER)
+                    .masterUserPassword(MASTER_PASSWORD)
+                    .dbName("appdb")
+                    .allocatedStorage(20)
+                    .dbInstanceClass("db.t3.micro")).dbInstance();
+            try {
+                asMaster(instance.endpoint().port(),
+                        "CREATE TABLE events (id int)",
+                        "CREATE TABLE late_events () INHERITS (events)",
+                        "INSERT INTO events VALUES (1)",
+                        "INSERT INTO late_events VALUES (2)");
+                String snapshotArn = rds.createDBSnapshot(request -> request
+                        .dbInstanceIdentifier(dbId)
+                        .dbSnapshotIdentifier(dbId + "-snap")).dbSnapshot().dbSnapshotArn();
+
+                rds.startExportTask(request -> request
+                        .exportTaskIdentifier(taskId)
+                        .sourceArn(snapshotArn)
+                        .s3BucketName(bucket)
+                        .iamRoleArn("arn:aws:iam::000000000000:role/export")
+                        .kmsKeyId("alias/export")
+                        .exportOnly("appdb.public.events", "appdb.public.late_events"));
+                ExportTask finished = awaitTerminal(rds, taskId);
+                assertThat(finished.failureCause(), finished.status(), equalTo("COMPLETE"));
+
+                for (Map.Entry<String, Integer> table : Map.of("events", 1, "late_events", 2).entrySet()) {
+                    String dataKey = s3Service.listObjects(bucket, taskId + "/appdb/public." + table.getKey() + "/",
+                            null, 1000).stream().map(S3Object::getKey).findFirst().orElseThrow();
+                    List<Map<String, Object>> rows = duckClient.query(
+                            "SELECT id FROM read_parquet('s3://" + bucket + "/" + dataKey + "')", null);
+                    assertThat(table.getKey(), rows, hasSize(1));
+                    assertEquals(table.getValue(), ((Number) rows.getFirst().get("id")).intValue());
+                }
+            } finally {
+                rds.deleteDBInstance(request -> request.dbInstanceIdentifier(dbId).skipFinalSnapshot(true));
+            }
+        }
+    }
+
     private static ExportTask awaitTerminal(RdsClient rds, String taskId) throws InterruptedException {
         Instant deadline = Instant.now().plus(Duration.ofMinutes(3));
         while (true) {

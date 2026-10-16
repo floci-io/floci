@@ -297,6 +297,32 @@ class PostgresSnapshotExporterTest {
     }
 
     @Test
+    void anOrdinaryTableIsReadWithoutTheRowsOfTablesInheritingFromIt() {
+        tableRows("{\"id\":1}\n");
+
+        exporter.export(task(), source, progress);
+
+        verify(containerManager).queryPostgres(eq("restore-container"), eq("master"), eq("appdb"),
+                argThat(sql -> sql.startsWith("SELECT row_to_json") && sql.contains(" FROM ONLY \"public\".\"items\")")),
+                any(OutputStream.class), eq(PostgresSnapshotExporter.TABLE_READ_TIMEOUT_SECONDS));
+    }
+
+    @Test
+    void aPartitionedTableIsReadThroughItsPartitions() {
+        when(containerManager.queryPostgres(eq("restore-container"), eq("master"), eq("appdb"),
+                argThat(sql -> sql.contains("pg_attribute"))))
+                .thenReturn("{\"schema\":\"public\",\"table\":\"items\",\"kind\":\"p\",\"column\":\"id\","
+                        + "\"type\":\"int4\"}\n");
+        tableRows("{\"id\":1}\n");
+
+        exporter.export(task(), source, progress);
+
+        verify(containerManager).queryPostgres(eq("restore-container"), eq("master"), eq("appdb"),
+                argThat(sql -> sql.startsWith("SELECT row_to_json") && sql.contains(" FROM \"public\".\"items\")")),
+                any(OutputStream.class), eq(PostgresSnapshotExporter.TABLE_READ_TIMEOUT_SECONDS));
+    }
+
+    @Test
     void theVolumeIsRemovedAndTheRuntimeReleasedWhenStoppingTheContainerFails() {
         tableRows("{\"id\":1}\n");
         doThrow(new IllegalStateException("Docker refused to stop the container"))
