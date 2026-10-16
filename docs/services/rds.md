@@ -134,6 +134,9 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `RestoreDBClusterToPointInTime` | Create a cluster from a source cluster at a time in its restorable window; see [Point in time restore](#point-in-time-restore) |
 | `DescribeDBClusterSnapshotAttributes` | Return the `restore` attribute of a cluster snapshot |
 | `ModifyDBClusterSnapshotAttribute` | Add or remove `restore` values (account ids or `all`) on a cluster snapshot |
+| `StartExportTask` | Export a DB snapshot or DB cluster snapshot to S3 as Parquet; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
+| `DescribeExportTasks` | List export tasks, by `ExportTaskIdentifier`, `SourceArn`, `SourceType` and the `export-task-identifier`, `s3-bucket`, `source-arn` and `status` filters |
+| `CancelExportTask` | Cancel a running export task; what it already wrote stays in the bucket |
 | `DescribeGlobalClusters` | List the account's global clusters with their primary and secondary members; see [Global clusters](#global-clusters) |
 | `CreateGlobalCluster` | Create an Aurora global database, empty or with an existing Aurora cluster as its primary |
 | `ModifyGlobalCluster` | Rename a global cluster, set deletion protection, or upgrade its engine version (members follow) |
@@ -235,6 +238,7 @@ they belong to, as the model requires. An omitted `Enabled` activates the subscr
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
+| `FLOCI_SERVICES_RDS_EXPORT_STAGING_BUCKET` | `floci-rds-export-staging` | S3 bucket where snapshot exports stage rows and Parquet; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Docker image for MySQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Docker image for MariaDB instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_SQL_SERVER_IMAGE` | `mcr.microsoft.com/mssql/server:2022-latest` | Docker image for SQL Server instances |
@@ -720,6 +724,71 @@ target is seeded from a `pg_dumpall` of the source taken when the request arrive
 replicas use, so the restored data is the source's latest state whatever time in the window is
 asked for; this is also why `LatestRestorableTime` is always the current time. As with
 `CreateDBSnapshot`, only PostgreSQL sources are accepted.
+
+## Exporting snapshots to Amazon S3
+
+`StartExportTask` exports a DB snapshot or a DB cluster snapshot to an S3 bucket in Floci as Apache
+Parquet, laid out as RDS lays it out, so a reader written against RDS exports (OpenSearch Data
+Prepper's `rds` source, Athena, Glue) reads Floci's. `ExportTaskIdentifier`, `SourceArn`,
+`S3BucketName`, `IamRoleArn` and `KmsKeyId` are required, `S3Prefix` and `ExportOnly` are optional.
+
+A task reports `STARTING` while the snapshot is restored, `IN_PROGRESS` with a `PercentProgress`
+while its tables are written, then `COMPLETE` or `FAILED` with a `FailureCause`. `CancelExportTask`
+moves a running task to `CANCELING`; it stops before its next table and becomes `CANCELED`, and the
+data it already wrote stays in the bucket, as on RDS. A table the export skips is named in
+`WarningMessage`. A task still running when Floci stops is `FAILED` as soon as Floci starts again,
+or `CANCELED` if it was being canceled, and the container and volume it was using are removed then. A `StartExportTask` that arrives while
+Floci is resetting waits for the reset to finish, and is refused with `Throttling` if it lasts more
+than 30 seconds.
+
+The snapshot is restored into a PostgreSQL container started from the snapshot's image, with a
+Docker volume of its own in every storage mode, and both are removed once the export ends, whether it
+completed, failed or was canceled. Each table's rows are streamed out of the restored database
+(for up to an hour per table) and staged, with the Parquet written from them, in the bucket named by
+`FLOCI_SERVICES_RDS_EXPORT_STAGING_BUCKET` (`floci-rds-export-staging`, created on first use); only
+the finished Parquet object is written to the export's bucket, so a failed table leaves nothing
+there. The Parquet is written by the floci-duck sidecar, the one Athena uses, so an export needs
+Docker for both. In [mock mode](#mock-mode-ci-tests) a task completes without writing anything,
+unless its bucket is in another region (see below).
+
+Each table goes under `<S3Prefix>/<ExportTaskIdentifier>/<database>/<schema>.<table>/1/` as
+`part-00000-<uuid>.gz.parquet`, compressed with GZIP. Floci reads a table in one batch and one
+partition, so each table has one file; an empty table has none. The task's own description is
+written next to the databases as `export_info_<ExportTaskIdentifier>.json`, with a
+`export_tables_info_<ExportTaskIdentifier>_from_1_to_<N>.json` that lists each table it wrote with the
+type every column was exported as. A backslash, backquote, double quote or space in an object path
+becomes an underscore.
+
+Column types follow the
+[RDS PostgreSQL mapping](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ExportSnapshot.data-types.html#USER_ExportSnapshot.data-types.PostgreSQL):
+`smallint` is `INT32` annotated `INT(16)`, `integer` `INT32`, `bigint` `INT64`, `real` `FLOAT`,
+`double precision` `DOUBLE`, `boolean` `BOOLEAN` and `bytea` binary. Every other type is a UTF-8
+string holding PostgreSQL's text output for the value: `numeric`, `money`, dates, times and
+intervals, `json` and `jsonb`, `uuid`, arrays, ranges, enums, domains and extension types such as
+pgvector's `vector`. Dates and times are written in ISO format, a `timestamptz` in UTC.
+
+`ExportOnly` takes `database`, `database.schema` or `database.schema.table` entries made of
+letters, digits, `$` and `_`, and refuses anything else with `InvalidExportOnly`, since RDS supports
+a partial export only for such names. Every database that accepts connections is exported when it
+is absent. As on RDS, temporary and unlogged tables, views and materialized views are not exported,
+a partitioned table is exported once through its parent, and a table with a `/` in its name, or a
+column name holding a space or one of `, ; { } ( ) = \n \t`, is skipped. Floci also skips a table
+whose database or schema name has a `/`, which would split its path in the bucket. A table that
+others inherit from (`INHERITS`) is exported with its own rows only, since each child is exported as
+a table of its own.
+
+What differs from RDS:
+
+- The IAM role is not assumed and the KMS key encrypts nothing: both are recorded and reported back
+  as given. The bucket must exist, or the request fails with `InvalidS3BucketFault`. A bucket in
+  another region than the snapshot's is accepted and the task then ends `FAILED`, as on RDS.
+- Only PostgreSQL snapshots can be exported, since Floci's snapshots hold PostgreSQL data only.
+  Any other source is refused with `InvalidExportSourceState`, and so is a snapshot that is not
+  `available`.
+- `SourceArn` must name a snapshot: exporting a live DB cluster (`SourceType` `CLUSTER`) is not
+  supported.
+- `TotalExtractedDataInGB` is the size of the rows Floci read, in whole gigabytes, and is 0 for
+  most local data sets.
 
 ## Global clusters
 

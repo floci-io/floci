@@ -34,6 +34,7 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
+import io.github.hectorvent.floci.services.rds.export.SnapshotExportSource;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
@@ -2263,6 +2264,69 @@ public class RdsService implements Resettable, ResourceProvider {
                     "Cross-region snapshot copy is not supported: " + source, 400);
         }
         return resource.substring("cluster-snapshot:".length());
+    }
+
+    /**
+     * The DB snapshot or DB cluster snapshot {@code sourceArn} names, as an export task reads it.
+     * Floci keeps PostgreSQL data in its snapshots, so a snapshot of any other engine cannot be
+     * exported, and an ARN naming a live cluster rather than a snapshot is refused.
+     */
+    public SnapshotExportSource snapshotExportSource(String sourceArn, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(sourceArn);
+        } catch (IllegalArgumentException malformed) {
+            throw new AwsException("InvalidParameterValue", "Invalid SourceArn: " + sourceArn, 400);
+        }
+        String resource = arn.resource();
+        boolean clusterSnapshot = resource.startsWith("cluster-snapshot:");
+        if (!"rds".equals(arn.service()) || !(clusterSnapshot || resource.startsWith("snapshot:"))) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceArn must name a DB snapshot or a DB cluster snapshot: " + sourceArn, 400);
+        }
+        boolean ours = AwsRegions.partitionFor(effectiveRegion).equals(arn.partition())
+                && effectiveRegion.equals(arn.region()) && accountId.equals(arn.accountId());
+        String snapshotId = resource.substring(resource.indexOf(':') + 1);
+        if (clusterSnapshot) {
+            if (!ours) {
+                throw new AwsException("DBClusterSnapshotNotFoundFault",
+                        "DBClusterSnapshot " + snapshotId + " not found.", 404);
+            }
+            DbClusterSnapshot snapshot = requireClusterSnapshot(accountId, effectiveRegion, snapshotId);
+            requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
+            String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, snapshotId))
+                    .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
+                            "DB cluster snapshot data for " + snapshotId + " not found.", 404));
+            return new SnapshotExportSource(snapshot.getDbClusterSnapshotArn(),
+                    imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
+                    snapshot.getMasterUsername(), snapshot.getMasterPassword(),
+                    snapshot.getSnapshotCreateTime(), sqlDump);
+        }
+        DbSnapshot snapshot = ours ? findSnapshotForScope(accountId, effectiveRegion, snapshotId) : null;
+        if (snapshot == null) {
+            throw new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404);
+        }
+        requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
+        String sqlDump = getSnapshotDataForScope(accountId, effectiveRegion, snapshotId)
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
+                        "DBSnapshot data for " + snapshotId + " not found.", 404));
+        return new SnapshotExportSource(snapshot.getDbSnapshotArn(),
+                imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
+                snapshot.getMasterUsername(), snapshot.getMasterPassword(),
+                snapshot.getSnapshotCreateTime(), sqlDump);
+    }
+
+    private static void requireExportable(String status, DatabaseEngine engine, String sourceArn) {
+        if (!"available".equals(status)) {
+            throw new AwsException("InvalidExportSourceState",
+                    "The snapshot " + sourceArn + " is not available for export.", 400);
+        }
+        if (engine != DatabaseEngine.POSTGRES) {
+            throw new AwsException("InvalidExportSourceState",
+                    "Floci exports PostgreSQL snapshots only: " + sourceArn, 400);
+        }
     }
 
     /** Cluster snapshot dumps share the snapshot data store with instance snapshots under their own prefix. */

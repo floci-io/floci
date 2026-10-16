@@ -31,6 +31,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -218,6 +219,41 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
             String runtimeId, String instanceId, String containerStorageResourceId,
             String dockerVolumeName, DatabaseEngine engine, String image,
             String masterUsername, String masterPassword, String dbName) {
+        return start(runtimeId, instanceId, containerStorageResourceId, dockerVolumeName, engine, image,
+                masterUsername, masterPassword, dbName, false);
+    }
+
+    /**
+     * Starts the PostgreSQL container a snapshot export restores into. {@code runtimeArn} gives it
+     * the task's account and region, and {@code volumeId}, unique to the task, names the container
+     * and its volume. It backs no DB instance, so its log goes to no instance's log group, it never
+     * pauses, and its data lives in a Docker volume of its own in every storage mode, which
+     * {@link #discardExport} removes once the export ends.
+     */
+    public RdsContainerHandle startForExport(String runtimeArn, String exportTaskIdentifier, String volumeId,
+                                             String image, String masterUsername, String masterPassword) {
+        return start(runtimeArn, exportTaskIdentifier, volumeId, exportVolumeName(volumeId),
+                DatabaseEngine.POSTGRES, image, masterUsername, masterPassword, null, true);
+    }
+
+    /**
+     * Removes an export's container, if it is still there, and its volume, which no storage mode
+     * keeps. Also clears what an export left behind when Floci stopped while it ran.
+     */
+    public void discardExport(String volumeId) {
+        String volumeName = exportVolumeName(volumeId);
+        lifecycleManager.removeIfExistsStrict(ContainerStorageHelper.dockerName(config, volumeName));
+        lifecycleManager.removeVolumeStrict(volumeName);
+    }
+
+    private String exportVolumeName(String volumeId) {
+        return ContainerStorageHelper.resourceName(config, "rds", volumeId, volumeId);
+    }
+
+    private RdsContainerHandle start(
+            String runtimeId, String instanceId, String containerStorageResourceId,
+            String dockerVolumeName, DatabaseEngine engine, String image,
+            String masterUsername, String masterPassword, String dbName, boolean ephemeral) {
         LOG.infov("Starting RDS backend container for instance: {0} engine={1}", instanceId, engine);
 
         String effectiveRuntimeId = runtimeId == null || runtimeId.isBlank()
@@ -287,8 +323,13 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
             }
 
         // Handle persistence mounting
-            addPersistenceMounts(
-                    specBuilder, storageResourceId, exactVolumeName, engine, image);
+            if (ephemeral) {
+                ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager, exactVolumeName,
+                        engineDefaultDataPath(engine, image));
+            } else {
+                addPersistenceMounts(
+                        specBuilder, storageResourceId, exactVolumeName, engine, image);
+            }
 
         // Add engine-specific command
         List<String> cmd = buildContainerCmd(engine, image);
@@ -318,23 +359,27 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
                     endpoint.host(), endpoint.port(), storageKey, containerKey);
 
         // Attach log streaming
-            String shortId = info.containerId().length() >= 8
-                    ? info.containerId().substring(0, 8)
-                    : info.containerId();
-            String logGroup = "/aws/rds/instance/" + instanceId + "/error";
-            String logStream = logStreamer.generateLogStreamName(shortId);
+            if (!ephemeral) {
+                String shortId = info.containerId().length() >= 8
+                        ? info.containerId().substring(0, 8)
+                        : info.containerId();
+                String logGroup = "/aws/rds/instance/" + instanceId + "/error";
+                String logStream = logStreamer.generateLogStreamName(shortId);
 
-            Closeable logHandle = runtimeIdentity.arnAccountId() != null
-                    ? logStreamer.attachForAccount(
-                            runtimeIdentity.arnAccountId(), info.containerId(), logGroup,
-                            logStream, runtimeIdentity.region(), "rds:" + effectiveRuntimeId)
-                    : logStreamer.attach(
-                            info.containerId(), logGroup, logStream, runtimeIdentity.region(),
-                            "rds:" + effectiveRuntimeId);
-            handle.setLogStream(logHandle);
+                Closeable logHandle = runtimeIdentity.arnAccountId() != null
+                        ? logStreamer.attachForAccount(
+                                runtimeIdentity.arnAccountId(), info.containerId(), logGroup,
+                                logStream, runtimeIdentity.region(), "rds:" + effectiveRuntimeId)
+                        : logStreamer.attach(
+                                info.containerId(), logGroup, logStream, runtimeIdentity.region(),
+                                "rds:" + effectiveRuntimeId);
+                handle.setLogStream(logHandle);
+            }
             // Before the handle is returned, so that the connections of every proxy started on it
             // are counted from the first one.
-            registerAutoPause(effectiveRuntimeId, handle);
+            if (!ephemeral) {
+                registerAutoPause(effectiveRuntimeId, handle);
+            }
             activeContainers.put(effectiveRuntimeId, handle);
 
             return handle;
@@ -953,6 +998,40 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
             return result.stdout();
         } catch (Exception e) {
             throw new RuntimeException("Failed to create postgres snapshot", e);
+        }
+    }
+
+    /**
+     * Runs one query as the master user and returns its rows, one per line, unaligned and without
+     * headers. The session uses ISO dates in UTC, so a value's text output does not depend on the
+     * image's defaults.
+     */
+    public String queryPostgres(String containerId, String masterUsername, String database, String sql) {
+        ByteArrayOutputStream rows = new ByteArrayOutputStream();
+        queryPostgres(containerId, masterUsername, database, sql, rows, 600);
+        return rows.toString(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * {@link #queryPostgres(String, String, String, String)} writing the rows to {@code rows} as
+     * psql prints them, so a large result never has to be held in memory.
+     */
+    public void queryPostgres(String containerId, String masterUsername, String database, String sql,
+                              OutputStream rows, int timeoutSeconds) {
+        String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
+        String[] cmd = {
+                "env", "PGOPTIONS=-c DateStyle=ISO -c TimeZone=UTC -c IntervalStyle=postgres",
+                "psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1",
+                "-U", effectiveUser, "-d", database, "-c", sql
+        };
+        ByteArrayOutputStream errors = new ByteArrayOutputStream();
+        try (Lease _ = holdContainer(containerId)) {
+            ContainerExec.Result result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd,
+                    timeoutSeconds, rows, errors).throwIfTimedOut(containerId);
+            if (result.exitCode() != 0) {
+                throw new IllegalStateException("psql failed with exit code " + result.exitCode() + ": "
+                        + errors.toString(StandardCharsets.UTF_8).trim());
+            }
         }
     }
 

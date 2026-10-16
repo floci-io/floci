@@ -578,7 +578,8 @@ public class AwsQueryController {
             "ModifyDBClusterParameterGroup", "DeleteDBClusterParameterGroup",
             "DescribeDBClusterParameters",
             "CreateOptionGroup", "DescribeOptionGroups", "ModifyOptionGroup", "DeleteOptionGroup",
-            "DescribeDBSnapshots", "DescribeDBClusterSnapshots"
+            "DescribeDBSnapshots", "DescribeDBClusterSnapshots",
+            "StartExportTask", "DescribeExportTasks", "CancelExportTask"
     );
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(
