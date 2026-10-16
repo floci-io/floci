@@ -2757,10 +2757,10 @@ public class CloudFormationService implements ResourceProvider {
      * Conditions are ignored, both on resources and in {@code Fn::If}: a resource depends on what
      * every branch names. The conditions read now need not be the ones a held resource was
      * provisioned under, since a failed rollback restores the parameters but can leave a resource
-     * on the branch the failed update chose. When counting every branch closes a cycle that the
-     * branches chosen now do not have, those branches order the walk instead, evaluated with the
-     * SSM-resolved parameter values when there are any. Insertion order is the fallback when the
-     * template cannot be read.
+     * on the branch the failed update chose. When counting every branch closes a cycle, the walk
+     * starts from the branches chosen now, evaluated with the SSM-resolved parameter values when
+     * there are any, and adds each other-branch dependency that closes no cycle. Insertion order
+     * is the fallback when the template cannot be read.
      */
     private List<StackResource> resourcesInCreationOrder(Stack stack, String region) {
         List<StackResource> ordered = new ArrayList<>(stack.resourcesSnapshot().values());
@@ -2791,7 +2791,7 @@ public class CloudFormationService implements ResourceProvider {
             // by its dependencies anyway rather than giving up.
             CreationOrder order = creationOrder(everyBranch, Map.of());
             if (!order.circular().isEmpty()) {
-                order = fewerCycles(order, stack, template, unconditional, region);
+                order = withoutBranchCycles(order, stack, template, unconditional, everyBranch, region);
             }
             List<String> creationOrder = order.sorted();
             Map<String, Integer> rank = new HashMap<>();
@@ -2824,24 +2824,78 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * The order the branches chosen now give, when it has fewer cycles than {@code everyBranch},
-     * the order counting every {@code Fn::If} branch; otherwise {@code everyBranch}, which is also
-     * kept when the conditions cannot be read.
+     * The order the branches chosen now give, with every dependency another {@code Fn::If} branch
+     * names added to it unless that dependency would close a cycle. Counting every branch can close
+     * a cycle no choice of branches has, such as two resources that each use the other under
+     * opposite conditions; dropping only the edges that close it keeps every other branch's
+     * dependencies. {@code everyBranch}, the order counting every branch, is kept when the
+     * conditions cannot be read.
      */
-    private CreationOrder fewerCycles(CreationOrder everyBranch, Stack stack, JsonNode template,
-                                      JsonNode unconditional, String region) {
+    private CreationOrder withoutBranchCycles(CreationOrder everyBranch, Stack stack, JsonNode template,
+                                              ObjectNode unconditional, ObjectNode everyBranchResources,
+                                              String region) {
         try {
             Map<String, String> resolvedParameters = stack.resolvedParametersSnapshot();
             Map<String, Boolean> conditions = resolveConditions(template,
                     resolvedParameters.isEmpty() ? stack.parametersSnapshot() : resolvedParameters,
                     stack, region, regionResolver.getAccountId());
-            CreationOrder chosen = creationOrder(unconditional, conditions);
-            return chosen.circular().size() < everyBranch.circular().size() ? chosen : everyBranch;
+            Set<String> ids = new LinkedHashSet<>();
+            unconditional.fieldNames().forEachRemaining(ids::add);
+            Map<String, Set<String>> dependencies = new HashMap<>();
+            for (String id : ids) {
+                Set<String> chosen = collectResourceDependencies(unconditional.get(id), ids, conditions);
+                chosen.retainAll(ids);
+                dependencies.put(id, chosen);
+            }
+            ObjectNode merged = unconditional.deepCopy();
+            for (String id : ids) {
+                for (String dependency : collectResourceDependencies(everyBranchResources.get(id), ids, Map.of())) {
+                    if (ids.contains(dependency) && !dependency.equals(id)
+                            && !dependencies.get(id).contains(dependency)
+                            && !dependsOn(dependencies, dependency, id)) {
+                        dependencies.get(id).add(dependency);
+                        addDependsOn(merged.get(id), dependency);
+                    }
+                }
+            }
+            return creationOrder(merged, conditions);
         } catch (RuntimeException e) {
             LOG.debugv("Ordering stack {0} by every Fn::If branch, its conditions could not be read: {1}",
                     stack.getStackName(), e.getMessage());
             return everyBranch;
         }
+    }
+
+    /** Whether {@code from} depends on {@code to}, directly or through other resources. */
+    private static boolean dependsOn(Map<String, Set<String>> dependencies, String from, String to) {
+        Deque<String> pending = new ArrayDeque<>(List.of(from));
+        Set<String> seen = new HashSet<>();
+        while (!pending.isEmpty()) {
+            String current = pending.pop();
+            if (current.equals(to)) {
+                return true;
+            }
+            if (seen.add(current)) {
+                pending.addAll(dependencies.getOrDefault(current, Set.of()));
+            }
+        }
+        return false;
+    }
+
+    /** Adds a resource to a definition's {@code DependsOn}, keeping what it already names. */
+    private static void addDependsOn(JsonNode definition, String dependency) {
+        if (!(definition instanceof ObjectNode object)) {
+            return;
+        }
+        JsonNode existing = object.path("DependsOn");
+        ArrayNode dependsOn = JsonNodeFactory.instance.arrayNode();
+        if (existing.isTextual()) {
+            dependsOn.add(existing.asText());
+        } else if (existing.isArray()) {
+            dependsOn.addAll((ArrayNode) existing);
+        }
+        dependsOn.add(dependency);
+        object.set("DependsOn", dependsOn);
     }
 
     /**

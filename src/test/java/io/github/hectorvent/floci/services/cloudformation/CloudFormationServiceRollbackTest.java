@@ -727,6 +727,67 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
+     * A cycle that only counting every branch closes, between X and Y, must not cost the rest of
+     * the stack its other-branch dependencies: the load balancer still on the subnet the failed
+     * update chose goes before that subnet, though the restored parameter now picks the other.
+     * SubnetC is created two steps after SubnetA, so only that dependency puts the load balancer
+     * after it.
+     */
+    @Test
+    void deleteStack_withAnUnrelatedBranchCycle_stillDeletesAResourceBeforeItsOtherBranchDependency() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-branch-cycle-and-held-branch");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_FAILED");
+        stack.setTemplateBody("""
+                {
+                  "Parameters": {"Placement": {"Type": "String"}},
+                  "Conditions": {
+                    "Second": {"Fn::Equals": [{"Ref": "Placement"}, "second"]},
+                    "First": {"Fn::Not": [{"Condition": "Second"}]}
+                  },
+                  "Resources": {
+                    "Alb": {"Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                            "Properties": {"Subnets": {"Fn::If": ["Second", [{"Ref": "SubnetC"}], [{"Ref": "SubnetA"}]]}}},
+                    "SubnetA": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": "vpc-1", "CidrBlock": "10.0.1.0/24"}},
+                    "SubnetB": {"Type": "AWS::EC2::Subnet", "DependsOn": "SubnetA",
+                                "Properties": {"VpcId": "vpc-1", "CidrBlock": "10.0.2.0/24"}},
+                    "SubnetC": {"Type": "AWS::EC2::Subnet", "DependsOn": "SubnetB",
+                                "Properties": {"VpcId": "vpc-1", "CidrBlock": "10.0.3.0/24"}},
+                    "Y": {"Type": "AWS::SQS::Queue",
+                          "Properties": {"Tags": {"Fn::If": ["First", [{"Key": "x", "Value": {"Ref": "X"}}],
+                                                             {"Ref": "AWS::NoValue"}]}}},
+                    "X": {"Type": "AWS::SQS::Queue",
+                          "Properties": {"Tags": {"Fn::If": ["Second", [{"Key": "y", "Value": {"Ref": "Y"}}],
+                                                             {"Ref": "AWS::NoValue"}]}}}
+                  }
+                }
+                """);
+        stack.replaceParameters(Map.of("Placement", "first"));
+        StackResource loadBalancer = resource("Alb", "arn:aws:elasticloadbalancing:us-east-1:000000000000:"
+                + "loadbalancer/app/web/1", "AWS::ElasticLoadBalancingV2::LoadBalancer", "UPDATE_FAILED");
+        StackResource subnetA = resource("SubnetA", "subnet-a", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        StackResource subnetB = resource("SubnetB", "subnet-b", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        StackResource subnetC = resource("SubnetC", "subnet-c", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        StackResource y = resource("Y", "queue-y", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource x = resource("X", "queue-x", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        for (StackResource resource : new StackResource[] {loadBalancer, subnetA, subnetB, subnetC, y, x}) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder subnets = inOrder(provisioner);
+        subnets.verify(provisioner).delete(loadBalancer, REGION);
+        subnets.verify(provisioner).delete(subnetC, REGION);
+        InOrder queues = inOrder(provisioner);
+        queues.verify(provisioner).delete(y, REGION);
+        queues.verify(provisioner).delete(x, REGION);
+    }
+
+    /**
      * A resource the template no longer names, such as a subnet ContinueUpdateRollback skipped, has
      * no template entry left to order it by. It still goes as late as possible, after the load
      * balancer that may still use it, but before the VPC its attributes name, or that VPC delete
