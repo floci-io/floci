@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.Image;
@@ -263,15 +262,13 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         assertTrue(copyId.startsWith("ami-"));
 
         String west = ec2(WEST_AUTH, "DescribeImages", "Owner.1", "self");
-        List<String> westIds = XmlParser.extractAll(west, "imageId");
-        assertTrue(westIds.contains(copyId), "the copy must be visible in the destination region");
+        assertTrue(west.contains(copyId), "the copy must be visible in the destination region");
         assertTrue(west.contains(copyName));
-        assertFalse(westIds.contains(sourceId), "the source AMI stays in its own region");
+        assertFalse(west.contains(sourceId), "the source AMI stays in its own region");
 
         String east = ec2(EAST_AUTH, "DescribeImages", "Owner.1", "self");
-        List<String> eastIds = XmlParser.extractAll(east, "imageId");
-        assertTrue(eastIds.contains(sourceId));
-        assertFalse(eastIds.contains(copyId), "the copy must not leak back into the source region");
+        assertTrue(east.contains(sourceId));
+        assertFalse(east.contains(copyId), "the copy must not leak back into the source region");
     }
 
     @Test
