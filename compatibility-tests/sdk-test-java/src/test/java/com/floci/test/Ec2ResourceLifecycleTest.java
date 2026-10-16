@@ -11,7 +11,7 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancer
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@DisplayName("EC2 resource identity and lifecycle dependencies")
+@DisplayName("EC2 subnet and VPC lifecycle dependencies")
 class Ec2ResourceLifecycleTest {
 
     @Test
