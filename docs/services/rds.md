@@ -927,7 +927,8 @@ letters, digits, `$` and `_`, and refuses anything else with `InvalidExportOnly`
 a partial export only for such names. Every database that accepts connections is exported when it
 is absent. As on RDS, temporary and unlogged tables, views and materialized views are not exported,
 a partitioned table is exported once through its parent, and a table with a `/` in its name, or a
-column name holding a space or one of `, ; { } ( ) = \n \t`, is skipped.
+column name holding a space or one of `, ; { } ( ) = \n \t`, is skipped. Floci also skips a table
+whose database or schema name has a `/`, which would split its path in the bucket.
 
 What differs from RDS:
 

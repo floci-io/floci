@@ -22,6 +22,7 @@ import java.time.ZoneOffset;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
@@ -263,6 +264,34 @@ class PostgresSnapshotExporterTest {
         exporter.export(task(), source, progress);
 
         verify(duckClient, never()).execute(anyString(), anyString(), any(), anyString());
+        verify(s3Service, never()).putObject(eq("exports"),
+                argThat(key -> key.endsWith(".parquet")), any(), anyString(), any());
+    }
+
+    @Test
+    void aTableInASchemaWithASlashIsSkippedWithAWarning() {
+        when(containerManager.queryPostgres(eq("restore-container"), eq("master"), eq("appdb"),
+                argThat(sql -> sql.contains("pg_attribute"))))
+                .thenReturn("{\"schema\":\"sales/eu\",\"table\":\"items\",\"column\":\"id\",\"type\":\"int4\"}\n");
+
+        SnapshotExporter.Outcome outcome = exporter.export(task(), source, progress);
+
+        assertThat(outcome.warnings(), contains(containsString("appdb.sales/eu.items was skipped")));
+        verify(s3Service, never()).putObject(eq("exports"),
+                argThat(key -> key.endsWith(".parquet")), any(), anyString(), any());
+    }
+
+    @Test
+    void aTableInADatabaseWithASlashIsSkippedWithAWarning() {
+        when(containerManager.queryPostgres(eq("restore-container"), eq("master"), eq("postgres"), anyString()))
+                .thenReturn("\"app/db\"\n");
+        when(containerManager.queryPostgres(eq("restore-container"), eq("master"), eq("app/db"),
+                argThat(sql -> sql.contains("pg_attribute"))))
+                .thenReturn("{\"schema\":\"public\",\"table\":\"items\",\"column\":\"id\",\"type\":\"int4\"}\n");
+
+        SnapshotExporter.Outcome outcome = exporter.export(task(), source, progress);
+
+        assertThat(outcome.warnings(), contains(containsString("app/db.public.items was skipped")));
         verify(s3Service, never()).putObject(eq("exports"),
                 argThat(key -> key.endsWith(".parquet")), any(), anyString(), any());
     }

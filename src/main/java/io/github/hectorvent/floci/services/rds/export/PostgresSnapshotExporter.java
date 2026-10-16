@@ -126,9 +126,10 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
                 if (!selection.includes(database, table.schema(), table.name())) {
                     continue;
                 }
-                if (table.name().contains("/") || !table.columns().stream().allMatch(ExportColumn::hasExportableName)) {
-                    warnings.add("The table " + table.target()
-                            + " was skipped because its name or a column name has characters RDS cannot export.");
+                if (table.target().contains("/")
+                        || !table.columns().stream().allMatch(ExportColumn::hasExportableName)) {
+                    warnings.add("The table " + table.target() + " was skipped because its database, schema or"
+                            + " table name, or a column name, has characters RDS cannot export.");
                     continue;
                 }
                 tables.add(table);
