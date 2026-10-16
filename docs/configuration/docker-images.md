@@ -10,7 +10,7 @@ Every image tag combines two independent choices: **what's inside** (variant) an
 |---|---|---|
 | **Standard** | Floci native binary only | General use: CI, local dev, Testcontainers **(recommended)** |
 | **Baseline** | Floci native binary compiled for ARMv8.0 (`armv8-a`) | ARM64 hosts without LSE, including Raspberry Pi 4-class CPUs |
-| **Compat** | Floci + Python 3 + AWS CLI + boto3 | Workflows that need AWS tooling available inside the container |
+| **Compat** | Floci + Python 3.12 + AWS CLI + boto3 | Workflows that need AWS tooling available inside the container |
 
 The compat image runs the same native binary as the standard image, so startup time and memory footprint are identical. Only the image size increases. The baseline image is different: it is an ARM64-only release artifact compiled for the ARMv8.0 ISA floor and is not published on nightly channels.
 
@@ -174,7 +174,7 @@ ghcr.io/example/floci@sha256:...
 
 The compat image adds the following to the standard image contents:
 
-- Python 3 + pip
+- Python 3.12 + pip (`python3`, `python`, `pip3` and `pip` all point at 3.12)
 - [AWS CLI](https://pypi.org/project/awscli/) (via pip)
 - [boto3](https://pypi.org/project/boto3/) (via pip)
 

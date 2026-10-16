@@ -52,8 +52,13 @@ ENV AWS_PAGER=""
 # a v2 install against real AWS. A hook passing raw bytes (e.g.
 # aws lambda invoke --payload) needs --cli-binary-format raw-in-base64-out.
 ARG AWSCLI_VERSION=2.36.24
+# Not the platform python3 (3.9): botocore 1.43+ needs 3.10, and on 3.9 it pins urllib3 to 1.26.
+# The python3, python, pip3 and pip links keep hooks that call them by name or path working.
+ARG PYTHON=python3.12
 RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci \
-    && microdnf install -y --nodocs python3 python3-pip unzip \
+    && microdnf install -y --nodocs ${PYTHON} ${PYTHON}-pip unzip \
+    && for name in python3 python; do ln -s ${PYTHON} /usr/bin/${name}; done \
+    && for name in pip3 pip; do ln -s pip${PYTHON#python} /usr/bin/${name}; done \
     && pip3 install --no-cache-dir boto3 \
     && case "$(uname -m)" in \
          x86_64)  arch=x86_64 ;; \
@@ -72,8 +77,8 @@ RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci \
     # The system Python keeps pip, setuptools and what boto3 imports; the optimised .pyc
     # variants, lib2to3 and ensurepip (pip is already installed) are build-time extras.
     && rm -rf /usr/local/aws-cli/v2/*/dist/awscli/data/ac.index /usr/local/aws-cli/v2/*/dist/aws_completer /usr/bin/aws_completer \
-    && rm -rf /usr/lib64/python3.9/lib2to3 /usr/lib64/python3.9/ensurepip \
-    && python3 -c 'import pathlib; [p.unlink() for d in ("/usr/lib64/python3.9","/usr/lib/python3.9") for p in pathlib.Path(d).rglob("*.opt-[12].pyc")]' \
+    && rm -rf /usr/lib64/${PYTHON}/lib2to3 /usr/lib64/${PYTHON}/ensurepip \
+    && python3 -c 'import pathlib, sys; [p.unlink() for d in ("/usr/lib64/" + sys.argv[1], "/usr/lib/" + sys.argv[1]) for p in pathlib.Path(d).rglob("*.opt-[12].pyc")]' "${PYTHON}" \
     && microdnf remove -y unzip \
     && microdnf clean all \
     && rm -rf /root/.cache/pip
