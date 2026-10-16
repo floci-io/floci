@@ -32,6 +32,9 @@ public final class SshPublicKeys {
 
     private static final int PEM_LINE_LENGTH = 64;
 
+    /** The length of an ed25519 public key, the one field after its type. */
+    private static final int ED25519_KEY_LENGTH = 32;
+
     private SshPublicKeys() {}
 
     /**
@@ -142,6 +145,51 @@ public final class SshPublicKeys {
             blob.putInt(field.length).put(field);
         }
         return blob.array();
+    }
+
+    /**
+     * Whether a blob carries a whole public key of the type it declares: an {@code ssh-rsa}
+     * exponent and modulus that make a usable key, a 32-byte ed25519 key, or an uncompressed point
+     * on the curve an ECDSA type names, each with the application field a security-key type adds.
+     * A type field alone, or a field of the wrong size, is not a key, and neither is a type this
+     * does not know. Fields after the key do not count against it, as for {@link #rsaKeyOf}.
+     */
+    public static boolean carriesAKey(byte[] blob) {
+        if (blob == null) {
+            return false;
+        }
+        try {
+            Reader reader = reader(blob);
+            String type = new String(reader.readField(), StandardCharsets.UTF_8);
+            return switch (type) {
+                case "ssh-rsa" -> rsaKeyOf(blob) != null;
+                case "ssh-ed25519" -> reader.readField().length == ED25519_KEY_LENGTH;
+                case "sk-ssh-ed25519@openssh.com" ->
+                        reader.readField().length == ED25519_KEY_LENGTH && reader.readField() != null;
+                case "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521" ->
+                        carriesAPointOn(reader, type.substring("ecdsa-sha2-".length()));
+                case "sk-ecdsa-sha2-nistp256@openssh.com" ->
+                        carriesAPointOn(reader, "nistp256") && reader.readField() != null;
+                default -> false;
+            };
+        } catch (SshPublicKeyException | NumberFormatException ignored) {
+            // A missing or empty field, such as an ssh-rsa type with no exponent: not a key.
+            return false;
+        }
+    }
+
+    /** Whether the next fields name the curve and hold an uncompressed point of its size on it. */
+    private static boolean carriesAPointOn(Reader reader, String curve) {
+        if (!curve.equals(new String(reader.readField(), StandardCharsets.UTF_8))) {
+            return false;
+        }
+        int coordinateLength = switch (curve) {
+            case "nistp256" -> 32;
+            case "nistp384" -> 48;
+            default -> 66;
+        };
+        byte[] point = reader.readField();
+        return point.length == 1 + 2 * coordinateLength && point[0] == 4;
     }
 
     /** The key type an OpenSSH blob declares, such as {@code ssh-rsa}. */

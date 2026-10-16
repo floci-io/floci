@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyPairGenerator;
 import java.security.NoSuchAlgorithmException;
 import java.security.interfaces.RSAPublicKey;
@@ -187,5 +188,43 @@ class SshPublicKeysTest {
     void theTypeIsReadFromTheBlob() {
         assertEquals("ssh-rsa", SshPublicKeys.keyType(
                 SshPublicKeys.decodeBlob(SshPublicKeys.toOpenSsh(KEY))));
+    }
+
+    /**
+     * A blob carries a key only when it has every field its type requires: a type field alone, or
+     * an ed25519 key or ECDSA point of the wrong size, is not a public key.
+     */
+    @Test
+    void aBlobCarriesAKeyOnlyWithEveryFieldItsTypeRequires() {
+        assertTrue(SshPublicKeys.carriesAKey(SshPublicKeys.openSshBlob(KEY)));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-rsa")));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-rsa", new byte[] {1, 0, 1})));
+        assertTrue(SshPublicKeys.carriesAKey(blob("ssh-ed25519", new byte[32])));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-ed25519", new byte[31])));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-ed25519")));
+        byte[] point = new byte[65];
+        point[0] = 4;
+        assertTrue(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp256", "nistp256".getBytes(StandardCharsets.US_ASCII), point)));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp256", "nistp384".getBytes(StandardCharsets.US_ASCII), point)));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ecdsa-sha2-nistp256", "nistp256".getBytes(StandardCharsets.US_ASCII), new byte[64])));
+        assertTrue(SshPublicKeys.carriesAKey(
+                blob("sk-ssh-ed25519@openssh.com", new byte[32], "ssh:".getBytes(StandardCharsets.US_ASCII))));
+        assertFalse(SshPublicKeys.carriesAKey(blob("sk-ssh-ed25519@openssh.com", new byte[32])));
+        assertFalse(SshPublicKeys.carriesAKey(blob("ssh-unknown", new byte[32])));
+        assertFalse(SshPublicKeys.carriesAKey(null));
+    }
+
+    /** An OpenSSH blob of the given type followed by the given fields, each length-prefixed. */
+    private static byte[] blob(String type, byte[]... fields) {
+        byte[] typeBytes = type.getBytes(StandardCharsets.US_ASCII);
+        int length = Integer.BYTES + typeBytes.length;
+        for (byte[] field : fields) {
+            length += Integer.BYTES + field.length;
+        }
+        ByteBuffer buffer = ByteBuffer.allocate(length).putInt(typeBytes.length).put(typeBytes);
+        for (byte[] field : fields) {
+            buffer.putInt(field.length).put(field);
+        }
+        return buffer.array();
     }
 }

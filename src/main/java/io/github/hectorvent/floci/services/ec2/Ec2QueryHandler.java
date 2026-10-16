@@ -3358,7 +3358,8 @@ public class Ec2QueryHandler {
     /**
      * The stored public key as an OpenSSH line whose comment is the key-pair name, the form
      * DescribeKeyPairs reports for created and imported keys alike. Null when the stored material is
-     * not an OpenSSH public key line: ImportKeyPair keeps what it was given, and rewriting the fields
+     * not an OpenSSH public key line, or its blob lacks a field its key type requires: ImportKeyPair
+     * keeps what it was given, and rewriting the fields
      * of a PEM or RFC 4716 body, or of text in another encoding, would report a key that does not
      * exist and could put characters XML cannot carry into the response.
      */
@@ -3375,7 +3376,8 @@ public class Ec2QueryHandler {
             // A second field that is base64 but not a key blob: not an OpenSSH line either.
             return null;
         }
-        if (!type.matches("[!-~]+") || !type.equals(material.strip().split("\\s+", 2)[0])) {
+        if (!type.matches("[!-~]+") || !type.equals(material.strip().split("\\s+", 2)[0])
+                || !SshPublicKeys.carriesAKey(blob)) {
             return null;
         }
         return type + " " + Base64.getEncoder().encodeToString(blob) + " " + kp.getKeyName();

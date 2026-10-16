@@ -125,4 +125,30 @@ class Ec2KeyPairPublicKeyIntegrationTest {
                     .formParam("KeyPairId", id).post("/").then().statusCode(200);
         }
     }
+
+    /**
+     * A blob that declares a key type but lacks a field that type requires, here an ssh-rsa type
+     * with no exponent or modulus and an ed25519 key one byte short, is not a public key.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"AAAAB3NzaC1yc2E=", "AAAAC3NzaC1lZDI1NTE5AAAAHwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="})
+    void aBlobMissingAFieldItsTypeRequiresIsDescribedWithoutAPublicKey(String blob) {
+        String name = "public-key-" + UUID.randomUUID();
+        String type = blob.startsWith("AAAAB3") ? "ssh-rsa" : "ssh-ed25519";
+        String id = given().header("Authorization", AUTH)
+                .formParam("Action", "ImportKeyPair").formParam("KeyName", name)
+                .formParam("PublicKeyMaterial", Base64.getEncoder().encodeToString(
+                        (type + " " + blob + " " + name).getBytes(StandardCharsets.UTF_8)))
+                .post("/").then().statusCode(200).extract().path("ImportKeyPairResponse.keyPairId");
+        try {
+            given().header("Authorization", AUTH).formParam("Action", "DescribeKeyPairs")
+                    .formParam("KeyPairId.1", id).formParam("IncludePublicKey", "true")
+                    .post("/").then().statusCode(200)
+                    .body("DescribeKeyPairsResponse.keySet.item.keyPairId", equalTo(id))
+                    .body("DescribeKeyPairsResponse.keySet.item.publicKey.size()", equalTo(0));
+        } finally {
+            given().header("Authorization", AUTH).formParam("Action", "DeleteKeyPair")
+                    .formParam("KeyPairId", id).post("/").then().statusCode(200);
+        }
+    }
 }
