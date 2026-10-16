@@ -684,6 +684,49 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
+     * Counting every Fn::If branch can close a cycle no choice of branches has: here A uses B when
+     * Flip is true, and B uses A when it is false. The walk then orders by the branches the
+     * conditions choose now, so A, which uses B, still goes first.
+     */
+    @Test
+    void deleteStack_whenEveryBranchWouldCloseACycle_ordersByTheBranchesChosenNow() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-branch-cycle");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("CREATE_COMPLETE");
+        stack.setTemplateBody("""
+                {
+                  "Parameters": {"Flip": {"Type": "String"}},
+                  "Conditions": {
+                    "Flipped": {"Fn::Equals": [{"Ref": "Flip"}, "yes"]},
+                    "NotFlipped": {"Fn::Not": [{"Condition": "Flipped"}]}
+                  },
+                  "Resources": {
+                    "B": {"Type": "AWS::SQS::Queue",
+                          "Properties": {"Tags": {"Fn::If": ["NotFlipped", [{"Key": "a", "Value": {"Ref": "A"}}],
+                                                             {"Ref": "AWS::NoValue"}]}}},
+                    "A": {"Type": "AWS::SQS::Queue",
+                          "Properties": {"Tags": {"Fn::If": ["Flipped", [{"Key": "b", "Value": {"Ref": "B"}}],
+                                                             {"Ref": "AWS::NoValue"}]}}}
+                  }
+                }
+                """);
+        stack.replaceParameters(Map.of("Flip", "yes"));
+        StackResource b = resource("B", "queue-b", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource a = resource("A", "queue-a", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        stack.getResources().put(b.getLogicalId(), b);
+        stack.getResources().put(a.getLogicalId(), a);
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(a, REGION);
+        deletes.verify(provisioner).delete(b, REGION);
+    }
+
+    /**
      * A resource the template no longer names, such as a subnet ContinueUpdateRollback skipped, has
      * no template entry left to order it by. It still goes as late as possible, after the load
      * balancer that may still use it, but before the VPC its attributes name, or that VPC delete

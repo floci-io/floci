@@ -2114,7 +2114,7 @@ public class CloudFormationService implements ResourceProvider {
         // delete fails ResourceInUse three times and leaves the group behind. The template's
         // order, not the map's: a resource a later update added sits after the resources that
         // depend on it, so reversing the map would delete it first.
-        List<StackResource> resources = resourcesInCreationOrder(stack);
+        List<StackResource> resources = resourcesInCreationOrder(stack, region);
         Collections.reverse(resources);
         for (StackResource resource : resources) {
             String cleanupPhysicalId = dispatcher.updateCleanupPhysicalId(resource);
@@ -2429,7 +2429,7 @@ public class CloudFormationService implements ResourceProvider {
         // walks it: a resource the update added sits after the resources that depend on it, so
         // reversing the map would delete a subnet the update moved a load balancer onto before the
         // load balancer is moved back, and EC2 refuses that delete.
-        List<StackResource> resources = resourcesInCreationOrder(stack);
+        List<StackResource> resources = resourcesInCreationOrder(stack, region);
         Collections.reverse(resources);
         List<String> failures = new ArrayList<>();
         List<String> removedResources = new ArrayList<>();
@@ -2757,10 +2757,12 @@ public class CloudFormationService implements ResourceProvider {
      * Conditions are ignored, both on resources and in {@code Fn::If}: a resource depends on what
      * every branch names. The conditions read now need not be the ones a held resource was
      * provisioned under, since a failed rollback restores the parameters but can leave a resource
-     * on the branch the failed update chose. Insertion order is the fallback when the template
-     * cannot be read.
+     * on the branch the failed update chose. When counting every branch closes a cycle that the
+     * branches chosen now do not have, those branches order the walk instead, evaluated with the
+     * SSM-resolved parameter values when there are any. Insertion order is the fallback when the
+     * template cannot be read.
      */
-    private List<StackResource> resourcesInCreationOrder(Stack stack) {
+    private List<StackResource> resourcesInCreationOrder(Stack stack, String region) {
         List<StackResource> ordered = new ArrayList<>(stack.resourcesSnapshot().values());
         try {
             JsonNode template = parseTemplate(stack.getTemplateBody());
@@ -2777,13 +2779,21 @@ public class CloudFormationService implements ResourceProvider {
             for (Map.Entry<String, JsonNode> entry : unconditional.properties()) {
                 if (entry.getValue() instanceof ObjectNode definition) {
                     definition.remove("Condition");
-                    definition.set("Properties", everyIfBranch(definition.path("Properties")));
                 }
             }
-            // A stack saved before circular templates were rejected may still have one, and naming
-            // every branch can close a cycle no single choice of branches has; order it by its
-            // dependencies anyway rather than giving up.
-            List<String> creationOrder = creationOrder(unconditional, Map.of()).sorted();
+            ObjectNode everyBranch = unconditional.deepCopy();
+            for (Map.Entry<String, JsonNode> entry : everyBranch.properties()) {
+                if (entry.getValue() instanceof ObjectNode definition && definition.has("Properties")) {
+                    definition.set("Properties", everyIfBranch(definition.get("Properties")));
+                }
+            }
+            // A stack saved before circular templates were rejected may still have one; order it
+            // by its dependencies anyway rather than giving up.
+            CreationOrder order = creationOrder(everyBranch, Map.of());
+            if (!order.circular().isEmpty()) {
+                order = fewerCycles(order, stack, template, unconditional, region);
+            }
+            List<String> creationOrder = order.sorted();
             Map<String, Integer> rank = new HashMap<>();
             for (int i = 0; i < creationOrder.size(); i++) {
                 rank.put(creationOrder.get(i), i);
@@ -2814,13 +2824,34 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
+     * The order the branches chosen now give, when it has fewer cycles than {@code everyBranch},
+     * the order counting every {@code Fn::If} branch; otherwise {@code everyBranch}, which is also
+     * kept when the conditions cannot be read.
+     */
+    private CreationOrder fewerCycles(CreationOrder everyBranch, Stack stack, JsonNode template,
+                                      JsonNode unconditional, String region) {
+        try {
+            Map<String, String> resolvedParameters = stack.resolvedParametersSnapshot();
+            Map<String, Boolean> conditions = resolveConditions(template,
+                    resolvedParameters.isEmpty() ? stack.parametersSnapshot() : resolvedParameters,
+                    stack, region, regionResolver.getAccountId());
+            CreationOrder chosen = creationOrder(unconditional, conditions);
+            return chosen.circular().size() < everyBranch.circular().size() ? chosen : everyBranch;
+        } catch (RuntimeException e) {
+            LOG.debugv("Ordering stack {0} by every Fn::If branch, its conditions could not be read: {1}",
+                    stack.getStackName(), e.getMessage());
+            return everyBranch;
+        }
+    }
+
+    /**
      * A copy of a template value with each {@code Fn::If} replaced by a list of both its branches,
      * so the dependencies collected from it are what either branch names.
      */
     private static JsonNode everyIfBranch(JsonNode node) {
         if (node.isObject()) {
             JsonNode fnIf = node.path("Fn::If");
-            if (node.size() == 1 && fnIf.isArray() && fnIf.size() == 3) {
+            if (fnIf.isArray() && fnIf.size() == 3) {
                 ArrayNode branches = JsonNodeFactory.instance.arrayNode();
                 branches.add(everyIfBranch(fnIf.get(1)));
                 branches.add(everyIfBranch(fnIf.get(2)));
@@ -2872,7 +2903,7 @@ public class CloudFormationService implements ResourceProvider {
 
     void deleteStackResources(Stack stack, String region, String accountId) {
         try {
-            List<StackResource> resources = resourcesInCreationOrder(stack);
+            List<StackResource> resources = resourcesInCreationOrder(stack, region);
             Collections.reverse(resources); // Dependents go before what they depend on
 
             List<String> failedResources = new ArrayList<>();
