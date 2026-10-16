@@ -1052,7 +1052,6 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         String previousType = EksClusterManager.nodeInstanceType(currentCluster);
         currentCluster.setNodeInstanceType(selectedType);
         if (currentCluster.getContainerId() != null && !selectedType.equals(previousType)) {
-            currentCluster.setStatus(ClusterStatus.CREATING);
             try {
                 if (!clusterManager.restartForNodeCapacity(currentCluster, previousType)) {
                     nodeGroup.setStatus(NodegroupStatus.CREATE_FAILED);
