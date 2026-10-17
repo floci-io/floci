@@ -611,6 +611,68 @@ class SwfServiceTest {
         assertEquals("DecisionTaskScheduled", events.get(events.size() - 1).getEventType());
     }
 
+    @ParameterizedTest
+    @CsvSource({"timer,false", "timer,true", "activity,false", "activity,true",
+            "queued,false", "queued,true"})
+    void lambdaOutcome_deliversOneDecisionDespiteOtherPendingWork(String pending, boolean failed) {
+        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        String runId = startLambdaWf("wf-lambda-outcome", "LW");
+        SwfDecisionTask first = pollFor("wf-lambda-outcome");
+        if (failed) {
+            lambdaResponse = new LambdaInvocationResult("{\"errorMessage\":\"boom\"}", "Unhandled");
+        }
+        Decision other = switch (pending) {
+            case "timer" -> new Decision("StartTimer", Map.of("timerId", "timer", "startToFireTimeout", "60"));
+            case "activity" -> new Decision("ScheduleActivityTask", Map.of(
+                    "activityId", "activity", "activityType", Map.of("name", "A", "version", "1")));
+            default -> new Decision("CancelTimer", Map.of("timerId", "missing"));
+        };
+
+        service.respondDecisionTaskCompleted(first.getTaskToken(), List.of(
+                other, scheduleLambda("lambda", "my-fn", null, null, null)), null);
+
+        List<SwfHistoryEvent> history = service.getWorkflowExecutionHistory(
+                REGION, DOMAIN, "wf-lambda-outcome", runId, false);
+        assertEquals(2, history.stream().filter(e -> "DecisionTaskScheduled".equals(e.getEventType())).count());
+        assertNotNull(eventOfType(history, failed ? "LambdaFunctionFailed" : "LambdaFunctionCompleted"));
+        assertEquals(1, service.countPendingDecisionTasks(REGION, DOMAIN, "tl"));
+        SwfDecisionTask outcome = pollFor("wf-lambda-outcome");
+        assertEquals(first.getStartedEventId(), outcome.getPreviousStartedEventId());
+        service.respondDecisionTaskCompleted(outcome.getTaskToken(), List.of(), null);
+        assertEquals(0, service.countPendingDecisionTasks(REGION, DOMAIN, "tl"));
+        assertTrue(service.pollForDecisionTask(REGION, DOMAIN, "tl", "idle").isEmpty());
+    }
+
+    @Test
+    void lambdaOutcomeDuringAStartedDecision_isDeliveredByOneSuccessor() throws Exception {
+        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        String runId = startLambdaWf("wf-lambda-in-flight", "LW");
+        SwfDecisionTask first = pollFor("wf-lambda-in-flight");
+        lambdaGate = new LambdaGate(new CountDownLatch(1), new CountDownLatch(1));
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> scheduling = executor.submit(() -> service.respondDecisionTaskCompleted(
+                    first.getTaskToken(), List.of(scheduleLambda("lambda", "my-fn", null, null, null)), null));
+            assertTrue(lambdaGate.started().await(5, TimeUnit.SECONDS));
+            service.signalWorkflowExecution(REGION, DOMAIN, "wf-lambda-in-flight", runId, "inspect", null);
+            SwfDecisionTask active = pollFor("wf-lambda-in-flight");
+            lambdaGate.release().countDown();
+            scheduling.get(10, TimeUnit.SECONDS);
+            assertEquals(0, service.countPendingDecisionTasks(REGION, DOMAIN, "tl"));
+            service.respondDecisionTaskCompleted(active.getTaskToken(), List.of(), null);
+            assertEquals(1, service.countPendingDecisionTasks(REGION, DOMAIN, "tl"));
+            SwfDecisionTask successor = pollFor("wf-lambda-in-flight");
+            assertEquals(active.getStartedEventId(), successor.getPreviousStartedEventId());
+            service.respondDecisionTaskCompleted(successor.getTaskToken(), List.of(), null);
+            assertEquals(0, service.countPendingDecisionTasks(REGION, DOMAIN, "tl"));
+        } finally {
+            lambdaGate.release().countDown();
+            executor.shutdownNow();
+        }
+    }
+
     @Test
     void scheduleLambdaFunction_whenTheHandlerErrors_recordsFailedWithTheFunctionError() {
         service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
