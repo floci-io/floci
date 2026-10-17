@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.VpcDependencyProvider;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elbv2.model.*;
 import io.github.hectorvent.floci.services.iam.ServerCertificateReferenceProvider;
@@ -34,7 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class ElbV2Service implements ResourceProvider, ServerCertificateReferenceProvider {
+public class ElbV2Service implements ResourceProvider, ServerCertificateReferenceProvider, VpcDependencyProvider {
 
     @Inject
     ElbV2DataPlane dataPlane;
@@ -195,10 +196,23 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     // ── Load Balancers ────────────────────────────────────────────────────────
 
+    /**
+     * Resolving the subnets and publishing the balancer happen under EC2's subnet lock, so a
+     * DeleteSubnet cannot pass its dependency check in between and leave the balancer on a subnet
+     * that is gone.
+     */
     public LoadBalancer createLoadBalancer(String region, String name, String scheme,
                                            String type, String ipAddressType,
                                            List<String> subnets, List<String> securityGroups,
                                            Map<String, String> initialTags) {
+        return ec2Service.supplyWithSubnetReferencesHeld(region, () -> createLoadBalancerWithSubnetsHeld(
+                region, name, scheme, type, ipAddressType, subnets, securityGroups, initialTags));
+    }
+
+    private LoadBalancer createLoadBalancerWithSubnetsHeld(String region, String name, String scheme,
+                                                           String type, String ipAddressType,
+                                                           List<String> subnets, List<String> securityGroups,
+                                                           Map<String, String> initialTags) {
         validateName(name, "load balancer");
         Map<String, LoadBalancer> regionLbs = loadBalancers.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
         boolean duplicate = regionLbs.values().stream()
@@ -239,6 +253,23 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             tags.put(arn, new LinkedHashMap<>(initialTags));
         }
         return lb;
+    }
+
+    /**
+     * A subnet is in use while a load balancer is configured with it. Account-scoped through the
+     * request-scoped storage, and a target group does not count: it pins nothing in AWS either.
+     */
+    @Override
+    public boolean hasSubnetDependency(String region, String subnetId) {
+        return loadBalancers.getOrDefault(region, Map.of()).values().stream()
+                .anyMatch(lb -> lb.getAvailabilityZones().stream()
+                        .anyMatch(zone -> subnetId.equals(zone.getSubnetId())));
+    }
+
+    @Override
+    public boolean hasVpcDependency(String region, String vpcId) {
+        return loadBalancers.getOrDefault(region, Map.of()).values().stream()
+                .anyMatch(lb -> vpcId.equals(lb.getVpcId()));
     }
 
     private String loadBalancerDnsSuffix() {
@@ -336,18 +367,21 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         persistRegion(loadBalancers, region);
     }
 
+    /** Under EC2's subnet lock for the same reason as {@link #createLoadBalancer}. */
     public void setSubnets(String region, String arn, List<String> subnets) {
-        LoadBalancer lb = requireLoadBalancer(region, arn);
-        String vpcId = resolveSubnetVpcId(region, lb.getType(), subnets);
-        if (vpcId != null && lb.getVpcId() != null && !lb.getVpcId().equals(vpcId)) {
-            throw new AwsException("InvalidConfigurationRequest",
-                    "All subnets must belong to the load balancer VPC.", 400);
-        }
-        lb.setAvailabilityZones(resolveAvailabilityZones(region, subnets));
-        if (vpcId != null) {
-            lb.setVpcId(vpcId);
-        }
-        persistRegion(loadBalancers, region);
+        ec2Service.runWithSubnetReferencesHeld(region, () -> {
+            LoadBalancer lb = requireLoadBalancer(region, arn);
+            String vpcId = resolveSubnetVpcId(region, lb.getType(), subnets);
+            if (vpcId != null && lb.getVpcId() != null && !lb.getVpcId().equals(vpcId)) {
+                throw new AwsException("InvalidConfigurationRequest",
+                        "All subnets must belong to the load balancer VPC.", 400);
+            }
+            lb.setAvailabilityZones(resolveAvailabilityZones(region, subnets));
+            if (vpcId != null) {
+                lb.setVpcId(vpcId);
+            }
+            persistRegion(loadBalancers, region);
+        });
     }
 
     public void setIpAddressType(String region, String arn, String ipAddressType) {

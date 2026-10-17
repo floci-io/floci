@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -22,12 +23,14 @@ import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -38,6 +41,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -606,6 +610,12 @@ class ElbV2ServiceTest {
     }
 
     private static void stubAlbSubnets(Ec2Service ec2Service) {
+        lenient().when(ec2Service.supplyWithSubnetReferencesHeld(anyString(), any()))
+                .thenAnswer(invocation -> invocation.<Supplier<?>>getArgument(1).get());
+        lenient().doAnswer(invocation -> {
+            invocation.<Runnable>getArgument(1).run();
+            return null;
+        }).when(ec2Service).runWithSubnetReferencesHeld(anyString(), any());
         Subnet subnetA = subnet("subnet-a", REGION + "a");
         Subnet subnetB = subnet("subnet-b", REGION + "b");
         lenient().when(ec2Service.requireSubnet(REGION, "subnet-a")).thenReturn(subnetA);
@@ -620,6 +630,25 @@ class ElbV2ServiceTest {
         subnet.setAvailabilityZone(availabilityZone);
         subnet.setVpcId("vpc-a");
         return subnet;
+    }
+
+    /** Files in a directory, so a second service reads back what the first wrote as JSON. */
+    private static final class PersistentStorageFactory extends StorageFactory {
+        private final Path dir;
+
+        private PersistentStorageFactory(Path dir) {
+            super(null, null);
+            this.dir = dir;
+        }
+
+        @Override
+        public <V> AccountAwareStorageBackend<V> create(String serviceName,
+                                                     String fileName,
+                                                     TypeReference<Map<String, V>> typeReference) {
+            PersistentStorage<String, V> files = new PersistentStorage<>(dir.resolve(fileName), typeReference);
+            files.load();
+            return new AccountAwareStorageBackend<>(files, null, "000000000000");
+        }
     }
 
     private static final class SharedStorageFactory extends StorageFactory {
@@ -662,5 +691,28 @@ class ElbV2ServiceTest {
         assertEquals(AwsRegionFacts.nlbHostedZoneId(REGION).orElseThrow(),
                 reloaded.describeLoadBalancers(REGION, null, List.of("stored-nlb"), null, null)
                         .getFirst().getCanonicalHostedZoneId());
+    }
+
+    @Test
+    void subnetAndVpcDependenciesComeFromPersistedLoadBalancersOnly(@TempDir Path dir) {
+        ElbV2Service first = serviceWithStorage(new PersistentStorageFactory(dir), dataPlane, healthChecker);
+        String arn = first.createLoadBalancer(REGION, "stored-dependency", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        String targetGroup = first.createTargetGroup(REGION, "independent-group", "HTTP", "HTTP1", 80,
+                "vpc-a", "instance", "HTTP", "traffic-port", true, "/", 30, 5, 5, 2, "200",
+                "ipv4", Map.of()).getTargetGroupArn();
+        ElbV2Service restored = serviceWithStorage(new PersistentStorageFactory(dir), dataPlane, healthChecker);
+        assertTrue(restored.hasSubnetDependency(REGION, "subnet-a"));
+        assertTrue(restored.hasSubnetDependency(REGION, "subnet-b"));
+        assertTrue(restored.hasVpcDependency(REGION, "vpc-a"));
+        assertFalse(restored.hasSubnetDependency("us-east-1", "subnet-a"));
+        assertFalse(restored.hasVpcDependency("us-east-1", "vpc-a"));
+        assertFalse(restored.hasSubnetDependency(REGION, "subnet-unrelated"));
+        restored.deleteLoadBalancer(REGION, arn);
+        ElbV2Service afterDelete = serviceWithStorage(new PersistentStorageFactory(dir), dataPlane, healthChecker);
+        assertFalse(afterDelete.hasSubnetDependency(REGION, "subnet-a"));
+        assertFalse(afterDelete.hasVpcDependency(REGION, "vpc-a"));
+        assertEquals(targetGroup, afterDelete.describeTargetGroups(REGION, null,
+                List.of(targetGroup), null).getFirst().getTargetGroupArn());
     }
 }

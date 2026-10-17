@@ -80,7 +80,7 @@ public final class ReplacementCleanup {
             cleanup.put("priorPhysicalId", prior);
             ObjectNode priorAttributes = cleanup.putObject("priorAttributes");
             attributesBeforeProvision.forEach((key, value) -> {
-                if (!key.startsWith("__Floci") && value != null) {
+                if (restoredOnRevert(key) && value != null) {
                     priorAttributes.put(key, value);
                 }
             });
@@ -131,7 +131,7 @@ public final class ReplacementCleanup {
         r.setPhysicalId(prior);
         Iterator<String> keys = r.getAttributes().keySet().iterator();
         while (keys.hasNext()) {
-            if (!keys.next().startsWith("__Floci")) {
+            if (restoredOnRevert(keys.next())) {
                 keys.remove();
             }
         }
@@ -145,6 +145,15 @@ public final class ReplacementCleanup {
             return true;
         }
         return deleteReplacement(r, cleanup, deleter, r.getResourceType(), replacement);
+    }
+
+    /**
+     * Whether a revert puts back the prior value of an attribute: the public ones, and the hidden
+     * {@link CfnRollback#USES_ATTR_PREFIX} ones, which describe the entity as the public ones do.
+     * Other {@code __Floci} keys are rollback bookkeeping that outlives the revert.
+     */
+    private static boolean restoredOnRevert(String key) {
+        return !key.startsWith("__Floci") || key.startsWith(CfnRollback.USES_ATTR_PREFIX);
     }
 
     /** Deletes a rolled-back replacement; one whose delete throws stays owed and named for the retry. */

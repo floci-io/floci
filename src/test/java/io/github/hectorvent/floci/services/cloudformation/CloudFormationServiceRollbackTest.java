@@ -636,6 +636,275 @@ class CloudFormationServiceRollbackTest {
     }
 
     /**
+     * A retry walks the failed update's template with the parameters the first pass already
+     * restored, so a condition the update turned on can read false again. A resource the stack
+     * holds is still ordered by its dependencies, so the load balancer the update created on the
+     * subnet it added is deleted before that subnet, not after it. The load balancer is inserted
+     * first, so falling back to the map's order would delete the subnet first too.
+     */
+    @Test
+    void resumeUpdateRollback_ordersAHeldResourceByItsDependenciesWhateverItsConditionReadsNow() {
+        Stack stack = new Stack();
+        stack.setStackName("retry-flipped-condition");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setTemplateBody("""
+                {
+                  "Parameters": {"Env": {"Type": "String"}},
+                  "Conditions": {"IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}},
+                  "Resources": {
+                    "SubnetC": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": "vpc-1", "CidrBlock": "10.0.3.0/24"}},
+                    "ProdAlb": {
+                      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                      "Condition": "IsProd",
+                      "Properties": {"Subnets": [{"Ref": "SubnetC"}]}
+                    }
+                  }
+                }
+                """);
+        stack.replaceParameters(Map.of("Env", "dev"));
+        stack.replaceResolvedParameters(Map.of("Env", "dev"));
+        StackResource subnet = resource("SubnetC", "subnet-c", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        StackResource loadBalancer = resource("ProdAlb", "arn:aws:elasticloadbalancing:us-east-1:000000000000:"
+                + "loadbalancer/app/prod/1", "AWS::ElasticLoadBalancingV2::LoadBalancer", "CREATE_COMPLETE");
+        stack.getResources().put(loadBalancer.getLogicalId(), loadBalancer);
+        stack.getResources().put(subnet.getLogicalId(), subnet);
+        stack.setUpdateRollbackSnapshot(new StackUpdateSnapshot("previous-template", "previous-original",
+                Map.of("Env", "dev"), Map.of("Env", "dev"), Map.of(), Map.of(), Map.of(), Map.of()));
+        stack.setUpdateRollbackResourceIds(List.of("SubnetC", "ProdAlb"));
+        stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
+
+        service.resumeUpdateRollback(stack, List.of(), false, REGION);
+
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", stack.getStatus());
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(eq(loadBalancer), anyString());
+        deletes.verify(provisioner).delete(eq(subnet), anyString());
+    }
+
+    /**
+     * A held resource can depend on a condition-false one the stack no longer holds, such as a role
+     * an earlier cleanup deleted while the load balancer on it failed to delete. Ordering must not
+     * then give up on the whole template: the load balancer still goes before the subnet it uses.
+     */
+    @Test
+    void deleteStack_withAHeldResourceOnAGoneConditionFalseOne_stillDeletesDependentsFirst() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-held-on-gone-conditional");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_COMPLETE");
+        stack.setTemplateBody("""
+                {
+                  "Parameters": {"Env": {"Type": "String"}},
+                  "Conditions": {"IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}},
+                  "Resources": {
+                    "ProdRole": {"Type": "AWS::IAM::Role", "Condition": "IsProd"},
+                    "SubnetC": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": "vpc-1", "CidrBlock": "10.0.3.0/24"}},
+                    "ProdAlb": {
+                      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                      "Condition": "IsProd",
+                      "DependsOn": "ProdRole",
+                      "Properties": {"Subnets": [{"Ref": "SubnetC"}]}
+                    }
+                  }
+                }
+                """);
+        stack.replaceParameters(Map.of("Env", "dev"));
+        stack.replaceResolvedParameters(Map.of("Env", "dev"));
+        StackResource loadBalancer = resource("ProdAlb", "arn:aws:elasticloadbalancing:us-east-1:000000000000:"
+                + "loadbalancer/app/prod/1", "AWS::ElasticLoadBalancingV2::LoadBalancer", "DELETE_FAILED");
+        StackResource subnet = resource("SubnetC", "subnet-c", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        stack.getResources().put(loadBalancer.getLogicalId(), loadBalancer);
+        stack.getResources().put(subnet.getLogicalId(), subnet);
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(loadBalancer, REGION);
+        deletes.verify(provisioner).delete(subnet, REGION);
+    }
+
+    /**
+     * Counting every Fn::If branch can close a cycle no choice of branches has: here A uses B when
+     * Flip is true, and B uses A when it is false. The walk then orders by the branches the
+     * conditions choose now, so A, which uses B, still goes first.
+     */
+    @Test
+    void deleteStack_whenEveryBranchWouldCloseACycle_ordersByTheBranchesChosenNow() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-branch-cycle");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("CREATE_COMPLETE");
+        stack.setTemplateBody("""
+                {
+                  "Parameters": {"Flip": {"Type": "String"}},
+                  "Conditions": {
+                    "Flipped": {"Fn::Equals": [{"Ref": "Flip"}, "yes"]},
+                    "NotFlipped": {"Fn::Not": [{"Condition": "Flipped"}]}
+                  },
+                  "Resources": {
+                    "B": {"Type": "AWS::SQS::Queue",
+                          "Properties": {"Tags": {"Fn::If": ["NotFlipped", [{"Key": "a", "Value": {"Ref": "A"}}],
+                                                             {"Ref": "AWS::NoValue"}]}}},
+                    "A": {"Type": "AWS::SQS::Queue",
+                          "Properties": {"Tags": {"Fn::If": ["Flipped", [{"Key": "b", "Value": {"Ref": "B"}}],
+                                                             {"Ref": "AWS::NoValue"}]}}}
+                  }
+                }
+                """);
+        stack.replaceParameters(Map.of("Flip", "yes"));
+        StackResource b = resource("B", "queue-b", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource a = resource("A", "queue-a", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        stack.getResources().put(b.getLogicalId(), b);
+        stack.getResources().put(a.getLogicalId(), a);
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(a, REGION);
+        deletes.verify(provisioner).delete(b, REGION);
+    }
+
+    /**
+     * A cycle that only counting every branch closes, between X and Y, must not cost the rest of
+     * the stack its other-branch dependencies: the load balancer still on the subnet the failed
+     * update chose goes before that subnet, though the restored parameter now picks the other.
+     * SubnetC is created two steps after SubnetA, so only that dependency puts the load balancer
+     * after it.
+     */
+    @Test
+    void deleteStack_withAnUnrelatedBranchCycle_stillDeletesAResourceBeforeItsOtherBranchDependency() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-branch-cycle-and-held-branch");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_FAILED");
+        stack.setTemplateBody("""
+                {
+                  "Parameters": {"Placement": {"Type": "String"}},
+                  "Conditions": {
+                    "Second": {"Fn::Equals": [{"Ref": "Placement"}, "second"]},
+                    "First": {"Fn::Not": [{"Condition": "Second"}]}
+                  },
+                  "Resources": {
+                    "Alb": {"Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                            "Properties": {"Subnets": {"Fn::If": ["Second", [{"Ref": "SubnetC"}], [{"Ref": "SubnetA"}]]}}},
+                    "SubnetA": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": "vpc-1", "CidrBlock": "10.0.1.0/24"}},
+                    "SubnetB": {"Type": "AWS::EC2::Subnet", "DependsOn": "SubnetA",
+                                "Properties": {"VpcId": "vpc-1", "CidrBlock": "10.0.2.0/24"}},
+                    "SubnetC": {"Type": "AWS::EC2::Subnet", "DependsOn": "SubnetB",
+                                "Properties": {"VpcId": "vpc-1", "CidrBlock": "10.0.3.0/24"}},
+                    "Y": {"Type": "AWS::SQS::Queue",
+                          "Properties": {"Tags": {"Fn::If": ["First", [{"Key": "x", "Value": {"Ref": "X"}}],
+                                                             {"Ref": "AWS::NoValue"}]}}},
+                    "X": {"Type": "AWS::SQS::Queue",
+                          "Properties": {"Tags": {"Fn::If": ["Second", [{"Key": "y", "Value": {"Ref": "Y"}}],
+                                                             {"Ref": "AWS::NoValue"}]}}}
+                  }
+                }
+                """);
+        stack.replaceParameters(Map.of("Placement", "first"));
+        StackResource loadBalancer = resource("Alb", "arn:aws:elasticloadbalancing:us-east-1:000000000000:"
+                + "loadbalancer/app/web/1", "AWS::ElasticLoadBalancingV2::LoadBalancer", "UPDATE_FAILED");
+        StackResource subnetA = resource("SubnetA", "subnet-a", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        StackResource subnetB = resource("SubnetB", "subnet-b", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        StackResource subnetC = resource("SubnetC", "subnet-c", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        StackResource y = resource("Y", "queue-y", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        StackResource x = resource("X", "queue-x", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        for (StackResource resource : new StackResource[] {loadBalancer, subnetA, subnetB, subnetC, y, x}) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder subnets = inOrder(provisioner);
+        subnets.verify(provisioner).delete(loadBalancer, REGION);
+        subnets.verify(provisioner).delete(subnetC, REGION);
+        InOrder queues = inOrder(provisioner);
+        queues.verify(provisioner).delete(y, REGION);
+        queues.verify(provisioner).delete(x, REGION);
+    }
+
+    /**
+     * A resource the template no longer names, such as a subnet ContinueUpdateRollback skipped, has
+     * no template entry left to order it by. It still goes as late as possible, after the load
+     * balancer that may still use it, but before the VPC its attributes name, or that VPC delete
+     * fails while the subnet exists.
+     */
+    @Test
+    void deleteStack_deletesALeftoverResourceBeforeTheResourceItsAttributesName() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-leftover-subnet");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
+        stack.setTemplateBody("""
+                {"Resources": {
+                  "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.0.0.0/16"}},
+                  "SubnetA": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": {"Ref": "Vpc"}, "CidrBlock": "10.0.1.0/24"}},
+                  "Alb": {"Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                          "Properties": {"Subnets": [{"Ref": "SubnetA"}]}}
+                }}""");
+        StackResource leftover = resource("SubnetC", "subnet-c", "AWS::EC2::Subnet", "UPDATE_COMPLETE");
+        leftover.getAttributes().put("VpcId", "vpc-1");
+        StackResource vpc = resource("Vpc", "vpc-1", "AWS::EC2::VPC", "CREATE_COMPLETE");
+        StackResource subnet = resource("SubnetA", "subnet-a", "AWS::EC2::Subnet", "CREATE_COMPLETE");
+        subnet.getAttributes().put("VpcId", "vpc-1");
+        StackResource loadBalancer = resource("Alb", "arn:aws:elasticloadbalancing:us-east-1:000000000000:"
+                + "loadbalancer/app/web/1", "AWS::ElasticLoadBalancingV2::LoadBalancer", "UPDATE_COMPLETE");
+        for (StackResource resource : new StackResource[] {vpc, subnet, loadBalancer, leftover}) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(loadBalancer, REGION);
+        deletes.verify(provisioner).delete(leftover, REGION);
+        deletes.verify(provisioner).delete(vpc, REGION);
+    }
+
+    /**
+     * A leftover may name another leftover: a VPC an update added and a subnet in it, both left by
+     * a failed rollback. The subnet goes before its VPC, which names only itself.
+     */
+    @Test
+    void deleteStack_deletesALeftoverBeforeTheLeftoverItsAttributesName() {
+        Stack stack = new Stack();
+        stack.setStackName("delete-leftover-chain");
+        stack.setStackId("stack-id");
+        stack.setRegion(REGION);
+        stack.setStatus("UPDATE_ROLLBACK_FAILED");
+        stack.setTemplateBody("""
+                {"Resources": {
+                  "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.0.0.0/16"}}
+                }}""");
+        StackResource vpc = resource("Vpc", "vpc-1", "AWS::EC2::VPC", "CREATE_COMPLETE");
+        vpc.getAttributes().put("VpcId", "vpc-1");
+        StackResource leftoverSubnet = resource("SubnetX", "subnet-x", "AWS::EC2::Subnet", "UPDATE_COMPLETE");
+        leftoverSubnet.getAttributes().put("SubnetId", "subnet-x");
+        leftoverSubnet.getAttributes().put("VpcId", "vpc-2");
+        StackResource leftoverVpc = resource("Vpc2", "vpc-2", "AWS::EC2::VPC", "UPDATE_COMPLETE");
+        leftoverVpc.getAttributes().put("VpcId", "vpc-2");
+        for (StackResource resource : new StackResource[] {vpc, leftoverSubnet, leftoverVpc}) {
+            stack.getResources().put(resource.getLogicalId(), resource);
+        }
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+
+        service.deleteStackResources(stack, REGION, ACCOUNT);
+
+        InOrder deletes = inOrder(provisioner);
+        deletes.verify(provisioner).delete(leftoverSubnet, REGION);
+        deletes.verify(provisioner).delete(leftoverVpc, REGION);
+    }
+
+    /**
      * The resume runs on the operation executor, whose future nobody reads. An unexpected failure
      * must still settle the stack in UPDATE_ROLLBACK_FAILED, keeping what a retry needs, instead
      * of stranding it in UPDATE_ROLLBACK_IN_PROGRESS, where ContinueUpdateRollback refuses it.

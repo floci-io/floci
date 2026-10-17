@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -2688,7 +2690,11 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, StackResource> previousResources,
             Set<String> attemptedResourceIds,
             String region) {
-        List<StackResource> resources = new ArrayList<>(stack.resourcesSnapshot().values());
+        // Dependents first, in the template's order rather than the map's, as the update cleanup
+        // walks it: a resource the update added sits after the resources that depend on it, so
+        // reversing the map would delete a subnet the update moved a load balancer onto before the
+        // load balancer is moved back, and EC2 refuses that delete.
+        List<StackResource> resources = resourcesInCreationOrder(stack, region);
         Collections.reverse(resources);
         List<String> failures = new ArrayList<>();
         List<String> removedResources = new ArrayList<>();
@@ -3004,13 +3010,22 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * The stack's resources in the order the current template creates them, for a delete that walks
-     * them backwards. The resource map keeps insertion order, and a resource added by a later
-     * update sits after the resources that depend on it, so reversing the map would delete it
-     * first: a certificate still used by a user pool domain, for one. Resources the template no
-     * longer names, left behind by a failed cleanup, sort first here so they are deleted last,
-     * after anything that might still use them. Insertion order is the fallback when the template
-     * cannot be read.
+     * The stack's resources in the order the current template creates them, for a delete, an update
+     * cleanup or an update rollback that walks them backwards. The resource map keeps insertion
+     * order, and a resource added by a later update sits after the resources that depend on it, so
+     * reversing the map would delete it first: a certificate still used by a user pool domain, for
+     * one. Resources the template no longer names, left behind by a failed cleanup or skipped by
+     * ContinueUpdateRollback, are deleted as late as possible, after anything that might still use
+     * them, but before any held resource whose physical id one of their attributes names, such as a
+     * subnet's {@code VpcId}: with their template entry gone, that is the only record of what they
+     * depend on, so a leftover whose attributes name nothing it uses is still deleted last.
+     * Conditions are ignored, both on resources and in {@code Fn::If}: a resource depends on what
+     * every branch names. The conditions read now need not be the ones a held resource was
+     * provisioned under, since a failed rollback restores the parameters but can leave a resource
+     * on the branch the failed update chose. When counting every branch closes a cycle, the walk
+     * starts from the branches chosen now, evaluated with the SSM-resolved parameter values when
+     * there are any, and adds each other-branch dependency that closes no cycle. Insertion order
+     * is the fallback when the template cannot be read.
      */
     private List<StackResource> resourcesInCreationOrder(Stack stack, String region) {
         List<StackResource> ordered = new ArrayList<>(stack.resourcesSnapshot().values());
@@ -3020,21 +3035,189 @@ public class CloudFormationService implements ResourceProvider {
             if (!resources.isObject()) {
                 return ordered;
             }
-            Map<String, Boolean> conditions = resolveConditions(
-                    template, stack.parametersSnapshot(), stack, region, regionResolver.getAccountId());
+            // Ordered without conditions: only the resources the stack holds are walked, and each
+            // was provisioned, so its dependencies count whatever its condition reads now. A
+            // ContinueUpdateRollback retry reads the failed update's template with the parameters
+            // the first pass already restored, and a held resource may depend on a condition-false
+            // one an earlier cleanup deleted, which would otherwise fail the whole ordering.
+            ObjectNode unconditional = resources.deepCopy();
+            for (Map.Entry<String, JsonNode> entry : unconditional.properties()) {
+                if (entry.getValue() instanceof ObjectNode definition) {
+                    definition.remove("Condition");
+                }
+            }
+            ObjectNode everyBranch = unconditional.deepCopy();
+            for (Map.Entry<String, JsonNode> entry : everyBranch.properties()) {
+                if (entry.getValue() instanceof ObjectNode definition && definition.has("Properties")) {
+                    definition.set("Properties", everyIfBranch(definition.get("Properties")));
+                }
+            }
             // A stack saved before circular templates were rejected may still have one; order it
             // by its dependencies anyway rather than giving up.
-            List<String> creationOrder = creationOrder(resources, conditions).sorted();
+            CreationOrder order = creationOrder(everyBranch, Map.of());
+            if (!order.circular().isEmpty()) {
+                order = withoutBranchCycles(order, stack, template, unconditional, everyBranch, region);
+            }
+            List<String> creationOrder = order.sorted();
             Map<String, Integer> rank = new HashMap<>();
             for (int i = 0; i < creationOrder.size(); i++) {
                 rank.put(creationOrder.get(i), i);
             }
-            ordered.sort(Comparator.comparingInt(r -> rank.getOrDefault(r.getLogicalId(), -1)));
+            Map<String, List<StackResource>> holdersByPhysicalId = new HashMap<>();
+            int leftovers = 0;
+            for (StackResource resource : ordered) {
+                if (!rank.containsKey(resource.getLogicalId())) {
+                    leftovers++;
+                }
+                if (resource.getPhysicalId() != null) {
+                    holdersByPhysicalId.computeIfAbsent(resource.getPhysicalId(), id -> new ArrayList<>())
+                            .add(resource);
+                }
+            }
+            double step = 1.0 / (leftovers + 1);
+            Map<String, Double> position = new HashMap<>();
+            for (StackResource resource : ordered) {
+                position.put(resource.getLogicalId(),
+                        leftoverPosition(resource, rank, holdersByPhysicalId, step, position, new HashSet<>()));
+            }
+            ordered.sort(Comparator.comparingDouble(r -> position.get(r.getLogicalId())));
         } catch (Exception e) {
-            LOG.debugv("Deleting stack {0} in insertion order, its template could not be ordered: {1}",
+            LOG.debugv("Walking stack {0} in insertion order, its template could not be ordered: {1}",
                     stack.getStackName(), e.getMessage());
         }
         return ordered;
+    }
+
+    /**
+     * The order the branches chosen now give, with every dependency another {@code Fn::If} branch
+     * names added to it unless that dependency would close a cycle. Counting every branch can close
+     * a cycle no choice of branches has, such as two resources that each use the other under
+     * opposite conditions; dropping only the edges that close it keeps every other branch's
+     * dependencies. {@code everyBranch}, the order counting every branch, is kept when the
+     * conditions cannot be read.
+     */
+    private CreationOrder withoutBranchCycles(CreationOrder everyBranch, Stack stack, JsonNode template,
+                                              ObjectNode unconditional, ObjectNode everyBranchResources,
+                                              String region) {
+        try {
+            Map<String, String> resolvedParameters = stack.resolvedParametersSnapshot();
+            Map<String, Boolean> conditions = resolveConditions(template,
+                    resolvedParameters.isEmpty() ? stack.parametersSnapshot() : resolvedParameters,
+                    stack, region, regionResolver.getAccountId());
+            Set<String> ids = new LinkedHashSet<>();
+            unconditional.fieldNames().forEachRemaining(ids::add);
+            Map<String, Set<String>> dependencies = new HashMap<>();
+            for (String id : ids) {
+                Set<String> chosen = collectResourceDependencies(unconditional.get(id), ids, conditions);
+                chosen.retainAll(ids);
+                dependencies.put(id, chosen);
+            }
+            ObjectNode merged = unconditional.deepCopy();
+            for (String id : ids) {
+                for (String dependency : collectResourceDependencies(everyBranchResources.get(id), ids, Map.of())) {
+                    if (ids.contains(dependency) && !dependency.equals(id)
+                            && !dependencies.get(id).contains(dependency)
+                            && !dependsOn(dependencies, dependency, id)) {
+                        dependencies.get(id).add(dependency);
+                        addDependsOn(merged.get(id), dependency);
+                    }
+                }
+            }
+            return creationOrder(merged, conditions);
+        } catch (RuntimeException e) {
+            LOG.debugv("Ordering stack {0} by every Fn::If branch, its conditions could not be read: {1}",
+                    stack.getStackName(), e.getMessage());
+            return everyBranch;
+        }
+    }
+
+    /** Whether {@code from} depends on {@code to}, directly or through other resources. */
+    private static boolean dependsOn(Map<String, Set<String>> dependencies, String from, String to) {
+        Deque<String> pending = new ArrayDeque<>(List.of(from));
+        Set<String> seen = new HashSet<>();
+        while (!pending.isEmpty()) {
+            String current = pending.pop();
+            if (current.equals(to)) {
+                return true;
+            }
+            if (seen.add(current)) {
+                pending.addAll(dependencies.getOrDefault(current, Set.of()));
+            }
+        }
+        return false;
+    }
+
+    /** Adds a resource to a definition's {@code DependsOn}, keeping what it already names. */
+    private static void addDependsOn(JsonNode definition, String dependency) {
+        if (!(definition instanceof ObjectNode object)) {
+            return;
+        }
+        JsonNode existing = object.path("DependsOn");
+        ArrayNode dependsOn = JsonNodeFactory.instance.arrayNode();
+        if (existing.isTextual()) {
+            dependsOn.add(existing.asText());
+        } else if (existing.isArray()) {
+            dependsOn.addAll((ArrayNode) existing);
+        }
+        dependsOn.add(dependency);
+        object.set("DependsOn", dependsOn);
+    }
+
+    /**
+     * A copy of a template value with each {@code Fn::If} replaced by a list of both its branches,
+     * so the dependencies collected from it are what either branch names.
+     */
+    private static JsonNode everyIfBranch(JsonNode node) {
+        if (node.isObject()) {
+            JsonNode fnIf = node.path("Fn::If");
+            if (fnIf.isArray() && fnIf.size() == 3) {
+                ArrayNode branches = JsonNodeFactory.instance.arrayNode();
+                branches.add(everyIfBranch(fnIf.get(1)));
+                branches.add(everyIfBranch(fnIf.get(2)));
+                return branches;
+            }
+            ObjectNode copy = JsonNodeFactory.instance.objectNode();
+            node.properties().forEach(e -> copy.set(e.getKey(), everyIfBranch(e.getValue())));
+            return copy;
+        }
+        if (node.isArray()) {
+            ArrayNode copy = JsonNodeFactory.instance.arrayNode();
+            node.forEach(item -> copy.add(everyIfBranch(item)));
+            return copy;
+        }
+        return node;
+    }
+
+    /**
+     * A resource's place in {@link #resourcesInCreationOrder}: its template rank, or for a leftover
+     * one step after the latest held resource its attributes name, leftovers included, or else -1.
+     * A chain of leftovers stays below the next template rank, and a cycle among them is cut where
+     * it closes.
+     */
+    private static double leftoverPosition(StackResource resource, Map<String, Integer> rank,
+                                           Map<String, List<StackResource>> holdersByPhysicalId,
+                                           double step, Map<String, Double> position, Set<String> visiting) {
+        Integer resourceRank = rank.get(resource.getLogicalId());
+        if (resourceRank != null) {
+            return resourceRank;
+        }
+        Double known = position.get(resource.getLogicalId());
+        if (known != null) {
+            return known;
+        }
+        visiting.add(resource.getLogicalId());
+        double placed = -1;
+        for (String value : resource.getAttributes().values()) {
+            for (StackResource holder : holdersByPhysicalId.getOrDefault(value, List.of())) {
+                if (!visiting.contains(holder.getLogicalId())) {
+                    placed = Math.max(placed,
+                            leftoverPosition(holder, rank, holdersByPhysicalId, step, position, visiting) + step);
+                }
+            }
+        }
+        visiting.remove(resource.getLogicalId());
+        position.put(resource.getLogicalId(), placed);
+        return placed;
     }
 
     void deleteStackResources(Stack stack, String region, String accountId) {
