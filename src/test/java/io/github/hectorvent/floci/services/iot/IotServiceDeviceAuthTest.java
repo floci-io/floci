@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.iot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.Pem;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.iot.IotService.RegisteredDevice;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
@@ -92,6 +94,37 @@ class IotServiceDeviceAuthTest {
         assertEquals(OTHER_ACCOUNT, device.accountId());
         assertEquals("eu-west-1", device.region());
         assertEquals(created.getCertificateId(), device.certificate().getCertificateId());
+    }
+
+    @Test
+    void aCertificateRegisteredInTwoAccountsIsRefused() {
+        IotCertificate registered = service.registerCertificateWithoutCa(selfSignedPem(), "ACTIVE", REGION);
+        support.certificates.putForAccount(OTHER_ACCOUNT, "cert:" + REGION + ":" + registered.getCertificateId(),
+                service.describeCertificate(registered.getCertificateId(), REGION));
+
+        assertTrue(service.findRegisteredCertificate(parse(registered)).isEmpty());
+    }
+
+    @Test
+    void aSecondAccountRegisteringAKnownDeviceRefusesItsNextConnect() {
+        String pem = selfSignedPem();
+        IotCertificate elsewhere = service.registerCertificateWithoutCa(pem, "ACTIVE", "eu-west-1");
+        support.certificates.delete("cert:eu-west-1:" + elsewhere.getCertificateId());
+        support.certificates.putForAccount(OTHER_ACCOUNT, "cert:eu-west-1:" + elsewhere.getCertificateId(), elsewhere);
+        assertEquals(OTHER_ACCOUNT, service.findRegisteredCertificate(parse(elsewhere)).orElseThrow().accountId());
+
+        service.registerCertificateWithoutCa(pem, "ACTIVE", REGION);
+
+        assertTrue(service.findRegisteredCertificate(parse(elsewhere)).isEmpty());
+    }
+
+    @Test
+    void aCertificateRegisteredInTwoRegionsOfOneAccountIsFound() {
+        String pem = selfSignedPem();
+        service.registerCertificateWithoutCa(pem, "ACTIVE", "eu-west-1");
+        IotCertificate registered = service.registerCertificateWithoutCa(pem, "ACTIVE", REGION);
+
+        assertEquals(ACCOUNT, service.findRegisteredCertificate(parse(registered)).orElseThrow().accountId());
     }
 
     @Test
@@ -475,6 +508,12 @@ class IotServiceDeviceAuthTest {
 
     private boolean connect(RegisteredDevice device, String clientId) {
         return service.isConnectAllowed(device, clientId, "127.0.0.1", null);
+    }
+
+    private static String selfSignedPem() {
+        return new CertificateGenerator()
+                .generateSelfSignedCertificate("device", List.of(), KeyAlgorithm.RSA_2048)
+                .certificatePem();
     }
 
     private static X509Certificate parse(IotCertificate certificate) {

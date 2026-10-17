@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CertificateMaterialException;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -78,6 +79,9 @@ import java.util.regex.Pattern;
 public class IotService {
 
     private static final Logger LOG = Logger.getLogger(IotService.class);
+
+    public static final String NON_EXCLUSIVE_THING = "NON_EXCLUSIVE_THING";
+    private static final String EXCLUSIVE_THING = "EXCLUSIVE_THING";
 
     static final String DEFAULT_ENDPOINT_TYPE = "iot:Data-ATS";
 
@@ -350,6 +354,36 @@ public class IotService {
         return certificate;
     }
 
+    /** As on AWS, the certificate is trusted because it is registered: no CA is checked, and its mode is {@code SNI_ONLY}. */
+    public IotCertificate registerCertificateWithoutCa(String certificatePem, String status, String region) {
+        startMqttIfEnabled();
+        if (certificatePem == null || certificatePem.isBlank()) {
+            throw new AwsException("InvalidRequestException", "certificatePem is required", 400);
+        }
+        String effectiveStatus = status == null ? "INACTIVE" : status;
+        validateCertificateStatus(effectiveStatus);
+        IotCertificate certificate = new IotCertificate();
+        try {
+            fill(certificate, Pem.parseCertificate(certificatePem));
+        } catch (CertificateMaterialException e) {
+            throw new AwsException("CertificateValidationException", e.getMessage(), 400);
+        } catch (Exception e) {
+            throw new AwsException("InternalFailureException", "Could not read device certificate: " + e.getMessage(), 500);
+        }
+        String key = certificateKey(region, certificate.getCertificateId());
+        if (certificateStore.get(key).isPresent()) {
+            throw new AwsException("ResourceAlreadyExistsException", "Certificate already exists: " + certificate.getCertificateId(), 409);
+        }
+        certificate.setCertificateArn(regionResolver.buildArn("iot", region, "cert/" + certificate.getCertificateId()));
+        certificate.setStatus(effectiveStatus);
+        certificate.setCertificateMode("SNI_ONLY");
+        certificate.setCreationDate(Instant.now());
+        certificateStore.put(key, certificate);
+        // A device that connected before may now be registered in a second account.
+        certificateLocations.remove(certificate.getCertificateId());
+        return certificate;
+    }
+
     /** As on AWS, the private key is returned once and never kept: the stored record has none. */
     private static IotCertificate withoutPrivateKey(IotCertificate certificate) {
         IotCertificate stored = new IotCertificate();
@@ -358,6 +392,7 @@ public class IotService {
         stored.setCertificatePem(certificate.getCertificatePem());
         stored.setPublicKey(certificate.getPublicKey());
         stored.setStatus(certificate.getStatus());
+        stored.setCertificateMode(certificate.getCertificateMode());
         stored.setCreationDate(certificate.getCreationDate());
         stored.setNotBefore(certificate.getNotBefore());
         stored.setNotAfter(certificate.getNotAfter());
@@ -449,7 +484,8 @@ public class IotService {
      * across every account partition: a connecting device carries no request context. The
      * partition and key a certificate was found under are remembered, so a device's next connect
      * is one keyed read; a remembered location that no longer resolves is dropped and the scan
-     * runs again.
+     * runs again. AWS picks the account from the server name; Floci cannot yet, so a certificate
+     * registered in more than one account is refused rather than admitted under one of them.
      */
     public Optional<RegisteredDevice> findRegisteredCertificate(X509Certificate presented) {
         String certificateId;
@@ -467,14 +503,28 @@ public class IotService {
             }
             certificateLocations.remove(certificateId, known);
         }
+        // compute serializes this scan with the remove in registerCertificateWithoutCa, so a
+        // registration in a second account cannot leave a stale location cached.
+        CertificateLocation location = certificateLocations.compute(certificateId, (id, stale) -> locateRegistration(id));
+        if (location == null) {
+            return Optional.empty();
+        }
+        return getForAccount(certificateStore, location.accountId(), location.key())
+                .map(certificate -> new RegisteredDevice(location.accountId(), regionOfCertificateKey(location.key()), certificate));
+    }
+
+    private CertificateLocation locateRegistration(String certificateId) {
         String suffix = ":" + certificateId;
-        Optional<AccountAwareStorageBackend.AccountEntry<IotCertificate>> found =
-                registeredCertificates(key -> key.startsWith("cert:") && key.endsWith(suffix)).stream()
-                        .sorted(Comparator.comparing((AccountAwareStorageBackend.AccountEntry<IotCertificate> entry) -> entry.accountId())
-                                .thenComparing(AccountAwareStorageBackend.AccountEntry::key))
-                        .findFirst();
-        found.ifPresent(entry -> certificateLocations.put(certificateId, new CertificateLocation(entry.accountId(), entry.key())));
-        return found.map(entry -> new RegisteredDevice(entry.accountId(), regionOfCertificateKey(entry.key()), entry.value()));
+        List<AccountAwareStorageBackend.AccountEntry<IotCertificate>> registrations =
+                registeredCertificates(key -> key.startsWith("cert:") && key.endsWith(suffix));
+        if (registrations.stream().map(AccountAwareStorageBackend.AccountEntry::accountId).distinct().count() > 1) {
+            LOG.debugv("Refusing device certificate {0}: it is registered in more than one account", certificateId);
+            return null;
+        }
+        return registrations.stream()
+                .min(Comparator.comparing(AccountAwareStorageBackend.AccountEntry::key))
+                .map(entry -> new CertificateLocation(entry.accountId(), entry.key()))
+                .orElse(null);
     }
 
     private static String regionOfCertificateKey(String key) {
@@ -782,6 +832,39 @@ public class IotService {
             }
         }
         return things;
+    }
+
+    public Page<String> listThingPrincipalsV2(String thingName, String thingPrincipalType, String region,
+                                              Integer maxResults, String nextToken) {
+        validateV2PageSize(maxResults);
+        return paginate(ofThingPrincipalType(thingPrincipalType, listThingPrincipals(thingName, region)), maxResults, nextToken);
+    }
+
+    public Page<String> listPrincipalThingsV2(String principal, String thingPrincipalType, String region,
+                                              Integer maxResults, String nextToken) {
+        if (principal == null || principal.isBlank()) {
+            throw new AwsException("InvalidRequestException", "Principal is required", 400);
+        }
+        validateV2PageSize(maxResults);
+        return paginate(ofThingPrincipalType(thingPrincipalType, listPrincipalThings(principal, region)), maxResults, nextToken);
+    }
+
+    /** The V2 principal lists accept 1 to 250 results per page, as on AWS. */
+    private static void validateV2PageSize(Integer maxResults) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 250)) {
+            throw new AwsException("InvalidRequestException", "maxResults must be between 1 and 250", 400);
+        }
+    }
+
+    /** Exclusive attachment is not modelled, so every attachment is {@code NON_EXCLUSIVE_THING}. */
+    private static List<String> ofThingPrincipalType(String thingPrincipalType, Set<String> attachments) {
+        if (thingPrincipalType == null || NON_EXCLUSIVE_THING.equals(thingPrincipalType)) {
+            return List.copyOf(attachments);
+        }
+        if (EXCLUSIVE_THING.equals(thingPrincipalType)) {
+            return List.of();
+        }
+        throw new AwsException("InvalidRequestException", "Unsupported thingPrincipalType: " + thingPrincipalType, 400);
     }
 
     public List<IotPolicy> listAttachedPolicies(String target, String region) {

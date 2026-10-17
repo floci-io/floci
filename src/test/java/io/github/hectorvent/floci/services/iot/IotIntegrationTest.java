@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.iot;
 
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.quarkus.test.junit.QuarkusTest;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
@@ -9,13 +11,18 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -796,6 +803,163 @@ class IotIntegrationTest {
         .then()
             .statusCode(200)
             .body("policyVersionId", equalTo("6"));
+    }
+
+    @Test
+    @Order(21)
+    void registerCertificateWithoutCaTrustsAnyIssuer() {
+        String certificatePem = new CertificateGenerator()
+                .generateSelfSignedCertificate("no-ca-device", List.of(), KeyAlgorithm.RSA_2048)
+                .certificatePem();
+
+        String certificateId = given()
+            .contentType("application/json")
+            .body(Map.of("certificatePem", certificatePem, "status", "ACTIVE"))
+        .when()
+            .post("/certificate/register-no-ca")
+        .then()
+            .statusCode(200)
+            .body("certificateId", matchesPattern("[0-9a-f]{64}"))
+            .body("certificateArn", containsString(":iot:us-east-1:000000000000:cert/"))
+            .extract()
+            .path("certificateId");
+
+        given()
+        .when()
+            .get("/certificates/" + certificateId)
+        .then()
+            .statusCode(200)
+            .body("certificateDescription.status", equalTo("ACTIVE"))
+            .body("certificateDescription.certificateMode", equalTo("SNI_ONLY"))
+            .body("certificateDescription.certificatePem", equalTo(certificatePem));
+
+        given()
+        .when()
+            .get("/certificates")
+        .then()
+            .statusCode(200)
+            .body("certificates.find { it.certificateId == '" + certificateId + "' }.certificateMode", equalTo("SNI_ONLY"));
+
+        given()
+            .contentType("application/json")
+            .body(Map.of("certificatePem", certificatePem))
+        .when()
+            .post("/certificate/register-no-ca")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("ResourceAlreadyExistsException"));
+
+        given()
+            .contentType("application/json")
+            .body(Map.of("certificatePem", "not a certificate"))
+        .when()
+            .post("/certificate/register-no-ca")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("CertificateValidationException"));
+
+        given()
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/certificate/register-no-ca")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        given()
+            .contentType("application/json")
+            .body(Map.of("certificatePem", certificatePem, "status", "UNKNOWN"))
+        .when()
+            .post("/certificate/register-no-ca")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+    }
+
+    @Test
+    @Order(22)
+    void principalListsV2ReportTheAttachmentType() {
+        String certificateArn = given()
+            .queryParam("setAsActive", true)
+        .when()
+            .post("/keys-and-certificate")
+        .then()
+            .statusCode(200)
+            .extract()
+            .path("certificateArn");
+        createThingAndReturnArn("v2-principal-thing-a");
+        createThingAndReturnArn("v2-principal-thing-b");
+        for (String thingName : List.of("v2-principal-thing-a", "v2-principal-thing-b")) {
+            given()
+                .queryParam("principal", certificateArn)
+            .when()
+                .put("/things/" + thingName + "/principals")
+            .then()
+                .statusCode(200);
+        }
+
+        given()
+        .when()
+            .get("/things/v2-principal-thing-a/principals-v2")
+        .then()
+            .statusCode(200)
+            .body("thingPrincipalObjects.principal", equalTo(List.of(certificateArn)))
+            .body("thingPrincipalObjects.thingPrincipalType", equalTo(List.of("NON_EXCLUSIVE_THING")));
+
+        given()
+            .header("x-amzn-principal", certificateArn)
+            .queryParam("maxResults", 1)
+        .when()
+            .get("/principals/things-v2")
+        .then()
+            .statusCode(200)
+            .body("principalThingObjects.thingName", equalTo(List.of("v2-principal-thing-a")))
+            .body("principalThingObjects.thingPrincipalType", equalTo(List.of("NON_EXCLUSIVE_THING")))
+            .body("nextToken", equalTo("1"));
+
+        given()
+            .header("x-amzn-principal", certificateArn)
+            .queryParam("nextToken", "1")
+        .when()
+            .get("/principals/things-v2")
+        .then()
+            .statusCode(200)
+            .body("principalThingObjects.thingName", equalTo(List.of("v2-principal-thing-b")))
+            .body("nextToken", nullValue());
+
+        given()
+            .header("x-amzn-principal", certificateArn)
+            .queryParam("thingPrincipalType", "EXCLUSIVE_THING")
+        .when()
+            .get("/principals/things-v2")
+        .then()
+            .statusCode(200)
+            .body("principalThingObjects", empty());
+
+        given()
+        .when()
+            .get("/principals/things-v2")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        given()
+            .header("x-amzn-principal", certificateArn)
+            .queryParam("maxResults", 0)
+        .when()
+            .get("/principals/things-v2")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+
+        given()
+            .queryParam("maxResults", 251)
+        .when()
+            .get("/things/v2-principal-thing-a/principals-v2")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
     }
 
     private String createThingAndReturnArn(String thingName) {

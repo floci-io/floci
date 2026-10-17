@@ -318,7 +318,39 @@ func TestIoT(t *testing.T) {
 		principals, err := svc.ListThingPrincipals(ctx, &iot.ListThingPrincipalsInput{ThingName: aws.String(thingName)})
 		require.NoError(t, err)
 		assert.Contains(t, principals.Principals, certArn)
+		principalsV2, err := svc.ListThingPrincipalsV2(ctx, &iot.ListThingPrincipalsV2Input{ThingName: aws.String(thingName)})
+		require.NoError(t, err)
+		require.Len(t, principalsV2.ThingPrincipalObjects, 1)
+		assert.Equal(t, certArn, aws.ToString(principalsV2.ThingPrincipalObjects[0].Principal))
+		assert.Equal(t, iottypes.ThingPrincipalTypeNonExclusiveThing, principalsV2.ThingPrincipalObjects[0].ThingPrincipalType)
+		thingsV2, err := svc.ListPrincipalThingsV2(ctx, &iot.ListPrincipalThingsV2Input{Principal: aws.String(certArn)})
+		require.NoError(t, err)
+		require.Len(t, thingsV2.PrincipalThingObjects, 1)
+		assert.Equal(t, thingName, aws.ToString(thingsV2.PrincipalThingObjects[0].ThingName))
+		assert.Equal(t, iottypes.ThingPrincipalTypeNonExclusiveThing, thingsV2.PrincipalThingObjects[0].ThingPrincipalType)
 		_, err = svc.DetachThingPrincipal(ctx, &iot.DetachThingPrincipalInput{ThingName: aws.String(thingName), Principal: aws.String(certArn)})
+		require.NoError(t, err)
+	})
+
+	t.Run("RegisterCertificateWithoutCA", func(t *testing.T) {
+		certPEM, _ := generateSelfSignedCert()
+		registered, err := svc.RegisterCertificateWithoutCA(ctx, &iot.RegisterCertificateWithoutCAInput{
+			CertificatePem: aws.String(string(certPEM)),
+			Status:         iottypes.CertificateStatusActive,
+		})
+		require.NoError(t, err)
+		described, err := svc.DescribeCertificate(ctx, &iot.DescribeCertificateInput{CertificateId: registered.CertificateId})
+		require.NoError(t, err)
+		assert.Equal(t, iottypes.CertificateStatusActive, described.CertificateDescription.Status)
+		assert.Equal(t, iottypes.CertificateModeSniOnly, described.CertificateDescription.CertificateMode)
+
+		_, err = svc.RegisterCertificateWithoutCA(ctx, &iot.RegisterCertificateWithoutCAInput{CertificatePem: aws.String(string(certPEM))})
+		var exists *iottypes.ResourceAlreadyExistsException
+		require.ErrorAs(t, err, &exists)
+
+		_, err = svc.UpdateCertificate(ctx, &iot.UpdateCertificateInput{CertificateId: registered.CertificateId, NewStatus: iottypes.CertificateStatusInactive})
+		require.NoError(t, err)
+		_, err = svc.DeleteCertificate(ctx, &iot.DeleteCertificateInput{CertificateId: registered.CertificateId})
 		require.NoError(t, err)
 	})
 

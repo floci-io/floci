@@ -14,6 +14,7 @@ public class IotCertificate {
     private String publicKey;
     private String privateKey;
     private String status;
+    private String certificateMode;
     private Instant creationDate;
     private Instant notBefore;
     private Instant notAfter;
@@ -31,6 +32,8 @@ public class IotCertificate {
     public void setPrivateKey(String privateKey) { this.privateKey = privateKey; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
+    public String getCertificateMode() { return certificateMode; }
+    public void setCertificateMode(String certificateMode) { this.certificateMode = certificateMode; }
     public Instant getCreationDate() { return creationDate; }
     public void setCreationDate(Instant creationDate) { this.creationDate = creationDate; }
     public Instant getNotBefore() { return notBefore; }
