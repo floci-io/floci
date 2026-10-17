@@ -496,17 +496,20 @@ public class AutoScalingQueryHandler {
     private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
         List<Map.Entry<String, List<String>>> filters = new ArrayList<>();
         for (int i = 1; ; i++) {
-            String name = p.getFirst("Filters.member." + i + ".Name");
-            if (name == null) { break; }
-            filters.add(Map.entry(name, memberList(p, "Filters.member." + i + ".Values")));
+            String prefix = "Filters.member." + i;
+            String name = p.getFirst(prefix + ".Name");
+            boolean hasValues = p.containsKey(prefix + ".Values") || p.containsKey(prefix + ".Values.member.1");
+            if (name == null && !hasValues) { break; }
+            filters.add(new AbstractMap.SimpleImmutableEntry<>(name,
+                    hasValues ? memberList(p, prefix + ".Values") : null));
         }
         String maxRecords = p.getFirst("MaxRecords");
         Integer limit = null;
-        if (maxRecords != null && !maxRecords.isBlank()) {
+        if (maxRecords != null) {
             try {
                 limit = Integer.parseInt(maxRecords);
             } catch (NumberFormatException e) {
-                throw new AwsException("ValidationError", "MaxRecords '" + maxRecords + "' is not a valid integer.", 400);
+                throw new AwsException("MalformedInput", "MaxRecords '" + maxRecords + "' is not a valid integer.", 400);
             }
         }
         PaginatedResult<AutoScalingService.TagDescription> page = service.describeTags(region, filters,

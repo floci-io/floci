@@ -585,31 +585,49 @@ public class AutoScalingService {
 
     // AWS: values inside one filter are ORed, separate filters are ANDed; only these four
     // filter names exist. Ordered by (group, key); NextToken is the last pair returned, so tags
-    // added or removed between pages neither skip nor repeat an entry. Values match exactly
-    // (the Filter model says they are case-sensitive).
+    // added or removed between pages neither skip nor repeat an entry.
     public PaginatedResult<TagDescription> describeTags(String region, List<Map.Entry<String, List<String>>> filters,
                                                          Integer maxRecords, String nextToken) {
+        List<Map.Entry<String, List<String>>> normalizedFilters = new ArrayList<>();
         for (Map.Entry<String, List<String>> filter : filters) {
-            if (!Set.of("auto-scaling-group", "key", "value", "propagate-at-launch").contains(filter.getKey())) {
+            String name = filter.getKey() == null ? "" : filter.getKey().toLowerCase(Locale.ROOT);
+            if (!Set.of("auto-scaling-group", "key", "value", "propagate-at-launch").contains(name)) {
                 throw new AwsException("ValidationError", "Filter name '" + filter.getKey() + "' is not valid.", 400);
             }
+            if (filter.getValue() == null) {
+                throw new AwsException("ValidationError", "The Values attribute and one or more filter values are required.", 400);
+            }
+            List<String> values = filter.getValue();
+            if ("propagate-at-launch".equals(name)) {
+                values = values.stream().map(value -> value.trim().toLowerCase(Locale.ROOT)).toList();
+                if (values.stream().anyMatch(value -> !Set.of("true", "false").contains(value))) {
+                    throw new AwsException("ValidationError", "The propagate-at-launch filter requires true or false.", 400);
+                }
+            }
+            normalizedFilters.add(Map.entry(name, values));
         }
-        int limit = maxRecords != null ? Math.min(Math.max(maxRecords, 1), 100) : 50;
+        if (maxRecords != null && (maxRecords < 1 || maxRecords > 100)) {
+            throw new AwsException("ValidationError", "MaxRecords must be between 1 and 100.", 400);
+        }
+        if (nextToken != null && nextToken.isBlank()) {
+            throw new AwsException("ValidationError", "The NextToken value is not valid.", 400);
+        }
+        int limit = maxRecords != null ? maxRecords : 50;
         List<TagDescription> matches = groups.values().stream()
                 .filter(Objects::nonNull) // group deleted between key snapshot and value read
                 .filter(g -> region.equals(g.getRegion()))
                 .flatMap(g -> g.getTags().entrySet().stream()
                         .map(t -> new TagDescription(g.getAutoScalingGroupName(), t.getKey(), t.getValue(),
                                 g.getTagPropagateAtLaunch().getOrDefault(t.getKey(), false))))
-                .filter(t -> matchesFilter(filters, "auto-scaling-group", t.resourceId())
-                        && matchesFilter(filters, "key", t.key())
-                        && matchesFilter(filters, "value", t.value())
-                        && matchesFilter(filters, "propagate-at-launch", String.valueOf(t.propagateAtLaunch())))
+                .filter(t -> matchesFilter(normalizedFilters, "auto-scaling-group", t.resourceId())
+                        && matchesFilter(normalizedFilters, "key", t.key())
+                        && matchesFilter(normalizedFilters, "value", t.value())
+                        && matchesFilter(normalizedFilters, "propagate-at-launch", String.valueOf(t.propagateAtLaunch())))
                 .collect(Collectors.toList());
         // "\0" sorts below every other character, so the cursor orders as the (group, key) pair.
         return Pagination.paginate(matches,
                 t -> t.resourceId() + "\0" + t.key(), limit, nextToken, "autoscaling-tags",
-                token -> new AwsException("InvalidNextToken", "The NextToken value is not valid.", 400));
+                token -> new AwsException("ValidationError", "The NextToken value is not valid.", 400));
     }
 
     // Every filter of this name must match (a repeated name is a second filter, ANDed).
