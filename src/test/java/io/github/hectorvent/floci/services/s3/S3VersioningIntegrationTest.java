@@ -583,6 +583,95 @@ class S3VersioningIntegrationTest {
         }
     }
 
+    @Test
+    @Order(24)
+    void versionIdNullNamesOnlyTheNullVersionOnEveryObjectOperation() {
+        String bucket = "versioned-null-version-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        // ACLs enabled, so the ACL requests below reach the version they name.
+        given().body("<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>")
+                .when().put("/" + bucket + "?ownershipControls").then().statusCode(200);
+        given().body("old").when().put("/" + bucket + "/old").then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given().body("new").when().put("/" + bucket + "/new").then().statusCode(200);
+
+        // "old", written before versioning, is the null version.
+        String old = "/" + bucket + "/old";
+        given().queryParam("versionId", "null").when().get(old).then().statusCode(200).body(equalTo("old"));
+        given().queryParam("versionId", "null").when().head(old).then().statusCode(200);
+        given().queryParam("versionId", "null").header("x-amz-object-attributes", "ObjectSize")
+                .when().get(old + "?attributes").then().statusCode(200)
+                .body(containsString("<ObjectSize>3</ObjectSize>"));
+        given().queryParam("versionId", "null").when().get(old + "?acl").then().statusCode(200);
+        given().queryParam("versionId", "null").header("x-amz-acl", "private")
+                .when().put(old + "?acl").then().statusCode(200);
+        given().queryParam("versionId", "null").queryParam("annotationName", "labels").body("x")
+                .when().put(old + "?annotation").then().statusCode(200);
+        given().queryParam("versionId", "null").queryParam("annotationName", "labels")
+                .when().get(old + "?annotation").then().statusCode(200);
+        given().header("x-amz-copy-source", "/" + bucket + "/old?versionId=null")
+                .when().put("/" + bucket + "/copy").then().statusCode(200);
+        given().when().get("/" + bucket + "/copy").then().statusCode(200).body(equalTo("old"));
+
+        // "new", written with versioning on, has no null version, and its current version is not
+        // one: each request naming the null version fails as for any missing version.
+        String added = "/" + bucket + "/new";
+        Matcher<String> noSuchVersion = containsString("<Code>NoSuchVersion</Code>");
+        given().queryParam("versionId", "null").when().get(added).then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").when().head(added).then().statusCode(404);
+        given().queryParam("versionId", "null").header("x-amz-object-attributes", "ObjectSize")
+                .when().get(added + "?attributes").then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").when().get(added + "?acl").then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").header("x-amz-acl", "private")
+                .when().put(added + "?acl").then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").queryParam("annotationName", "labels").body("x")
+                .when().put(added + "?annotation").then().statusCode(404)
+                .body(containsString("<Code>NoSuchKey</Code>"));
+        given().header("x-amz-copy-source", "/" + bucket + "/new?versionId=null")
+                .when().put("/" + bucket + "/copy-of-new").then().statusCode(404).body(noSuchVersion);
+        given().when().get(added).then().statusCode(200).body(equalTo("new"));
+    }
+
+    @Test
+    @Order(25)
+    void retentionAndLegalHoldFindTheNullVersion() {
+        // Object Lock enabled on a bucket that already holds a null version, which keeps it.
+        String bucket = "versioned-null-version-lock-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("old").when().put("/" + bucket + "/old").then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given().body("<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>")
+                .when().put("/" + bucket + "?object-lock").then().statusCode(200);
+        given().body("new").when().put("/" + bucket + "/new").then().statusCode(200);
+        String retention = "<Retention><Mode>GOVERNANCE</Mode>"
+                + "<RetainUntilDate>2031-01-01T00:00:00Z</RetainUntilDate></Retention>";
+        String legalHold = "<LegalHold><Status>OFF</Status></LegalHold>";
+
+        String old = "/" + bucket + "/old";
+        given().queryParam("versionId", "null").body(retention).when().put(old + "?retention").then().statusCode(200);
+        given().queryParam("versionId", "null").when().get(old + "?retention")
+                .then().statusCode(200).body(containsString("<Mode>GOVERNANCE</Mode>"));
+        given().queryParam("versionId", "null").body(legalHold).when().put(old + "?legal-hold").then().statusCode(200);
+        given().queryParam("versionId", "null").when().get(old + "?legal-hold")
+                .then().statusCode(200).body(containsString("<Status>OFF</Status>"));
+
+        String added = "/" + bucket + "/new";
+        Matcher<String> noSuchVersion = containsString("<Code>NoSuchVersion</Code>");
+        given().queryParam("versionId", "null").body(retention).when().put(added + "?retention")
+                .then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").when().get(added + "?retention")
+                .then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").body(legalHold).when().put(added + "?legal-hold")
+                .then().statusCode(404).body(noSuchVersion);
+        given().queryParam("versionId", "null").when().get(added + "?legal-hold")
+                .then().statusCode(404).body(noSuchVersion);
+
+        given().queryParam("versionId", "null").header("x-amz-bypass-governance-retention", "true")
+                .when().delete(old).then().statusCode(204);
+    }
+
     private static String tagging(String value) {
         return "<Tagging><TagSet><Tag><Key>version</Key><Value>" + value + "</Value></Tag></TagSet></Tagging>";
     }

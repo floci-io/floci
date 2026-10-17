@@ -382,14 +382,12 @@ class S3VersioningServiceTest {
         for (Runnable request : List.<Runnable>of(
                 () -> s3Service.getObjectTaggingResult("versioned-bucket", "new", "null"),
                 () -> s3Service.putObjectTagging("versioned-bucket", "new", "null", Map.of("version", "other")),
-                () -> s3Service.deleteObjectTagging("versioned-bucket", "new", "null"))) {
+                () -> s3Service.deleteObjectTagging("versioned-bucket", "new", "null"),
+                () -> s3Service.getObjectTagging("versioned-bucket", "new", "null"))) {
             AwsException e = assertThrows(AwsException.class, request::run);
             assertEquals("NoSuchVersion", e.getErrorCode());
         }
         assertEquals(Map.of("version", "current"), s3Service.getObjectTagging("versioned-bucket", "new"));
-        // The condition context's lookup still takes "null" as the current version, which is what
-        // GetObject serves for it.
-        assertEquals(Map.of("version", "current"), s3Service.getObjectTagging("versioned-bucket", "new", "null"));
 
         // An object written while versioning is suspended is the null version too, above the
         // versions written before it.

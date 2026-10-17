@@ -2464,6 +2464,33 @@ class S3AuthEnforcementIntegrationTest {
         given().when().get("/" + bucket + "?list-type=2").then().statusCode(200);
     }
 
+    @Test
+    @Order(59)
+    void anAnonymousReadNamingTheNullVersionIsCheckedAgainstThatVersionsAcl() {
+        String bucket = "auth-null-version-acl-bucket";
+        given().filter(LOCAL_SIGNER).when().put("/" + bucket).then().statusCode(200);
+        enableLegacyAcls(bucket);
+        given().filter(LOCAL_SIGNER).body("old").when().put("/" + bucket + "/old").then().statusCode(200);
+        given().filter(LOCAL_SIGNER)
+            .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+            .when().put("/" + bucket + "?versioning")
+            .then().statusCode(200);
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "public-read").body("new")
+            .when().put("/" + bucket + "/new")
+            .then().statusCode(200);
+
+        // "old", written before versioning, is the null version, and its own ACL makes it public.
+        given().filter(LOCAL_SIGNER).queryParam("versionId", "null").header("x-amz-acl", "public-read")
+            .when().put("/" + bucket + "/old?acl")
+            .then().statusCode(200);
+        given().queryParam("versionId", "null").when().get("/" + bucket + "/old")
+            .then().statusCode(200).body(equalTo("old"));
+
+        // "new" has no null version: its public current version does not make one readable.
+        given().when().get("/" + bucket + "/new").then().statusCode(200).body(equalTo("new"));
+        given().queryParam("versionId", "null").when().get("/" + bucket + "/new").then().statusCode(403);
+    }
+
     private static String publicObjectActionPolicy(String bucket, String action) {
         return publicObjectActionPolicy(bucket, "*", action);
     }

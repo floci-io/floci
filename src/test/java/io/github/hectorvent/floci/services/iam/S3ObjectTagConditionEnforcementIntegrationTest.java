@@ -150,18 +150,20 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
     }
 
     @Test
-    void aReadNamingTheNullVersionIsAuthorizedAgainstTheVersionItServes() {
+    void aReadNamingTheNullVersionIsAuthorizedAgainstThatVersion() {
         Fixture f = new Fixture("nullversion", true);
-        // Written with versioning on, the key has no null version. S3 answers a read naming one with
-        // NoSuchVersion, but floci serves it the current version, so that version's tags must decide
-        // or the deny on them would be skipped.
+        // Seeded before versioning was enabled, a/tagged-a and a/tagged-b are null versions, and a
+        // read naming one is checked against its tags. a/secret, written with versioning on, has no
+        // null version: a read naming one is answered NoSuchVersion and serves nothing.
         f.seedVersion("a/secret", "env=b");
         f.policy(allow("\"s3:GetObject\",\"s3:GetObjectVersion\"", f.objects(), null) + ","
                 + "{\"Effect\":\"Deny\",\"Action\":[\"s3:GetObject\",\"s3:GetObjectVersion\"],"
                 + "\"Resource\":\"" + f.objects() + "\","
                 + "\"Condition\":{\"StringEquals\":{\"s3:ExistingObjectTag/env\":\"b\"}}}");
+        assertEquals(403, f.getVersion("a/tagged-b", "null"), "the null version carries the denied tag");
+        assertEquals(200, f.getVersion("a/tagged-a", "null"), "the null version carries an allowed tag");
         assertEquals(403, f.get("a/secret"), "the current version carries the denied tag");
-        assertEquals(403, f.getVersion("a/secret", "null"), "the same version, reached through versionId=null");
+        assertEquals(404, f.getVersion("a/secret", "null"), "a key without a null version serves none");
     }
 
     private static String allow(String actions, String resource, String condition) {
