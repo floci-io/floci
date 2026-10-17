@@ -811,10 +811,26 @@ public class VpcNetworkManager {
         if (!vpc.created) {
             return;
         }
-        removeNetworkWithRetry(vpc.networkName, 1);
+        String flociContainerId = vpc.flociContainerId;
+        if (flociContainerId == null && currentContainerNetworkResolver != null) {
+            flociContainerId = currentContainerNetworkResolver.resolveContainerId().orElse(null);
+        }
+        removeNetworkWithRetry(vpc.networkName, flociContainerId, 1);
     }
 
-    private void removeNetworkWithRetry(String networkName, int attempt) {
+    private void removeNetworkWithRetry(String networkName, String flociContainerId, int attempt) {
+        if (flociContainerId != null) {
+            try {
+                dockerClient.disconnectFromNetworkCmd()
+                        .withNetworkId(networkName)
+                        .withContainerId(flociContainerId)
+                        .withForce(true)
+                        .exec();
+            } catch (Exception e) {
+                LOG.debugv("Could not disconnect Floci container {0} from VPC network {1}: {2}",
+                        flociContainerId, networkName, e.getMessage());
+            }
+        }
         try {
             dockerClient.removeNetworkCmd(networkName).exec();
             LOG.infov("Removed Docker network {0}", networkName);
@@ -823,7 +839,8 @@ public class VpcNetworkManager {
         } catch (Exception e) {
             // Containers terminated moments earlier still hold endpoints for a beat.
             if (attempt < 5 && !retries.isShutdown()) {
-                retries.schedule(() -> removeNetworkWithRetry(networkName, attempt + 1), 2, TimeUnit.SECONDS);
+                retries.schedule(() -> removeNetworkWithRetry(networkName, flociContainerId, attempt + 1),
+                        2, TimeUnit.SECONDS);
                 return;
             }
             LOG.warnv("Could not remove Docker network {0} after {1} attempts: {2}. It will be reconciled "

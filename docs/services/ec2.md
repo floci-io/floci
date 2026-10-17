@@ -935,6 +935,11 @@ For overlapping VPC CIDRs, the first VPC whose addresses are needed keeps the de
 later VPCs use the fallback pool. Within one emulator run, allocated addresses remain on the
 same effective range.
 
+When Floci runs in Docker, deleting a VPC disconnects Floci's own container before removing
+the VPC network. Other endpoints are not forcibly disconnected: removal retries while they
+drain, up to five attempts two seconds apart. After successful removal, a new VPC can reuse
+the CIDR without colliding with a network left behind by that deletion.
+
 When EC2 is enabled, Floci initializes its service, restores persisted state, and seeds the
 configured region's default resources during startup. Other account and region scopes seed on
 first access. Docker reconciliation can lengthen startup, and Docker-backed instance launches

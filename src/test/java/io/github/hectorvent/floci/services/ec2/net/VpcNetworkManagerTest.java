@@ -8,12 +8,15 @@ import com.github.dockerjava.api.command.DisconnectFromNetworkCmd;
 import com.github.dockerjava.api.command.InspectNetworkCmd;
 import com.github.dockerjava.api.command.ListNetworksCmd;
 import com.github.dockerjava.api.command.RemoveNetworkCmd;
+import com.github.dockerjava.api.exception.ConflictException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Network;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
@@ -22,11 +25,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -37,6 +42,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -475,6 +481,200 @@ class VpcNetworkManagerTest {
         ConnectToNetworkCmd connect = docker.connectToNetworkCmd();
         verify(connect, never()).withContainerId("floci-container");
         verify(connect).withContainerId("instance-1");
+    }
+
+    @Test
+    void deletingVpcDisconnectsFlociAndLetsTheNextVpcReuseItsDeclaredCidr() {
+        VpcNetworkManager dockerHostedManager = dockerHostedManager("floci-container");
+        NetworkLifecycle network = new NetworkLifecycle(dockerHostedManager, "floci-container");
+        try {
+            dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+            dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+            String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+            assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+            dockerHostedManager.detach(REGION, "vpc-1", "instance-1");
+            dockerHostedManager.forgetSubnet(REGION, "subnet-a");
+
+            dockerHostedManager.deleteVpcNetwork(REGION, "vpc-1");
+            dockerHostedManager.declareVpc(REGION, "vpc-2", "10.0.0.0/16");
+            dockerHostedManager.declareSubnet(REGION, "vpc-2", "subnet-b", "10.0.1.0/24");
+
+            assertEquals(address, dockerHostedManager.allocatePrivateIp(REGION, "subnet-b").orElseThrow(),
+                    "deleting the first VPC must release its Docker IPAM reservation");
+            assertTrue(existingNetworks.isEmpty());
+            assertTrue(network.endpoints.isEmpty());
+        } finally {
+            dockerHostedManager.shutdown();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deletingAdoptedVpcDisconnectsItsExistingFlociEndpoint(boolean shortContainerId) {
+        String fullContainerId = "0123456789abcdef".repeat(4);
+        String resolvedContainerId = shortContainerId ? fullContainerId.substring(0, 12) : fullContainerId;
+        VpcNetworkManager dockerHostedManager = dockerHostedManager(resolvedContainerId);
+        NetworkLifecycle network = new NetworkLifecycle(dockerHostedManager, fullContainerId);
+        network.endpoints.put(fullContainerId, mock(Network.ContainerNetworkConfig.class));
+        existingNetwork(network.name, "10.0.0.0/16", ourLabels("vpc-1", "4650"), network.endpoints);
+        try {
+            dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+            dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+            String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+            assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+            dockerHostedManager.detach(REGION, "vpc-1", "instance-1");
+
+            dockerHostedManager.deleteVpcNetwork(REGION, "vpc-1");
+
+            assertTrue(existingNetworks.isEmpty(), "an adopted self endpoint must not keep the network alive");
+            assertTrue(network.endpoints.isEmpty());
+        } finally {
+            dockerHostedManager.shutdown();
+        }
+    }
+
+    @Test
+    void deletingVpcDisconnectsTheRecordedFlociEndpointAndLeavesOthersAttached() {
+        CurrentContainerNetworkResolver resolver = mock(CurrentContainerNetworkResolver.class);
+        when(resolver.resolveContainerId()).thenReturn(Optional.of("floci-container"));
+        VpcNetworkManager dockerHostedManager = new VpcNetworkManager(config, docker, resolver);
+        NetworkLifecycle network = new NetworkLifecycle(dockerHostedManager, "floci-container");
+        try {
+            dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+            dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+            String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+            assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+            network.endpoints.put("foreign-container", mock(Network.ContainerNetworkConfig.class));
+            when(resolver.resolveContainerId()).thenReturn(Optional.of("foreign-container"));
+
+            dockerHostedManager.deleteVpcNetwork(REGION, "vpc-1");
+
+            assertEquals(Set.of("instance-1", "foreign-container"), network.endpoints.keySet(),
+                    "normal teardown detaches only Floci, leaving other endpoints to drain");
+            assertEquals(1, existingNetworks.size(), "Docker must retain a network with live guest endpoints");
+        } finally {
+            dockerHostedManager.shutdown();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deletingVpcWithoutASelfEndpointNeedsNoDisconnect(boolean resolverAvailable) {
+        VpcNetworkManager hostManager = resolverAvailable
+                ? dockerHostedManager(null) : new VpcNetworkManager(config, docker);
+        NetworkLifecycle network = new NetworkLifecycle(hostManager, "floci-container");
+        try {
+            hostManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+            hostManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+            String address = hostManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+            assertTrue(hostManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+            network.endpoints.remove("instance-1");
+
+            hostManager.deleteVpcNetwork(REGION, "vpc-1");
+
+            assertTrue(existingNetworks.isEmpty());
+            verify(docker, never()).disconnectFromNetworkCmd();
+        } finally {
+            hostManager.shutdown();
+        }
+    }
+
+    @Test
+    void deletingVpcRetriesATransientFlociDisconnectFailure() throws Exception {
+        VpcNetworkManager dockerHostedManager = dockerHostedManager("floci-container");
+        NetworkLifecycle network = new NetworkLifecycle(dockerHostedManager, "floci-container");
+        try {
+            dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+            dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+            String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+            assertTrue(dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address).isPresent());
+            dockerHostedManager.detach(REGION, "vpc-1", "instance-1");
+            network.failNextDisconnect.set(true);
+
+            dockerHostedManager.deleteVpcNetwork(REGION, "vpc-1");
+
+            assertTrue(network.removed.await(5, TimeUnit.SECONDS),
+                    "teardown must retry disconnecting Floci before retrying network removal");
+            assertTrue(network.endpoints.isEmpty());
+            assertTrue(existingNetworks.isEmpty());
+        } finally {
+            dockerHostedManager.shutdown();
+        }
+    }
+
+    private VpcNetworkManager dockerHostedManager(String containerId) {
+        CurrentContainerNetworkResolver resolver = mock(CurrentContainerNetworkResolver.class);
+        when(resolver.resolveContainerId()).thenReturn(Optional.ofNullable(containerId));
+        return new VpcNetworkManager(config, docker, resolver);
+    }
+
+    private final class NetworkLifecycle {
+        final String name;
+        final Map<String, Network.ContainerNetworkConfig> endpoints = new ConcurrentHashMap<>();
+        final AtomicBoolean failNextDisconnect = new AtomicBoolean();
+        final CountDownLatch removed = new CountDownLatch(1);
+
+        NetworkLifecycle(VpcNetworkManager networkManager, String selfContainerId) {
+            name = networkManager.networkName(REGION, "vpc-1");
+            when(docker.createNetworkCmd().exec()).thenAnswer(call -> {
+                existingNetwork(name, "10.0.0.0/16", ourLabels("vpc-1", "4650"), endpoints);
+                return new CreateNetworkResponse();
+            });
+            when(docker.connectToNetworkCmd()).thenAnswer(call -> {
+                ConnectToNetworkCmd connect = mock(ConnectToNetworkCmd.class, RETURNS_SELF);
+                String[] containerId = new String[1];
+                when(connect.withContainerId(anyString())).thenAnswer(argument -> {
+                    String requested = argument.getArgument(0);
+                    containerId[0] = selfContainerId.startsWith(requested) ? selfContainerId : requested;
+                    return connect;
+                });
+                when(connect.withNetworkId(anyString())).thenAnswer(argument -> {
+                    assertEquals(name, argument.getArgument(0));
+                    return connect;
+                });
+                doAnswer(execution -> {
+                    if (endpoints.putIfAbsent(containerId[0], mock(Network.ContainerNetworkConfig.class)) != null) {
+                        throw new ConflictException("container is already connected");
+                    }
+                    return null;
+                }).when(connect).exec();
+                return connect;
+            });
+            when(docker.disconnectFromNetworkCmd()).thenAnswer(call -> {
+                DisconnectFromNetworkCmd disconnect = mock(DisconnectFromNetworkCmd.class, RETURNS_SELF);
+                String[] containerId = new String[1];
+                when(disconnect.withContainerId(anyString())).thenAnswer(argument -> {
+                    String requested = argument.getArgument(0);
+                    containerId[0] = selfContainerId.startsWith(requested) ? selfContainerId : requested;
+                    return disconnect;
+                });
+                when(disconnect.withNetworkId(anyString())).thenAnswer(argument -> {
+                    assertEquals(name, argument.getArgument(0));
+                    return disconnect;
+                });
+                doAnswer(execution -> {
+                    if (failNextDisconnect.compareAndSet(true, false)) {
+                        throw new RuntimeException("temporary Docker disconnect failure");
+                    }
+                    endpoints.remove(containerId[0]);
+                    return null;
+                }).when(disconnect).exec();
+                return disconnect;
+            });
+            when(docker.removeNetworkCmd(anyString())).thenAnswer(call -> {
+                assertEquals(name, call.getArgument(0));
+                RemoveNetworkCmd remove = mock(RemoveNetworkCmd.class, RETURNS_SELF);
+                doAnswer(execution -> {
+                    if (!endpoints.isEmpty()) {
+                        throw new ConflictException("network has active endpoints");
+                    }
+                    existingNetworks.removeIf(network -> name.equals(network.getName()));
+                    removed.countDown();
+                    return null;
+                }).when(remove).exec();
+                return remove;
+            });
+        }
     }
 
     @Test
