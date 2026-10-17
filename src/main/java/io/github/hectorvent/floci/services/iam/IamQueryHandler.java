@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.DelegationPermission;
+import io.github.hectorvent.floci.services.iam.model.DelegationRequest;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
@@ -14,6 +16,7 @@ import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.OrganizationsAccessReportJob;
 import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederation;
+import io.github.hectorvent.floci.services.iam.model.PolicyParameter;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
@@ -42,6 +45,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Pattern;
@@ -78,6 +82,7 @@ public class IamQueryHandler {
     private final SAMLProviderService samlProviderService;
     private final ServiceLastAccessedService serviceLastAccessedService;
     private final OrganizationsAccessReportService organizationsAccessReportService;
+    private final DelegationRequestService delegationRequestService;
     private final RegionResolver regionResolver;
     private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
 
@@ -86,6 +91,7 @@ public class IamQueryHandler {
                            AccountResolver accountResolver, SAMLProviderService samlProviderService,
                            ServiceLastAccessedService serviceLastAccessedService,
                            OrganizationsAccessReportService organizationsAccessReportService,
+                           DelegationRequestService delegationRequestService,
                            RegionResolver regionResolver,
                            Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders) {
         this.iamService = iamService;
@@ -94,6 +100,7 @@ public class IamQueryHandler {
         this.samlProviderService = samlProviderService;
         this.serviceLastAccessedService = serviceLastAccessedService;
         this.organizationsAccessReportService = organizationsAccessReportService;
+        this.delegationRequestService = delegationRequestService;
         this.regionResolver = regionResolver;
         this.serverCertificateReferenceProviders = serverCertificateReferenceProviders;
     }
@@ -316,6 +323,15 @@ public class IamQueryHandler {
             case "GetOrganizationsAccessReport" ->
                     handleGetOrganizationsAccessReport(params, authorization);
             case "ListPoliciesGrantingServiceAccess" -> handleListPoliciesGrantingServiceAccess(params, authorization);
+
+            // Delegation requests
+            case "CreateDelegationRequest" -> handleCreateDelegationRequest(params);
+            case "AssociateDelegationRequest" -> handleAssociateDelegationRequest(params, authorization);
+            case "AcceptDelegationRequest" -> handleAcceptDelegationRequest(params, authorization);
+            case "RejectDelegationRequest" -> handleRejectDelegationRequest(params);
+            case "UpdateDelegationRequest" -> handleUpdateDelegationRequest(params);
+            case "GetDelegationRequest" -> handleGetDelegationRequest(params);
+            case "ListDelegationRequests" -> handleListDelegationRequests(params);
 
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.IAM, 400);
@@ -2454,6 +2470,255 @@ public class IamQueryHandler {
         }
         return Response.ok(AwsQueryResponse.envelope("ListPoliciesGrantingServiceAccess",
                 AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    // ── Delegation requests ───────────────────────────────────────────────────
+
+    /**
+     * Files a delegation request for the calling partner account.
+     *
+     * <p>Members are read without {@code requireParam} and handed over as they arrived: the
+     * service validates them and answers {@code ValidationError}, which the reference's common
+     * errors publish for a member that breaks its format or constraints across every IAM
+     * operation. The modeled {@code InvalidInput} is left for a value that cannot be read as the
+     * member's type at all, which is what {@link #delegationInt} and
+     * {@link #parseDelegationBoolean} answer.
+     */
+    private Response handleCreateDelegationRequest(MultivaluedMap<String, String> params) {
+        DelegationRequestService.NewRequest command = new DelegationRequestService.NewRequest(
+                getParam(params, "Description"),
+                getParam(params, "NotificationChannel"),
+                getParam(params, "RequestorWorkflowId"),
+                delegationInt(params, "SessionDuration"),
+                parseDelegationPermissions(params),
+                getParam(params, "OwnerAccountId"),
+                getParam(params, "RedirectUrl"),
+                getParam(params, "RequestMessage"),
+                parseDelegationBoolean(params, "OnlySendByOwner"));
+        DelegationRequestService.Created created = delegationRequestService.create(
+                regionResolver.getAccountId(), regionResolver.getRegion(), command);
+        String result = new XmlBuilder()
+                .elem("DelegationRequestId", created.request().getDelegationRequestId())
+                .elem("ConsoleDeepLink", created.consoleDeepLink())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("CreateDelegationRequest",
+                AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleAssociateDelegationRequest(MultivaluedMap<String, String> params,
+                                                      String authorization) {
+        delegationRequestService.associate(regionResolver.getAccountId(),
+                callerPrincipalArn(authorization), getParam(params, "DelegationRequestId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("AssociateDelegationRequest",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleAcceptDelegationRequest(MultivaluedMap<String, String> params,
+                                                   String authorization) {
+        delegationRequestService.accept(regionResolver.getAccountId(),
+                callerPrincipalArn(authorization), getParam(params, "DelegationRequestId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("AcceptDelegationRequest",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleRejectDelegationRequest(MultivaluedMap<String, String> params) {
+        delegationRequestService.reject(regionResolver.getAccountId(),
+                getParam(params, "DelegationRequestId"), getParam(params, "Notes"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("RejectDelegationRequest",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleUpdateDelegationRequest(MultivaluedMap<String, String> params) {
+        delegationRequestService.update(regionResolver.getAccountId(),
+                getParam(params, "DelegationRequestId"), getParam(params, "Notes"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateDelegationRequest",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * One request, with the permission check only when it was asked for.
+     *
+     * <p>{@code PermissionCheckResult} answers {@code UNSURE}, which the enum models for exactly
+     * this: the check asks whether the caller may act on the request, and a delegation request
+     * carries no permission for Floci to evaluate, so claiming {@code ALLOWED} or {@code DENIED}
+     * would be inventing an answer. Omitting both members when the flag is absent keeps a plain
+     * read the shape AWS gives it.
+     */
+    private Response handleGetDelegationRequest(MultivaluedMap<String, String> params) {
+        DelegationRequest request = delegationRequestService.get(regionResolver.getAccountId(),
+                getParam(params, "DelegationRequestId"));
+        XmlBuilder xml = new XmlBuilder().start("DelegationRequest")
+                .raw(delegationRequestXml(request)).end("DelegationRequest");
+        if (Boolean.TRUE.equals(parseDelegationBoolean(params, "DelegationPermissionCheck"))) {
+            xml.elem("PermissionCheckStatus", "COMPLETE").elem("PermissionCheckResult", "UNSURE");
+        }
+        return Response.ok(AwsQueryResponse.envelope("GetDelegationRequest",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleListDelegationRequests(MultivaluedMap<String, String> params) {
+        Page<DelegationRequest> page = paginate(delegationRequestService.list(
+                regionResolver.getAccountId(), getParam(params, "OwnerId")), params);
+        XmlBuilder xml = new XmlBuilder().start("DelegationRequests");
+        for (DelegationRequest request : page.items()) {
+            xml.start("member").raw(delegationRequestXml(request)).end("member");
+        }
+        // isTruncated is lower-cased on this one operation, where every other IAM list spells it
+        // IsTruncated. The model names the member that way, so the wire follows the model.
+        xml.end("DelegationRequests").elem("isTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListDelegationRequests",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private String delegationRequestXml(DelegationRequest request) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("DelegationRequestId", request.getDelegationRequestId())
+                .elem("Description", request.getDescription())
+                .elem("RequestMessage", request.getRequestMessage())
+                .elem("RequestorId", request.getRequestorId())
+                .elem("RequestorName", request.getRequestorName())
+                .elem("OwnerAccountId", request.getOwnerAccountId())
+                .elem("OwnerId", request.getOwnerId())
+                .elem("ApproverId", request.getApproverId())
+                .elem("State", request.getState() == null ? null : request.getState().name())
+                .elem("PermissionPolicy", request.getPermissionPolicy())
+                .elem("RedirectUrl", request.getRedirectUrl())
+                .elem("Notes", request.getNotes())
+                .elem("RejectionReason", request.getRejectionReason());
+        if (request.getSessionDuration() != null) {
+            xml.elem("SessionDuration", request.getSessionDuration());
+        }
+        if (request.getOnlySendByOwner() != null) {
+            xml.elem("OnlySendByOwner", request.getOnlySendByOwner());
+        }
+        if (request.getCreateDate() != null) {
+            xml.elem("CreateDate", isoDate(request.getCreateDate()));
+        }
+        if (request.getUpdatedTime() != null) {
+            xml.elem("UpdatedTime", isoDate(request.getUpdatedTime()));
+        }
+        if (request.getExpirationTime() != null) {
+            xml.elem("ExpirationTime", isoDate(request.getExpirationTime()));
+        }
+        if (!request.getRolePermissionRestrictionArns().isEmpty()) {
+            xml.start("RolePermissionRestrictionArns");
+            for (String arn : request.getRolePermissionRestrictionArns()) {
+                xml.elem("member", arn);
+            }
+            xml.end("RolePermissionRestrictionArns");
+        }
+        DelegationPermission permissions = request.getPermissions();
+        if (permissions != null) {
+            xml.start("Permissions").elem("PolicyTemplateArn", permissions.getPolicyTemplateArn());
+            if (!permissions.getParameters().isEmpty()) {
+                xml.start("Parameters");
+                for (PolicyParameter parameter : permissions.getParameters()) {
+                    xml.start("member").elem("Name", parameter.getName())
+                       .elem("Type", parameter.getType()).start("Values");
+                    for (String value : parameter.getValues()) {
+                        xml.elem("member", value);
+                    }
+                    xml.end("Values").end("member");
+                }
+                xml.end("Parameters");
+            }
+            xml.end("Permissions");
+        }
+        return xml.build();
+    }
+
+    /** {@code Permissions} is a structure, so its members arrive dotted under that prefix. */
+    private DelegationPermission parseDelegationPermissions(MultivaluedMap<String, String> params) {
+        String templateArn = getParam(params, "Permissions.PolicyTemplateArn");
+        List<PolicyParameter> parameters = new ArrayList<>();
+        for (int index : memberIndices(params, "Permissions.Parameters.member.")) {
+            String prefix = "Permissions.Parameters.member." + index;
+            List<String> values = new ArrayList<>();
+            for (int valueIndex : memberIndices(params, prefix + ".Values.member.")) {
+                values.add(getParam(params, prefix + ".Values.member." + valueIndex));
+            }
+            parameters.add(new PolicyParameter(getParam(params, prefix + ".Name"),
+                    getParam(params, prefix + ".Type"), values));
+        }
+        if (templateArn == null && parameters.isEmpty()
+                && params.getFirst("Permissions") == null) {
+            // Nothing under the prefix at all, which the service reports as the missing required
+            // member rather than being read here as an empty structure.
+            return null;
+        }
+        return new DelegationPermission(templateArn, parameters);
+    }
+
+    /**
+     * The indices a request supplied under an indexed member prefix, in order. Read from the keys
+     * the request carries rather than counted up from one, so a list numbered from two, or one
+     * with a gap in it, keeps every entry instead of being cut short at the first index missing.
+     */
+    private static List<Integer> memberIndices(MultivaluedMap<String, String> params, String prefix) {
+        return params.keySet().stream()
+                .filter(key -> key.startsWith(prefix))
+                .map(key -> key.substring(prefix.length()).split("\\.")[0])
+                .filter(segment -> segment.matches("\\d+"))
+                .map(Integer::valueOf)
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
+    /**
+     * The caller's principal ARN, or the account-root stand-in when the access key maps to no IAM
+     * user, which is the same synthesized principal {@code IamEnforcementFilter} uses. An owner has
+     * to be an identity ARN, and the credentials a local caller signs with are usually not a
+     * stored user's.
+     */
+    private String callerPrincipalArn(String authorization) {
+        String accessKeyId = accountResolver.extractAccessKeyId(authorization);
+        return Optional.ofNullable(accessKeyId)
+                .flatMap(iamService::resolveCallerArns)
+                .map(IamService.CallerArns::callerArn)
+                .orElseGet(() -> regionResolver.buildGlobalArn("iam", "root"));
+    }
+
+    /** An integer member on a delegation operation, refused with the code those operations model. */
+    private Integer delegationInt(MultivaluedMap<String, String> params, String name) {
+        String raw = getParam(params, name);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidInput", "The request was rejected because an invalid or "
+                    + "out-of-range value was supplied for '"
+                    + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                    + "': Member must be a number", 400);
+        }
+    }
+
+    /**
+     * A boolean member on a delegation operation. The Query protocol writes {@code true} or
+     * {@code false}, so anything else is a value the member cannot carry and is refused with the
+     * code a malformed number gets rather than read as {@code false}.
+     */
+    private Boolean parseDelegationBoolean(MultivaluedMap<String, String> params, String name) {
+        String raw = getParam(params, name);
+        if (raw == null) {
+            return null;
+        }
+        String value = raw.trim();
+        if (value.equalsIgnoreCase("true")) {
+            return Boolean.TRUE;
+        }
+        if (value.equalsIgnoreCase("false")) {
+            return Boolean.FALSE;
+        }
+        throw new AwsException("InvalidInput", "The request was rejected because an invalid or "
+                + "out-of-range value was supplied for '"
+                + Character.toLowerCase(name.charAt(0)) + name.substring(1)
+                + "': Member must be a boolean", 400);
     }
 
     /** One page of a response list, plus the marker that continues it. */

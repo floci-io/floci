@@ -210,7 +210,6 @@ public class ResourceArnBuilder {
      * exists to close.
      */
     static final Map<String, String> UNRESOLVED_TYPES = Map.of(
-            "delegation-request", "the delegation request family is not dispatched",
             "role-template", "GetRoleTemplateVersion is not dispatched");
 
     /**
@@ -230,9 +229,9 @@ public class ResourceArnBuilder {
      * The actions resolved by a branch of their own in {@link #buildIamArns}, because what the
      * request carries is not an IAM entity's name: a service principal for
      * {@code CreateServiceLinkedRole}, an access key id for {@code GetAccessKeyLastUsed}, a
-     * deletion task id for {@code GetServiceLinkedRoleDeletionStatus}, and an Organizations
+     * deletion task id for {@code GetServiceLinkedRoleDeletionStatus}, an Organizations
      * entity path for {@code GenerateOrganizationsAccessReport}, whose resource lives in another
-     * service's tree.
+     * service's tree, and a request id for the four delegation actions that name one.
      *
      * <p>The resolver is the value rather than a branch elsewhere, so this cannot become a list
      * that says an action is handled while the dispatch has nothing for it. The keys are also what
@@ -245,7 +244,11 @@ public class ResourceArnBuilder {
             (self, ctx, region, accountId) -> self.accessKeyOwnerArn(ctx, accountId),
             "GetServiceLinkedRoleDeletionStatus", ResourceArnBuilder::deletionTaskRoleArn,
             "GenerateOrganizationsAccessReport",
-            ResourceArnBuilder::organizationsAccessReportArn);
+            ResourceArnBuilder::organizationsAccessReportArn,
+            "AssociateDelegationRequest", ResourceArnBuilder::delegationRequestArn,
+            "AcceptDelegationRequest", ResourceArnBuilder::delegationRequestArn,
+            "RejectDelegationRequest", ResourceArnBuilder::delegationRequestArn,
+            "GetDelegationRequest", ResourceArnBuilder::delegationRequestArn);
 
     /** How one of {@link #DERIVED_RESOLVERS} reads its resource out of the request. */
     interface DerivedResolver {
@@ -423,6 +426,29 @@ public class ResourceArnBuilder {
         };
         return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId, resource)
                 .toString();
+    }
+
+    /**
+     * The delegation request a by-id action names.
+     *
+     * <p>Minted from the request rather than read back: the id is the whole resource name, with no
+     * path and no partition of its own to recover, and an id naming no request answers
+     * {@code NoSuchEntity} whatever a policy says. That is the same reasoning the ARN-carrying
+     * actions use, one step earlier, because this family passes an id where they pass an ARN.
+     *
+     * <p>{@code CreateDelegationRequest} is not here: IAM mints the id, so the request names no
+     * resource and the wildcard is the honest answer. {@code UpdateDelegationRequest} is not here
+     * either, AWS publishing no authorizable action for it at all, so it carries no type to
+     * resolve.
+     */
+    private List<String> delegationRequestArn(ContainerRequestContext ctx, String region,
+                                              String accountId) {
+        String id = RequestBodyReader.formField(ctx, "DelegationRequestId");
+        if (id == null || id.isBlank()) {
+            return List.of("*");
+        }
+        return List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
+                "delegation-request/" + id).toString());
     }
 
     /** An OIDC provider URL as its ARN carries it, which is the URL without its scheme. */

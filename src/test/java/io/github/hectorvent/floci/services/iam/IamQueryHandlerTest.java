@@ -61,7 +61,7 @@ class IamQueryHandlerTest {
                 "fabricated-key", null, Map.of())).thenReturn(certificate);
         when(service.getServerCertificate(CERTIFICATE_NAME)).thenReturn(certificate);
         when(service.listServerCertificates(null)).thenReturn(List.of(certificate));
-        IamQueryHandler handler = new IamQueryHandler(service, null, null, null, null, null, null, null);
+        IamQueryHandler handler = new IamQueryHandler(service, null, null, null, null, null, null, null, null);
 
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ServerCertificateName", CERTIFICATE_NAME);
@@ -90,7 +90,7 @@ class IamQueryHandlerTest {
         IamService service = mock(IamService.class);
         when(service.createRole(ROLE_NAME, "/", "{}", null, 3600, Map.of(), null)).thenReturn(role);
         when(service.getValidatedRole(ROLE_NAME)).thenReturn(role);
-        IamQueryHandler handler = new IamQueryHandler(service, null, null, null, null, null, null, null);
+        IamQueryHandler handler = new IamQueryHandler(service, null, null, null, null, null, null, null, null);
 
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleName", ROLE_NAME);

@@ -143,8 +143,10 @@ class IamActionResourcesTest {
                         "policy", "mfa", "sms-mfa", "saml-provider", "oidc-provider",
                         // Named by a parameter that is not an IAM entity name.
                         "access-report",
+                        // Derived from an id the request carries.
+                        "delegation-request",
                         // Only on actions the handler does not dispatch.
-                        "delegation-request", "role-template"),
+                        "role-template"),
                 inUse,
                 "AWS has changed which resource types IAM actions are authorized against; "
                         + "teach ResourceArnBuilder the new one or list it as unresolved");

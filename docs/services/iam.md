@@ -1054,6 +1054,69 @@ Under [enforcement](#iam-enforcement-mode) these actions are evaluated against t
 ARN, which when `UserName` is omitted is the ARN of the user who signed the request, resolved from
 the access key in the credential.
 
+### Delegation Requests
+
+IAM temporary delegation lets an AWS Partner ask a customer for scoped, time-limited access to the
+customer's account. The partner files a request, the customer claims and answers it, and an accepted
+request releases an exchange token the partner trades for credentials.
+
+The deep link `CreateDelegationRequest` returns points at the IAM console on the host of the
+request's own partition, so a partner in China or GovCloud sends the customer to a console that
+exists there. AWS publishes the field's purpose and its length but no format, and Floci serves no
+approval page of its own: the customer side of the workflow is the API.
+
+| Action | Description |
+|--------|-------------|
+| CreateDelegationRequest | Files a request for the calling account, returning its id and a console deep link. |
+| AssociateDelegationRequest | Claims an unassigned request for the calling identity. |
+| AcceptDelegationRequest | Approves a claimed request, recording the approver. |
+| RejectDelegationRequest | Refuses a request, keeping the explanation as `RejectionReason`. |
+| UpdateDelegationRequest | Adds notes and forwards the request for administrator approval. |
+| GetDelegationRequest | Returns one request, with an optional permission check. |
+| ListDelegationRequests | Lists the requests the calling account owns. |
+
+A request moves through the states AWS publishes: `UNASSIGNED`, `ASSIGNED`, `PENDING_APPROVAL`,
+`ACCEPTED`, `FINALIZED`, `REJECTED` and `EXPIRED`. A new request is `UNASSIGNED` whether or not it
+names a target account, claiming it makes it `ASSIGNED`, an update forwards it to
+`PENDING_APPROVAL`, and acceptance from either state makes it `ACCEPTED`. A rejected request cannot
+be accepted or updated afterwards.
+
+Expiry follows the two windows AWS documents, and is applied when a request is next read rather than
+by a sweeper: a day for an unclaimed request, a week for every other state, including the terminal
+ones. A request past its window reads back as `EXPIRED`.
+
+A delegation request is the one IAM record two accounts share, so visibility follows the rules on
+`GetDelegationRequest`: a request with no owner can be read by any account, and one naming a target
+account only from that account. Floci decides this at account granularity, there being no
+per-identity permission on a request to consult. `ListDelegationRequests` leaves out a request that
+has no owner even when it names the listing account, as AWS documents, so a partner does not list
+its own filings.
+
+`RequestorWorkflowId` is unique per partner: reusing one is `EntityAlreadyExists`, which is the
+failure the reference describes for it, and the uniqueness check shares a lock with the write that
+follows it so two creates racing one workflow id cannot both pass. Each member is held to the length
+and pattern it declares, which means an empty `Description` is a value rather than an omission: the
+member is required and its pattern permits an empty string, so only leaving it out altogether is
+refused. A member that breaks the format or constraints it declares answers `ValidationError`, which
+the reference publishes as a common error for every IAM operation while listing it on none of them,
+so these operations answer it the way the rest of IAM does. The `InvalidInput` they model is kept
+for a value that cannot be read as the member's type at all, such as a `SessionDuration` that is not
+a number or a boolean that is neither `true` nor `false`. An operation asked to move a request out
+of a state it is no longer in answers `ConcurrentModification`: no modeled error says "wrong state",
+and `AcceptDelegationRequest` models only `NoSuchEntity`, `ServiceFailure` and
+`ConcurrentModification`, so the conflict is the closest of the three. The same lock serializes
+those transitions, so two callers claiming one request leave a single owner.
+
+Four things are deliberately not modeled. `SendDelegationToken` and STS `GetDelegatedAccessToken`
+are not dispatched yet, so no request reaches `FINALIZED`. IAM publishes no SNS notification for a
+state change, so `NotificationChannel` is validated and stored but nothing reads it.
+`GetHumanReadableSummary` is undispatched, its summary being LLM-generated on AWS.
+`PermissionCheckResult` answers `UNSURE` when `DelegationPermissionCheck` is asked for, which the
+enum models, because a delegation request carries no permission for Floci to evaluate. Policy
+templates and permission boundaries are registered by AWS out of band, with no API, so
+`PolicyTemplateArn` is kept as given and resolved against nothing, and `LimitExceeded` is modeled
+with no published quota behind it, so no limit is enforced.
+
 ## AWS Managed Policies
 
 Floci seeds a catalog of commonly-used AWS managed policies at startup. These are attachable immediately without any setup:

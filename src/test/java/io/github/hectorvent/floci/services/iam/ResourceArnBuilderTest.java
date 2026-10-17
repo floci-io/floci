@@ -163,6 +163,32 @@ class ResourceArnBuilderTest {
     }
 
     /**
+     * The delegation family passes an id where the ARN-carrying actions pass an ARN, so its ARN is
+     * minted from the request. Without this the actions fall back to {@code *} and a policy naming
+     * one request never applies, which is the fail-open {@code UNRESOLVED_TYPES} used to cover
+     * while none of them was dispatched.
+     */
+    @Test
+    void iamNamesTheDelegationRequestABlockOfActionsActsOn() {
+        String id = "dr-0123456789abcdef01234567";
+        for (String action : List.of("AssociateDelegationRequest", "AcceptDelegationRequest",
+                "RejectDelegationRequest", "GetDelegationRequest")) {
+            assertEquals("arn:aws:iam::000000000000:delegation-request/" + id,
+                    resourceOf(builder, "Action=" + action + "&DelegationRequestId=" + id), action);
+        }
+    }
+
+    @Test
+    void iamLeavesADelegationRequestItIsAboutToMintAtTheWildcard() {
+        // IAM assigns the id, so the create names no resource to authorize against.
+        assertEquals("*", resourceOf(builder,
+                "Action=CreateDelegationRequest&Description=d&RequestorWorkflowId=w"));
+        // AWS publishes no authorizable action for the update at all, so it carries no type.
+        assertEquals("*", resourceOf(builder,
+                "Action=UpdateDelegationRequest&DelegationRequestId=dr-0123456789abcdef01234567"));
+    }
+
+    /**
      * Two entities named, one authorized. The reference gives {@code AddUserToGroup} the group as
      * its only resource type, so taking the user from the request would scope it to the wrong one
      * and have a deny on the group pass.
