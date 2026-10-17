@@ -2,10 +2,15 @@ package io.github.hectorvent.floci.services.lambda.zip;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.IOException;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -172,6 +177,42 @@ class CodeStoreTest {
         assertFalse(version.normalize().startsWith(latest.normalize()),
                 "extraction replaces $LATEST's directory wholesale, taking any nested version with it");
         assertTrue(version.normalize().startsWith(baseDir.normalize()));
+    }
+
+    @Test
+    void versionFilesRemainIndependentAfterInPlaceHostEdits(@TempDir Path baseDir)
+            throws IOException {
+        CodeStore store = new CodeStore(baseDir);
+        Path latest = store.getCodePath(ACCOUNT_A, REGION, "fn");
+        writeHandler(latest.resolve("lib"), "handler");
+        Files.createSymbolicLink(latest.resolve("index.js"), Path.of("lib/index.js"));
+
+        Path version = store.copyForVersion(ACCOUNT_A, REGION, "fn", "1", latest);
+
+        assertFalse(Files.isSameFile(latest.resolve("lib/index.js"), version.resolve("lib/index.js")));
+        Files.writeString(latest.resolve("lib/index.js"), "changed in place");
+        assertEquals("handler", Files.readString(version.resolve("lib/index.js")));
+        assertFalse(Files.isSymbolicLink(version.resolve("index.js")));
+        assertFalse(Files.isSameFile(latest.resolve("index.js"), version.resolve("index.js")));
+        assertEquals("handler", Files.readString(version.resolve("index.js")));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true, false", "false, true", "true, true"})
+    void versionCopiesWorkAcrossFilesystemProviders(boolean zipSource, boolean zipTarget, @TempDir Path baseDir)
+            throws IOException {
+        try (FileSystem zip = FileSystems.newFileSystem(baseDir.resolve("code.zip"), Map.of("create", "true"))) {
+            CodeStore store = new CodeStore(zipTarget ? zip.getPath("/code") : baseDir.resolve("code"));
+            Path source = zipSource ? zip.getPath("/source") : baseDir.resolve("source");
+            writeHandler(source.resolve("lib"), "original");
+
+            Path version = store.copyForVersion(ACCOUNT_A, REGION, "fn", "1", source);
+            writeHandler(source.resolve("lib"), "changed");
+
+            assertEquals("original", Files.readString(version.resolve("lib/index.js")));
+            store.deleteVersion(ACCOUNT_A, REGION, "fn", "1");
+            assertEquals("changed", Files.readString(source.resolve("lib/index.js")));
+        }
     }
 
     private void writeHandler(Path codePath, String content) throws IOException {

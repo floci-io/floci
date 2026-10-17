@@ -40,6 +40,10 @@ public class ZipExtractor {
     }
 
     public void extractTo(byte[] zipBytes, Path targetDir, int maxEntries) throws IOException {
+        extractTo(zipBytes, targetDir, maxEntries, null);
+    }
+
+    public void extractTo(byte[] zipBytes, Path targetDir, int maxEntries, Runnable beforeInstall) throws IOException {
         if (maxEntries < 1) {
             throw new IOException("ZIP archive entry limit must be at least 1: " + maxEntries);
         }
@@ -142,6 +146,9 @@ public class ZipExtractor {
                 }
             }
             // Extraction succeeded in full: install the new tree.
+            if (beforeInstall != null) {
+                beforeInstall.run();
+            }
             install(staging, absTarget);
         } finally {
             Files.deleteIfExists(staged);

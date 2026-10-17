@@ -6,6 +6,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -112,6 +113,12 @@ public class CodeStore {
                     Files.copy(from, to, StandardCopyOption.REPLACE_EXISTING);
                 }
             }
+        } catch (UncheckedIOException e) {
+            deleteDirectory(target, functionName);
+            throw e.getCause();
+        } catch (IOException e) {
+            deleteDirectory(target, functionName);
+            throw e;
         }
         return target;
     }
@@ -159,7 +166,7 @@ public class CodeStore {
                         }
                     });
             LOG.debugv("Deleted code for function: {0}", functionName);
-        } catch (IOException e) {
+        } catch (IOException | UncheckedIOException e) {
             LOG.warnv("Failed to delete code directory for {0}: {1}", functionName, e.getMessage());
         }
     }

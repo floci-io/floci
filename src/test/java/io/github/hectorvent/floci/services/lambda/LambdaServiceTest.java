@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -12,6 +13,9 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.LambdaUrlConfig;
 import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.github.hectorvent.floci.services.s3.model.S3ObjectUpdatedEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -29,13 +33,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -974,6 +984,11 @@ class LambdaServiceTest {
 
     private LambdaService serviceWithHotReload(boolean enabled, List<String> allowedPaths,
                                                int zipMaxEntries) {
+        return serviceWithHotReload(enabled, allowedPaths, zipMaxEntries, "docker");
+    }
+
+    private LambdaService serviceWithHotReload(boolean enabled, List<String> allowedPaths,
+                                               int zipMaxEntries, String executor) {
         EmulatorConfig cfg = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig svc = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.LambdaServiceConfig lambdaCfg = mock(EmulatorConfig.LambdaServiceConfig.class);
@@ -985,6 +1000,7 @@ class LambdaServiceTest {
         when(lambdaCfg.defaultTimeoutSeconds()).thenReturn(3);
         when(lambdaCfg.defaultMemoryMb()).thenReturn(128);
         when(lambdaCfg.zipMaxEntries()).thenReturn(zipMaxEntries);
+        when(lambdaCfg.executor()).thenReturn(executor);
         when(hr.enabled()).thenReturn(enabled);
         when(hr.allowedPaths()).thenReturn(allowedPaths == null ? Optional.empty() : Optional.of(allowedPaths));
 
@@ -1205,8 +1221,7 @@ class LambdaServiceTest {
 
     @Test
     void hotReload_convertFromS3Backed_clearsBucketAndKey() {
-        // A function previously deployed from S3 that is later converted to hot-reload
-        // must have s3Bucket/s3Key cleared so the reactive S3 sync observer cannot fire.
+        // Clear the previous S3 location so reactive sync cannot overwrite the bind-mounted code.
         LambdaService svc = serviceWithHotReload(true, null);
         Map<String, Object> req = baseRequest("hr-convert");
         req.put("Code", Map.of("S3Bucket", "my-code-bucket", "S3Key", "fn.zip"));
@@ -1223,6 +1238,79 @@ class LambdaServiceTest {
         assertNull(updated.getS3Bucket(), "s3Bucket must be cleared after hot-reload conversion");
         assertNull(updated.getS3Key(), "s3Key must be cleared after hot-reload conversion");
         assertEquals("/tmp/converted", updated.getHotReloadHostPath());
+    }
+
+    @Test
+    void requiredPackageStorageFailurePreservesHotReloadState() {
+        LambdaService svc = serviceWithHotReload(true, null, ZipExtractor.DEFAULT_MAX_ENTRIES, "kubernetes");
+        String name = "hot-reload-storage-failure";
+        Map<String, Object> request = baseRequest(name);
+        request.put("Code", Map.of("S3Bucket", "hot-reload", "S3Key", "/tmp/host-code"));
+        LambdaFunction original = svc.createFunction(REGION, request);
+        String revision = original.getRevisionId();
+        long modified = original.getLastModified();
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> svc.updateFunctionCode(REGION, name, Map.of("ZipFile", zipWithBody("new"))));
+
+        assertEquals("ServiceException", failure.getErrorCode());
+        LambdaFunction unchanged = svc.getFunction(REGION, name);
+        assertTrue(unchanged.isHotReload());
+        assertEquals("/tmp/host-code", unchanged.getHotReloadHostPath());
+        assertNull(unchanged.getCodeLocalPath());
+        assertEquals(revision, unchanged.getRevisionId());
+        assertEquals(modified, unchanged.getLastModified());
+        assertEquals("", unchanged.getCodeSha256());
+    }
+
+    @Test
+    void hotReload_zipDeploymentConvertsToManagedCodeAndPreservesPublishedVersions() throws Exception {
+        LambdaService svc = serviceWithHotReload(true, null);
+        String name = "hr-managed-deployment";
+        Map<String, Object> request = baseRequest(name);
+        request.put("Architectures", List.of("x86_64"));
+        request.put("Code", Map.of("S3Bucket", "hot-reload", "S3Key", "/tmp/host-code"));
+        request.put("Environment", Map.of("Variables", Map.of("MARKER", "configured")));
+        LambdaFunction original = svc.createFunction(REGION, request);
+        String originalRevision = original.getRevisionId();
+        long originalModified = original.getLastModified();
+
+        AwsException failure = assertThrows(AwsException.class, () -> svc.updateFunctionCode(REGION, name,
+                Map.of("ZipFile", Base64.getEncoder().encodeToString("not a ZIP".getBytes(StandardCharsets.UTF_8)),
+                        "Architectures", List.of("arm64"))));
+
+        assertEquals("InvalidParameterValueException", failure.getErrorCode());
+        LambdaFunction unchanged = svc.getFunction(REGION, name);
+        assertTrue(unchanged.isHotReload());
+        assertEquals("/tmp/host-code", unchanged.getHotReloadHostPath());
+        assertNull(unchanged.getCodeLocalPath());
+        assertEquals("", unchanged.getCodeSha256());
+        assertEquals(0L, unchanged.getCodeSizeBytes());
+        assertEquals(originalRevision, unchanged.getRevisionId());
+        assertEquals(originalModified, unchanged.getLastModified());
+        assertEquals(List.of("x86_64"), unchanged.getArchitectures());
+        assertEquals(Map.of("MARKER", "configured"), unchanged.getEnvironment());
+
+        LambdaFunction converted = svc.updateFunctionCode(REGION, name, Map.of("ZipFile", zipWithBody("v1")));
+
+        assertFalse(converted.isHotReload());
+        assertNull(converted.getHotReloadHostPath());
+        Path latestPath = Path.of(converted.getCodeLocalPath());
+        assertEquals("v1", Files.readString(latestPath.resolve("index.js")).trim());
+        LambdaFunction published = svc.publishVersion(REGION, name, null);
+        Path versionPath = Path.of(published.getCodeLocalPath());
+        String versionHash = published.getCodeSha256();
+        assertFalse(published.isHotReload());
+        assertNotEquals(latestPath, versionPath);
+
+        svc.updateFunctionCode(REGION, name, Map.of("ZipFile", zipWithBody("v2")));
+
+        assertEquals("v2", Files.readString(latestPath.resolve("index.js")).trim());
+        assertEquals("v1", Files.readString(versionPath.resolve("index.js")).trim());
+        assertEquals(versionHash, published.getCodeSha256());
+        assertEquals(Map.of("MARKER", "configured"), published.getEnvironment());
+        assertEquals(10, published.getTimeout());
+        assertEquals(256, published.getMemorySize());
     }
 
     /**
@@ -2111,6 +2199,9 @@ class LambdaServiceTest {
 
         assertTrue(Files.isDirectory(v1Path), "a published version must have its own code directory");
         assertEquals("v1", Files.readString(v1Path.resolve("index.js")).trim());
+        assertFalse(Files.isSameFile(v1Path.resolve("index.js"),
+                Path.of(service.getFunction(REGION, "version-code-isolation-fn").getCodeLocalPath())
+                        .resolve("index.js")));
 
         // Redeploy $LATEST. Extraction replaces its directory wholesale, which is what used to take
         // the published version's code with it.
@@ -2128,6 +2219,8 @@ class LambdaServiceTest {
         assertTrue(Files.isDirectory(v1Path), "the version's code must survive a redeploy of $LATEST");
         assertEquals("v1", Files.readString(v1Path.resolve("index.js")).trim());
         assertEquals(v1Sha, v1.getCodeSha256());
+        assertFalse(Files.isSameFile(v1Path.resolve("index.js"),
+                Path.of(latest.getCodeLocalPath()).resolve("index.js")));
     }
 
     @Test
@@ -2171,6 +2264,191 @@ class LambdaServiceTest {
         assertTrue(Files.isDirectory(v2Path), "a surviving version's code must be left alone");
         assertEquals("v2", Files.readString(v2Path.resolve("index.js")).trim());
         assertTrue(Files.isDirectory(latestPath), "$LATEST's code must be left alone");
+    }
+
+    @Test
+    void unrelatedS3EventsDoNotAcquireOtherFunctionsDeploymentLocks() throws Exception {
+        LambdaFunction first = service.createFunction(REGION, baseRequest("unrelated-sync-first"));
+        LambdaFunction second = service.createFunction(REGION, baseRequest("unrelated-sync-second"));
+        first.setS3Bucket("source-bucket");
+        first.setS3Key("first.zip");
+        second.setS3Bucket("source-bucket");
+        second.setS3Key("second.zip");
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            synchronized (service.lockForConcurrencyOp(first.getFunctionArn())) {
+                Future<?> deployment = worker.submit(() -> {
+                    synchronized (service.lockForConcurrencyOp(second.getFunctionArn())) {
+                        service.onS3ObjectUpdated(new S3ObjectUpdatedEvent("tasks-bucket", "deployment.zip"));
+                    }
+                });
+                deployment.get(2, TimeUnit.SECONDS);
+            }
+        } finally {
+            worker.shutdownNow();
+        }
+    }
+
+    @Test
+    void reactiveSyncHoldsThePublicationLockThroughExtraction() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        WarmPool warmPool = mock(WarmPool.class);
+        ZipExtractor extractor = spy(new ZipExtractor());
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        LambdaFunctionStore functionStore = new LambdaFunctionStore(new InMemoryStorage<String, LambdaFunction>());
+        LambdaAliasStore aliasStore = new LambdaAliasStore(storageFactory);
+        LambdaService syncingService = new LambdaService(functionStore, null, new LambdaConcurrencyLimiter(),
+                warmPool, new CodeStore(Path.of("target/test-data/lambda-code")), extractor, null,
+                new RegionResolver(REGION, "000000000000"), null, aliasStore,
+                new LambdaTargetResolver(functionStore, aliasStore), s3, null, null, null, null,
+                storageFactory, null, null, null, null, new ObjectMapper());
+        String name = "reactive-snapshot-" + UUID.randomUUID();
+        when(s3.getObject("code-bucket", "function.zip"))
+                .thenReturn(new S3Object("code-bucket", "function.zip",
+                        Base64.getDecoder().decode(zipWithBody("v1")), "application/zip"))
+                .thenReturn(new S3Object("code-bucket", "function.zip",
+                        Base64.getDecoder().decode(zipWithBody("v2")), "application/zip"));
+        Map<String, Object> request = baseRequest(name);
+        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "function.zip"));
+        LambdaFunction latest = syncingService.createFunction(REGION, request);
+        LambdaFunction first = syncingService.publishVersion(REGION, name, null);
+        CountDownLatch extracting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(inv -> {
+            assertTrue(Thread.holdsLock(syncingService.lockForConcurrencyOp(latest.getFunctionArn())));
+            extracting.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return inv.callRealMethod();
+        }).when(extractor).extractTo(any(byte[].class), any(Path.class), anyInt(), any(Runnable.class));
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> sync = workers.submit(() -> syncingService.onS3ObjectUpdated(
+                    new S3ObjectUpdatedEvent("code-bucket", "function.zip")));
+            assertTrue(extracting.await(2, TimeUnit.SECONDS));
+            AtomicReference<Thread> publicationThread = new AtomicReference<>();
+            Future<LambdaFunction> publication = workers.submit(() -> {
+                publicationThread.set(Thread.currentThread());
+                return syncingService.publishVersion(REGION, name, null);
+            });
+            await().atMost(2, TimeUnit.SECONDS).until(() -> publicationThread.get() != null
+                    && publicationThread.get().getState() == Thread.State.BLOCKED);
+            assertFalse(publication.isDone());
+            release.countDown();
+            sync.get(5, TimeUnit.SECONDS);
+            LambdaFunction second = publication.get(5, TimeUnit.SECONDS);
+            assertEquals("v1", Files.readString(Path.of(first.getCodeLocalPath()).resolve("index.js")).trim());
+            assertEquals("v2", Files.readString(Path.of(second.getCodeLocalPath()).resolve("index.js")).trim());
+            assertEquals(latest.getCodeSha256(), second.getCodeSha256());
+            verify(warmPool).pushCodeUpdate(latest);
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
+    void deletingOneVersionPreservesAnotherVersionAndLatest() throws Exception {
+        String name = "shared-version-code";
+        Map<String, Object> request = baseRequest(name);
+        request.put("Code", Map.of("ZipFile", zipWithBody("shared")));
+        LambdaFunction latest = service.createFunction(REGION, request);
+        LambdaFunction first = service.publishVersion(REGION, name, null);
+        service.updateFunctionConfiguration(REGION, name, Map.of("Timeout", 20));
+        LambdaFunction second = service.publishVersion(REGION, name, null);
+        Path firstFile = Path.of(first.getCodeLocalPath()).resolve("index.js");
+        Path secondFile = Path.of(second.getCodeLocalPath()).resolve("index.js");
+        Path latestFile = Path.of(latest.getCodeLocalPath()).resolve("index.js");
+        assertFalse(Files.isSameFile(firstFile, secondFile));
+        assertFalse(Files.isSameFile(secondFile, latestFile));
+
+        service.deleteFunction(REGION, name, first.getVersion());
+
+        assertFalse(Files.exists(firstFile));
+        assertEquals("shared", Files.readString(secondFile).trim());
+        assertEquals("shared", Files.readString(latestFile).trim());
+        assertEquals(20, second.getTimeout());
+    }
+
+    @Test
+    void failedVersionSnapshotKeepsLatestVersionsAndAliasesIntact() throws Exception {
+        String name = "failed-version-snapshot-" + UUID.randomUUID();
+        Map<String, Object> request = baseRequest(name);
+        request.put("Code", Map.of("ZipFile", zipWithBody("v1")));
+        service.createFunction(REGION, request);
+        LambdaFunction first = service.publishVersion(REGION, name, null);
+        service.createAlias(REGION, name, "live", first.getVersion(), null, null);
+        LambdaFunction latest = service.updateFunctionCode(REGION, name,
+                Map.of("ZipFile", zipWithBody("v2")));
+        Path latestPath = Path.of(latest.getCodeLocalPath());
+        Path firstPath = Path.of(first.getCodeLocalPath());
+        Path unreadable = Files.createSymbolicLink(latestPath.resolve("unreadable"),
+                Path.of("missing-file"));
+        try {
+            AwsException failure = assertThrows(AwsException.class,
+                    () -> service.publishVersion(REGION, name, null));
+            assertEquals("ServiceException", failure.getErrorCode());
+            assertEquals(Set.of("$LATEST", first.getVersion()),
+                    service.listVersionsByFunction(REGION, name).stream()
+                            .map(LambdaFunction::getVersion).collect(Collectors.toSet()));
+            assertEquals(first.getVersion(), service.getAlias(REGION, name, "live").getFunctionVersion());
+            assertEquals("v1", Files.readString(firstPath.resolve("index.js")).trim());
+            assertEquals("v2", Files.readString(latestPath.resolve("index.js")).trim());
+            try (Stream<Path> versions = Files.list(firstPath.getParent())) {
+                assertEquals(List.of(firstPath), versions.toList(),
+                        "a failed snapshot must not leave a partial version directory");
+            }
+        } finally {
+            Files.delete(unreadable);
+        }
+        LambdaFunction retry = service.publishVersion(REGION, name, null);
+        assertEquals("2", retry.getVersion(), "failed publication must not consume a version number");
+        assertNotEquals(latestPath, Path.of(retry.getCodeLocalPath()));
+        assertEquals(latest.getCodeSha256(), retry.getCodeSha256());
+        assertEquals("v2", Files.readString(Path.of(retry.getCodeLocalPath()).resolve("index.js")).trim());
+    }
+
+    @Test
+    void rejectedZipUpdatePreservesLatestCodeVersionsAliasesAndConfiguration() throws Exception {
+        String name = "rejected-zip-deployment";
+        Map<String, Object> request = baseRequest(name);
+        request.put("Architectures", List.of("x86_64"));
+        request.put("Code", Map.of("ZipFile", zipWithBody("v1")));
+        request.put("Environment", Map.of("Variables", Map.of("MARKER", "original")));
+        service.createFunction(REGION, request);
+        LambdaFunction version = service.publishVersion(REGION, name, null);
+        service.createAlias(REGION, name, "live", version.getVersion(), null, null);
+        LambdaFunction latest = service.updateFunctionCode(REGION, name, Map.of("ZipFile", zipWithBody("v2")));
+        String latestPath = latest.getCodeLocalPath();
+        String latestHash = latest.getCodeSha256();
+        long latestSize = latest.getCodeSizeBytes();
+        String latestRevision = latest.getRevisionId();
+        long latestModified = latest.getLastModified();
+        String versionHash = version.getCodeSha256();
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION, name,
+                Map.of("ZipFile", Base64.getEncoder().encodeToString("not a ZIP".getBytes(StandardCharsets.UTF_8)),
+                        "Architectures", List.of("arm64"), "Publish", true)));
+
+        assertEquals("InvalidParameterValueException", failure.getErrorCode());
+        LambdaFunction unchanged = service.getFunction(REGION, name);
+        assertEquals(latestPath, unchanged.getCodeLocalPath());
+        assertEquals("v2", Files.readString(Path.of(latestPath).resolve("index.js")).trim());
+        assertEquals(latestHash, unchanged.getCodeSha256());
+        assertEquals(latestSize, unchanged.getCodeSizeBytes());
+        assertEquals(latestRevision, unchanged.getRevisionId());
+        assertEquals(latestModified, unchanged.getLastModified());
+        assertNull(unchanged.getHotReloadHostPath());
+        assertEquals(List.of("x86_64"), unchanged.getArchitectures());
+        assertEquals(Map.of("MARKER", "original"), unchanged.getEnvironment());
+        assertEquals(10, unchanged.getTimeout());
+        assertEquals(256, unchanged.getMemorySize());
+        assertEquals("v1", Files.readString(Path.of(version.getCodeLocalPath()).resolve("index.js")).trim());
+        assertEquals(versionHash, version.getCodeSha256());
+        assertEquals(version.getVersion(), service.getAlias(REGION, name, "live").getFunctionVersion());
+        assertEquals(Set.of("$LATEST", version.getVersion()), service.listVersionsByFunction(REGION, name).stream()
+                .map(LambdaFunction::getVersion).collect(Collectors.toSet()));
     }
 
     private static String zipWithBody(String body) throws Exception {
