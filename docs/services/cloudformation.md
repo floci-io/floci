@@ -170,6 +170,7 @@ cross-resource references.
 | Service | Resource types |
 |---|---|
 | S3 | `Bucket`, `BucketPolicy` (document stored on the bucket; S3 does not evaluate it) |
+| S3 Vectors | `VectorBucket`, `Index` |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription`, `TopicPolicy` |
 | SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment) |

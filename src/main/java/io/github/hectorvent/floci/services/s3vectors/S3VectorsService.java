@@ -4,7 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.s3vectors.model.VectorBucket;
 import io.github.hectorvent.floci.services.s3vectors.model.VectorData;
@@ -14,7 +14,11 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -22,8 +26,10 @@ import java.util.stream.Collectors;
 public class S3VectorsService {
     private static final Logger LOG = Logger.getLogger(S3VectorsService.class);
 
-    private final StorageBackend<String, VectorBucket> store;
+    private final AccountAwareStorageBackend<VectorBucket> store;
     private final RegionResolver regionResolver;
+    // Keep each monitor across deletion and recreation so an in-flight writer cannot revive a bucket.
+    private final Map<String, Object> bucketLocks = new ConcurrentHashMap<>();
 
     @Inject
     public S3VectorsService(StorageFactory factory, RegionResolver regionResolver) {
@@ -36,6 +42,11 @@ public class S3VectorsService {
         return region + "::" + bucketName;
     }
 
+    private Object lockFor(String bucketName, String region) {
+        String key = store.accountId() + "/" + buildStorageKey(region, bucketName);
+        return bucketLocks.computeIfAbsent(key, ignored -> new Object());
+    }
+
     private String buildBucketArn(String region, String bucketName) {
         return AwsArnUtils.Arn.of("s3vectors", region, regionResolver.getAccountId(), "bucket/" + bucketName).toString();
     }
@@ -45,15 +56,24 @@ public class S3VectorsService {
     }
 
     public VectorBucket createVectorBucket(String bucketName, Object encryptionConfiguration, String region) {
-        String key = buildStorageKey(region, bucketName);
-        if (store.get(key).isPresent()) {
-            throw new AwsException("ConflictException", "The vector bucket " + bucketName + " already exists.", 409);
+        return createVectorBucket(bucketName, encryptionConfiguration, Map.of(), region);
+    }
+
+    public VectorBucket createVectorBucket(String bucketName, Object encryptionConfiguration,
+                                          Map<String, String> tags, String region) {
+        synchronized (lockFor(bucketName, region)) {
+            String key = buildStorageKey(region, bucketName);
+            if (store.get(key).isPresent()) {
+                throw new AwsException("ConflictException", "The vector bucket " + bucketName + " already exists.", 409);
+            }
+            String arn = buildBucketArn(region, bucketName);
+            VectorBucket bucket = new VectorBucket(bucketName, arn,
+                    encryptionConfiguration != null ? encryptionConfiguration : Map.of("sseType", "AES256"));
+            bucket.setTags(new ConcurrentHashMap<>(tags));
+            store.put(key, bucket);
+            LOG.infov("Created Vector Bucket: {0} in region {1}", bucketName, region);
+            return bucket;
         }
-        String arn = buildBucketArn(region, bucketName);
-        VectorBucket bucket = new VectorBucket(bucketName, arn, encryptionConfiguration);
-        store.put(key, bucket);
-        LOG.infov("Created Vector Bucket: {0} in region {1}", bucketName, region);
-        return bucket;
     }
 
     public VectorBucket getVectorBucket(String bucketName, String region) {
@@ -69,44 +89,71 @@ public class S3VectorsService {
     }
 
     public void deleteVectorBucket(String bucketName, String region) {
-        String key = buildStorageKey(region, bucketName);
-        VectorBucket bucket = store.get(key).orElseThrow(() ->
-                new AwsException("NotFoundException", "The vector bucket " + bucketName + " does not exist.", 404));
+        synchronized (lockFor(bucketName, region)) {
+            String key = buildStorageKey(region, bucketName);
+            VectorBucket bucket = store.get(key).orElseThrow(() ->
+                    new AwsException("NotFoundException", "The vector bucket " + bucketName + " does not exist.", 404));
 
-        if (!bucket.getIndexes().isEmpty()) {
-            throw new AwsException("ConflictException", "The vector bucket " + bucketName + " is not empty.", 409);
+            if (!bucket.getIndexes().isEmpty()) {
+                throw new AwsException("ConflictException", "The vector bucket " + bucketName + " is not empty.", 409);
+            }
+            store.delete(key);
+            LOG.infov("Deleted Vector Bucket: {0}", bucketName);
         }
-        store.delete(key);
-        LOG.infov("Deleted Vector Bucket: {0}", bucketName);
     }
 
     public VectorIndex createIndex(String bucketName, String indexName, int dimension, String dataType,
                                    String distanceMetric, List<String> nonFilterableMetadataKeys, String region) {
+        return createIndex(bucketName, indexName, dimension, dataType, distanceMetric,
+                nonFilterableMetadataKeys, null, Map.of(), region);
+    }
+
+    public VectorIndex createIndex(String bucketName, String indexName, int dimension, String dataType,
+                                   String distanceMetric, List<String> nonFilterableMetadataKeys,
+                                   Object encryptionConfiguration, Map<String, String> tags, String region) {
+        if (dimension < 1 || dimension > 4096) {
+            throw new AwsException("ValidationException", "Dimension must be between 1 and 4096.", 400);
+        }
         if (!"float32".equals(dataType)) {
             throw new AwsException("ValidationException", "Unsupported dataType: " + dataType + ". Only float32 is supported.", 400);
         }
         if (!"cosine".equals(distanceMetric) && !"euclidean".equals(distanceMetric)) {
             throw new AwsException("ValidationException", "Unsupported distanceMetric: " + distanceMetric + ". Supported metrics are cosine and euclidean.", 400);
         }
-
-        VectorBucket bucket = getVectorBucket(bucketName, region);
-        if (bucket.getIndexes().containsKey(indexName)) {
-            throw new AwsException("ConflictException", "The index " + indexName + " already exists.", 409);
+        if (nonFilterableMetadataKeys == null || nonFilterableMetadataKeys.size() > 10
+                || nonFilterableMetadataKeys.stream().anyMatch(key -> key == null || key.isBlank() || key.length() > 63)) {
+            throw new AwsException("ValidationException",
+                    "NonFilterableMetadataKeys must contain at most 10 keys of 1 to 63 characters.", 400);
         }
 
-        String arn = buildIndexArn(region, bucketName, indexName);
-        VectorIndex index = new VectorIndex(indexName, arn, bucketName, dimension, dataType, distanceMetric);
-        bucket.getIndexes().put(indexName, index);
-        store.put(buildStorageKey(region, bucketName), bucket);
-        LOG.infov("Created Index: {0} in bucket {1}", indexName, bucketName);
-        return index;
+        synchronized (lockFor(bucketName, region)) {
+            VectorBucket bucket = getVectorBucket(bucketName, region);
+            if (bucket.getIndexes().containsKey(indexName)) {
+                throw new AwsException("ConflictException", "The index " + indexName + " already exists.", 409);
+            }
+
+            String arn = buildIndexArn(region, bucketName, indexName);
+            VectorIndex index = new VectorIndex(indexName, arn, bucketName, dimension, dataType, distanceMetric);
+            index.setNonFilterableMetadataKeys(List.copyOf(nonFilterableMetadataKeys));
+            index.setEncryptionConfiguration(encryptionConfiguration != null
+                    ? encryptionConfiguration : bucket.getEncryptionConfiguration());
+            index.setTags(new ConcurrentHashMap<>(tags));
+            bucket.getIndexes().put(indexName, index);
+            store.put(buildStorageKey(region, bucketName), bucket);
+            LOG.infov("Created Index: {0} in bucket {1}", indexName, bucketName);
+            return index;
+        }
     }
 
     public VectorIndex getIndex(String bucketName, String indexName, String region) {
-        VectorBucket bucket = getVectorBucket(bucketName, region);
+        return getIndex(getVectorBucket(bucketName, region), indexName);
+    }
+
+    private VectorIndex getIndex(VectorBucket bucket, String indexName) {
         VectorIndex index = bucket.getIndexes().get(indexName);
         if (index == null) {
-            throw new AwsException("NotFoundException", "The index " + indexName + " does not exist in bucket " + bucketName + ".", 404);
+            throw new AwsException("NotFoundException",
+                    "The index " + indexName + " does not exist in bucket " + bucket.getVectorBucketName() + ".", 404);
         }
         return index;
     }
@@ -119,28 +166,49 @@ public class S3VectorsService {
     }
 
     public void deleteIndex(String bucketName, String indexName, String region) {
-        VectorBucket bucket = getVectorBucket(bucketName, region);
-        if (!bucket.getIndexes().containsKey(indexName)) {
-            throw new AwsException("NotFoundException", "The index " + indexName + " does not exist.", 404);
+        synchronized (lockFor(bucketName, region)) {
+            VectorBucket bucket = getVectorBucket(bucketName, region);
+            if (!bucket.getIndexes().containsKey(indexName)) {
+                throw new AwsException("NotFoundException", "The index " + indexName + " does not exist.", 404);
+            }
+            bucket.getIndexes().remove(indexName);
+            store.put(buildStorageKey(region, bucketName), bucket);
+            LOG.infov("Deleted Index: {0}", indexName);
         }
-        bucket.getIndexes().remove(indexName);
-        store.put(buildStorageKey(region, bucketName), bucket);
-        LOG.infov("Deleted Index: {0}", indexName);
+    }
+
+    public void replaceBucketTags(String bucketName, Map<String, String> tags, String region) {
+        synchronized (lockFor(bucketName, region)) {
+            VectorBucket bucket = getVectorBucket(bucketName, region);
+            bucket.setTags(new ConcurrentHashMap<>(tags));
+            store.put(buildStorageKey(region, bucketName), bucket);
+        }
+    }
+
+    public void replaceIndexTags(String bucketName, String indexName, Map<String, String> tags, String region) {
+        synchronized (lockFor(bucketName, region)) {
+            VectorBucket bucket = getVectorBucket(bucketName, region);
+            VectorIndex index = getIndex(bucket, indexName);
+            index.setTags(new ConcurrentHashMap<>(tags));
+            store.put(buildStorageKey(region, bucketName), bucket);
+        }
     }
 
     public void putVectors(String bucketName, String indexName, List<VectorData> vectors, String region) {
-        VectorBucket bucket = getVectorBucket(bucketName, region);
-        VectorIndex index = getIndex(bucketName, indexName, region);
+        synchronized (lockFor(bucketName, region)) {
+            VectorBucket bucket = getVectorBucket(bucketName, region);
+            VectorIndex index = getIndex(bucket, indexName);
 
-        for (VectorData v : vectors) {
-            if (v.getData() != null && v.getData().size() != index.getDimension()) {
-                throw new AwsException("ValidationException",
-                        "Vector dimension " + v.getData().size() + " does not match index dimension " + index.getDimension(), 400);
+            for (VectorData v : vectors) {
+                if (v.getData() != null && v.getData().size() != index.getDimension()) {
+                    throw new AwsException("ValidationException",
+                            "Vector dimension " + v.getData().size() + " does not match index dimension " + index.getDimension(), 400);
+                }
+                index.getVectors().put(v.getKey(), v);
             }
-            index.getVectors().put(v.getKey(), v);
+            store.put(buildStorageKey(region, bucketName), bucket);
+            LOG.infov("Put {0} vectors into index {1}", vectors.size(), indexName);
         }
-        store.put(buildStorageKey(region, bucketName), bucket);
-        LOG.infov("Put {0} vectors into index {1}", vectors.size(), indexName);
     }
 
     public List<VectorData> getVectors(String bucketName, String indexName, List<String> keys, String region) {
@@ -254,13 +322,15 @@ public class S3VectorsService {
     public record ListVectorsResult(List<VectorData> vectors, String nextToken) {}
 
     public void deleteVectors(String bucketName, String indexName, List<String> keys, String region) {
-        VectorBucket bucket = getVectorBucket(bucketName, region);
-        VectorIndex index = getIndex(bucketName, indexName, region);
-        for (String key : keys) {
-            index.getVectors().remove(key);
+        synchronized (lockFor(bucketName, region)) {
+            VectorBucket bucket = getVectorBucket(bucketName, region);
+            VectorIndex index = getIndex(bucket, indexName);
+            for (String key : keys) {
+                index.getVectors().remove(key);
+            }
+            store.put(buildStorageKey(region, bucketName), bucket);
+            LOG.infov("Deleted {0} vectors from index {1}", keys.size(), indexName);
         }
-        store.put(buildStorageKey(region, bucketName), bucket);
-        LOG.infov("Deleted {0} vectors from index {1}", keys.size(), indexName);
     }
 
     public List<QueryResult> queryVectors(String bucketName, String indexName, List<Float> queryVector,
@@ -272,6 +342,7 @@ public class S3VectorsService {
         }
 
         S3VectorsMetadataFilter metadataFilter = S3VectorsMetadataFilter.compile(filter);
+        validateFilterKeys(filter, index.getNonFilterableMetadataKeys());
         String metric = index.getDistanceMetric() != null ? index.getDistanceMetric().toLowerCase() : "cosine";
         List<QueryResult> results = new ArrayList<>();
 
@@ -295,6 +366,23 @@ public class S3VectorsService {
         results.sort(Comparator.comparingDouble(QueryResult::getDistance));
 
         return results.stream().limit(topK).collect(Collectors.toList());
+    }
+
+    private static void validateFilterKeys(Object filter, List<String> nonFilterableKeys) {
+        if (!(filter instanceof Map<?, ?> clauses)) {
+            return;
+        }
+        for (Map.Entry<?, ?> clause : clauses.entrySet()) {
+            if (nonFilterableKeys.contains(clause.getKey())) {
+                throw new AwsException("ValidationException", "Cannot filter on non-filterable metadata key: " + clause.getKey(), 400);
+            }
+            if (("$and".equals(clause.getKey()) || "$or".equals(clause.getKey()))
+                    && clause.getValue() instanceof List<?> children) {
+                for (Object child : children) {
+                    validateFilterKeys(child, nonFilterableKeys);
+                }
+            }
+        }
     }
 
     private double calculateCosineSimilarity(List<Float> v1, List<Float> v2) {

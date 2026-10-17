@@ -98,6 +98,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftC
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftServerlessCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.S3VectorsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
@@ -151,6 +152,7 @@ import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.route53.Route53Service;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3vectors.S3VectorsService;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ses.SesIdentityService;
@@ -192,6 +194,7 @@ final class CfnProvisionerFixture {
     static final class Builder {
 
         private S3Service s3Service;
+        private S3VectorsService s3VectorsService;
         private SnsService snsService;
         private SesService sesService;
         private SesIdentityService sesIdentityService;
@@ -305,6 +308,9 @@ final class CfnProvisionerFixture {
             if (customResourceResponseStore != null) {
                 discovered.add(new CustomResourceCfnProvisioner(lambdaService, objectMapper,
                         customResourceResponseStore, reachableEndpoint));
+            }
+            if (s3VectorsService != null) {
+                discovered.add(new S3VectorsCfnProvisioner(s3VectorsService));
             }
             if (s3Service != null) {
                 discovered.add(new S3CfnProvisioner(s3Service));
@@ -506,6 +512,11 @@ final class CfnProvisionerFixture {
                         bedrockAgentCoreMemoryService));
             }
             return discovered;
+        }
+
+        public Builder s3Vectors(S3VectorsService v) {
+            this.s3VectorsService = v;
+            return this;
         }
 
         public Builder s3(S3Service v) {

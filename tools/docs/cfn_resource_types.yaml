@@ -11,6 +11,7 @@
 # entry degrades to a sensible position rather than disappearing.
 order:
   - AWS::S3
+  - AWS::S3Vectors
   - AWS::SQS
   - AWS::SNS
   - AWS::SES
@@ -77,6 +78,7 @@ display_names:
 # Curated where the reading order carries meaning (primary resources before their accessories).
 type_order:
   AWS::S3: [Bucket, BucketPolicy]
+  AWS::S3Vectors: [VectorBucket, Index]
   AWS::SQS: [Queue, QueuePolicy]
   AWS::SNS: [Topic, Subscription]
   AWS::DynamoDB: [Table, GlobalTable]
@@ -157,6 +159,7 @@ service_labels:
   AWS::RedshiftServerless: Redshift Serverless
   AWS::Route53: Route 53
   AWS::S3: S3
+  AWS::S3Vectors: S3 Vectors
   AWS::SNS: SNS
   AWS::SES: SES
   AWS::SQS: SQS
