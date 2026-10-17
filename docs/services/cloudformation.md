@@ -471,6 +471,41 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 - On `UpdateStack` (no interruption, as in AWS), a cluster's list is checked first, then the roles the template gained are added, and the roles the previous template declared and the new one drops are removed. A role associated outside the stack is kept while the template leaves it out; declaring it fails the update with `DBClusterRoleAlreadyExists`, as in AWS. If any step of an update is refused, the roles it already added are removed and the ones it removed are put back, so the database matches what the stack still records and a retry starts from there. A rolled-back cluster replacement restores the record of which roles the stack declared.
 - An Aurora cluster member (`AWS::RDS::DBInstance` with `DBClusterIdentifier`) cannot carry `AssociatedRoles`: the schema documents the property as not applicable there, since the cluster manages its roles. The resource fails with a `ValidationError` pointing at the cluster's `AssociatedRoles`.
 
+## S3 ownership controls
+
+`AWS::S3::Bucket` applies `OwnershipControls` through the same S3 call as
+`PutBucketOwnershipControls`, on create and in place on update.
+
+- A malformed rule fails the resource before the bucket is created or changed, and the stack
+  rolls back. The resource's status reason gives the first fault found: `OwnershipControls` is
+  checked first, then each rule in turn, then whether a rule repeats another, then S3's own check.
+- A fault the resource schema defines is reported as
+  `Model validation failed (#/OwnershipControls...: <reason>)`: a value of the wrong type
+  (`OwnershipControls` or a rule that is not an object, `Rules` that is not a list, an
+  `ObjectOwnership` that is a list or an object), a key other than `Rules` on `OwnershipControls`
+  or other than `ObjectOwnership` on a rule (`extraneous key [<key>] is not permitted`), or a
+  rule listed twice (`array items are not unique`), comparing the rules after intrinsic
+  functions such as `Ref` are resolved.
+- A rule without `ObjectOwnership`, which S3 requires, fails among that rule's own checks in the
+  same form, with `required key [ObjectOwnership] not found`. The schema accepts such a rule, so
+  CloudFormation's reason for a template with one can differ.
+- What S3 refuses then fails with the message of the `MalformedXML` error that
+  `PutBucketOwnershipControls` returns, `The XML you provided was not well-formed or did not
+  validate against our published schema.`: no rule, more than one rule, or a mode other than
+  `BucketOwnerEnforced`, `BucketOwnerPreferred` or `ObjectWriter`. AWS's published resource
+  schema refuses two of these itself, a missing `Rules` (`required key [Rules] not found`) and a
+  mode outside the three (its `enum`), so CloudFormation's reason for them may differ.
+- An update that removes `OwnershipControls` from a template that declared it deletes the
+  controls, as a removed `NotificationConfiguration` is cleared; real AWS's answer for that
+  removal is unmeasured. Controls set outside the stack are left alone while neither the previous
+  nor the new template declares the property.
+- A failed update, including one where a later resource fails, puts back the controls the bucket
+  had before the update, with the rest of its configuration (see
+  [Failed update rollbacks](#failed-update-rollbacks)).
+- Floci's S3 gives a new bucket no ownership controls, so a bucket that never declares the
+  property answers `GetBucketOwnershipControls` with `OwnershipControlsNotFoundError`, where AWS
+  reports its default, `BucketOwnerEnforced`.
+
 ## Account-Aware Provisioning
 
 Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace

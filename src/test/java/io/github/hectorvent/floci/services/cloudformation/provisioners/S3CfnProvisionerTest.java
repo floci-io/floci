@@ -113,6 +113,76 @@ class S3CfnProvisionerTest {
         verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
     }
 
+    /**
+     * The registry schema allows only {@code Rules} on the controls and only {@code ObjectOwnership}
+     * on a rule, no rule listed twice, and an object, a list or a string at each level. An unknown
+     * key is reported ahead of a wrong type beside it, and the schema is checked before S3's own
+     * rules, so a repeated rule is refused for the repetition rather than for the rule count.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            {"Rules": [{"ObjectOwnership": "ObjectWriter"}], "Rule": []}                          | #/OwnershipControls: extraneous key [Rule] is not permitted
+            {"Rule": [{"ObjectOwnership": "ObjectWriter"}]}                                       | #/OwnershipControls: extraneous key [Rule] is not permitted
+            {"Rules": "ObjectWriter", "Extra": 1}                                                 | #/OwnershipControls: extraneous key [Extra] is not permitted
+            {"Rules": [{"ObjectOwnership": "ObjectWriter"}], "ObjectOwnership": "ObjectWriter"}   | #/OwnershipControls: extraneous key [ObjectOwnership] is not permitted
+            {"Rules": [{"ObjectOwnership": "ObjectWriter", "Owner": "me"}]}                       | #/OwnershipControls/Rules/0: extraneous key [Owner] is not permitted
+            {"Rules": [{"Objectownership": "ObjectWriter"}]}                                      | #/OwnershipControls/Rules/0: extraneous key [Objectownership] is not permitted
+            {"Rules": [{"Rules": []}]}                                                            | #/OwnershipControls/Rules/0: extraneous key [Rules] is not permitted
+            {"Rules": [{"ObjectOwnership": "ObjectWriter"}, {"ObjectOwnership": "ObjectWriter"}]} | #/OwnershipControls/Rules: array items are not unique
+            {"Rules": [{"ObjectOwnership": "ObjectWriter"}, {"ObjectOwnership": "BucketOwnerPreferred"}, {"ObjectOwnership": "ObjectWriter"}]} | #/OwnershipControls/Rules: array items are not unique
+            "BucketOwnerEnforced"                                                                 | #/OwnershipControls: expected type: JSONObject, found: String
+            [{"Rules": [{"ObjectOwnership": "ObjectWriter"}]}]                                    | #/OwnershipControls: expected type: JSONObject, found: JSONArray
+            {"Rules": {"ObjectOwnership": "ObjectWriter"}}                                        | #/OwnershipControls/Rules: expected type: JSONArray, found: JSONObject
+            {"Rules": ["ObjectWriter"]}                                                           | #/OwnershipControls/Rules/0: expected type: JSONObject, found: String
+            {"Rules": [{"ObjectOwnership": {"Mode": "ObjectWriter"}}]}                            | #/OwnershipControls/Rules/0/ObjectOwnership: expected type: String, found: JSONObject
+            """)
+    void ownershipControlsTheSchemaRefusesFailBeforeCreatingTheBucket(String controls, String reason) {
+        assertOwnershipControlsFailModelValidation(controls, reason);
+    }
+
+    /**
+     * Every rule is checked on its own before any repeat, so a malformed rule fails for its own
+     * fault, as a single one does, whether it is the repeated rule or comes after a repeat.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            {"Rules": [{}, {}]}                                                                       | #/OwnershipControls/Rules/0: required key [ObjectOwnership] not found
+            {"Rules": ["ObjectWriter", "ObjectWriter"]}                                               | #/OwnershipControls/Rules/0: expected type: JSONObject, found: String
+            {"Rules": [{"ObjectOwnership": "ObjectWriter"}, {"ObjectOwnership": "ObjectWriter"}, {}]} | #/OwnershipControls/Rules/2: required key [ObjectOwnership] not found
+            """)
+    void aRepeatedRuleIsCheckedOnItsOwnFirst(String controls, String reason) {
+        assertOwnershipControlsFailModelValidation(controls, reason);
+    }
+
+    private void assertOwnershipControlsFailModelValidation(String controls, String reason) {
+        AwsException e = assertThrows(AwsException.class, () -> provisionBucket("""
+                {"BucketName": "my-bucket", "OwnershipControls": %s}
+                """.formatted(controls)));
+
+        assertEquals("InvalidRequest", e.getErrorCode());
+        assertEquals("Model validation failed (" + reason + ")", e.getMessage());
+        verify(s3, never()).createBucket(anyString(), anyString());
+        verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
+    }
+
+    @Test
+    void anOwnershipRuleTheSchemaRefusesFailsAnUpdateBeforeTheBucketChanges() {
+        AwsException e = assertThrows(AwsException.class, () -> updateBucket("""
+                {"BucketName": "b", "OwnershipControls": {"Rules": [{"ObjectOwnership": "ObjectWriter"}]}}
+                """, """
+                {"BucketName": "b", "Tags": [{"Key": "k", "Value": "v"}],
+                 "OwnershipControls": {"Rules": [{"ObjectOwnership": "BucketOwnerEnforced", "Owner": "me"}]}}
+                """));
+
+        assertEquals("InvalidRequest", e.getErrorCode());
+        assertEquals("Model validation failed (#/OwnershipControls/Rules/0: extraneous key [Owner] is not permitted)",
+                e.getMessage());
+        verify(s3, never()).deleteBucketCors(anyString());
+        verify(s3, never()).putBucketTagging(anyString(), any());
+        verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
+        verify(s3, never()).deleteBucketOwnershipControls(anyString());
+    }
+
     @Test
     void refIsTheBucketNameAndGetAttExposesTheDocumentedAttributes() {
         StackResource r = provisionBucket("""

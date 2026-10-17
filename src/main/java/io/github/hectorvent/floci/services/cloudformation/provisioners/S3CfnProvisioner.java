@@ -19,6 +19,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 
@@ -236,6 +238,14 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         s3Service.putBucketLifecycle(bucketName, lifecycleXml(lifecycle.get("Rules"), ctx), null);
     }
 
+    /**
+     * The document the template declares, or null when it declares none. A key the registry schema
+     * does not define, a value of the wrong type, a rule without {@code ObjectOwnership} or a rule
+     * listed twice fails in the class's {@code Model validation failed} form. The repeat is checked
+     * once every rule passes on its own, so a malformed rule fails for its own fault even when
+     * repeated. The document then goes through S3's own check, which answers {@code MalformedXML}
+     * for no rule, more than one, or an unknown mode.
+     */
     private String ownershipControlsXml(JsonNode props, ProvisionContext ctx) {
         JsonNode declaredNode = declared(props, "OwnershipControls");
         if (declaredNode == null) {
@@ -246,17 +256,18 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             return null;
         }
         String path = "#/OwnershipControls";
-        requireObject(controls, path);
+        requireOnly(requireObject(controls, path), path, "Rules");
         JsonNode rules = declaredArray(controls, "Rules", path);
         XmlBuilder xml = new XmlBuilder().start("OwnershipControls", AwsNamespaces.S3);
         for (int index = 0; rules != null && index < rules.size(); index++) {
             String rulePath = path + "/Rules/" + index;
-            JsonNode rule = requireObject(rules.get(index), rulePath);
+            JsonNode rule = requireOnly(requireObject(rules.get(index), rulePath), rulePath, "ObjectOwnership");
             String ownership = required(rule, "ObjectOwnership", rulePath);
             xml.start("Rule");
             xml.elem("ObjectOwnership", ownership);
             xml.end("Rule");
         }
+        requireDistinct(rules, path + "/Rules");
         String document = xml.end("OwnershipControls").build();
         S3Service.validateOwnershipControls(document);
         return document;
@@ -463,6 +474,36 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             throw typeMismatch(pointer, "JSONObject", value);
         }
         return value;
+    }
+
+    /**
+     * The object itself when it holds no key besides {@code keys}. Any other key fails, as the
+     * schema's {@code additionalProperties: false} does, rather than being dropped unread.
+     */
+    private static JsonNode requireOnly(JsonNode object, String pointer, String... keys) {
+        Set<String> allowed = Set.of(keys);
+        for (Iterator<String> names = object.fieldNames(); names.hasNext(); ) {
+            String name = names.next();
+            if (!allowed.contains(name)) {
+                throw new AwsException("InvalidRequest", "Model validation failed (" + pointer
+                        + ": extraneous key [" + name + "] is not permitted)", 400);
+            }
+        }
+        return object;
+    }
+
+    /**
+     * Fails when an item of the list repeats another, as the schema's {@code uniqueItems} does. A
+     * list that is not declared, null here, has no repeat.
+     */
+    private static void requireDistinct(JsonNode items, String pointer) {
+        Set<JsonNode> seen = new HashSet<>();
+        for (int index = 0; items != null && index < items.size(); index++) {
+            if (!seen.add(items.get(index))) {
+                throw new AwsException("InvalidRequest",
+                        "Model validation failed (" + pointer + ": array items are not unique)", 400);
+            }
+        }
     }
 
     private static AwsException typeMismatch(String pointer, String expected, JsonNode value) {

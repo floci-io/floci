@@ -155,6 +155,55 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
                 + marker + "\" }]" + controls + " } } } }";
     }
 
+    /** A key the registry schema does not define fails the create, and the stack leaves no bucket. */
+    @Test
+    void anOwnershipRuleWithAKeyTheSchemaDoesNotDefineFailsTheCreate() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-ownership-extra-" + suffix;
+        String stackId = stack("CreateStack", "cfn-ownership-extra-stack-" + suffix, """
+                { "Resources": { "Bucket": { "Type": "AWS::S3::Bucket", "Properties": {
+                    "BucketName": "%s",
+                    "OwnershipControls": { "Rules": [
+                        { "ObjectOwnership": "BucketOwnerEnforced", "Owner": "me" } ] } } } } }
+                """.formatted(bucket));
+        await(stackId, "ROLLBACK_COMPLETE");
+
+        String events = stackEvents(stackId);
+        assertTrue(events.contains(
+                "Model validation failed (#/OwnershipControls/Rules/0: extraneous key [Owner] is not permitted)"),
+                "the create failed on the rule: " + events);
+        given().when().head("/" + bucket).then().statusCode(404);
+    }
+
+    /**
+     * The template is resolved before the schema is checked, so two rules that resolve to the same
+     * mode are a repeated rule. The update rolls back and the bucket keeps its tag and mode.
+     */
+    @Test
+    void ownershipRulesThatResolveToTheSameModeFailTheUpdate() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-ownership-repeated-" + suffix;
+        String stackName = "cfn-ownership-repeated-stack-" + suffix;
+        String stackId = stack("CreateStack", stackName, ownershipTemplate(bucket, "BucketOwnerEnforced", "before"));
+        await(stackId, "CREATE_COMPLETE");
+
+        stack("UpdateStack", stackName, """
+                { "Parameters": { "Mode": { "Type": "String", "Default": "ObjectWriter" } },
+                  "Resources": { "Bucket": { "Type": "AWS::S3::Bucket", "Properties": {
+                    "BucketName": "%s", "Tags": [{ "Key": "marker", "Value": "after" }],
+                    "OwnershipControls": { "Rules": [
+                        { "ObjectOwnership": { "Ref": "Mode" } }, { "ObjectOwnership": "ObjectWriter" } ] } } } } }
+                """.formatted(bucket));
+        await(stackId, "UPDATE_ROLLBACK_COMPLETE");
+
+        String events = stackEvents(stackId);
+        assertTrue(events.contains("Model validation failed (#/OwnershipControls/Rules: array items are not unique)"),
+                "the update failed on the repeated rule: " + events);
+        bucketGet(bucket, "ownershipControls")
+                .body(containsString("<ObjectOwnership>BucketOwnerEnforced</ObjectOwnership>"));
+        bucketGet(bucket, "tagging").body(containsString("<Value>before</Value>"));
+    }
+
     @Test
     void theBucketCarriesWhatItsTemplateDeclares() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
@@ -278,6 +327,14 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
 
     private static io.restassured.response.ValidatableResponse bucketGet(String bucket, String subresource) {
         return given().when().get("/" + bucket + "?" + subresource).then().statusCode(200);
+    }
+
+    private static String stackEvents(String stackId) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stackId)
+        .when().post("/").then().statusCode(200).extract().asString();
     }
 
     private static String stack(String action, String stackName, String template) {
