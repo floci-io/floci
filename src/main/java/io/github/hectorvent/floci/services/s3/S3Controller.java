@@ -859,8 +859,8 @@ public class S3Controller {
                 s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
                 int parsedPartNumber = PartRange.parseUploadPartNumber(partNumber);
                 if (copySource != null && !copySource.isEmpty()) {
-                    return handleUploadPartCopy(
-                            copySource, bucket, key, uploadId, parsedPartNumber, httpHeaders, authorization);
+                    return handleUploadPartCopy(copySource, bucket, key, uploadId, parsedPartNumber,
+                            httpHeaders, uriInfo, authorization);
                 }
                 requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PART_SIZE);
                 Part part = s3Service.storePart(bucket, key, uploadId, parsedPartNumber,
@@ -3067,7 +3067,7 @@ public class S3Controller {
                                       ObjectLockHeaders lock) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
-        authorizeCopySourceRead(httpHeaders, sourceObject, authorization);
+        authorizeCopySourceRead(httpHeaders, uriInfo, sourceObject, authorization);
         authorizeCopiedTags(httpHeaders, uriInfo, sourceObject, destBucket, destKey, authorization);
         String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
         String copyContentDisposition = httpHeaders.getHeaderString("Content-Disposition");
@@ -3155,10 +3155,10 @@ public class S3Controller {
 
     private Response handleUploadPartCopy(String copySource, String destBucket, String destKey,
                                           String uploadId, int partNumber, HttpHeaders httpHeaders,
-                                          S3Service.RequestAuthorization authorization) {
+                                          UriInfo uriInfo, S3Service.RequestAuthorization authorization) {
         CopySourceRef sourceObject = parseCopySource(copySource);
         String sourceBucket = sourceObject.bucket();
-        authorizeCopySourceRead(httpHeaders, sourceObject, authorization);
+        authorizeCopySourceRead(httpHeaders, uriInfo, sourceObject, authorization);
         String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
@@ -4376,9 +4376,11 @@ public class S3Controller {
      * in the {@code x-amz-copy-source} header and is otherwise invisible to the request-level IAM filter
      * that authorizes the destination from the URL path. Real S3 requires both permissions: a caller
      * allowed to write to the destination bucket must not be able to exfiltrate an object it cannot read.
-     * A no-op when IAM enforcement is disabled, matching {@link IamEnforcementFilter}'s own bypass rules.
+     * IAM checks it against the request's credential, the header's or a presigned URL's, as the filter
+     * checks the destination. A no-op when IAM enforcement is disabled, matching
+     * {@link IamEnforcementFilter}'s own bypass rules.
      */
-    private void authorizeCopySourceRead(HttpHeaders httpHeaders, CopySourceRef source,
+    private void authorizeCopySourceRead(HttpHeaders httpHeaders, UriInfo uriInfo, CopySourceRef source,
                                          S3Service.RequestAuthorization authorization) {
         String action = source.versionId() == null ? "s3:GetObject" : "s3:GetObjectVersion";
         String resource = S3PublicAccessEvaluator.objectArn(
@@ -4386,8 +4388,7 @@ public class S3Controller {
         S3Service.SignedPrincipalResourcePolicyEvaluation resourcePolicyEvaluation =
                 s3Service.signedPrincipalResourcePolicyDecision(
                         source.bucket(), action, resource, authorization);
-        iamEnforcementFilter.authorizeAdditionalResource(
-                httpHeaders.getHeaderString("Authorization"), action, resource,
+        iamEnforcementFilter.authorizeAdditionalResource(iamCredential(httpHeaders, uriInfo), action, resource,
                 resourcePolicyEvaluation.decision(), resourcePolicyEvaluation.resourceOwnerAccountId());
         s3Service.authorizeGetObject(
                 source.bucket(), source.objectKey(), source.versionId(), authorization);

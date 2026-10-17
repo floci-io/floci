@@ -19,7 +19,9 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -41,6 +43,9 @@ public final class S3RequestSigner implements Filter {
     private static final String SERVICE = "s3";
     private static final DateTimeFormatter AMZ_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+    /** The query parameters a presigned URL carries, lowercased: a URI holding one is already signed. */
+    private static final Set<String> PRESIGN_PARAMETERS = Set.of("x-amz-algorithm", "x-amz-credential",
+            "x-amz-date", "x-amz-expires", "x-amz-security-token", "x-amz-signedheaders", "x-amz-signature");
 
     private final String accessKeyId;
     private final String secretKey;
@@ -181,9 +186,19 @@ public final class S3RequestSigner implements Filter {
      * The query string of a presigned URL for {@code method} on {@code uri}, written the way an AWS
      * SDK presigner writes it: the {@code X-Amz-*} parameters, {@code X-Amz-Security-Token} when a
      * session token is given, {@code host} as the only signed header, an unsigned payload, and the
-     * signature last. Send it with URL encoding off, since it is already encoded.
+     * signature last. Parameters already in {@code uri}'s query, such as an upload id, are signed too
+     * and lead the result, so send it in place of that query. A {@code uri} that is already presigned
+     * is refused, since signing over its signature would give a URL no verifier accepts. Send the
+     * result with URL encoding off, since it is already encoded.
      */
     public String presignedQuery(String method, URI uri, int expiresSeconds) throws Exception {
+        String uriQuery = uri.getRawQuery() == null ? "" : uri.getRawQuery();
+        for (String pair : uriQuery.split("&")) {
+            String name = URLDecoder.decode(pair.split("=", 2)[0], StandardCharsets.UTF_8);
+            if (PRESIGN_PARAMETERS.contains(name.toLowerCase(Locale.ROOT))) {
+                throw new IllegalArgumentException("already presigned, it carries " + name + ": " + uri);
+            }
+        }
         Instant at = signedAt != null ? signedAt : Instant.now();
         String amzDate = AMZ_DATE.format(at);
         String scopeDate = amzDate.substring(0, 8);
@@ -201,6 +216,9 @@ public final class S3RequestSigner implements Filter {
         String query = params.entrySet().stream()
                 .map(param -> uriEncode(param.getKey()) + "=" + uriEncode(param.getValue()))
                 .collect(Collectors.joining("&"));
+        if (!uriQuery.isEmpty()) {
+            query = uriQuery + "&" + query;
+        }
 
         String rawPath = uri.getRawPath() == null || uri.getRawPath().isEmpty() ? "/" : uri.getRawPath();
         String canonicalRequest = method + "\n"

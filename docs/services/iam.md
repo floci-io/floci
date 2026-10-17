@@ -1169,6 +1169,9 @@ An S3 object operation is checked as the action the S3 documentation gives it:
   `SelectObjectContent` as `s3:GetObject`, or `s3:GetObjectVersion` when it names a version.
 - **Attributes:** `GetObjectAttributes` needs `s3:GetObject` and `s3:GetObjectAttributes`, as its
   API reference says.
+- **Copying:** `CopyObject` and `UploadPartCopy` also need `s3:GetObject` on the source object, or
+  `s3:GetObjectVersion` when `x-amz-copy-source` names a version, as their API references say. It
+  is checked against the request's credential, a presigned URL's included.
 - **Object lock:**
   - Object retention and legal hold use their own actions: `s3:GetObjectRetention`,
     `s3:PutObjectRetention`, `s3:GetObjectLegalHold` and `s3:PutObjectLegalHold`.
