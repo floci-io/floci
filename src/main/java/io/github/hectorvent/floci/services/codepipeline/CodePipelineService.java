@@ -1527,11 +1527,15 @@ public class CodePipelineService {
             try {
                 runStagesFrom(pipeline, execution, 0, includeStagesFor(pipeline, execution));
             } catch (Exception e) {
-                if (execution.getCurrentStage() != null) {
-                    execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
+                synchronized (execution) {
+                    if (!isTerminal(execution.getStatus())) {
+                        if (execution.getCurrentStage() != null) {
+                            execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
+                        }
+                        execution.setStatus("Failed");
+                        execution.setStatusSummary(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+                    }
                 }
-                execution.setStatus("Failed");
-                execution.setStatusSummary(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
                 LOG.errorf(e, "CodePipeline execution %s failed", execution.getPipelineExecutionId());
             } finally {
                 finishExecutionRun(execution);
@@ -1564,11 +1568,15 @@ public class CodePipelineService {
             }
             runStagesFrom(pipeline, execution, stageIndex + 1, includeStagesFor(pipeline, execution));
         } catch (Exception e) {
-            if (execution.getCurrentStage() != null) {
-                execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
+            synchronized (execution) {
+                if (!isTerminal(execution.getStatus())) {
+                    if (execution.getCurrentStage() != null) {
+                        execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Failed");
+                    }
+                    execution.setStatus("Failed");
+                    execution.setStatusSummary(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+                }
             }
-            execution.setStatus("Failed");
-            execution.setStatusSummary(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             LOG.errorf(e, "CodePipeline retry for execution %s failed", execution.getPipelineExecutionId());
         } finally {
             finishExecutionRun(execution);
@@ -1585,15 +1593,19 @@ public class CodePipelineService {
                 continue;
             }
             waitForTransition(pipeline, execution, stageName);
-            if (finishIfStopped(execution)) {
+            if (isTerminal(execution.getStatus()) || finishIfStopped(execution)) {
                 return;
             }
             if (!runStageInRun(pipeline, execution, stage, "ALL_ACTIONS", Map.of())) {
                 return;
             }
         }
-        execution.setStatus("Succeeded");
-        execution.setStatusSummary("Pipeline execution succeeded.");
+        synchronized (execution) {
+            if (!isTerminal(execution.getStatus())) {
+                execution.setStatus("Succeeded");
+                execution.setStatusSummary("Pipeline execution succeeded.");
+            }
+        }
     }
 
     /**
@@ -1605,10 +1617,15 @@ public class CodePipelineService {
     private boolean runStageInRun(CodePipelinePipeline pipeline, CodePipelineExecution execution, JsonNode stage,
                                   String retryMode, Map<String, String> previousStatuses) {
         String stageName = stage.path("name").asText();
-        execution.setCurrentStage(stageName);
-        execution.getStageExecutionStatuses().put(stageName, "InProgress");
-        execution.setLastUpdateTime(now());
-        putExecution(execution);
+        synchronized (execution) {
+            if (isTerminal(execution.getStatus())) {
+                return false;
+            }
+            execution.setCurrentStage(stageName);
+            execution.getStageExecutionStatuses().put(stageName, "InProgress");
+            execution.setLastUpdateTime(now());
+            putExecution(execution);
+        }
 
         // Evaluated before STARTED is published: AWS documents no skipped-stage event, so a stage
         // skipped by its beforeEntry condition emits no stage events at all.
@@ -2499,19 +2516,22 @@ public class CodePipelineService {
         }
         executions(execution.getAccountId(), execution.getRegion(), execution.getPipelineName()).stream()
                 .filter(e -> !e.getPipelineExecutionId().equals(execution.getPipelineExecutionId()))
-                .filter(e -> "InProgress".equals(e.getStatus()) && e.getCurrentStage() == null)
                 .forEach(e -> {
-                    e.setStatus("Superseded");
-                    e.setStatusSummary("Superseded by " + execution.getPipelineExecutionId());
-                    e.setLastUpdateTime(now());
-                    putExecution(e);
+                    synchronized (e) {
+                        if ("InProgress".equals(e.getStatus()) && e.getCurrentStage() == null) {
+                            e.setStatus("Superseded");
+                            e.setStatusSummary("Superseded by " + execution.getPipelineExecutionId());
+                            e.setLastUpdateTime(now());
+                            putExecution(e);
+                        }
+                    }
                 });
     }
 
     private void waitForTransition(CodePipelinePipeline pipeline, CodePipelineExecution execution,
                                    String stageName) throws InterruptedException {
         while (!pipeline.getTransitions().getOrDefault(stageName, enabledTransition()).isEnabled()) {
-            if (execution.isStopRequested()) {
+            if (isTerminal(execution.getStatus()) || execution.isStopRequested()) {
                 return;
             }
             TimeUnit.MILLISECONDS.sleep(POLL_INTERVAL_MS);

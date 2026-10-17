@@ -19,7 +19,7 @@ public class CodePipelineExecution {
     private String pipelineExecutionId;
     private String pipelineName;
     private Integer pipelineVersion;
-    private String status;
+    private volatile String status;
     private String statusSummary;
     private String executionMode;
     private String executionType;
@@ -32,7 +32,7 @@ public class CodePipelineExecution {
     private Map<String, String> trigger = new LinkedHashMap<>();
     private List<ActionExecution> actionExecutions = new ArrayList<>();
     private Map<String, String> stageExecutionStatuses = new LinkedHashMap<>();
-    private String currentStage;
+    private volatile String currentStage;
     private volatile boolean stopRequested;
     private volatile boolean abandon;
     private volatile boolean artifactsReleased;

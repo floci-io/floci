@@ -1,5 +1,7 @@
 # CodePipeline
 
+In `SUPERSEDED` mode, an execution superseded between stages stops without starting another stage or overwriting its terminal status. A worker waiting at a disabled transition exits when superseded; enabling the transition lets the newer execution proceed. Already-running stages are not interrupted by supersession.
+
 Floci implements the AWS CodePipeline JSON 1.1 API and a local pipeline execution engine.
 
 **Protocol:** `POST /` with `Content-Type: application/x-amz-json-1.1` and

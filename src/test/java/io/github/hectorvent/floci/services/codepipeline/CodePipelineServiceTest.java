@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -27,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -469,6 +471,68 @@ class CodePipelineServiceTest {
 
     private JsonNode handle(String action, String body) throws Exception {
         return service.handle(action, mapper.readTree(body), REGION, ACCOUNT);
+    }
+
+    @Test
+    void supersededExecutionLeavesDisabledTransitionWithoutStartingActions() throws Exception {
+        String pipeline = "superseded-pipeline";
+        String transition = """
+                {"pipelineName":"%s","stageName":"External","transitionType":"Inbound","reason":"paused"}
+                """.formatted(pipeline);
+        try {
+            createExternalActionPipeline(service, pipeline, """
+                    {"name":"Approve","actionTypeId":{
+                    "category":"Approval","owner":"AWS","provider":"Manual","version":"1"}}
+                    """);
+            handle("DisableStageTransition", transition);
+            String first = startExecution(service, pipeline);
+            await().atMost(Duration.ofSeconds(3)).until(() -> service.activeRuns.contains(ACCOUNT + ":" + first));
+            String second = startExecution(service, pipeline);
+            waitForExecutionStatus(service, pipeline, first, "Superseded");
+            await().atMost(Duration.ofSeconds(3)).until(() -> !service.activeRuns.contains(ACCOUNT + ":" + first));
+
+            handle("EnableStageTransition", transition);
+            await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+                    assertFalse(handle("ListActionExecutions", """
+                            {"pipelineName":"%s","filter":{"pipelineExecutionId":"%s"}}
+                            """.formatted(pipeline, second)).path("actionExecutionDetails").isEmpty()));
+            assertEquals("Superseded", handle("GetPipelineExecution", """
+                    {"pipelineName":"%s","pipelineExecutionId":"%s"}
+                    """.formatted(pipeline, first)).path("pipelineExecution").path("status").asText());
+            assertTrue(handle("ListActionExecutions", """
+                    {"pipelineName":"%s","filter":{"pipelineExecutionId":"%s"}}
+                    """.formatted(pipeline, first)).path("actionExecutionDetails").isEmpty());
+            stopExecution(service, pipeline, second, true);
+            waitForExecutionStatus(service, pipeline, second, "Stopped");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void startingNewExecutionDoesNotSupersedeAnActiveStage() throws Exception {
+        String pipeline = "active-stage-pipeline";
+        try {
+            createExternalActionPipeline(service, pipeline, """
+                    {"name":"Approve","actionTypeId":{
+                    "category":"Approval","owner":"AWS","provider":"Manual","version":"1"}}
+                    """);
+            String first = startExecution(service, pipeline);
+            await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+                    assertFalse(handle("ListActionExecutions", """
+                            {"pipelineName":"%s","filter":{"pipelineExecutionId":"%s"}}
+                            """.formatted(pipeline, first)).path("actionExecutionDetails").isEmpty()));
+            String second = startExecution(service, pipeline);
+            assertEquals("InProgress", handle("GetPipelineExecution", """
+                    {"pipelineName":"%s","pipelineExecutionId":"%s"}
+                    """.formatted(pipeline, first)).path("pipelineExecution").path("status").asText());
+            stopExecution(service, pipeline, first, true);
+            stopExecution(service, pipeline, second, true);
+            waitForExecutionStatus(service, pipeline, first, "Stopped");
+            waitForExecutionStatus(service, pipeline, second, "Stopped");
+        } finally {
+            service.shutdown();
+        }
     }
 
     private CodePipelineService serviceWith(CodeBuildService codeBuildService,
