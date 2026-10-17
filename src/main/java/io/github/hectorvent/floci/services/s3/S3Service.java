@@ -5937,9 +5937,8 @@ public class S3Service implements Resettable, ResourceProvider {
     /**
      * Resolves the ACL to store for an object/bucket from a canned ACL and/or the explicit
      * ACL grant headers (x-amz-grant-read, x-amz-grant-write, x-amz-grant-full-control,
-     * x-amz-grant-read-acp, x-amz-grant-write-acp). If both are somehow present, the canned ACL
-     * takes precedence - real S3 instead rejects that combination with 400 "Conflicting header
-     * values", but Floci doesn't model that validation yet. Returns null if neither is set, so
+     * x-amz-grant-read-acp, x-amz-grant-write-acp). Specifying both a canned ACL and any explicit
+     * grant headers is rejected with 400 InvalidRequest. Returns null if neither is set, so
      * callers can fall back to a pre-existing ACL (e.g. an explicit AccessControlPolicy XML body).
      */
     String resolveObjectAclXml(String cannedAcl, String grantRead, String grantWrite,
@@ -5952,11 +5951,17 @@ public class S3Service implements Resettable, ResourceProvider {
                                        String grantRead, String grantWrite,
                                        String grantFullControl, String grantReadAcp,
                                        String grantWriteAcp) {
-        if (cannedAcl != null && !cannedAcl.isBlank()) {
+        boolean hasCannedAcl = !isBlank(cannedAcl);
+        boolean hasGrantHeaders = !isBlank(grantRead) || !isBlank(grantWrite)
+                || !isBlank(grantFullControl) || !isBlank(grantReadAcp) || !isBlank(grantWriteAcp);
+        if (hasCannedAcl && hasGrantHeaders) {
+            throw new AwsException("InvalidRequest",
+                    "Specifying both Canned ACLs and Header Grants is not allowed", 400);
+        }
+        if (hasCannedAcl) {
             return cannedObjectAclXml(ownerAccount, cannedAcl);
         }
-        if (isBlank(grantRead) && isBlank(grantWrite) && isBlank(grantFullControl)
-                && isBlank(grantReadAcp) && isBlank(grantWriteAcp)) {
+        if (!hasGrantHeaders) {
             return null;
         }
         List<String> grants = new ArrayList<>();
