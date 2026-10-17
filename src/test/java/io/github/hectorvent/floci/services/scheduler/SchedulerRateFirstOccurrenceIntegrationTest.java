@@ -6,9 +6,9 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
+import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -29,16 +29,18 @@ import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Verifies that a rate schedule first fires at its stored start date, or at its creation date when
+ * it has none, whether it is created or updated directly or through a Step Functions SDK task.
+ *
+ * <p>Each test ticks a dispatcher of its own at chosen instants, so the background dispatcher is
+ * off: {@code floci.services.scheduler.invocation-enabled=false} comes from
+ * {@link IndependentServiceSettingsProfile}, which this class shares with other classes that each
+ * call a different service.
+ */
 @QuarkusTest
-@TestProfile(SchedulerRateFirstOccurrenceIntegrationTest.ManualDispatch.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class SchedulerRateFirstOccurrenceIntegrationTest {
-
-    public static class ManualDispatch implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.scheduler.invocation-enabled", "false");
-        }
-    }
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

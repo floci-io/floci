@@ -1,11 +1,9 @@
 package io.github.hectorvent.floci.services.bedrockagentcore;
 
+import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -14,17 +12,13 @@ import static org.hamcrest.Matchers.equalTo;
  * Verifies the opt-in existence check (issue #11). With
  * {@code validate-runtime-exists=true}, invoking an unknown runtime ARN returns 404
  * while invoking a real runtime's ARN still returns the canned body.
+ *
+ * <p>The setting comes from {@link IndependentServiceSettingsProfile}, which this class shares
+ * with other classes that each call a different service.
  */
 @QuarkusTest
-@TestProfile(BedrockAgentCoreInvokeValidateIntegrationTest.ValidateProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class BedrockAgentCoreInvokeValidateIntegrationTest {
-
-    public static class ValidateProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.bedrock-agent-core.validate-runtime-exists", "true");
-        }
-    }
 
     private static final String CREATE = """
             {

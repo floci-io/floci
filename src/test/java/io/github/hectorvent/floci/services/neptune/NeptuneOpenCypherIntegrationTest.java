@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.neptune;
 
+import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 import org.neo4j.driver.AuthTokens;
@@ -9,7 +9,6 @@ import org.neo4j.driver.Driver;
 import org.neo4j.driver.GraphDatabase;
 import org.neo4j.driver.Session;
 
-import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -23,9 +22,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * <p>The default Gremlin backend ({@code tinkerpop/gremlin-server}) does NOT understand
  * openCypher/Bolt, so before {@code db-type} support existed this test could not pass —
  * the proxied port served a Gremlin WebSocket endpoint, not a Bolt endpoint.
+ *
+ * <p>{@code db-type=neo4j} comes from {@link IndependentServiceSettingsProfile}, which this class
+ * shares with other classes that each call a different service.
  */
 @QuarkusTest
-@TestProfile(NeptuneOpenCypherIntegrationTest.Neo4jDbTypeProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class NeptuneOpenCypherIntegrationTest {
 
     private static final String FORM = "application/x-www-form-urlencoded";
@@ -84,12 +86,5 @@ class NeptuneOpenCypherIntegrationTest {
             throw new AssertionError("No <Port> in CreateDBCluster response: " + xml);
         }
         return Integer.parseInt(m.group(1));
-    }
-
-    public static final class Neo4jDbTypeProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.neptune.db-type", "neo4j");
-        }
     }
 }

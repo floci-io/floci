@@ -1,31 +1,30 @@
 package io.github.hectorvent.floci.services.route53;
 
+import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 
+/**
+ * Verifies that a VPC association or authorization change on a private hosted zone, made while the
+ * previous one is still in progress, is refused with {@code PriorRequestNotComplete} or
+ * {@code ConcurrentModification}, and that a retry succeeds once the previous change is done.
+ *
+ * <p>The 150 ms the previous change stays in progress comes from
+ * {@link IndependentServiceSettingsProfile}, which this class shares with other classes that each
+ * call a different service.
+ */
 @QuarkusTest
-@TestProfile(Route53VpcAssociationTransientErrorIntegrationTest.DelayProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class Route53VpcAssociationTransientErrorIntegrationTest {
 
     private static final String XML = "application/xml";
-
-    public static final class DelayProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.storage.mode", "memory",
-                    "floci.services.route53.vpc-association-control-plane-delay-ms", "150");
-        }
-    }
 
     @Test
     void associationOverlapReturnsPriorRequestNotCompleteThenRetrySucceeds() {

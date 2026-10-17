@@ -1,34 +1,28 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
-
+import static io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile.IAM_ACCOUNT_ALIAS;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
  * Verifies that {@code floci.services.iam.account-alias} seeds the alias at startup, so callers
  * that read an account alias find one without creating it first.
+ *
+ * <p>The alias, {@link IndependentServiceSettingsProfile#IAM_ACCOUNT_ALIAS}, comes from
+ * {@link IndependentServiceSettingsProfile}, which this class shares with other classes that each
+ * call a different service.
  */
 @QuarkusTest
-@TestProfile(IamSeededAccountAliasIntegrationTest.SeededAliasProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class IamSeededAccountAliasIntegrationTest {
-
-    private static final String SEEDED_ALIAS = "seeded-alias";
 
     private static final String IAM_CREDENTIAL =
             "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request";
-
-    public static class SeededAliasProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.account-alias", SEEDED_ALIAS);
-        }
-    }
 
     @Test
     void configuredAliasIsSeededAtStartup() {
@@ -40,14 +34,14 @@ class IamSeededAccountAliasIntegrationTest {
         .then()
             .statusCode(200)
             .body("ListAccountAliasesResponse.ListAccountAliasesResult.AccountAliases.member",
-                    equalTo(SEEDED_ALIAS));
+                    equalTo(IAM_ACCOUNT_ALIAS));
     }
 
     @Test
     void recreatingTheSeededAliasIsRejected() {
         given()
             .formParam("Action", "CreateAccountAlias")
-            .formParam("AccountAlias", SEEDED_ALIAS)
+            .formParam("AccountAlias", IAM_ACCOUNT_ALIAS)
             .header("Authorization", IAM_CREDENTIAL)
         .when()
             .post("/")
@@ -80,7 +74,7 @@ class IamSeededAccountAliasIntegrationTest {
 
         given()
             .formParam("Action", "CreateAccountAlias")
-            .formParam("AccountAlias", SEEDED_ALIAS)
+            .formParam("AccountAlias", IAM_ACCOUNT_ALIAS)
             .header("Authorization", IAM_CREDENTIAL)
         .when()
             .post("/")

@@ -13,8 +13,8 @@ import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginRequestPolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
+import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
 import io.restassured.response.Response;
@@ -59,8 +59,15 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Serves distributions from custom origins that the tests start on 127.0.0.1.
+ *
+ * <p>CloudFront refuses an origin at a private address unless its host is allowed. The allowance
+ * for 127.0.0.1 comes from {@link IndependentServiceSettingsProfile}, which this class shares with
+ * other classes that each call a different service.
+ */
 @QuarkusTest
-@TestProfile(CloudFrontCustomOriginServingTest.PrivateOriginProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class CloudFrontCustomOriginServingTest {
 
     /** The AWS managed CachingDisabled cache policy, which forwards no viewer values. */
@@ -1084,12 +1091,5 @@ class CloudFrontCustomOriginServingTest {
         behavior.setTargetOriginId(originId);
         behavior.setViewerProtocolPolicy("allow-all");
         return behavior;
-    }
-
-    public static final class PrivateOriginProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.cloudfront.allowed-private-origin-hosts", "127.0.0.1");
-        }
     }
 }
