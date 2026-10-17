@@ -20,6 +20,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -59,6 +60,12 @@ public class EcrJsonHandler {
             case "DescribeImages" -> handleDescribeImages(request, region);
             case "BatchGetImage" -> handleBatchGetImage(request, region);
             case "BatchDeleteImage" -> handleBatchDeleteImage(request, region);
+            case "PutImage" -> handlePutImage(request, region);
+            case "BatchCheckLayerAvailability" -> handleBatchCheckLayerAvailability(request, region);
+            case "GetDownloadUrlForLayer" -> handleGetDownloadUrlForLayer(request, region);
+            case "InitiateLayerUpload" -> handleInitiateLayerUpload(request, region);
+            case "UploadLayerPart" -> handleUploadLayerPart(request, region);
+            case "CompleteLayerUpload" -> handleCompleteLayerUpload(request, region);
             case "PutImageTagMutability" -> handlePutImageTagMutability(request, region);
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
@@ -377,6 +384,107 @@ public class EcrJsonHandler {
     // Tag mutability + resource tags
     // ============================================================
 
+    private Response handlePutImage(JsonNode request, String region) {
+        Image img = service.putImage(
+                request.path("repositoryName").asText(null),
+                request.path("imageManifest").asText(null),
+                request.path("imageManifestMediaType").asText(null),
+                request.path("imageTag").asText(null),
+                request.path("imageDigest").asText(null),
+                request.path("registryId").asText(null),
+                region);
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("registryId", img.getRegistryId());
+        n.put("repositoryName", img.getRepositoryName());
+        n.set("imageId", buildImageIdentifier(img.getImageId()));
+        n.put("imageManifest", img.getImageManifest());
+        n.put("imageManifestMediaType", img.getImageManifestMediaType());
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("image", n);
+        return Response.ok(response).build();
+    }
+
+    private Response handleBatchCheckLayerAvailability(JsonNode request, String region) {
+        EcrService.BatchCheckLayerAvailabilityResult result = service.batchCheckLayerAvailability(
+                request.path("repositoryName").asText(null),
+                parseStringList(request.path("layerDigests")),
+                request.path("registryId").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode layers = response.putArray("layers");
+        for (EcrService.LayerAvailability layer : result.layers()) {
+            ObjectNode n = layers.addObject();
+            n.put("layerDigest", layer.layerDigest());
+            n.put("layerAvailability", layer.availability());
+            n.put("layerSize", layer.layerSize());
+        }
+        ArrayNode failures = response.putArray("failures");
+        for (EcrService.LayerFailure failure : result.failures()) {
+            ObjectNode n = failures.addObject();
+            if (failure.layerDigest() != null) {
+                n.put("layerDigest", failure.layerDigest());
+            }
+            n.put("failureCode", failure.failureCode());
+            n.put("failureReason", failure.failureReason());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetDownloadUrlForLayer(JsonNode request, String region) {
+        String digest = request.path("layerDigest").asText(null);
+        String url = service.getDownloadUrlForLayer(
+                request.path("repositoryName").asText(null),
+                digest,
+                request.path("registryId").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("downloadUrl", url);
+        response.put("layerDigest", digest);
+        return Response.ok(response).build();
+    }
+
+    private Response handleInitiateLayerUpload(JsonNode request, String region) {
+        EcrService.LayerUpload upload = service.initiateLayerUpload(
+                request.path("repositoryName").asText(null),
+                request.path("registryId").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("uploadId", upload.uploadId());
+        response.put("partSize", EcrLayerUploads.PART_SIZE);
+        return Response.ok(response).build();
+    }
+
+    private Response handleUploadLayerPart(JsonNode request, String region) {
+        String repositoryName = request.path("repositoryName").asText(null);
+        String uploadId = request.path("uploadId").asText(null);
+        String registryId = request.path("registryId").asText(null);
+        long lastByte = service.uploadLayerPart(repositoryName, uploadId,
+                parseLong(request.path("partFirstByte"), "partFirstByte"),
+                parseLong(request.path("partLastByte"), "partLastByte"),
+                parseBlob(request.path("layerPartBlob")),
+                registryId, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("registryId", service.registryIdFor(registryId));
+        response.put("repositoryName", repositoryName);
+        response.put("uploadId", uploadId);
+        response.put("lastByteReceived", lastByte);
+        return Response.ok(response).build();
+    }
+
+    private Response handleCompleteLayerUpload(JsonNode request, String region) {
+        String repositoryName = request.path("repositoryName").asText(null);
+        String uploadId = request.path("uploadId").asText(null);
+        String registryId = request.path("registryId").asText(null);
+        String digest = service.completeLayerUpload(repositoryName, uploadId,
+                parseStringList(request.path("layerDigests")), registryId, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("registryId", service.registryIdFor(registryId));
+        response.put("repositoryName", repositoryName);
+        response.put("uploadId", uploadId);
+        response.put("layerDigest", digest);
+        return Response.ok(response).build();
+    }
+
     private Response handlePutImageTagMutability(JsonNode request, String region) {
         String repo = request.path("repositoryName").asText(null);
         String registryId = request.path("registryId").asText(null);
@@ -615,6 +723,27 @@ public class EcrJsonHandler {
         List<String> out = new ArrayList<>();
         node.forEach(n -> out.add(n.asText()));
         return out;
+    }
+
+    private static Long parseLong(JsonNode node, String name) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber() || !node.canConvertToLong()) {
+            throw new AwsException("InvalidParameterException", name + " must be an integer.", 400);
+        }
+        return node.longValue();
+    }
+
+    private static byte[] parseBlob(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        try {
+            return Base64.getDecoder().decode(node.asText());
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterException", "layerPartBlob must be base64-encoded.", 400);
+        }
     }
 
     private static Integer parseMaxResults(JsonNode node) {

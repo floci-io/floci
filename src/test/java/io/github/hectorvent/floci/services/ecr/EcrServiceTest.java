@@ -903,6 +903,23 @@ class EcrServiceTest {
     }
 
     @Test
+    void putImage_retagKeepsTheFirstPushTime() {
+        InMemoryStorage<String, ImageMetadata> metaStore = new InMemoryStorage<>();
+        EcrService withMeta = new EcrService(new InMemoryStorage<>(), metaStore, pullThroughCacheRuleStore,
+                registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+        when(registryManager.httpClient()).thenReturn(Mockito.mock(RegistryHttpClient.class));
+        withMeta.createRepository(REPO, null, null, null, null, null, null, REGION);
+        String manifest = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.docker.distribution.manifest.v2+json\"}";
+
+        withMeta.putImage(REPO, manifest, null, "v1", null, null, REGION);
+        Instant firstPush = metaStore.scan(k -> true).get(0).getPushedAt();
+        withMeta.putImage(REPO, manifest, null, "release", null, null, REGION);
+
+        assertEquals(1, metaStore.scan(k -> true).size());
+        assertEquals(firstPush, metaStore.scan(k -> true).get(0).getPushedAt());
+    }
+
+    @Test
     void putImageTagMutability_roundTrips() {
         service.createRepository(REPO, null, null, null, null, null, null, REGION);
         Repository updated = service.putImageTagMutability(REPO, null, "IMMUTABLE", REGION);

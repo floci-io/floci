@@ -103,3 +103,40 @@ teardown() {
     assert_failure
     [[ "$output" == *"RepositoryNotFoundException"* ]]
 }
+
+@test "ECR: an image pushed with the layer API retags with batch-get-image and put-image" {
+    aws_cmd ecr create-repository --repository-name "$REPO_NAME" >/dev/null
+    printf '{"architecture":"amd64","os":"linux"}' > "$BATS_TEST_TMPDIR/config"
+    printf 'floci layer bytes' > "$BATS_TEST_TMPDIR/layer"
+
+    for blob in config layer; do
+        file="$BATS_TEST_TMPDIR/$blob"
+        size=$(wc -c < "$file" | tr -d ' ')
+        digest="sha256:$(sha256sum "$file" | cut -d' ' -f1)"
+        upload=$(aws_cmd ecr initiate-layer-upload --repository-name "$REPO_NAME" | jq -r '.uploadId')
+        run aws_cmd ecr upload-layer-part --repository-name "$REPO_NAME" --upload-id "$upload" \
+            --part-first-byte 0 --part-last-byte $((size - 1)) --layer-part-blob "fileb://$file"
+        assert_success
+        run aws_cmd ecr complete-layer-upload --repository-name "$REPO_NAME" --upload-id "$upload" \
+            --layer-digests "$digest"
+        assert_success
+        [ "$(json_get "$output" '.layerDigest')" = "$digest" ]
+        eval "${blob}_digest=$digest ${blob}_size=$size"
+    done
+
+    manifest=$(printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","size":%s,"digest":"%s"},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar","size":%s,"digest":"%s"}]}' \
+        "$config_size" "$config_digest" "$layer_size" "$layer_digest")
+    run aws_cmd ecr put-image --repository-name "$REPO_NAME" --image-tag v1 --image-manifest "$manifest"
+    assert_success
+    digest=$(json_get "$output" '.image.imageId.imageDigest')
+
+    read_back=$(aws_cmd ecr batch-get-image --repository-name "$REPO_NAME" --image-ids imageTag=v1 \
+        --query 'images[0].imageManifest' --output text)
+    run aws_cmd ecr put-image --repository-name "$REPO_NAME" --image-tag release --image-manifest "$read_back"
+    assert_success
+    [ "$(json_get "$output" '.image.imageId.imageDigest')" = "$digest" ]
+
+    run aws_cmd ecr describe-images --repository-name "$REPO_NAME" --image-ids imageTag=release
+    assert_success
+    [ "$(json_get "$output" '.imageDetails[0].imageDigest')" = "$digest" ]
+}

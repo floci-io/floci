@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
 /** Unit tests for routing AWS-shaped ECR repository URIs through Floci's data plane. */
@@ -222,6 +223,7 @@ class EcrRegistryDataPlaneTest {
                     .thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
             when(ecrService.isImageTagImmutable("platform/api", "000000000000", "us-east-1"))
                     .thenReturn(true);
+            when(ecrService.claimImmutableTag(anyString())).thenReturn(true);
             when(ecrService.registryRepositoryName("platform/api", "000000000000", "us-east-1"))
                     .thenReturn("legacy/platform-api");
 
@@ -286,6 +288,7 @@ class EcrRegistryDataPlaneTest {
                     .thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
             when(ecrService.isImageTagImmutable("platform/api", "000000000000", "us-east-1"))
                     .thenReturn(true);
+            when(ecrService.claimImmutableTag(anyString())).thenReturn(true);
             when(ecrService.registryRepositoryName("platform/api", "000000000000", "us-east-1"))
                     .thenReturn("legacy/platform-api");
 

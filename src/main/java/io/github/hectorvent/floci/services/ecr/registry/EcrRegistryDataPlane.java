@@ -21,7 +21,6 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -44,7 +43,6 @@ public class EcrRegistryDataPlane {
     private final EmulatorConfig config;
     private final Vertx vertx;
     private final HttpClient proxyClient;
-    private final Set<String> inFlightImmutableTags = ConcurrentHashMap.newKeySet();
 
     @Inject
     public EcrRegistryDataPlane(EcrRegistryManager registryManager,
@@ -83,7 +81,7 @@ public class EcrRegistryDataPlane {
                             registryRequest.repositoryName(), registryRequest.accountId(), registryRequest.region()));
         }
         String immutableTag = immutableTag(context, registryRequest);
-        if (immutableTag != null && !inFlightImmutableTags.add(immutableTag)) {
+        if (immutableTag != null && !ecrService.claimImmutableTag(immutableTag)) {
             context.request().resume();
             imageTagAlreadyExists(context, registryRequest);
             return;
@@ -97,7 +95,7 @@ public class EcrRegistryDataPlane {
                 || !ecrService.isImageTagImmutable(request.repositoryName(), request.accountId(), request.region())) {
             return null;
         }
-        return request.accountId() + "/" + request.region() + "/" + request.repositoryName() + ":" + request.tag();
+        return EcrService.immutableTagKey(request.accountId(), request.region(), request.repositoryName(), request.tag());
     }
 
     private void checkTagAndProxy(RoutingContext context, RegistryRequest request, String immutableTag) {
@@ -220,7 +218,7 @@ public class EcrRegistryDataPlane {
 
     private void release(String immutableTag) {
         if (immutableTag != null) {
-            inFlightImmutableTags.remove(immutableTag);
+            ecrService.releaseImmutableTag(immutableTag);
         }
     }
 

@@ -176,6 +176,18 @@ public class EcrRegistryManager {
     }
 
     /**
+     * The address a blob can be fetched from through Floci's registry endpoint: the repository URI's
+     * host, with {@code /v2/<repository>/blobs/<digest>}, over the scheme the proxy endpoint uses.
+     */
+    public String blobUrl(String repositoryUri, String digest) {
+        int slash = repositoryUri.indexOf('/');
+        String endpoint = getProxyEndpoint();
+        String scheme = endpoint.substring(0, endpoint.indexOf("://"));
+        return scheme + "://" + repositoryUri.substring(0, slash) + "/v2/" + repositoryUri.substring(slash + 1)
+                + "/blobs/" + digest;
+    }
+
+    /**
      * Returns the proxy endpoint a docker daemon should log into for any ECR repo.
      *
      * <p>An ECR registry is regional, so the region in the endpoint is the region of the

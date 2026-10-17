@@ -6,9 +6,11 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -222,6 +224,146 @@ public class RegistryHttpClient {
             return false;
         }
         return true;
+    }
+
+    /**
+     * A registry refusal, carrying the first {@code errors[].code} of the registry's error body
+     * (for example {@code MANIFEST_BLOB_UNKNOWN}) so the ECR API can answer with its own error.
+     */
+    public static class RegistryErrorException extends IOException {
+        private final int status;
+        private final String code;
+
+        public RegistryErrorException(int status, String code, String message) {
+            super(message);
+            this.status = status;
+            this.code = code;
+        }
+
+        public int status() {
+            return status;
+        }
+
+        public String code() {
+            return code;
+        }
+    }
+
+    /** PUT a manifest under a tag or digest, returning the digest the registry stored it under. */
+    public String putManifest(String name, String reference, String mediaType, String body)
+            throws IOException, InterruptedException {
+        HttpResponse<String> resp = http.send(
+                HttpRequest.newBuilder(URI.create(baseUrl + "/v2/" + name + "/manifests/" + reference))
+                        .timeout(Duration.ofSeconds(30))
+                        .header("Content-Type", mediaType)
+                        .PUT(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() >= 400) {
+            throw registryError("PUT manifest " + name + "/" + reference, resp);
+        }
+        return resp.headers().firstValue("Docker-Content-Digest").orElse(null);
+    }
+
+    /** HEAD a blob, returning its size in bytes, or {@code null} if the repository does not hold it. */
+    public Long headBlob(String name, String digest) throws IOException, InterruptedException {
+        HttpResponse<Void> resp = http.send(
+                HttpRequest.newBuilder(URI.create(baseUrl + "/v2/" + name + "/blobs/" + digest))
+                        .timeout(Duration.ofSeconds(10))
+                        .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                        .build(),
+                HttpResponse.BodyHandlers.discarding());
+        if (resp.statusCode() == 404) {
+            return null;
+        }
+        if (resp.statusCode() >= 400) {
+            throw new IOException("Registry HEAD blob " + name + "/" + digest + " returned " + resp.statusCode());
+        }
+        return resp.headers().firstValueAsLong("Content-Length").orElse(0L);
+    }
+
+    /** Opens a blob upload session, returning the absolute URL the next request goes to. */
+    public String startUpload(String name) throws IOException, InterruptedException {
+        HttpResponse<String> resp = http.send(
+                HttpRequest.newBuilder(URI.create(baseUrl + "/v2/" + name + "/blobs/uploads/"))
+                        .timeout(Duration.ofSeconds(10))
+                        .POST(HttpRequest.BodyPublishers.noBody())
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() != 202) {
+            throw registryError("POST blob upload " + name, resp);
+        }
+        return uploadLocation(resp);
+    }
+
+    /**
+     * Sends one chunk of an upload, bytes {@code first} to {@code first + bytes.length - 1}, and
+     * returns the URL the next request goes to.
+     */
+    public String patchUpload(String location, byte[] bytes, long first) throws IOException, InterruptedException {
+        HttpResponse<String> resp = http.send(
+                HttpRequest.newBuilder(URI.create(location))
+                        .timeout(Duration.ofSeconds(60))
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Content-Range", first + "-" + (first + bytes.length - 1))
+                        .method("PATCH", HttpRequest.BodyPublishers.ofByteArray(bytes))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() != 202) {
+            throw registryError("PATCH blob upload", resp);
+        }
+        return uploadLocation(resp);
+    }
+
+    /** Closes an upload, asking the registry to store what it received under {@code digest}. */
+    public void finishUpload(String location, String digest) throws IOException, InterruptedException {
+        String url = location + (location.contains("?") ? "&" : "?")
+                + "digest=" + URLEncoder.encode(digest, StandardCharsets.UTF_8);
+        HttpResponse<String> resp = http.send(
+                HttpRequest.newBuilder(URI.create(url))
+                        .timeout(Duration.ofSeconds(60))
+                        .header("Content-Type", "application/octet-stream")
+                        .PUT(HttpRequest.BodyPublishers.noBody())
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() != 201) {
+            throw registryError("PUT blob upload", resp);
+        }
+    }
+
+    /** Drops an upload session the registry still holds. Best effort. */
+    public void cancelUpload(String location) {
+        try {
+            http.send(HttpRequest.newBuilder(URI.create(location))
+                            .timeout(Duration.ofSeconds(10))
+                            .DELETE()
+                            .build(),
+                    HttpResponse.BodyHandlers.discarding());
+        } catch (Exception e) {
+            LOG.debugv("Registry DELETE blob upload failed: {0}", e.getMessage());
+        }
+    }
+
+    private String uploadLocation(HttpResponse<?> resp) throws IOException {
+        String location = resp.headers().firstValue("Location").orElse(null);
+        if (location == null || location.isBlank()) {
+            throw new IOException("Registry blob upload response has no Location");
+        }
+        return location.startsWith("/") ? baseUrl + location : location;
+    }
+
+    private static RegistryErrorException registryError(String what, HttpResponse<String> resp) {
+        String code = null;
+        try {
+            JsonNode errors = MAPPER.readTree(resp.body()).path("errors");
+            if (errors.isArray() && !errors.isEmpty()) {
+                code = errors.get(0).path("code").asText(null);
+            }
+        } catch (Exception ignored) {
+            // A body that is not the registry's error JSON leaves the code unknown.
+        }
+        return new RegistryErrorException(resp.statusCode(), code,
+                "Registry " + what + " returned " + resp.statusCode() + ": " + resp.body());
     }
 
     /**
