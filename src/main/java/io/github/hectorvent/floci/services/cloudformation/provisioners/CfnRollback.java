@@ -43,6 +43,14 @@ public final class CfnRollback {
     public static final String PIPE_UPDATE_SNAPSHOT_ATTR = "__FlociPipeUpdateSnapshot";
 
     /**
+     * Holds the subnets a kept ELBv2 load balancer had before the update in flight moved it,
+     * comma-joined, so a failed stack update can move it back. Written by
+     * {@code ElbV2CfnProvisioner} after its SetSubnets and spent by its {@code rollbackUpdate},
+     * retained across a failed move back.
+     */
+    public static final String LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR = "__FlociLoadBalancerSubnetsUpdateSnapshot";
+
+    /**
      * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
      * with the rule name, bus and region needed to address them again, so a failed stack update can
      * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent
