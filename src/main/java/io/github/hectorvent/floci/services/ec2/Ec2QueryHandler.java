@@ -4910,17 +4910,17 @@ public class Ec2QueryHandler {
                 .elem("capacityReservationPreference", "open")
                 .end("capacityReservationSpecification");
         if (inst.getRootVolumeId() != null) {
-            xml.start("blockDeviceMapping")
+            service.rootVolumeAttachment(inst).ifPresent(attachment -> xml.start("blockDeviceMapping")
                     .start("item")
-                    .elem("deviceName", inst.getRootDeviceName())
+                    .elem("deviceName", attachment.getDevice())
                     .start("ebs")
-                    .elem("volumeId", inst.getRootVolumeId())
-                    .elem("status", "attached")
-                    .elem("deleteOnTermination", "true")
-                    .elem("attachTime", inst.getLaunchTime() != null ? ISO_FMT.format(inst.getLaunchTime()) : "")
+                    .elem("volumeId", attachment.getVolumeId())
+                    .elem("status", attachment.getState())
+                    .elem("deleteOnTermination", String.valueOf(attachment.isDeleteOnTermination()))
+                    .elem("attachTime", ISO_FMT.format(attachment.getAttachTime()))
                     .end("ebs")
                     .end("item")
-                    .end("blockDeviceMapping");
+                    .end("blockDeviceMapping"));
         }
         if (inst.getIamInstanceProfileArn() != null) {
             xml.start("iamInstanceProfile")

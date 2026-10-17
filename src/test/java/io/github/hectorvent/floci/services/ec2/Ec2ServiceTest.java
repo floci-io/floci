@@ -2335,6 +2335,44 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void registerImageTreatsBlankRootDeviceNameAsMissing() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        Image image = service.registerImage("us-east-1", "blank-root", null, null, "", List.of());
+        assertEquals("/dev/sda1", image.getRootDeviceName());
+
+        Instance launched = service.runInstances("us-east-1", image.getImageId(), "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        assertEquals("/dev/sda1", launched.getRootDeviceName());
+        assertEquals("/dev/sda1", service.rootVolumeAttachment(launched).orElseThrow().getDevice());
+    }
+
+    @Test
+    void clientTokenFilterNeverMatchesInstancesLaunchedWithoutOne() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String withToken = service.runInstances("us-east-1", "ami-test", "t3.micro",
+                1, 1, null, List.of(), null, "allocation-token", List.of(), null, null)
+                .getInstances().getFirst().getInstanceId();
+        service.runInstances("us-east-1", "ami-test", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+
+        for (String pattern : List.of("allocation-token", "allocation-*", "*")) {
+            List<String> found = service.describeInstances("us-east-1", List.of(),
+                            Map.of("client-token", List.of(pattern))).stream()
+                    .flatMap(reservation -> reservation.getInstances().stream())
+                    .map(Instance::getInstanceId).toList();
+            assertEquals(List.of(withToken), found, pattern);
+        }
+        assertTrue(service.describeInstances("us-east-1", List.of(), Map.of("client-token", List.of(""))).isEmpty());
+        assertTrue(service.describeInstances("us-east-1", List.of(), Map.of("client-token", List.of("other"))).isEmpty());
+    }
+
+    @Test
     void describeImagesMatchesCatalogAliasInImageIdFilter() {
         Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
