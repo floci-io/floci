@@ -18,6 +18,8 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.SocketException;
+import java.net.UnknownHostException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
@@ -66,6 +68,7 @@ public class LambdaExecutorService implements Resettable {
     private final LambdaService directLambdaService;
     private final Clock clock;
     private final long asyncRetryDelayMs;
+    private final boolean dockerExecutor;
     /** Moved on by a reset so that retries still waiting from before it are dropped. */
     private final AtomicLong generation = new AtomicLong();
     private final Map<String, Long> deletions = new ConcurrentHashMap<>();
@@ -85,7 +88,8 @@ public class LambdaExecutorService implements Resettable {
                                  Clock clock,
                                  EmulatorConfig config) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, lambdaServiceInstance, null, clock,
-                Duration.ofSeconds(config.services().lambda().asyncRetryDelaySeconds()));
+                Duration.ofSeconds(config.services().lambda().asyncRetryDelaySeconds()),
+                !"kubernetes".equalsIgnoreCase(config.services().lambda().executor().trim()));
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -94,7 +98,7 @@ public class LambdaExecutorService implements Resettable {
                           AsyncInvokeDestinationRouter destinationRouter,
                           LambdaService directLambdaService) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService,
-                Clock.systemUTC(), Duration.ZERO);
+                Clock.systemUTC(), Duration.ZERO, true);
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -105,7 +109,7 @@ public class LambdaExecutorService implements Resettable {
                           Clock clock,
                           Duration asyncRetryDelay) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService, clock,
-                asyncRetryDelay);
+                asyncRetryDelay, true);
     }
 
     private LambdaExecutorService(WarmPool warmPool,
@@ -115,7 +119,8 @@ public class LambdaExecutorService implements Resettable {
                                   Instance<LambdaService> lambdaServiceInstance,
                                   LambdaService directLambdaService,
                                   Clock clock,
-                                  Duration asyncRetryDelay) {
+                                  Duration asyncRetryDelay,
+                                  boolean dockerExecutor) {
         this.warmPool = warmPool;
         this.objectMapper = objectMapper;
         this.concurrencyLimiter = concurrencyLimiter;
@@ -124,6 +129,7 @@ public class LambdaExecutorService implements Resettable {
         this.directLambdaService = directLambdaService;
         this.clock = clock;
         this.asyncRetryDelayMs = asyncRetryDelay.toMillis();
+        this.dockerExecutor = dockerExecutor;
     }
 
     /** Package-private constructor for testing without CDI, leaving destinations unrouted. */
@@ -131,7 +137,7 @@ public class LambdaExecutorService implements Resettable {
                           ObjectMapper objectMapper,
                           LambdaConcurrencyLimiter concurrencyLimiter) {
         this(warmPool, objectMapper, concurrencyLimiter, null, (Instance<LambdaService>) null, null,
-                Clock.systemUTC(), Duration.ZERO);
+                Clock.systemUTC(), Duration.ZERO, true);
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -139,7 +145,7 @@ public class LambdaExecutorService implements Resettable {
                           LambdaConcurrencyLimiter concurrencyLimiter,
                           AsyncInvokeDestinationRouter destinationRouter) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter,
-                (Instance<LambdaService>) null, null, Clock.systemUTC(), Duration.ZERO);
+                (Instance<LambdaService>) null, null, Clock.systemUTC(), Duration.ZERO, true);
     }
 
     public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type) {
@@ -324,6 +330,22 @@ public class LambdaExecutorService implements Resettable {
                 event.invokedQualifier());
     }
 
+    /**
+     * A container that could not start because Docker is unreachable says so, rather than surfacing
+     * the raw socket error ("No such file or directory") a native binary without Docker would get.
+     * With the Kubernetes executor a socket error comes from the cluster API, so it keeps its own
+     * message.
+     */
+    static String initFailureMessage(Exception e, boolean dockerExecutor) {
+        for (Throwable cause = e; dockerExecutor && cause != null; cause = cause.getCause()) {
+            if (cause instanceof SocketException || cause instanceof UnknownHostException) {
+                return "Failed to start Lambda container: Docker is not reachable (" + cause.getMessage()
+                        + "). Lambda functions run in Docker containers.";
+            }
+        }
+        return "Failed to start Lambda container: " + e.getMessage();
+    }
+
     private InvokeResult executeSync(LambdaFunction fn, byte[] payload, String requestId,
                                      String clientContext) {
         ContainerHandle handle;
@@ -332,7 +354,7 @@ public class LambdaExecutorService implements Resettable {
         } catch (Exception e) {
             LOG.warnv("Failed to acquire container for function {0}: {1}", fn.getFunctionName(), e.getMessage());
             return new InvokeResult(200, "Unhandled",
-                    buildErrorPayload("Failed to start Lambda container: " + e.getMessage(), "Lambda.InitError"),
+                    buildErrorPayload(initFailureMessage(e, dockerExecutor), "Lambda.InitError"),
                     null, requestId);
         }
         try {

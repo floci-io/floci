@@ -186,8 +186,9 @@ public class ImageCacheService {
                 }
                 ManifestDigestCallback callback = new ManifestDigestCallback();
                 lastAttempt.set(callback);
-                pullImage.<PullImageResultCallback>exec(callback)
-                        .awaitCompletion(5, TimeUnit.MINUTES);
+                if (!pullImage.<PullImageResultCallback>exec(callback).awaitCompletion(5, TimeUnit.MINUTES)) {
+                    throw new DockerClientException("Timed out pulling image " + imageUri + " after 5 minutes");
+                }
             });
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

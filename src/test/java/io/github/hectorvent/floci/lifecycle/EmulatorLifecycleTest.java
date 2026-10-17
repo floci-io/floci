@@ -418,7 +418,6 @@ class EmulatorLifecycleTest {
     @Test
     @DisplayName("onHttpStart on port 4566 (non-TLS) triggers hook execution and marks lifecycle completed")
     void onHttpStart_nonTls_triggersHooksOnPort4566() throws IOException, InterruptedException {
-        when(tlsConfig.enabled()).thenReturn(false);
         when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
         when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
 
@@ -432,7 +431,7 @@ class EmulatorLifecycleTest {
     @DisplayName("onHttpStart on a non-default floci.port (non-TLS) triggers hook execution (#2437)")
     void onHttpStart_nonTls_triggersHooksOnCustomPort() throws IOException, InterruptedException {
         Mockito.lenient().when(config.port()).thenReturn(4577);
-        when(tlsConfig.enabled()).thenReturn(false);
+        emulatorLifecycle.httpPort = 4577;
         when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
         when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(true);
 
@@ -445,9 +444,22 @@ class EmulatorLifecycleTest {
     }
 
     @Test
+    @DisplayName("onHttpStart on quarkus.http.port overridden alone (non-TLS) triggers hook execution")
+    void onHttpStart_nonTls_triggersHooksOnHttpPortOverride() throws IOException, InterruptedException {
+        // QUARKUS_HTTP_PORT=4811 with floci.port left at 4566: the server listens on 4811.
+        emulatorLifecycle.httpPort = 4811;
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4811)));
+
+        verify(initializationHooksRunner).run(InitializationHook.START);
+        verify(initLifecycleState).markStartCompleted();
+    }
+
+    @Test
     @DisplayName("onHttpStart on wrong port (non-TLS) is ignored")
     void onHttpStart_nonTls_ignoresWrongPort() throws IOException, InterruptedException {
-        when(tlsConfig.enabled()).thenReturn(false);
 
         emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4510)));
 
@@ -458,7 +470,8 @@ class EmulatorLifecycleTest {
     @Test
     @DisplayName("onHttpStart on port 4510 (TLS mode) triggers hook execution and marks lifecycle completed")
     void onHttpStart_tls_triggersHooksOnBackendPort4510() throws IOException, InterruptedException {
-        when(tlsConfig.enabled()).thenReturn(true);
+        // TlsConfigSource pins quarkus.http.port to the internal HTTP backend.
+        emulatorLifecycle.httpPort = 4510;
         when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
         when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
 
@@ -471,7 +484,8 @@ class EmulatorLifecycleTest {
     @Test
     @DisplayName("onHttpStart on port 4566 (TLS mode) is ignored — public port is not the backend port")
     void onHttpStart_tls_ignoresPublicPort4566() throws IOException, InterruptedException {
-        when(tlsConfig.enabled()).thenReturn(true);
+        // TlsConfigSource pins quarkus.http.port to the internal HTTP backend.
+        emulatorLifecycle.httpPort = 4510;
 
         emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566)));
 
@@ -482,7 +496,6 @@ class EmulatorLifecycleTest {
     @Test
     @DisplayName("onHttpStart exits the process when a startup hook is interrupted")
     void onHttpStart_hookInterrupted_exitsProcess() throws IOException, InterruptedException {
-        when(tlsConfig.enabled()).thenReturn(false);
         when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
         when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
         doThrow(new InterruptedException("interrupted"))
@@ -741,7 +754,6 @@ class EmulatorLifecycleTest {
     @Test
     @DisplayName("Should emit the parity \"Ready.\" line on the deferred onHttpStart ready path too")
     void shouldEmitParityReadyLineOnHttpStartPath() throws IOException, InterruptedException {
-        when(tlsConfig.enabled()).thenReturn(false);
         when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
         when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
 

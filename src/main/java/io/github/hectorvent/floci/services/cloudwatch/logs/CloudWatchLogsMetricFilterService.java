@@ -522,7 +522,11 @@ public class CloudWatchLogsMetricFilterService implements Resettable {
         synchronized (store) {
             String account = regionResolver.getAccountId();
             String prefix = groupPrefix(event.region(), event.logGroupName());
-            store.keys().stream().filter(key -> key.startsWith(prefix)).toList().forEach(store::delete);
+            store.keys().stream().filter(storedKey -> storedKey.startsWith(prefix)
+                            && store.get(storedKey).map(filter -> event.logGroupName().equals(filter.getLogGroupName())
+                                    && storedKey.equals(key(event.region(), event.logGroupName(), filter.getFilterName())))
+                                    .orElse(false))
+                    .toList().forEach(store::delete);
             pending.values().removeIf(p -> p.owner().account().equals(account)
                     && p.owner().region().equals(event.region()) && p.owner().group().equals(event.logGroupName()));
             forgetCompletedOutages();

@@ -132,6 +132,20 @@ class Ec2InstanceTypeCatalogTest {
     }
 
     @Test
+    void t2FamilySupportsI386AndX86_64() {
+        for (String name : List.of("t2.nano", "t2.micro", "t2.small", "t2.medium")) {
+            assertEquals(Set.of("i386", "x86_64"),
+                    Set.copyOf(instanceTypeCatalog.find(name).orElseThrow().supportedArchitectures), name);
+        }
+        // AWS's 32-bit-capable t2 list stops at medium
+        for (String name : List.of("t2.large", "t2.xlarge", "t2.2xlarge")) {
+            assertEquals(List.of("x86_64"), instanceTypeCatalog.find(name).orElseThrow().supportedArchitectures, name);
+        }
+        // launch-time default architecture must stay x86_64 (first entry)
+        assertEquals("x86_64", instanceTypeCatalog.find("t2.micro").orElseThrow().supportedArchitectures.get(0));
+    }
+
+    @Test
     void burstableFamiliesCarryTheirDocumentedDefaultCreditOption() {
         assertEquals(Optional.of("standard"), Ec2InstanceTypeCatalog.defaultCpuCredits("t2.micro"));
         assertEquals(Optional.of("unlimited"), Ec2InstanceTypeCatalog.defaultCpuCredits("t3.small"));
@@ -162,7 +176,6 @@ class Ec2InstanceTypeCatalogTest {
 
         assertEquals(vcpu, instanceType.vcpu, name);
         assertEquals(memoryMib, instanceType.memoryMib, name);
-        assertEquals(List.of("x86_64"), instanceType.supportedArchitectures, name);
         assertEquals(ipv4PerInterface, instanceType.ipv4AddressesPerInterface, name);
         assertEquals(maxInterfaces, instanceType.networkCards.get(0).maximumNetworkInterfaces, name);
         assertTrue(instanceType.currentGeneration, name);

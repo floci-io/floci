@@ -72,6 +72,7 @@ public class RdsDataService implements Resettable {
     private final ConcurrentMap<String, TransactionContext> transactions = new ConcurrentHashMap<>();
     private final ScheduledExecutorService transactionCleanupExecutor;
     private final RdsBackendGate backendGate;
+    private final boolean databaseResumingExceptionEnabled;
 
     @Inject
     public RdsDataService(RdsDataResourceResolver resourceResolver,
@@ -81,7 +82,8 @@ public class RdsDataService implements Resettable {
                           EmulatorConfig config,
                           RdsBackendGate backendGate) {
         this(resourceResolver, secretsManagerService, objectMapper, connectionFactory,
-                Duration.ofSeconds(config.services().rdsData().transactionTtlSeconds()), backendGate);
+                Duration.ofSeconds(config.services().rdsData().transactionTtlSeconds()), backendGate,
+                config.services().rdsData().databaseResumingExceptionEnabled());
     }
 
     RdsDataService(RdsDataResourceResolver resourceResolver,
@@ -99,12 +101,23 @@ public class RdsDataService implements Resettable {
                    RdsDataConnectionFactory connectionFactory,
                    Duration transactionTtl,
                    RdsBackendGate backendGate) {
+        this(resourceResolver, secretsManagerService, objectMapper, connectionFactory, transactionTtl, backendGate, false);
+    }
+
+    RdsDataService(RdsDataResourceResolver resourceResolver,
+                   SecretsManagerService secretsManagerService,
+                   ObjectMapper objectMapper,
+                   RdsDataConnectionFactory connectionFactory,
+                   Duration transactionTtl,
+                   RdsBackendGate backendGate,
+                   boolean databaseResumingExceptionEnabled) {
         this.resourceResolver = resourceResolver;
         this.secretsManagerService = secretsManagerService;
         this.objectMapper = objectMapper;
         this.connectionFactory = connectionFactory;
         this.transactionTtl = transactionTtl;
         this.backendGate = backendGate;
+        this.databaseResumingExceptionEnabled = databaseResumingExceptionEnabled;
         this.transactionCleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "rds-data-transaction-cleanup");
             thread.setDaemon(true);
@@ -298,12 +311,15 @@ public class RdsDataService implements Resettable {
     }
 
     /**
-     * Resumes an auto-paused Aurora cluster before the Data API uses its database, as Aurora
-     * does, and keeps it from pausing again until the returned lease is closed.
+     * Keeps a ready backend awake. By default resume is awaited; the opt-in AWS error mode
+     * initiates resume and asks the caller to retry instead, without opening a connection.
      */
     private RdsBackendGate.Lease enterBackend(RdsDataResourceResolver.DatabaseTarget target) {
         try {
-            return backendGate.enter(target.host(), target.port());
+            return backendGate.enter(target.host(), target.port(), !databaseResumingExceptionEnabled);
+        } catch (RdsBackendGate.ResumingException e) {
+            throw new AwsException("DatabaseResumingException",
+                    "The Aurora Serverless v2 DB instance is resuming. Wait a few seconds and try again.", 400);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new AwsException("InternalServerErrorException",

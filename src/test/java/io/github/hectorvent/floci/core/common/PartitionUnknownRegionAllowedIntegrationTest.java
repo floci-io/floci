@@ -14,7 +14,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 
-/** {@code floci.partitions.allow-unknown-regions=true}: the old behaviour, any label is a region. */
+/** {@code floci.partitions.allow-unknown-regions=true}: custom colon-free labels have their own region. */
 @QuarkusTest
 @TestProfile(PartitionUnknownRegionAllowedIntegrationTest.AllowUnknownRegionsProfile.class)
 class PartitionUnknownRegionAllowedIntegrationTest {

@@ -340,10 +340,12 @@ class CloudFormationSchedulerScheduleIntegrationTest {
         Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
         prepareFailedRollback(stack, name, queue);
         String snapshot = scheduleResource(stack).getAttributes().get("__FlociSchedulerUpdateSnapshot");
+        String priorTemplate = cloudFormation.describeStacks(stack, "us-east-1").getFirst().getOriginalTemplateBody();
 
         assertUpdateRefused(stack, externalQueueTemplate("", queue), Map.of("Name", name));
         outputs(stack, "UPDATE_ROLLBACK_FAILED");
         assertEquals(snapshot, scheduleResource(stack).getAttributes().get("__FlociSchedulerUpdateSnapshot"));
+        assertEquals(priorTemplate, cloudFormation.describeStacks(stack, "us-east-1").getFirst().getOriginalTemplateBody());
         getSchedule(name, "default").then().statusCode(200)
                 .body("ScheduleExpression", equalTo("rate(10 minutes)"))
                 .body("Target.Input", equalTo("payload:changed"));

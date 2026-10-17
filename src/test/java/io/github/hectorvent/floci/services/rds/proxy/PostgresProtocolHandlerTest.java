@@ -1,7 +1,8 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
@@ -45,8 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PostgresProtocolHandlerTest {
 
@@ -447,14 +447,32 @@ class PostgresProtocolHandlerTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"172.17.0.5, true", "never-registered.example.com, false"})
-    void hostnameVerificationRequiresRegisteredAdvertisedHost(String advertisedHost, boolean registered) throws Exception {
+    @CsvSource({"172.17.0.5, true, false", "never-registered.example.com, false, false",
+            "host.docker.internal, true, true", "never-registered.example.com, false, true"})
+    void hostnameVerificationRequiresRegisteredAdvertisedHost(String advertisedHost, boolean registered,
+                                                              boolean legacyCa) throws Exception {
         try (ServerSocket clientServer = new ServerSocket(0);
              Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
              Socket proxyClient = clientServer.accept()) {
 
             RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
+            Path caCertFile = tempDir.resolve("tls/rds-ca.crt");
+            if (legacyCa) {
+                CertificateGenerator.GeneratedCertificate legacy = new CertificateGenerator()
+                        .generateSelfSignedCertificate("localhost", List.of("localhost", "172.17.0.5"),
+                                KeyAlgorithm.RSA_2048);
+                Files.writeString(caCertFile.resolveSibling("rds-ca.crt"), legacy.certificatePem());
+                Files.writeString(caCertFile.resolveSibling("rds-ca.key"), legacy.privateKeyPem());
+                Files.writeString(caCertFile.resolveSibling("rds-ca.metadata.json"),
+                        "{\"hostnames\":[\"localhost\",\"172.17.0.5\"]}");
+            }
             tlsCertificates.ensureHost("172.17.0.5");
+            Path trustedCaFile = Files.copy(caCertFile, tempDir.resolve("trusted-ca.crt"));
+            if (legacyCa) {
+                tlsCertificates.ensureHost("host.docker.internal");
+                tlsCertificates = testTlsCertificates();
+            }
+            RdsProxyTlsCertificates serverCertificates = tlsCertificates;
 
             AtomicReference<Throwable> authFailure = new AtomicReference<>();
             Thread authThread = Thread.ofVirtual()
@@ -464,7 +482,7 @@ class PostgresProtocolHandlerTest {
                             PostgresProtocolHandler.authenticate(
                                     proxyClient, NEVER_CONNECT,
                                     "dbadmin", "adminpass", "postgres",
-                                    false, testSigV4Validator(), testBinding(), tlsCertificates,
+                                    false, testSigV4Validator(), testBinding(), serverCertificates,
                                     (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
                         } catch (IOException expected) {
                             // Closing or rejecting TLS ends authentication before PostgreSQL startup.
@@ -478,10 +496,19 @@ class PostgresProtocolHandlerTest {
                 writeSslRequest(clientOut);
                 assertEquals('S', clientIn.readUnsignedByte());
 
-                Path caCertFile = tempDir.resolve("tls").resolve("rds-ca.crt");
-                try (SSLSocket sslClient = verifyingClientSocket(ourClient, caCertFile, advertisedHost)) {
+                try (SSLSocket sslClient = verifyingClientSocket(ourClient, trustedCaFile, advertisedHost)) {
                     if (registered) {
                         sslClient.startHandshake();
+                        X509Certificate serverCertificate = (X509Certificate)
+                                sslClient.getSession().getPeerCertificates()[0];
+                        assertEquals(-1, serverCertificate.getBasicConstraints(),
+                                "strict TLS clients require an end-entity server certificate, not the trusted CA");
+                        assertTrue(serverCertificate.getExtendedKeyUsage().contains("1.3.6.1.5.5.7.3.1"));
+                        assertEquals(2, sslClient.getSession().getPeerCertificates().length);
+                        try (InputStream trustedCa = Files.newInputStream(trustedCaFile)) {
+                            assertEquals(CertificateFactory.getInstance("X.509").generateCertificate(trustedCa),
+                                    sslClient.getSession().getPeerCertificates()[1]);
+                        }
                     } else {
                         assertThrows(SSLHandshakeException.class, sslClient::startHandshake);
                     }
@@ -1877,11 +1904,8 @@ class PostgresProtocolHandlerTest {
     }
 
     private RdsProxyTlsCertificates testTlsCertificates() {
-        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
-        when(storage.persistentPath()).thenReturn(tempDir.toString());
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        when(config.storage()).thenReturn(storage);
-        return new RdsProxyTlsCertificates(config, new CertificateGenerator());
+        return new RdsProxyTlsCertificates(FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls")),
+                new CertificateGenerator());
     }
 
     /**

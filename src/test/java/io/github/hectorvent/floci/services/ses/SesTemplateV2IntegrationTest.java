@@ -684,11 +684,40 @@ class SesTemplateV2IntegrationTest {
             .body("__type", equalTo("BadRequestException"));
     }
 
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("wrongTypeSendEmailBodies")
+    @Order(51)
+    void sendEmail_wrongMemberType_returnsSerializationException(String label, String body) {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
     static Stream<Arguments> malformedSendEmailBodies() {
         return Stream.of(
                 Arguments.of("body is array", "[1,2,3]"),
                 Arguments.of("body is JSON null literal", "null"),
                 Arguments.of("body is JSON string", "\"hello\""),
+                Arguments.of("TemplateData as invalid JSON string", """
+                    {
+                      "FromEmailAddress": "sender@example.com",
+                      "Destination": {"ToAddresses": ["recipient@example.com"]},
+                      "Content": {
+                        "Template": {"TemplateName": "any", "TemplateData": "{not json"}
+                      }
+                    }
+                    """)
+        );
+    }
+
+    static Stream<Arguments> wrongTypeSendEmailBodies() {
+        return Stream.of(
                 Arguments.of("Destination as string", """
                     {
                       "FromEmailAddress": "sender@example.com",
@@ -711,15 +740,6 @@ class SesTemplateV2IntegrationTest {
                       "Destination": {"ToAddresses": ["recipient@example.com"]},
                       "Content": {
                         "Template": {"TemplateName": "any", "TemplateData": [1,2,3]}
-                      }
-                    }
-                    """),
-                Arguments.of("TemplateData as invalid JSON string", """
-                    {
-                      "FromEmailAddress": "sender@example.com",
-                      "Destination": {"ToAddresses": ["recipient@example.com"]},
-                      "Content": {
-                        "Template": {"TemplateName": "any", "TemplateData": "{not json"}
                       }
                     }
                     """)

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3.model;
 
+import java.time.Instant;
 import java.util.Map;
 
 public class CopyObjectOptions {
@@ -26,6 +27,10 @@ public class CopyObjectOptions {
     private String grantFullControl;
     private String grantReadAcp;
     private String grantWriteAcp;
+    // The Object Lock settings the new object gets; the source's are not copied.
+    private String objectLockMode;
+    private Instant retainUntilDate;
+    private String legalHoldStatus;
     private String checksumAlgorithm;
     // Whether annotations travel with the copy: COPY (the default) or EXCLUDE.
     private String annotationDirective;
@@ -102,6 +107,15 @@ public class CopyObjectOptions {
 
     public String getGrantWriteAcp() { return grantWriteAcp; }
     public CopyObjectOptions withGrantWriteAcp(String grantWriteAcp) { this.grantWriteAcp = grantWriteAcp; return this; }
+
+    public String getObjectLockMode() { return objectLockMode; }
+    public CopyObjectOptions withObjectLockMode(String objectLockMode) { this.objectLockMode = objectLockMode; return this; }
+
+    public Instant getRetainUntilDate() { return retainUntilDate; }
+    public CopyObjectOptions withRetainUntilDate(Instant retainUntilDate) { this.retainUntilDate = retainUntilDate; return this; }
+
+    public String getLegalHoldStatus() { return legalHoldStatus; }
+    public CopyObjectOptions withLegalHoldStatus(String legalHoldStatus) { this.legalHoldStatus = legalHoldStatus; return this; }
 
     public String getChecksumAlgorithm() { return checksumAlgorithm; }
     public CopyObjectOptions withChecksumAlgorithm(String checksumAlgorithm) { this.checksumAlgorithm = checksumAlgorithm; return this; }

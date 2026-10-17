@@ -1,14 +1,13 @@
 package io.github.hectorvent.floci.services.iot;
 
+import io.github.hectorvent.floci.testing.IotSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.util.Map;
-
+import static io.github.hectorvent.floci.testing.IotSettingsProfile.ENDPOINT_ADDRESS;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -17,12 +16,13 @@ import static org.hamcrest.Matchers.equalTo;
  * for every endpoint type, the way AWS returns a bare hostname that devices complete with their
  * own port. {@link IotIntegrationTest} and {@link IotEndpointHostnameIntegrationTest} keep
  * guarding the unset case, the host and port of the base URL.
+ *
+ * <p>The address comes from {@link IotSettingsProfile}, which this class shares with the other IoT
+ * class that changes a default.
  */
 @QuarkusTest
-@TestProfile(IotDescribeEndpointOverrideIntegrationTest.Profile.class)
+@TestProfile(IotSettingsProfile.class)
 class IotDescribeEndpointOverrideIntegrationTest {
-
-    static final String ENDPOINT_ADDRESS = "iot.example.localhost.floci.io";
 
     @Test
     void omittedEndpointTypeReturnsTheConfiguredAddress() {
@@ -67,12 +67,5 @@ class IotDescribeEndpointOverrideIntegrationTest {
             .statusCode(200)
             .body("domainType", equalTo("AWS_MANAGED"))
             .body("domainName", equalTo(ENDPOINT_ADDRESS));
-    }
-
-    public static final class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iot.endpoint-address", ENDPOINT_ADDRESS);
-        }
     }
 }

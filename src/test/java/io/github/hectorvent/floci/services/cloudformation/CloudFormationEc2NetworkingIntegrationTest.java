@@ -197,8 +197,9 @@ class CloudFormationEc2NetworkingIntegrationTest {
         assertTrue(ec2("DescribeInternetGateways").contains(out.get("IgwId")));
 
         // The same template again: every id survives (the switch re-created all seven).
-        cloudFormation("UpdateStack", template(vpcId, "10.40.0.0/24"));
+        cloudFormation("UpdateStack", CfnUpdates.forceUpdate(template(vpcId, "10.40.0.0/24")));
         Map<String, String> again = XmlParser.extractPairs(describeStacks("UPDATE_COMPLETE"), "Outputs", "OutputKey", "OutputValue");
+        again.remove(CfnUpdates.FORCED_OUTPUT);
         assertEquals(out, again, "an unchanged update must keep every networking resource");
 
         // Tags are mutable: a dropped key goes, a changed value is written, the subnet stays.

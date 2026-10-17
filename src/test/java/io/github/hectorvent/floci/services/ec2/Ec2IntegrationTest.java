@@ -5778,6 +5778,38 @@ class Ec2IntegrationTest {
             .body(containsString("Value (gp9) for parameter volumeType is invalid. Unknown volume type."));
     }
 
+    @Test
+    @Order(335)
+    void runInstancesNoDeviceRootMappingFallsBackToAmiRootVolumeType() {
+        String templateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "gp3-root-nodevice-template")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/xvda")
+            .formParam("LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+
+        // NoDevice removes the template's root mapping, so the AMI's gp2 root applies.
+        assertEquals("gp2", rootVolumeType(launch(Map.of(
+            "LaunchTemplate.LaunchTemplateId", templateId,
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.NoDevice", ""))));
+    }
+
+    @Test
+    @Order(336)
+    void runInstancesIgnoresVolumeTypeOnANoDeviceMapping() {
+        // The device is removed regardless of the assigned value, so gp9 is never validated.
+        assertEquals("gp2", rootVolumeType(launch(Map.of(
+            "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+            "BlockDeviceMapping.1.NoDevice", "",
+            "BlockDeviceMapping.1.Ebs.VolumeType", "gp9"))));
+    }
+
     private String launch(Map<String, String> params) {
         return given()
             .formParam("Action", "RunInstances")

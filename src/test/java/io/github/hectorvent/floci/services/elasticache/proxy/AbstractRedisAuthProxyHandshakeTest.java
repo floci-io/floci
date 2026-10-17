@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elasticache.proxy;
 
+import io.github.hectorvent.floci.testutil.FreePorts;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
 
@@ -293,10 +294,7 @@ class AbstractRedisAuthProxyHandshakeTest {
     private static TestProxy startProxy(ServerSocket backendServer, boolean authRequired,
                                         String username, String password,
                                         int handshakeTimeoutMillis) throws IOException {
-        int proxyPort;
-        try (ServerSocket freePort = new ServerSocket(0)) {
-            proxyPort = freePort.getLocalPort();
-        }
+        int proxyPort = FreePorts.anyInterfacePort();
         TestProxy proxy = new TestProxy("127.0.0.1", backendServer.getLocalPort(), proxyPort,
                 authRequired, username, password, handshakeTimeoutMillis);
         proxy.start(proxyPort);

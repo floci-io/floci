@@ -37,6 +37,15 @@ class IotDataIntegrationTest {
             .post("/things/phase-five-thing/shadow")
         .then()
             .statusCode(200)
+            .body("state.desired", nullValue())
+            .body("state.reported.color", equalTo("green"))
+            .body("version", equalTo(2));
+
+        given()
+        .when()
+            .get("/things/phase-five-thing/shadow")
+        .then()
+            .statusCode(200)
             .body("state.desired.color", equalTo("blue"))
             .body("state.reported.color", equalTo("green"))
             .body("version", equalTo(2));
@@ -183,6 +192,14 @@ class IotDataIntegrationTest {
         .then()
             .statusCode(200)
             .body("state.desired.color", nullValue())
+            .body("version", equalTo(2));
+
+        given()
+        .when()
+            .get("/things/mvp1-shadow/shadow")
+        .then()
+            .statusCode(200)
+            .body("state.desired.color", nullValue())
             .body("state.desired.mode", equalTo("auto"))
             .body("version", equalTo(2));
 
@@ -193,7 +210,9 @@ class IotDataIntegrationTest {
             .post("/things/mvp1-shadow/shadow")
         .then()
             .statusCode(409)
-            .body("__type", equalTo("VersionConflictException"));
+            .header("x-amzn-ErrorType", equalTo("ConflictException"))
+            .body("__type", equalTo("ConflictException"))
+            .body("message", equalTo("Version conflict"));
 
         given()
             .contentType("application/json")
@@ -204,5 +223,39 @@ class IotDataIntegrationTest {
             .statusCode(200)
             .body("state.desired", nullValue())
             .body("version", equalTo(3));
+    }
+
+    @Test
+    void namedShadowVersionConflictUsesIotDataErrorCode() {
+        given()
+            .contentType("application/json")
+            .queryParam("name", "settings")
+            .body("{\"state\":{\"desired\":{\"mode\":\"auto\"}}}")
+        .when()
+            .post("/things/mvp1-versioned-named/shadow")
+        .then()
+            .statusCode(200)
+            .body("version", equalTo(1));
+
+        given()
+            .contentType("application/json")
+            .queryParam("name", "settings")
+            .body("{\"version\":0,\"state\":{\"desired\":{\"mode\":\"manual\"}}}")
+        .when()
+            .post("/things/mvp1-versioned-named/shadow")
+        .then()
+            .statusCode(409)
+            .header("x-amzn-ErrorType", equalTo("ConflictException"))
+            .body("__type", equalTo("ConflictException"))
+            .body("message", equalTo("Version conflict"));
+
+        given()
+            .queryParam("name", "settings")
+        .when()
+            .get("/things/mvp1-versioned-named/shadow")
+        .then()
+            .statusCode(200)
+            .body("version", equalTo(1))
+            .body("state.desired.mode", equalTo("auto"));
     }
 }

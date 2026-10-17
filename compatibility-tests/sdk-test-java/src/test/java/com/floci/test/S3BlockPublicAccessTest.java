@@ -16,8 +16,12 @@ import software.amazon.awssdk.services.s3.model.GetBucketPolicyRequest;
 import software.amazon.awssdk.services.s3.model.GetPublicAccessBlockRequest;
 import software.amazon.awssdk.services.s3.model.GetPublicAccessBlockResponse;
 import software.amazon.awssdk.services.s3.model.ObjectCannedACL;
+import software.amazon.awssdk.services.s3.model.ObjectOwnership;
+import software.amazon.awssdk.services.s3.model.OwnershipControls;
+import software.amazon.awssdk.services.s3.model.OwnershipControlsRule;
 import software.amazon.awssdk.services.s3.model.PublicAccessBlockConfiguration;
 import software.amazon.awssdk.services.s3.model.PutBucketAclRequest;
+import software.amazon.awssdk.services.s3.model.PutBucketOwnershipControlsRequest;
 import software.amazon.awssdk.services.s3.model.PutBucketPolicyRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutPublicAccessBlockRequest;
@@ -63,6 +67,13 @@ class S3BlockPublicAccessTest {
         } catch (BucketAlreadyOwnedByYouException expected) {
             // A previous run of this suite left the bucket behind; reuse it.
         }
+        s3.putBucketOwnershipControls(PutBucketOwnershipControlsRequest.builder()
+                .bucket(BUCKET)
+                .ownershipControls(OwnershipControls.builder()
+                        .rules(OwnershipControlsRule.builder()
+                                .objectOwnership(ObjectOwnership.OBJECT_WRITER).build())
+                        .build())
+                .build());
         s3.putPublicAccessBlock(PutPublicAccessBlockRequest.builder()
                 .bucket(BUCKET)
                 .publicAccessBlockConfiguration(PublicAccessBlockConfiguration.builder()

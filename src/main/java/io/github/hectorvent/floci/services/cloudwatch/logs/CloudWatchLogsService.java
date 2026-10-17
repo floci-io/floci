@@ -285,6 +285,7 @@ public class CloudWatchLogsService implements ResourceProvider {
         synchronized (metricFilterStore) {
             String key = groupKey(region, name);
             LogGroup group = groupStore.get(key)
+                    .filter(stored -> name.equals(stored.getLogGroupName()))
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                             "The specified log group does not exist: " + name, 400));
             if (group.isDeletionProtectionEnabled()) {
@@ -301,15 +302,22 @@ public class CloudWatchLogsService implements ResourceProvider {
                     .toList();
             for (String sk : streamKeys) {
                 LogStream stream = streamStore.get(sk).orElse(null);
-                if (stream != null) {
+                if (stream != null && name.equals(stream.getLogGroupName())
+                        && sk.equals(streamKey(region, name, stream.getLogStreamName()))) {
                     deleteEventsForStream(region, name, stream.getLogStreamName());
                     streamStore.delete(sk);
                 }
             }
-            metricFilterStore.keys().stream().filter(k -> k.startsWith(streamPrefix))
+            metricFilterStore.keys().stream().filter(k -> k.startsWith(streamPrefix)
+                            && metricFilterStore.get(k).map(filter -> name.equals(filter.getLogGroupName())
+                                    && k.equals(streamPrefix + filter.getFilterName())).orElse(false))
                     .toList().forEach(metricFilterStore::delete);
             String subscriptionPrefix = subscriptionFilterKeyPrefix(region, name);
-            subscriptionFilterStore.keys().stream().filter(k -> k.startsWith(subscriptionPrefix))
+            subscriptionFilterStore.keys().stream().filter(k -> k.startsWith(subscriptionPrefix)
+                            && subscriptionFilterStore.get(k)
+                                    .map(filter -> name.equals(filter.getLogGroupName())
+                                            && k.equals(subscriptionFilterKey(region, name, filter.getFilterName())))
+                                    .orElse(false))
                     .toList().forEach(subscriptionFilterStore::delete);
             groupStore.delete(key);
             LOG.infov("Deleted log group: {0}", name);
@@ -358,6 +366,7 @@ public class CloudWatchLogsService implements ResourceProvider {
     public void putRetentionPolicy(String groupName, int days, String region) {
         String key = groupKey(region, groupName);
         LogGroup group = groupStore.get(key)
+                .filter(stored -> groupName.equals(stored.getLogGroupName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
         group.setRetentionInDays(days);
@@ -367,15 +376,21 @@ public class CloudWatchLogsService implements ResourceProvider {
     public void deleteRetentionPolicy(String groupName, String region) {
         String key = groupKey(region, groupName);
         LogGroup group = groupStore.get(key)
+                .filter(stored -> groupName.equals(stored.getLogGroupName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
         group.setRetentionInDays(null);
         groupStore.put(key, group);
     }
 
+    public LogGroupTagTarget resolveTagTarget(String resourceArn, String region) {
+        return LogGroupTagTarget.resolve(resourceArn, region, regionResolver.getAccountId(), regionResolver.getPartition());
+    }
+
     public void tagLogGroup(String groupName, Map<String, String> tags, String region) {
         String key = groupKey(region, groupName);
         LogGroup group = groupStore.get(key)
+                .filter(stored -> groupName.equals(stored.getLogGroupName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
         group.getTags().putAll(tags);
@@ -385,6 +400,7 @@ public class CloudWatchLogsService implements ResourceProvider {
     public void untagLogGroup(String groupName, List<String> tagKeys, String region) {
         String key = groupKey(region, groupName);
         LogGroup group = groupStore.get(key)
+                .filter(stored -> groupName.equals(stored.getLogGroupName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + groupName, 400));
         tagKeys.forEach(group.getTags()::remove);

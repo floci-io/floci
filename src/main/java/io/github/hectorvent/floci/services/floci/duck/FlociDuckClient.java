@@ -3,8 +3,7 @@ package io.github.hectorvent.floci.services.floci.duck;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
-import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -29,21 +28,18 @@ public class FlociDuckClient {
 
     private final FlociDuckManager duckManager;
     private final EmulatorConfig config;
-    private final EmbeddedDnsServer embeddedDnsServer;
-    private final DockerHostResolver dockerHostResolver;
+    private final ContainerReachableEndpoint containerEndpoint;
     private final ObjectMapper mapper;
     private final HttpClient httpClient;
 
     @Inject
     public FlociDuckClient(FlociDuckManager duckManager,
                            EmulatorConfig config,
-                           EmbeddedDnsServer embeddedDnsServer,
-                           DockerHostResolver dockerHostResolver,
+                           ContainerReachableEndpoint containerEndpoint,
                            ObjectMapper mapper) {
         this.duckManager = duckManager;
         this.config = config;
-        this.embeddedDnsServer = embeddedDnsServer;
-        this.dockerHostResolver = dockerHostResolver;
+        this.containerEndpoint = containerEndpoint;
         this.mapper = mapper;
         this.httpClient = HttpClient.newHttpClient();
     }
@@ -125,7 +121,7 @@ public class FlociDuckClient {
         if (setupDdl != null && !setupDdl.isBlank()) {
             body.put("setup_sql", setupDdl);
         }
-        body.put("s3_endpoint", resolveFlociEndpoint());
+        body.put("s3_endpoint", containerEndpoint.baseUrl());
         body.put("s3_region", config.defaultRegion());
         // A 12-digit access key flows through AccountResolver and selects the
         // matching account partition for any S3 read/write the SQL performs.
@@ -134,19 +130,6 @@ public class FlociDuckClient {
         body.put("s3_secret_key", "test");
         body.put("s3_url_style", "path");
         return body;
-    }
-
-    /**
-     * Returns the Floci S3 endpoint URL as reachable from inside a floci-duck container.
-     * Uses the embedded DNS hostname when the DNS server is active, falls back to the
-     * raw Docker host IP for local dev mode.
-     */
-    private String resolveFlociEndpoint() {
-        int port = URI.create(config.baseUrl()).getPort();
-        String hostname = embeddedDnsServer.getServerIp().isPresent()
-                ? config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX)
-                : dockerHostResolver.resolve();
-        return "http://" + hostname + ":" + port;
     }
 
     private String post(String url, Map<String, Object> body, String operation) {

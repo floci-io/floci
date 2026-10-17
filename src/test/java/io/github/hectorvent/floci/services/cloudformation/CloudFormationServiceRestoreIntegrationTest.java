@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -33,8 +34,8 @@ import static org.mockito.Mockito.withSettings;
 
 /**
  * Fills the bounded operation executor with change set executions that block inside resource
- * provisioning, then checks that the execution it rejects leaves its stack and change set as
- * they were.
+ * provisioning, then checks that the execution or stack delete it rejects leaves the stack (and
+ * change set) as they were, and can be retried once there is room.
  *
  * <p>The dispatcher bean is swapped for a mock whose default answer blocks {@code provision}
  * for this test's stacks and forwards everything else to the real dispatcher. The answer
@@ -59,6 +60,9 @@ class CloudFormationServiceRestoreIntegrationTest {
     @Inject
     CfnResourceDispatcher provisioner;
 
+    @Inject
+    RegionResolver regionResolver;
+
     private final CountDownLatch activeOperations = new CountDownLatch(ACTIVE_OPERATIONS);
     private final CountDownLatch releaseOperations = new CountDownLatch(1);
     private CfnResourceDispatcher blockingProvisioner;
@@ -76,28 +80,10 @@ class CloudFormationServiceRestoreIntegrationTest {
     @Test
     void rejectedExecutionRestoresStackAndChangeSetState() throws Exception {
         String targetStack = uniqueStackName("target");
-        List<String> fillerStacks = new ArrayList<>();
-        for (int i = 0; i < ACTIVE_OPERATIONS + QUEUED_OPERATIONS; i++) {
-            fillerStacks.add(uniqueStackName("filler"));
-        }
-        for (String fillerStack : fillerStacks) {
-            createChangeSet(fillerStack);
-        }
         createChangeSet(targetStack);
 
-        List<Future<?>> runningOperations = new ArrayList<>();
+        List<Future<?>> runningOperations = fillExecutor();
         try {
-            for (String fillerStack : fillerStacks.subList(0, ACTIVE_OPERATIONS)) {
-                runningOperations.add(service.executeChangeSet(fillerStack, "initial", REGION));
-            }
-
-            assertTrue(activeOperations.await(TIMEOUT_SECONDS, TimeUnit.SECONDS),
-                    this::describeProvisionerActivity);
-
-            for (String fillerStack : fillerStacks.subList(ACTIVE_OPERATIONS, fillerStacks.size())) {
-                runningOperations.add(service.executeChangeSet(fillerStack, "initial", REGION));
-            }
-
             AwsException rejected = assertThrows(AwsException.class,
                     () -> service.executeChangeSet(targetStack, "initial", REGION));
             assertEquals("LimitExceededException", rejected.getErrorCode());
@@ -108,10 +94,7 @@ class CloudFormationServiceRestoreIntegrationTest {
             assertEquals("CREATE_COMPLETE", restoredChangeSet.getStatus());
             assertEquals("AVAILABLE", restoredChangeSet.getExecutionStatus());
         } finally {
-            releaseOperations.countDown();
-            for (Future<?> operation : runningOperations) {
-                operation.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            }
+            release(runningOperations);
         }
 
         Future<?> retry = service.executeChangeSet(targetStack, "initial", REGION);
@@ -119,6 +102,58 @@ class CloudFormationServiceRestoreIntegrationTest {
         assertEquals("CREATE_COMPLETE", service.describeStacks(targetStack, REGION).getFirst().getStatus());
         assertEquals("EXECUTE_COMPLETE",
                 service.describeChangeSet(targetStack, "initial", REGION).getExecutionStatus());
+    }
+
+    @Test
+    void rejectedDeleteLeavesTheStackAsItWasAndCanBeRetried() throws Exception {
+        // Outside STACK_PREFIX, so its own create is not held by the blocking provisioner.
+        String targetStack = "restore-delete-target-" + System.nanoTime();
+        createChangeSet(targetStack);
+        service.executeChangeSet(targetStack, "initial", REGION).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        Stack stack = service.describeStacks(targetStack, REGION).getFirst();
+        assertEquals("CREATE_COMPLETE", stack.getStatus());
+
+        List<Future<?>> runningOperations = fillExecutor();
+        try {
+            AwsException rejected = assertThrows(AwsException.class,
+                    () -> service.deleteStack(targetStack, REGION));
+            assertEquals("LimitExceededException", rejected.getErrorCode());
+            assertEquals("CREATE_COMPLETE", service.describeStacks(targetStack, REGION).getFirst().getStatus());
+        } finally {
+            release(runningOperations);
+        }
+
+        service.deleteStack(targetStack, REGION, regionResolver.getAccountId()).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
+    }
+
+    /** Starts change set executions that block in provisioning until every thread and queue slot is taken. */
+    private List<Future<?>> fillExecutor() throws InterruptedException {
+        List<String> fillerStacks = new ArrayList<>();
+        for (int i = 0; i < ACTIVE_OPERATIONS + QUEUED_OPERATIONS; i++) {
+            fillerStacks.add(uniqueStackName("filler"));
+        }
+        for (String fillerStack : fillerStacks) {
+            createChangeSet(fillerStack);
+        }
+
+        List<Future<?>> runningOperations = new ArrayList<>();
+        for (String fillerStack : fillerStacks.subList(0, ACTIVE_OPERATIONS)) {
+            runningOperations.add(service.executeChangeSet(fillerStack, "initial", REGION));
+        }
+        assertTrue(activeOperations.await(TIMEOUT_SECONDS, TimeUnit.SECONDS),
+                this::describeProvisionerActivity);
+        for (String fillerStack : fillerStacks.subList(ACTIVE_OPERATIONS, fillerStacks.size())) {
+            runningOperations.add(service.executeChangeSet(fillerStack, "initial", REGION));
+        }
+        return runningOperations;
+    }
+
+    private void release(List<Future<?>> runningOperations) throws Exception {
+        releaseOperations.countDown();
+        for (Future<?> operation : runningOperations) {
+            operation.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        }
     }
 
     private void createChangeSet(String stackName) {

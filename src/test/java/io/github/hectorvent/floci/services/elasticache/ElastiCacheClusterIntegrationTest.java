@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.testing.DockerAvailability;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.AfterAll;
@@ -15,6 +16,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
@@ -42,6 +44,9 @@ class ElastiCacheClusterIntegrationTest {
     private static final int SOCKET_TIMEOUT_MS = 10_000;
 
     private static int configurationEndpointPort;
+
+    @TestHTTPResource("/")
+    static URI baseUri;
     private static int secondShardPort;
 
     @BeforeAll
@@ -53,6 +58,7 @@ class ElastiCacheClusterIntegrationTest {
     static void cleanup() {
         try {
             given()
+                .port(baseUri.getPort())
                 .formParam("Action", "DeleteReplicationGroup")
                 .formParam("ReplicationGroupId", GROUP_ID)
                 .header("Authorization", AUTH_HEADER)

@@ -182,16 +182,20 @@ public class StsQueryHandler {
      * in the header or presigned in the query, which for an IAM user or a session is the account
      * that owns the key rather than the default one. A role session is matched as the role that
      * issued it, whose ARN keeps the path the session ARN drops. The trust policy's conditions see
-     * the request's keys: the global keys, {@code aws:PrincipalArn}, {@code sts:RoleSessionName},
-     * and {@code sts:ExternalId} when the caller sends one.
+     * the request's keys: the global keys, {@code sts:RoleSessionName}, {@code sts:ExternalId}
+     * when the caller sends one, and the keys that say who is calling, which the resolved caller
+     * writes itself so that a trust policy reads the same principal as any other policy. A
+     * credential that resolves to no identity is the account root stand-in, carrying the account
+     * id as its {@code aws:userid} and {@code Account} as its {@code aws:PrincipalType}, as that
+     * principal does wherever else Floci builds it.
      */
     private Response enforceTrustPolicy(String roleArn, IamRole role, String roleAccountId,
                                         MultivaluedMap<String, String> params) {
         String callerAccount = regionResolver.getAccountId();
-        Optional<IamService.CallerArns> callerArns = iamService.resolveCallerArns(callerAccessKeyId());
-        String callerArn = callerArns.map(IamService.CallerArns::callerArn)
-                .orElse(regionResolver.buildGlobalArn("iam", callerAccount, "root"));
-        String principalArn = callerArns.map(IamService.CallerArns::principalArn).orElse(callerArn);
+        IamService.CallerArns caller = iamService.resolveCallerArns(callerAccessKeyId())
+                .orElseGet(() -> IamService.CallerArns.accountRoot(
+                        regionResolver.buildGlobalArn("iam", callerAccount, "root"), callerAccount));
+        String callerArn = caller.callerArn();
 
         if (role == null || !IamService.roleArnMatches(roleArn, role)) {
             return AwsQueryResponse.error("AccessDenied",
@@ -209,8 +213,8 @@ public class StsQueryHandler {
         if (externalId != null) {
             requestContext.put("sts:ExternalId", List.of(externalId));
         }
-        if (trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), callerArn, principalArn,
-                callerAccount, requestContext)) {
+        if (trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), caller, callerAccount,
+                requestContext)) {
             return null;
         }
         return AwsQueryResponse.error("AccessDenied",

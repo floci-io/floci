@@ -533,6 +533,28 @@ class BedrockServiceTest {
     }
 
     @Test
+    void updateRejectingTheKmsKeyAppliesNothing() {
+        doThrow(new AwsException("NotFoundException", "Key not found: missing", 404))
+                .when(kmsService).describeKey("missing", REGION);
+        Guardrail created = create("kms-rejected");
+
+        ObjectNode request = createRequest("kms-rejected-renamed");
+        request.put("description", "should not stick");
+        request.put("blockedInputMessaging", "input blocked v2");
+        request.put("blockedOutputsMessaging", "output blocked v2");
+        request.put("kmsKeyId", "missing");
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateGuardrail(created.getGuardrailId(), request, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+
+        Guardrail draft = service.getGuardrail(created.getGuardrailId(), null, REGION);
+        assertEquals("kms-rejected", draft.getName());
+        assertNull(draft.getDescription());
+        assertEquals("input blocked", draft.getBlockedInputMessaging());
+        assertEquals("output blocked", draft.getBlockedOutputsMessaging());
+    }
+
+    @Test
     void guardrailsAreScopedToTheirRegion() {
         Guardrail created = create("regional");
         assertThrows(AwsException.class,

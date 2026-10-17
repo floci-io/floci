@@ -77,7 +77,7 @@ public class CodeArtifactService implements Resettable {
      * and the backfill in {@link #ensureFormatContainerId} already handle it, including for
      * repositories created before that format's proxy existed.
      */
-    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm", "pypi");
+    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm", "pypi", "nuget");
     private static final Set<String> ORIGIN_RESTRICTION_VALUES = Set.of("ALLOW", "BLOCK");
     /**
      * Formats AWS documents as valid for {@code GetPackageVersionReadme} specifically: the
@@ -143,12 +143,12 @@ public class CodeArtifactService implements Resettable {
     // currentContainerBackedPackageFence's own javadoc for what this protects against.
     private final ConcurrentHashMap<String, Long> containerBackedPackageDeletionFence = new ConcurrentHashMap<>();
     private final AtomicLong containerBackedPackageDeletionCounter = new AtomicLong();
-    // Maven, npm, and pypi publishes go straight to their own sidecar and never create a
+    // Maven, npm, pypi, and nuget publishes go straight to their own sidecar and never create a
     // packageVersions record (see CONTAINER_BACKED_FORMATS), so DescribeDomain's assetSizeBytes
     // can't see their bytes by summing packageVersions the way it does for generic. Each format's
     // own proxy reports a successful, non-idempotent publish's size here instead, keyed exactly
     // like packageOriginConfigs (region/domain/repository/format/namespace/package, no version).
-    // In memory only, like the fence above, not through StorageFactory: the Maven/npm/pypi
+    // In memory only, like the fence above, not through StorageFactory: the Maven/npm/pypi/nuget
     // content these bytes count lives in the sidecar containers themselves, which do not survive
     // a Floci restart either (no volume attached, removed on shutdown; see this service's own
     // Known limitations doc). Persisting the count but not the content it describes would leave
@@ -385,7 +385,7 @@ public class CodeArtifactService implements Resettable {
                 .filter(k -> k.startsWith(originPrefix))
                 .forEach(k -> packageOriginConfigs.deleteForAccount(owner, k));
         // Keyed the same way: without this, a repository recreated under the same name would
-        // inherit the previous one's Maven/npm/pypi byte counts into DescribeDomain's total.
+        // inherit the previous one's Maven/npm/pypi/nuget byte counts into DescribeDomain's total.
         String ownerScopedOriginPrefix = ownerScopedKey(owner, originPrefix);
         containerBackedAssetBytes.keySet().stream()
                 .filter(k -> k.startsWith(ownerScopedOriginPrefix))
@@ -771,10 +771,65 @@ public class CodeArtifactService implements Resettable {
             validatePackageToken("namespace", namespace);
         }
         String owner = effectiveOwner(domainOwner);
+        // Maven, npm, and pypi are metadata-free passthroughs straight to their own sidecar, the
+        // same reason getPackageVersionAsset bridges to them (see
+        // getContainerBackedPackageVersionAsset): publish for these formats never goes through
+        // publishPackageVersion, so packageVersions can never hold a record for them.
+        if (CONTAINER_BACKED_FORMATS.contains(format)) {
+            return describeContainerBackedPackageVersion(region, domain, owner, repository, format, namespace,
+                    packageName, version);
+        }
         String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
         return packageVersions.getForAccount(owner, key)
                 .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
                         + "' was not found.", version, "package-version"));
+    }
+
+    /**
+     * Unlike {@code GetPackageVersionAsset}, real CodeArtifact's {@code DescribePackageVersion}
+     * response has no asset listing at all (confirmed against the wire model: {@code
+     * PackageVersionDescription} has no such member; enumerating a version's files is {@code
+     * ListPackageVersionAssets}'s job, a separate, still-unimplemented action). All this needs
+     * from a sidecar is a yes/no answer to "does this exact version exist," which is cheap for
+     * every one of the three: Verdaccio's packument already lists every version it holds,
+     * Reposilite's own details API answers directory existence the same way {@link
+     * #ensureFormatContainerId}'s readiness probe already relies on, and pypiserver's per-project
+     * JSON listing already groups files by version the same way {@code deletePackage} already
+     * reads it.
+     *
+     * <p>A sidecar-backed version is always reported {@code Published}: nothing here ever leaves
+     * one in {@code Unfinished}, the way a generic publish deliberately can, since a real {@code
+     * mvn deploy}/{@code npm publish}/{@code twine upload} only ever lands a version by completing
+     * it in one shot.
+     *
+     * <p>Namespace is validated through the same shared {@link #validatePackageCoordinates} every
+     * other package-level operation already uses, rather than a one-off maven-only check: a pypi
+     * version genuinely has no namespace, so a caller-supplied one must be rejected outright, not
+     * silently ignored and echoed back in the response as though it belonged to the package.
+     */
+    private CodeArtifactPackageVersion describeContainerBackedPackageVersion(String region, String domain,
+            String owner, String repository, String format, String namespace, String packageName, String version) {
+        validatePackageCoordinates(format, namespace, packageName, "describing a version of");
+        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version"));
+        if (!manager.packageVersionExists(repoId, domain, repository, namespace, packageName, version)) {
+            throw notFound("Package version '" + version + "' of package '" + packageName
+                    + "' was not found.", version, "package-version");
+        }
+        CodeArtifactPackageVersion pv = new CodeArtifactPackageVersion();
+        pv.setDomainName(domain);
+        pv.setDomainOwner(owner);
+        pv.setRegion(region);
+        pv.setRepositoryName(repository);
+        pv.setFormat(format);
+        pv.setNamespace(namespace);
+        pv.setPackageName(packageName);
+        pv.setVersion(version);
+        pv.setStatus("Published");
+        pv.setRevision(synthesizeContainerBackedRevision(repoId, namespace, packageName, version));
+        return pv;
     }
 
     /**
@@ -799,7 +854,7 @@ public class CodeArtifactService implements Resettable {
         // it with no versions (its own documented behavior): a stored config, even with zero
         // versions behind it, already proves the package exists, and the && below must short-circuit
         // on originConfig.isEmpty() before packageExistsViaVersionsOrSidecar ever runs. For a
-        // container-backed format that call would otherwise start the real Maven/npm/pypi sidecar
+        // container-backed format that call would otherwise start the real Maven/npm/pypi/nuget sidecar
         // container (its own ensureReady lazily provisions one) just to answer a DescribePackage for
         // a package nothing was ever actually published to.
         if (originConfig.isEmpty()
@@ -983,10 +1038,11 @@ public class CodeArtifactService implements Resettable {
 
     /**
      * Each sidecar's delete capability differs enough that there is no honest shared implementation:
-     * Verdaccio and Reposilite remove a whole package in one call, while pypiserver's own management
-     * endpoint only deletes one exact name/version pair per call, so {@code PypiserverSidecarClient}
-     * lists every file first and removes each one in turn; all three are confirmed against live
-     * containers. {@link RepositorySidecarManager#deletePackage}'s default still throws
+     * Verdaccio and Reposilite remove a whole package in one call, while pypiserver's and BaGetter's
+     * own management endpoints only delete one exact name/version pair per call, so {@code
+     * PypiserverSidecarClient} and {@code BagetterSidecarClient} each list every file or version first
+     * and remove each one in turn; all four are confirmed against live containers.
+     * {@link RepositorySidecarManager#deletePackage}'s default still throws
      * {@link UnsupportedOperationException} for a sidecar that genuinely cannot do this, rather than
      * silently leaving the package in place or claiming a success it cannot back up; that becomes a
      * real, if deliberately blunt, AWS error here instead of an unhandled 500.
@@ -1054,8 +1110,8 @@ public class CodeArtifactService implements Resettable {
         }
         String owner = effectiveOwner(domainOwner);
 
-        // Maven, npm, and pypi are metadata-free passthroughs straight to their own sidecar
-        // (ReposiliteSidecarClient/VerdaccioSidecarClient/PypiserverSidecarClient): publish for
+        // Maven, npm, pypi, and nuget are metadata-free passthroughs straight to their own sidecar
+        // (ReposiliteSidecarClient/VerdaccioSidecarClient/PypiserverSidecarClient/BagetterSidecarClient): publish for
         // these formats never goes through publishPackageVersion (it only ever accepts "generic"),
         // so packageVersions can never hold a record for them. Bridge straight to the sidecar
         // that actually has the asset instead of always 404ing here.
@@ -1085,25 +1141,6 @@ public class CodeArtifactService implements Resettable {
         return new PackageVersionAssetResult(asset, pv.getRevision());
     }
 
-    /**
-     * There's no stored revision for a sidecar-backed format to compare against, so one is
-     * synthesized from the version coordinate itself (this repository's own sidecar container id,
-     * plus namespace/package/version), not the fetched asset's own bytes: a real revision is
-     * shared by every asset of one package version (a Maven version's JAR and POM alike), so
-     * hashing per-asset content would give a client that described the version once, then tried
-     * to fetch a second asset at that same revision, a spurious not-found on the second call even
-     * though both assets genuinely exist. Keying on the sidecar container id, not just the bare
-     * namespace/package/version strings, keeps two different repositories (even two with the
-     * identical coordinates) from ever synthesizing the same revision.
-     *
-     * <p>Doesn't change when a new asset is published to the version afterward, unlike a real
-     * stored revision: tracking that would mean enumerating every asset a sidecar holds for a
-     * version on every call, the same capability {@code DescribePackageVersion} would need and
-     * doesn't have either for these formats (see the Known limitations doc). Accepted for the
-     * same reason: nothing before this change ever let a client obtain a revision for these
-     * formats in the first place (not even a stale one), so this isn't a regression against any
-     * previously working staleness check.
-     */
     private PackageVersionAssetResult getContainerBackedPackageVersionAsset(String region, String domain,
             String owner, String repository, String format, String namespace, String packageName, String version,
             String assetName, String packageVersionRevision) {
@@ -1132,10 +1169,24 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
-     * The same synthesized revision {@link #getContainerBackedPackageVersionAsset} uses, shared
-     * so {@link #getPackageVersionReadme}'s npm/pypi answers report a revision consistent with
-     * whatever {@code GetPackageVersionAsset} would already report for the same version
-     * coordinate, rather than two independently-computed stand-ins that happen to differ.
+     * There's no stored revision for a sidecar-backed format to compare against, so one is
+     * synthesized from the version coordinate itself (this repository's own sidecar container id,
+     * plus namespace/package/version), not the fetched asset's own bytes: a real revision is
+     * shared by every asset of one package version (a Maven version's JAR and POM alike), so
+     * hashing per-asset content would give a client that described the version once, then tried
+     * to fetch a second asset at that same revision, a spurious not-found on the second call even
+     * though both assets genuinely exist. Keying on the sidecar container id, not just the bare
+     * namespace/package/version strings, keeps two different repositories (even two with the
+     * identical coordinates) from ever synthesizing the same revision.
+     *
+     * <p>Shared by {@link #getContainerBackedPackageVersionAsset}, {@link
+     * #describeContainerBackedPackageVersion}, and {@link #getPackageVersionReadme}'s npm/pypi/nuget
+     * answers, so a client calling any two of them for the same version coordinate always sees one
+     * consistent revision rather than independently-computed stand-ins that happen to differ.
+     * Doesn't change when a new asset is published to the version afterward, unlike a real stored
+     * revision would: nothing before this helper existed ever let a client obtain a revision for
+     * these formats in the first place (not even a stale one), so this isn't a regression against
+     * any previously working staleness check.
      */
     private static String synthesizeContainerBackedRevision(String repoId, String namespace, String packageName,
             String version) {
@@ -1167,10 +1218,11 @@ public class CodeArtifactService implements Resettable {
      * action); see {@link #recordPublishedPackageVersionReadme}, the only place either is ever
      * captured.
      *
-     * <p>nuget is accepted, since AWS documents it as valid, but never finds anything: nothing in
-     * Floci today implements the real NuGet wire protocol, so no nuget package version can ever
-     * actually exist here. This 404s for it exactly the same way as any npm/pypi version nothing
-     * ever published, rather than special-casing a format with no data behind it either way.
+     * <p>nuget differs from both: BaGetter keeps every version's own readme (and nuspec {@code
+     * description} fallback) addressable by exact version for as long as that version exists
+     * (confirmed directly against its package content controller), so this answers nuget live
+     * against the sidecar, through {@link RepositorySidecarManager#fetchPackageVersionReadme},
+     * rather than from a record captured at publish time the way npm and pypi need to.
      */
     public PackageVersionReadmeResult getPackageVersionReadme(String region, String domain, String domainOwner,
             String repository, String format, String namespace, String packageName, String version) {
@@ -1181,25 +1233,31 @@ public class CodeArtifactService implements Resettable {
         requireNonBlank(repository, "repository");
         requireNonBlank(packageName, "package");
         requireNonBlank(version, "packageVersion");
-        validatePackageToken("package", packageName);
         validatePackageToken("packageVersion", version);
-        if (namespace != null) {
-            validatePackageToken("namespace", namespace);
-        }
+        // Found by Qodo review: this used to only check namespace's token syntax, never whether
+        // pypi or nuget (neither of which has one) was even given one; a caller-supplied
+        // namespace for an existing pypi/nuget version could resolve a readme under a coordinate
+        // that format can't actually have, instead of a ValidationException.
+        validatePackageCoordinates(format, namespace, packageName, "reading the readme of");
         String owner = effectiveOwner(domainOwner);
         requireRepository(owner, repositoryKey(region, domain, repository), repository);
-        // npm, pypi, and nuget alike: none of the three can be answered live (see this method's
-        // own javadoc), so a version that was never captured here means it was never published,
-        // including every nuget version, since nothing ever publishes one. Checked before
-        // ensureFormatContainerId below so a nuget request, which can only ever 404, never mints
-        // and persists a sidecar container id for a format with no sidecar at all.
+        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+        String revision = synthesizeContainerBackedRevision(repoId, namespace, packageName, version);
+        if ("nuget".equals(format)) {
+            String readme = sidecarRegistry.forFormat(format)
+                    .flatMap(manager -> manager.fetchPackageVersionReadme(repoId, domain, repository, namespace,
+                            packageName, version))
+                    .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                            + "' was not found.", version, "package-version"));
+            return new PackageVersionReadmeResult(format, namespace, packageName, version, revision, readme);
+        }
+        // npm and pypi: neither can be answered live (see this method's own javadoc), so a
+        // version that was never captured here means it was never published.
         String key = packageVersionKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName), version);
         String readme = Optional.ofNullable(packageVersionReadmes.get(ownerScopedKey(owner, key)))
                 .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
                         + "' was not found.", version, "package-version"));
-        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
-        String revision = synthesizeContainerBackedRevision(repoId, namespace, packageName, version);
         return new PackageVersionReadmeResult(format, namespace, packageName, version, revision, readme);
     }
 
@@ -1424,7 +1482,7 @@ public class CodeArtifactService implements Resettable {
 
     /**
      * Sums every stored {@link PackageAsset}'s size across the domain's repositories, plus
-     * whatever each repository's Maven/npm/pypi proxy has reported through
+     * whatever each repository's Maven/npm/pypi/nuget proxy has reported through
      * {@link #recordContainerBackedAssetBytes}, for {@code DescribeDomain}'s {@code
      * assetSizeBytes}.
      *
@@ -1491,9 +1549,14 @@ public class CodeArtifactService implements Resettable {
 
     /**
      * Adds {@code bytes} to the running total CodeArtifact's own storage tracks for one
-     * Maven/npm/pypi package, independent of whatever that sidecar could report back later: none
-     * of the three expose an enumeration cheap enough for {@link #assetSizeBytesForDomain} to
-     * query live (the same reason {@link #describePackageVersion} can't bridge to them either).
+     * Maven/npm/pypi/nuget package, independent of whatever that sidecar could report back later:
+     * Maven, npm, and pypi expose no enumeration cheap enough for {@link #assetSizeBytesForDomain}
+     * to query live (the same reason {@link #describePackageVersion} can't bridge to any of the
+     * three either). nuget's BaGetter sidecar actually could answer a per-package byte total cheaply
+     * through its own flat container listing, but this stays the uniform mechanism across every
+     * container-backed format rather than special-casing the one sidecar that happens to support
+     * it, the same reasoning {@link #deleteContainerBackedPackageIfPresent} already applies by
+     * always asking the sidecar instead of trusting a stored shortcut.
      * Called by each format's own proxy only once it has already decided, in its own terms, that a
      * real write just happened: never for an idempotent short-circuit (nothing new was written) or
      * a rejected conflict (Reposilite's {@code redeployment: false}, Verdaccio's native reject, or
@@ -1626,7 +1689,16 @@ public class CodeArtifactService implements Resettable {
      * that mismatch is pre-existing and unrelated to the byte accounting this method guards.
      */
     private static String accountingPackageName(String format, String packageName) {
-        return "pypi".equals(format) ? packageName.toLowerCase(Locale.ROOT).replaceAll("[-_.]+", "-") : packageName;
+        if ("pypi".equals(format)) {
+            return packageName.toLowerCase(Locale.ROOT).replaceAll("[-_.]+", "-");
+        }
+        // AWS's own NuGet normalization doc: "CodeArtifact normalizes NuGet package names by
+        // converting all letters to lowercase," with no further collapsing the way pypi's PEP 503
+        // normalization does, so this never needs anything beyond a case change.
+        if ("nuget".equals(format)) {
+            return packageName.toLowerCase(Locale.ROOT);
+        }
+        return packageName;
     }
 
     private int domainCountForAccount(String owner, String region) {
@@ -1785,8 +1857,8 @@ public class CodeArtifactService implements Resettable {
         if (("maven".equals(format) || "generic".equals(format)) && (namespace == null || namespace.isBlank())) {
             throw validation("namespace is required when " + action + " a " + format + " package.");
         }
-        if ("pypi".equals(format) && namespace != null) {
-            throw validation("pypi packages do not have a namespace.");
+        if (("pypi".equals(format) || "nuget".equals(format)) && namespace != null) {
+            throw validation(format + " packages do not have a namespace.");
         }
     }
 

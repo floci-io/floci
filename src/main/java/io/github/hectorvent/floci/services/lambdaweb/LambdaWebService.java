@@ -10,7 +10,9 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
@@ -41,6 +43,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -136,6 +140,8 @@ public class LambdaWebService implements Resettable {
     /** Keyed {@code region/functionName}. The backend adds the caller's account to every key. */
     private StorageBackend<String, WebFunction> functions;
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
+    /** Every endpoint domain, filled from storage at start and kept by the create and delete paths. */
+    private final ConcurrentHashMap<String, EndpointLocator> domains = new ConcurrentHashMap<>();
 
     @Inject
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
@@ -156,11 +162,74 @@ public class LambdaWebService implements Resettable {
     void initializeStorage() {
         this.functions = storageFactory.create("lambda", "lambda-web-functions.json",
                 new TypeReference<Map<String, WebFunction>>() {});
+        domains.clear();
+        List<WebFunction> all = functions instanceof AccountAwareStorageBackend<WebFunction> aware
+                ? aware.scanAllAccounts()
+                : functions.scan(key -> true);
+        for (WebFunction fn : all) {
+            fn.endpoints.values().forEach(endpoint -> indexDomains(fn, endpoint));
+        }
     }
 
     @Override
     public void clear() {
         functions.clear();
+        domains.clear();
+    }
+
+    /** Where a request to an endpoint domain goes. Domains are unique across accounts and regions. */
+    public record WebFunctionTarget(String accountId, String region, WebFunction function, WebFunctionEndpoint endpoint) {
+    }
+
+    private record EndpointLocator(String accountId, String region, String functionName, String endpointName) {
+    }
+
+    public Optional<WebFunctionTarget> locate(String host) {
+        EndpointLocator locator = domains.get(host);
+        if (locator == null) {
+            return Optional.empty();
+        }
+        return RequestScopes.callAs(locator.accountId(), locator.region(), () -> {
+            synchronized (lockFor(locator.region(), locator.functionName())) {
+                Optional<WebFunction> stored = functions.get(key(locator.region(), locator.functionName()));
+                if (stored.isEmpty() || !stored.get().endpoints.containsKey(locator.endpointName())) {
+                    domains.remove(host, locator);
+                    return Optional.empty();
+                }
+                WebFunction fn = copy(stored.get(), WebFunction.class);
+                return Optional.of(new WebFunctionTarget(locator.accountId(), locator.region(), fn,
+                        fn.endpoints.get(locator.endpointName())));
+            }
+        });
+    }
+
+    private void indexDomains(WebFunction fn, WebFunctionEndpoint endpoint) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.functionArn);
+        EndpointLocator locator = new EndpointLocator(arn.accountId(), arn.region(), fn.functionName, endpoint.endpointName);
+        domains.put(endpoint.domainName, locator);
+        endpoint.regionalDomainNames.values().forEach(domain -> domains.put(domain, locator));
+    }
+
+    private void unindexDomains(WebFunctionEndpoint endpoint) {
+        domains.remove(endpoint.domainName);
+        endpoint.regionalDomainNames.values().forEach(domains::remove);
+    }
+
+    /** The revision a request goes to, drawn by the endpoint's weights. */
+    public static WebFunctionRevision pickRevision(WebFunctionTarget target) {
+        List<WebFunctionEndpoint.RevisionWeight> weights = target.endpoint().revisionWeights;
+        if (weights.isEmpty()) {
+            return null;
+        }
+        int draw = ThreadLocalRandom.current().nextInt(100);
+        int cumulative = 0;
+        for (WebFunctionEndpoint.RevisionWeight weight : weights) {
+            cumulative += weight.weight;
+            if (draw < cumulative) {
+                return target.function().revisions.get(weight.revisionId);
+            }
+        }
+        return target.function().revisions.get(weights.get(weights.size() - 1).revisionId);
     }
 
     /** An endpoint before and after an update. The update response shows both. */
@@ -191,9 +260,7 @@ public class LambdaWebService implements Resettable {
         validateTagsShape(validation, "tags", tags);
         validation.throwIfAny();
 
-        if (!FUNCTION_NAME.matcher(functionName).matches()) {
-            throw invalidFunctionName(functionName);
-        }
+        requireFunctionName(functionName);
         if (revisionConfig == null || endpointConfig == null) {
             throw new AwsException("ValidationException",
                     "The revisionConfig and endpointConfig must be specified.", 400);
@@ -202,19 +269,45 @@ public class LambdaWebService implements Resettable {
         validateRevisionRules(revisionConfig);
         String accountId = regionResolver.getAccountId();
         WebFunctionEndpoint endpoint = draftEndpoint(region, accountId, functionName, endpointConfig, false);
-        String arn = functionArn(region, accountId, functionName);
-        synchronized (lockFor(region, functionName)) {
-            if (functions.get(key(region, functionName)).isPresent()) {
-                throw new AwsException("ConflictException", "The function " + arn + " already exists.", 409);
-            }
-            WebFunction fn = newFunction(region, accountId, functionName, tags == null ? Map.of() : tags);
+        return storeNewFunction(region, functionName, tags, fn -> {
             WebFunctionRevision revision = buildRevision(fn, revisionConfig);
             attachEndpoint(region, fn, endpoint, revision);
             fn.revisions.put(revision.revisionId, revision);
             fn.endpoints.put(endpoint.endpointName, endpoint);
-            functions.put(key(region, functionName), fn);
+            indexDomains(fn, endpoint);
             LOG.infov("Created web function {0} with revision {1} and endpoint {2}",
                     functionName, revision.revisionId, endpoint.endpointName);
+        });
+    }
+
+    /** A function with no revision and no endpoint, for AWS::Lambda::WebFunction. */
+    public WebFunction createFunctionShell(String region, String functionName, Map<String, String> tags) {
+        requireFunctionName(functionName);
+        LambdaWebValidation validation = new LambdaWebValidation();
+        validateTagsShape(validation, "tags", tags);
+        validation.throwIfAny();
+        requireValidTags(tags);
+        return storeNewFunction(region, functionName, tags, fn -> { });
+    }
+
+    private static void requireFunctionName(String functionName) {
+        if (functionName == null || !FUNCTION_NAME.matcher(functionName).matches()) {
+            throw invalidFunctionName(functionName);
+        }
+    }
+
+    /** Stores a new function under its lock, refusing a name the region already has. */
+    private WebFunction storeNewFunction(String region, String functionName, Map<String, String> tags,
+                                         Consumer<WebFunction> populate) {
+        String accountId = regionResolver.getAccountId();
+        synchronized (lockFor(region, functionName)) {
+            if (functions.get(key(region, functionName)).isPresent()) {
+                throw new AwsException("ConflictException",
+                        "The function " + functionArn(region, accountId, functionName) + " already exists.", 409);
+            }
+            WebFunction fn = newFunction(region, accountId, functionName, tags == null ? Map.of() : tags);
+            populate.accept(fn);
+            functions.put(key(region, functionName), fn);
             return copy(fn, WebFunction.class);
         }
     }
@@ -252,7 +345,8 @@ public class LambdaWebService implements Resettable {
     public void deleteFunction(String region, String functionNameOrArn) {
         String functionName = resolveFunctionName(region, functionNameOrArn, "DeleteWebFunction");
         synchronized (lockFor(region, functionName)) {
-            function(region, functionName);
+            WebFunction fn = function(region, functionName);
+            fn.endpoints.values().forEach(this::unindexDomains);
             functions.delete(key(region, functionName));
         }
         LOG.infov("Deleted web function {0}", functionName);
@@ -337,6 +431,31 @@ public class LambdaWebService implements Resettable {
         }
     }
 
+    /** Whether a revision already carries the configuration a request describes. */
+    public boolean revisionMatches(WebFunctionRevision existing, JsonNode request) {
+        WebFunctionRevision desired = new WebFunctionRevision();
+        desired.description = LambdaWebJson.text(request, "description");
+        desired.kmsKeyArn = LambdaWebJson.text(request, "kmsKeyArn");
+        desired.buildConfig = buildConfigOf(LambdaWebJson.structure(request, "buildConfig"));
+        String functionName = existing.functionArn.substring(existing.functionArn.lastIndexOf('/') + 1);
+        desired.serviceConfig = serviceConfigOf(LambdaWebJson.structure(request, "serviceConfig"),
+                defaultLogGroup(functionName));
+        return objectMapper.valueToTree(configOnly(existing)).equals(objectMapper.valueToTree(configOnly(desired)));
+    }
+
+    private static String defaultLogGroup(String functionName) {
+        return "/aws/lambda/web/" + functionName;
+    }
+
+    private static WebFunctionRevision configOnly(WebFunctionRevision revision) {
+        WebFunctionRevision copy = new WebFunctionRevision();
+        copy.description = revision.description;
+        copy.kmsKeyArn = revision.kmsKeyArn;
+        copy.buildConfig = revision.buildConfig;
+        copy.serviceConfig = revision.serviceConfig;
+        return copy;
+    }
+
     private static WebFunctionRevision revision(WebFunction fn, String revisionId) {
         WebFunctionRevision revision = fn.revisions.get(revisionId);
         if (revision == null) {
@@ -372,7 +491,7 @@ public class LambdaWebService implements Resettable {
                     "The runtime " + revision.buildConfig.runtime + " is invalid.", 400);
         }
         revision.serviceConfig = serviceConfigOf(LambdaWebJson.structure(request, "serviceConfig"),
-                "/aws/lambda/web/" + fn.functionName);
+                defaultLogGroup(fn.functionName));
         requireCodeObject(revision.buildConfig);
         revision.description = LambdaWebJson.text(request, "description");
         revision.kmsKeyArn = LambdaWebJson.text(request, "kmsKeyArn");
@@ -520,6 +639,7 @@ public class LambdaWebService implements Resettable {
             WebFunction fn = function(region, functionName);
             attachEndpoint(region, fn, endpoint, null);
             fn.endpoints.put(endpoint.endpointName, endpoint);
+            indexDomains(fn, endpoint);
             fn.updatedAt = now();
             persist(region, fn);
         }
@@ -616,6 +736,7 @@ public class LambdaWebService implements Resettable {
             WebFunction fn = function(region, functionName);
             WebFunctionEndpoint endpoint = endpoint(fn, endpointName);
             fn.endpoints.remove(endpoint.endpointName);
+            unindexDomains(endpoint);
             fn.updatedAt = now();
             persist(region, fn);
         }
@@ -872,14 +993,7 @@ public class LambdaWebService implements Resettable {
         validation.pattern("resource", resourceArn, RESOURCE_ARN).required("tags", tags);
         validateTagsShape(validation, "tags", tags);
         validation.throwIfAny();
-        requireValidTags(tags);
-        String functionName = resolveFunctionName(region, resourceArn, "TagResource");
-        synchronized (lockFor(region, functionName)) {
-            WebFunction fn = function(region, functionName);
-            fn.tags.putAll(tags);
-            fn.updatedAt = now();
-            persist(region, fn);
-        }
+        writeTags(region, resourceArn, tags, fn -> fn.tags.putAll(tags));
     }
 
     public void untagResource(String region, String resourceArn, List<String> tagKeys) {
@@ -897,6 +1011,27 @@ public class LambdaWebService implements Resettable {
             tagKeys.forEach(fn.tags::remove);
             fn.updatedAt = now();
             persist(region, fn);
+        }
+    }
+
+    /** Sets the stored tags to exactly {@code desired}, for AWS::Lambda::WebFunction. */
+    public WebFunction replaceTags(String region, String functionNameOrArn, Map<String, String> desired) {
+        LambdaWebValidation validation = new LambdaWebValidation();
+        validateTagsShape(validation, "tags", desired);
+        validation.throwIfAny();
+        return writeTags(region, functionNameOrArn, desired, fn -> fn.tags = new LinkedHashMap<>(desired));
+    }
+
+    private WebFunction writeTags(String region, String functionNameOrArn, Map<String, String> tags,
+                                  Consumer<WebFunction> write) {
+        requireValidTags(tags);
+        String functionName = resolveFunctionName(region, functionNameOrArn, "TagResource");
+        synchronized (lockFor(region, functionName)) {
+            WebFunction fn = function(region, functionName);
+            write.accept(fn);
+            fn.updatedAt = now();
+            persist(region, fn);
+            return copy(fn, WebFunction.class);
         }
     }
 

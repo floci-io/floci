@@ -123,6 +123,30 @@ class ProtocolClaimerIntegrationTest {
     }
 
     @Test
+    void botoSwfJsonClaimsOnlyTheDocumentedRootTarget() {
+        String target = "com.amazonaws.swf.service.model.SimpleWorkflowService.RegisterActivityType";
+        ProtocolClaim legacy = claim("POST", "/", "Application/JSON; charset=UTF-8",
+                null, target, null).orElseThrow();
+        assertEquals(WireProtocol.AWS_JSON_1_0, legacy.protocol());
+        assertEquals("swf", legacy.service().externalKey());
+        assertEquals("RegisterActivityType", legacy.operation());
+        assertEquals(target, legacy.target());
+
+        assertTrue(claim("POST", "/", "text/plain", null, target, null).isEmpty());
+        assertTrue(claim("POST", "/", "application/json", "rpc-v2-json", target, null).isEmpty());
+        assertEquals("swf", claim("POST", "/", "application/json", null,
+                "SimpleWorkflowService.RegisterActivityType", null).orElseThrow().service().externalKey());
+        assertTrue(claim("POST", "/", "application/json", null,
+                "com.amazonaws.swf.service.model.SimpleWorkflowServiceOther.RegisterActivityType", null).isEmpty());
+        assertTrue(claim("POST", "/", "application/json", null,
+                "AmazonSSM.DescribeParameters", null).isEmpty());
+        assertEquals(WireProtocol.REST, claim("GET", "/", "application/json",
+                null, target, null).orElseThrow().protocol());
+        assertEquals(WireProtocol.REST, claim("POST", "/other", "application/json",
+                null, target, null).orElseThrow().protocol());
+    }
+
+    @Test
     void unknownTargetStillClaimsProtocolWithoutService() {
         ProtocolClaim claim = claim("POST", "/", "application/x-amz-json-1.1",
                 null, "NoSuchService.DoThing", null).orElseThrow();

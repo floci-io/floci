@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.config;
 
 import io.github.hectorvent.floci.services.iot.IotMqttWebSocketIntegrationTest;
 import io.github.hectorvent.floci.testing.IotMqttTlsProfile;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.vertx.core.Vertx;
@@ -20,13 +21,13 @@ import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -107,10 +108,7 @@ class IotMqttWebSocketProxyIntegrationTest {
     }
 
     private int startProxy() throws Exception {
-        int publicPort;
-        try (ServerSocket probe = new ServerSocket(0)) {
-            publicPort = probe.getLocalPort();
-        }
+        int publicPort = FreePorts.anyInterfacePort();
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.TlsConfig tls = mock(EmulatorConfig.TlsConfig.class);
         when(config.port()).thenReturn(publicPort);

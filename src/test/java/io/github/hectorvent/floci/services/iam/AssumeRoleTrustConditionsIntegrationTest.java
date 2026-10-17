@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.EnforcementFixtures.Session;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -42,6 +43,8 @@ class AssumeRoleTrustConditionsIntegrationTest {
     private static final String DEFAULT_ACCOUNT = "000000000000";
     private static final DateTimeFormatter AMZ_DATE_FMT =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+    private static final String ALLOW_ASSUME_ROLE = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+            + "\"Action\":\"sts:AssumeRole\",\"Resource\":\"*\"}]}";
 
     @Test
     void externalIdConditionNeedsTheMatchingExternalId() {
@@ -91,18 +94,70 @@ class AssumeRoleTrustConditionsIntegrationTest {
 
     @Test
     void userKeyCallerIsTheUsersAccountNotTheDefaultAccount() {
-        String user = "trust-user-" + UUID.randomUUID().toString().substring(0, 8);
-        String accessKeyId = EnforcementFixtures.createUser(cleanup, baseUri.getPort(),
-                auth(OTHER_ACCOUNT, "iam"), user).accessKeyId();
-        given().formParam("Action", "PutUserPolicy").formParam("UserName", user).formParam("PolicyName", "p")
-                .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                        + "\"Action\":\"sts:AssumeRole\",\"Resource\":\"*\"}]}")
-                .header("Authorization", auth(OTHER_ACCOUNT, "iam")).when().post("/").then().statusCode(200);
+        String accessKeyId = createCallerUser("trust-user-" + UUID.randomUUID().toString().substring(0, 8));
         String trustsDefault = createRole(trustAccountRoot(DEFAULT_ACCOUNT));
         String trustsOwnAccount = createRole(trustAccountRoot(OTHER_ACCOUNT));
 
         assertTrustDenied(assumeRole(accessKeyId, trustsDefault, "s", null), trustsDefault);
         assumeRole(accessKeyId, trustsOwnAccount, "s", null).then().statusCode(200);
+    }
+
+    @Test
+    void aTrustConditionOnTheUserNameMatchesTheCallingUser() {
+        String user = "trust-name-" + UUID.randomUUID().toString().substring(0, 8);
+        String accessKeyId = createCallerUser(user);
+        String ownerRoot = "arn:aws:iam::" + OTHER_ACCOUNT + ":root";
+        String namesTheCaller = createRole(trustWithCondition(ownerRoot,
+                "{\"StringEquals\":{\"aws:username\":\"" + user + "\"}}"));
+        String namesSomeoneElse = createRole(trustWithCondition(ownerRoot,
+                "{\"StringEquals\":{\"aws:username\":\"someone-else\"}}"));
+
+        assumeRole(accessKeyId, namesTheCaller, "s", null).then().statusCode(200);
+        assertTrustDenied(assumeRole(accessKeyId, namesSomeoneElse, "s", null), namesSomeoneElse);
+    }
+
+    @Test
+    void aTrustConditionTellsAUserApartFromARoleSession() {
+        String accessKeyId = createCallerUser("trust-type-" + UUID.randomUUID().toString().substring(0, 8));
+        String callerRole = "trust-type-role-" + UUID.randomUUID().toString().substring(0, 8);
+        createCallerRole(callerRole, "/");
+        Session session = assumeCallerRole(callerRole, "/");
+        String onlyUsers = createRole(trustWithCondition("*",
+                "{\"StringEquals\":{\"aws:PrincipalType\":\"User\"}}"));
+        String onlySessions = createRole(trustWithCondition("*",
+                "{\"StringEquals\":{\"aws:PrincipalType\":\"AssumedRole\"}}"));
+
+        assumeRole(accessKeyId, onlyUsers, "s", null).then().statusCode(200);
+        assertTrustDenied(assumeRoleWithSession(session, onlyUsers), onlyUsers);
+        assumeRoleWithSession(session, onlySessions).then().statusCode(200);
+        assertTrustDenied(assumeRole(accessKeyId, onlySessions, "s", null), onlySessions);
+    }
+
+    @Test
+    void theAccountRootStandInIsTheAccountItSignsFor() {
+        String accessKeyId = createCallerUser("trust-root-" + UUID.randomUUID().toString().substring(0, 8));
+        String onlyTheRoot = createRole(trustWithCondition("*",
+                "{\"StringEquals\":{\"aws:PrincipalType\":\"Account\",\"aws:userid\":\"" + TRUSTED_ACCOUNT + "\"}}"));
+
+        assumeRole(TRUSTED_ACCOUNT, onlyTheRoot, "s", null).then().statusCode(200);
+        assertTrustDenied(assumeRole(accessKeyId, onlyTheRoot, "s", null), onlyTheRoot);
+    }
+
+    @Test
+    void aTrustConditionReadsTheCallersUserId() {
+        String accessKeyId = createCallerUser("trust-id-" + UUID.randomUUID().toString().substring(0, 8));
+        String callerRole = "trust-id-role-" + UUID.randomUUID().toString().substring(0, 8);
+        createCallerRole(callerRole, "/");
+        Session session = assumeCallerRole(callerRole, "/");
+        // A user's aws:userid is its own unique id; a session's is role-id:session-name, and the
+        // session below was issued under the name s.
+        String userIds = createRole(trustWithCondition("*", "{\"StringLike\":{\"aws:userid\":\"AIDA*\"}}"));
+        String sessionIds = createRole(trustWithCondition("*", "{\"StringLike\":{\"aws:userid\":\"AROA*:s\"}}"));
+
+        assumeRole(accessKeyId, userIds, "s", null).then().statusCode(200);
+        assertTrustDenied(assumeRoleWithSession(session, userIds), userIds);
+        assumeRoleWithSession(session, sessionIds).then().statusCode(200);
+        assertTrustDenied(assumeRole(accessKeyId, sessionIds, "s", null), sessionIds);
     }
 
     @Test
@@ -165,30 +220,24 @@ class AssumeRoleTrustConditionsIntegrationTest {
         return spec.when().post("/");
     }
 
-    private record Session(String accessKeyId, String sessionToken) {
+    /** A user in {@link #OTHER_ACCOUNT} carrying the sts:AssumeRole its own policies have to allow. */
+    private String createCallerUser(String user) {
+        String accessKeyId = EnforcementFixtures.createUser(cleanup, baseUri.getPort(),
+                auth(OTHER_ACCOUNT, "iam"), user).accessKeyId();
+        given().formParam("Action", "PutUserPolicy").formParam("UserName", user).formParam("PolicyName", "p")
+                .formParam("PolicyDocument", ALLOW_ASSUME_ROLE)
+                .header("Authorization", auth(OTHER_ACCOUNT, "iam")).when().post("/").then().statusCode(200);
+        return accessKeyId;
     }
 
     /** A role in the trusted account that its own account may assume, allowed to call AssumeRole. */
     private void createCallerRole(String name, String path) {
-        cleanup.register(() -> EnforcementFixtures.removeRole(baseUri.getPort(),
-                auth(TRUSTED_ACCOUNT, "iam"), name));
-        given().formParam("Action", "CreateRole").formParam("RoleName", name).formParam("Path", path)
-                .formParam("AssumeRolePolicyDocument", trustAccountRoot(TRUSTED_ACCOUNT))
-                .header("Authorization", auth(TRUSTED_ACCOUNT, "iam")).when().post("/").then().statusCode(200);
-        given().formParam("Action", "PutRolePolicy").formParam("RoleName", name).formParam("PolicyName", "p")
-                .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                        + "\"Action\":\"sts:AssumeRole\",\"Resource\":\"*\"}]}")
-                .header("Authorization", auth(TRUSTED_ACCOUNT, "iam")).when().post("/").then().statusCode(200);
+        EnforcementFixtures.createRole(cleanup, baseUri.getPort(), TRUSTED_ACCOUNT, path, name, ALLOW_ASSUME_ROLE);
     }
 
-    private static Session assumeCallerRole(String name, String path) {
-        Response response = given().formParam("Action", "AssumeRole")
-                .formParam("RoleArn", "arn:aws:iam::" + TRUSTED_ACCOUNT + ":role" + path + name)
-                .formParam("RoleSessionName", "s")
-                .header("Authorization", auth(TRUSTED_ACCOUNT, "sts")).when().post("/");
-        response.then().statusCode(200);
-        return new Session(response.path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId"),
-                response.path("AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken"));
+    private Session assumeCallerRole(String name, String path) {
+        return EnforcementFixtures.assumeRole(baseUri.getPort(), TRUSTED_ACCOUNT,
+                "arn:aws:iam::" + TRUSTED_ACCOUNT + ":role" + path + name);
     }
 
     private static Response assumeRoleWithSession(Session session, String role) {
@@ -224,6 +273,13 @@ class AssumeRoleTrustConditionsIntegrationTest {
         return """
                 {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
                   "Principal":{"AWS":"%s"},"Action":"sts:AssumeRole"}]}""".formatted(principalArn);
+    }
+
+    private static String trustWithCondition(String principal, String condition) {
+        return """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Principal":{"AWS":"%s"},"Action":"sts:AssumeRole",
+                  "Condition":%s}]}""".formatted(principal, condition);
     }
 
     private static String trustAccountRoot(String account) {

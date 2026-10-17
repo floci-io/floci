@@ -84,10 +84,13 @@ class CloudFormationEventBusTest {
                 .containsEntry("keep", "old")
                 .containsEntry("remove", "old");
 
-        cloudFormation.updateStack(r -> r
+        // An update with nothing to change is refused, as CloudFormation refuses it.
+        assertThatThrownBy(() -> cloudFormation.updateStack(r -> r
                 .stackName(stackName)
-                .templateBody(template("before", "old", "remove")));
-        assertThat(waitForTerminal(stackName, 30)).isEqualTo("UPDATE_COMPLETE");
+                .templateBody(template("before", "old", "remove"))))
+                .isInstanceOf(CloudFormationException.class)
+                .hasMessageContaining("No updates are to be performed.");
+        assertThat(waitForTerminal(stackName, 30)).isEqualTo("CREATE_COMPLETE");
 
         cloudFormation.updateStack(r -> r
                 .stackName(stackName)

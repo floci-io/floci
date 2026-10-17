@@ -393,7 +393,7 @@ public class AwsJsonCborController {
         }
 
         // Symmetric with the JSON 1.0/1.1 controllers: a target this controller cannot
-        // resolve is an unknown operation, not an empty 204. The 204 fallback now applies
+        // dispatch is an unknown operation, not an empty 204. The 204 fallback now applies
         // only to a resolved service whose action this handler does not dispatch.
         ServiceCatalog.TargetMatch targetMatch = catalog.matchTarget(target).orElse(null);
         if (targetMatch == null) {
@@ -420,7 +420,7 @@ public class AwsJsonCborController {
                 case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
                 case "states" -> sfnJsonHandler.handle(action, request, region);
                 case "monitoring" -> cloudWatchMetricsJsonHandler.handle(action, request, region);
-                default -> null;
+                default -> throw new AwsException("UnknownOperationException", "Unknown operation: " + target, 404);
             };
             if (delegated == null) {
                 return null;

@@ -65,6 +65,12 @@ was started with `us-east-1`, so one process can serve several partitions at onc
 without a credential, and background work (pollers, schedulers, startup hooks), use the
 deployment's partition.
 
+JSON 1.1 service dispatch uses the region selected for the request, including a presigned
+`X-Amz-Credential` query scope when the request filter accepts it. An applicable
+`Authorization` header takes precedence over query credentials; requests without an admitted
+credential scope use the configured default region. Authorization and execution therefore use
+the same regional namespace.
+
 The scope region of a global service is its *signing* region, not a place to put regional
 resources: China IAM always signs `cn-north-1` even from Ningxia, GovCloud IAM signs
 `us-gov-west-1`. Floci uses it to pick the partition and nothing else. The
@@ -82,10 +88,14 @@ A scope region that no partition publishes or admits by its region pattern, such
 The pattern rule is the AWS SDKs' own, so a region AWS launches after the vendored data was
 refreshed (`eu-south-9`, say) is still served; it is looser than S3's `LocationConstraint` enum,
 which stays published-only. Set `FLOCI_PARTITIONS_ALLOW_UNKNOWN_REGIONS=true`
-(`floci.partitions.allow-unknown-regions`) to serve any label with its own namespace, as Floci
-did before. Such a label belongs to the deployment's partition. ARNs minted through Floci's
-shared region resolver use that partition too; services that build their ARNs directly still fall
-back to `aws` for a label no partition publishes.
+(`floci.partitions.allow-unknown-regions`) to serve custom labels with their own namespaces.
+Such a label belongs to the deployment's partition. ARNs minted through Floci's shared region
+resolver use that partition too; services that build their ARNs directly still fall back to
+`aws` for a label no partition publishes.
+
+A region label containing `:` is always refused because the colon separates ARN fields and
+storage identities. This also applies to `FLOCI_DEFAULT_REGION`; Floci refuses to start with
+a colon in that setting. Existing stored namespaces are not migrated or deleted by this check.
 
 ## What changes per partition
 

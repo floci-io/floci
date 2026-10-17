@@ -215,7 +215,8 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
         }
         try {
             this.containerId = existing.getId();
-            ContainerInfo info = lifecycleManager.adopt(containerId, List.of(CONTAINER_INTERNAL_PORT));
+            ContainerInfo info = lifecycleManager.adopt(containerId, List.of(CONTAINER_INTERNAL_PORT),
+                    containerBuilder.resolveDockerNetwork(jsRuntimeConfig().dockerNetwork()));
             this.baseUrl = endpointUrl(info.getEndpoint(CONTAINER_INTERNAL_PORT));
             awaitHealthy(ADOPT_PROBE_SECONDS);
             this.started = true;

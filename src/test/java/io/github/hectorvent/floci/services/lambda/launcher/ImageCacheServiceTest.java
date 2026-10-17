@@ -19,9 +19,11 @@ import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.Lau
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -50,7 +52,7 @@ class ImageCacheServiceTest {
         DockerClient dockerClient = mock(DockerClient.class);
         InspectImageCmd inspectImage = mock(InspectImageCmd.class);
         PullImageCmd pullImage = mock(PullImageCmd.class);
-        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        PullImageResultCallback callback = completedPull();
         when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
         when(inspectImage.exec()).thenThrow(new NotFoundException("image not found"))
                 .thenReturn(new InspectImageResponse()
@@ -88,7 +90,7 @@ class ImageCacheServiceTest {
         DockerClient dockerClient = mock(DockerClient.class);
         InspectImageCmd inspectImage = mock(InspectImageCmd.class);
         PullImageCmd pullImage = mock(PullImageCmd.class);
-        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        PullImageResultCallback callback = completedPull();
         when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
         when(inspectImage.exec()).thenReturn(
                 new InspectImageResponse().withOs("linux").withArch("amd64"),
@@ -111,7 +113,7 @@ class ImageCacheServiceTest {
         DockerClient dockerClient = mock(DockerClient.class);
         InspectImageCmd inspectImage = mock(InspectImageCmd.class);
         PullImageCmd pullImage = mock(PullImageCmd.class);
-        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        PullImageResultCallback callback = completedPull();
         when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
         // Docker 29's containerd image store answers for the index, so with the host's variant
         // already local it keeps reporting that architecture after the foreign pull.
@@ -135,7 +137,7 @@ class ImageCacheServiceTest {
         DockerClient dockerClient = mock(DockerClient.class);
         InspectImageCmd inspectImage = mock(InspectImageCmd.class);
         PullImageCmd pullImage = mock(PullImageCmd.class);
-        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        PullImageResultCallback callback = completedPull();
         when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
         // The same store with no other variant local: the index it pulled describes no platform
         // at all.
@@ -171,11 +173,11 @@ class ImageCacheServiceTest {
     }
 
     @Test
-    void keepsDifferentPlatformsAsSeparateCacheRequests() {
+    void keepsDifferentPlatformsAsSeparateCacheRequests() throws Exception {
         DockerClient dockerClient = mock(DockerClient.class);
         InspectImageCmd inspectImage = mock(InspectImageCmd.class);
         PullImageCmd pullImage = mock(PullImageCmd.class);
-        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        PullImageResultCallback callback = completedPull();
         when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
         when(inspectImage.exec()).thenReturn(
                 new InspectImageResponse().withOs("linux").withArch("amd64"),
@@ -203,7 +205,7 @@ class ImageCacheServiceTest {
         DockerClient dockerClient = mock(DockerClient.class);
         InspectImageCmd inspectImage = mock(InspectImageCmd.class);
         PullImageCmd pullImage = mock(PullImageCmd.class);
-        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        PullImageResultCallback callback = completedPull();
         when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
         when(inspectImage.exec()).thenThrow(new NotFoundException("image not found"))
                 .thenReturn(new InspectImageResponse()
@@ -237,7 +239,7 @@ class ImageCacheServiceTest {
         InspectImageCmd inspectImage = mock(InspectImageCmd.class);
         InspectImageCmd inspectCachedImage = mock(InspectImageCmd.class);
         PullImageCmd pullImage = mock(PullImageCmd.class);
-        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        PullImageResultCallback callback = completedPull();
         when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
         when(dockerClient.inspectImageCmd("sha256:arm64-old")).thenReturn(inspectCachedImage);
         when(inspectImage.exec()).thenReturn(
@@ -269,7 +271,7 @@ class ImageCacheServiceTest {
         InspectImageCmd inspectImage = mock(InspectImageCmd.class);
         InspectImageCmd inspectCachedImage = mock(InspectImageCmd.class);
         PullImageCmd pullImage = mock(PullImageCmd.class);
-        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        PullImageResultCallback callback = completedPull();
         when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
         when(dockerClient.inspectImageCmd("sha256:default-old")).thenReturn(inspectCachedImage);
         when(inspectImage.exec())
@@ -426,6 +428,18 @@ class ImageCacheServiceTest {
 
         assertThrows(NotFoundException.class,
                 () -> newService(daemon.client).resolveForLaunch(LOCAL_IMAGE, ImagePullBehavior.DEFAULT));
+    }
+
+    @Test
+    void alwaysPullBehaviourFailsWhenThePullTimesOutEvenWithACachedImage() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.store(REGISTRY_IMAGE, image("sha256:old", REGISTRY_REPO + "@sha256:old-manifest"));
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:new", REGISTRY_REPO + "@sha256:new-manifest"));
+        daemon.hangingPulls.add(REGISTRY_IMAGE);
+
+        DockerClientException error = assertThrows(DockerClientException.class,
+                () -> newService(daemon.client).resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.ALWAYS));
+        assertTrue(error.getMessage().contains("Timed out pulling image " + REGISTRY_IMAGE), error.getMessage());
     }
 
     @Test
@@ -633,6 +647,7 @@ class ImageCacheServiceTest {
         final Map<String, InspectImageResponse> local = new HashMap<>();
         final Map<String, InspectImageResponse> registry = new HashMap<>();
         final Map<String, String> registryDigests = new HashMap<>();
+        final Set<String> hangingPulls = new HashSet<>();
         final AtomicInteger pulls = new AtomicInteger();
 
         FakeDaemon() {
@@ -654,6 +669,9 @@ class ImageCacheServiceTest {
                 when(pull.withAuthConfig(any())).thenReturn(pull);
                 when(pull.exec(any(PullImageResultCallback.class))).thenAnswer(execution -> {
                     pulls.incrementAndGet();
+                    if (hangingPulls.contains(reference)) {
+                        return mock(PullImageResultCallback.class);
+                    }
                     InspectImageResponse image = registry.get(reference);
                     if (image == null) {
                         throw new NotFoundException("manifest unknown: " + reference);
@@ -665,7 +683,7 @@ class ImageCacheServiceTest {
                         when(status.getStatus()).thenReturn("Digest: " + digest);
                         execution.<PullImageResultCallback>getArgument(0).onNext(status);
                     }
-                    return mock(PullImageResultCallback.class);
+                    return completedPull();
                 });
                 return pull;
             });
@@ -675,6 +693,12 @@ class ImageCacheServiceTest {
             local.put(tag, image);
             local.put(image.getId(), image);
         }
+    }
+
+    private static PullImageResultCallback completedPull() throws InterruptedException {
+        PullImageResultCallback callback = mock(PullImageResultCallback.class);
+        when(callback.awaitCompletion(5, TimeUnit.MINUTES)).thenReturn(true);
+        return callback;
     }
 
     private static ImageCacheService newService(DockerClient dockerClient) {

@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.redshift.RedshiftIamDbUserResolver;
 import io.github.hectorvent.floci.services.redshift.TempCredential;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
+import io.github.hectorvent.floci.services.redshiftserverless.model.CustomDomainAssociation;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
 import io.github.hectorvent.floci.services.redshiftserverless.model.RedshiftServerlessSnapshot;
@@ -44,17 +45,20 @@ public class RedshiftServerlessJsonHandler {
     private final RedshiftIamDbUserResolver iamDbUserResolver;
     private final RedshiftServerlessUsageLimitService usageLimits;
     private final RedshiftServerlessAdminJsonHandler admin;
+    private final RedshiftServerlessCustomDomainService customDomains;
 
     @Inject
     public RedshiftServerlessJsonHandler(RedshiftServerlessService service, ObjectMapper objectMapper,
                                          RedshiftIamDbUserResolver iamDbUserResolver,
                                          RedshiftServerlessUsageLimitService usageLimits,
-                                         RedshiftServerlessAdminJsonHandler admin) {
+                                         RedshiftServerlessAdminJsonHandler admin,
+                                         RedshiftServerlessCustomDomainService customDomains) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.iamDbUserResolver = iamDbUserResolver;
         this.usageLimits = usageLimits;
         this.admin = admin;
+        this.customDomains = customDomains;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -163,11 +167,11 @@ public class RedshiftServerlessJsonHandler {
                 parseWorkgroupSettings(request),
                 parseTagList(request.path("tags"), "tags"),
                 region);
-        return workgroupResponse(workgroup);
+        return workgroupResponse(workgroup, region);
     }
 
     private Response handleGetWorkgroup(JsonNode request, String region) {
-        return workgroupResponse(service.getWorkgroup(ServerlessSupport.text(request, "workgroupName"), region));
+        return workgroupResponse(service.getWorkgroup(ServerlessSupport.text(request, "workgroupName"), region), region);
     }
 
     private Response handleListWorkgroups(JsonNode request, String region) {
@@ -175,7 +179,7 @@ public class RedshiftServerlessJsonHandler {
                 region, ServerlessSupport.maxResults(request), ServerlessSupport.text(request, "nextToken"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("workgroups");
-        page.items().forEach(workgroup -> items.add(workgroupNode(workgroup)));
+        page.items().forEach(workgroup -> items.add(workgroupNode(workgroup, region)));
         if (page.nextToken() != null) {
             response.put("nextToken", page.nextToken());
         }
@@ -184,11 +188,11 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleUpdateWorkgroup(JsonNode request, String region) {
         return workgroupResponse(service.updateWorkgroup(
-                ServerlessSupport.text(request, "workgroupName"), parseWorkgroupSettings(request), region));
+                ServerlessSupport.text(request, "workgroupName"), parseWorkgroupSettings(request), region), region);
     }
 
     private Response handleDeleteWorkgroup(JsonNode request, String region) {
-        return workgroupResponse(service.deleteWorkgroup(ServerlessSupport.text(request, "workgroupName"), region));
+        return workgroupResponse(service.deleteWorkgroup(ServerlessSupport.text(request, "workgroupName"), region), region);
     }
 
     /**
@@ -197,11 +201,8 @@ public class RedshiftServerlessJsonHandler {
      * refreshes an authorization early, so the refresh time is the expiry.
      */
     private Response handleGetCredentials(JsonNode request, String region, String authorizationHeader) {
-        if (request.hasNonNull("customDomainName")) {
-            throw ServerlessSupport.validation("customDomainName is not supported; use workgroupName.");
-        }
         TempCredential credential = service.getCredentials(
-                ServerlessSupport.text(request, "workgroupName"),
+                workgroupNameOf(request, region),
                 ServerlessSupport.text(request, "dbName"),
                 ServerlessSupport.integer(request, "durationSeconds"),
                 iamDbUserResolver.resolveDbUser(authorizationHeader),
@@ -212,6 +213,28 @@ public class RedshiftServerlessJsonHandler {
         response.put("expiration", credential.expiresAt().getEpochSecond());
         response.put("nextRefreshTime", credential.expiresAt().getEpochSecond());
         return Response.ok(response).build();
+    }
+
+    /**
+     * Resolves the workgroup name from {@code workgroupName}, or from {@code customDomainName} when given.
+     * AWS requires exactly one of the two to identify the target workgroup.
+     */
+    private String workgroupNameOf(JsonNode request, String region) {
+        String workgroupName = ServerlessSupport.text(request, "workgroupName");
+        String customDomainName = ServerlessSupport.text(request, "customDomainName");
+        if (workgroupName != null && customDomainName != null) {
+            throw ServerlessSupport.validation("workgroupName and customDomainName cannot both be specified.");
+        }
+        if (workgroupName == null && customDomainName == null) {
+            throw ServerlessSupport.validation(
+                    "The custom domain name or the workgroup name must be included in the request.");
+        }
+        if (customDomainName != null) {
+            return customDomains.findForCustomDomain(customDomainName, region)
+                    .map(CustomDomainAssociation::getWorkgroupName)
+                    .orElseThrow(() -> ServerlessSupport.notFound("The custom domain " + customDomainName + " was not found."));
+        }
+        return workgroupName;
     }
 
     private Response handleCreateSnapshot(JsonNode request, String region) {
@@ -420,24 +443,26 @@ public class RedshiftServerlessJsonHandler {
         return node;
     }
 
-    private Response workgroupResponse(Workgroup workgroup) {
+    private Response workgroupResponse(Workgroup workgroup, String region) {
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("workgroup", workgroupNode(workgroup));
+        response.set("workgroup", workgroupNode(workgroup, region));
         return Response.ok(response).build();
     }
 
     /**
      * Members the emulator does not model ({@code workgroupVersion}, {@code patchVersion},
-     * {@code crossAccountVpcs}, the custom domain members and {@code endpoint.vpcEndpoints}) are
+     * {@code crossAccountVpcs} and {@code endpoint.vpcEndpoints}) are
      * omitted rather than invented; all of them are optional in the API model.
      */
-    private ObjectNode workgroupNode(Workgroup workgroup) {
+    private ObjectNode workgroupNode(Workgroup workgroup, String region) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("workgroupName", workgroup.getWorkgroupName());
         node.put("workgroupId", workgroup.getWorkgroupId());
         node.put("workgroupArn", workgroup.getWorkgroupArn());
         node.put("namespaceName", workgroup.getNamespaceName());
         node.put("status", workgroup.getStatus());
+        customDomains.findForWorkgroup(workgroup.getWorkgroupName(), region)
+                .ifPresent(association -> ServerlessSupport.populateCustomDomain(node, association));
         if (workgroup.getBaseCapacity() != null) {
             node.put("baseCapacity", workgroup.getBaseCapacity());
         }

@@ -11,15 +11,14 @@ import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Api;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Reply;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.ConnectException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
@@ -151,10 +150,7 @@ class DynamoDbLocalClientTest {
 
     @Test
     void connectionRefused() throws Exception {
-        int port;
-        try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
-            port = socket.getLocalPort();
-        }
+        int port = FreePorts.loopbackIpv4Port();
         client = new DynamoDbLocalClient(URI.create("http://127.0.0.1:" + port),
                 Duration.ofSeconds(2), Duration.ofSeconds(2), mapper);
 

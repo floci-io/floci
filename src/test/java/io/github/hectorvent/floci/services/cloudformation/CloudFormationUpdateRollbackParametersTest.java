@@ -129,7 +129,7 @@ class CloudFormationUpdateRollbackParametersTest {
     void failedUpdateWithFailedResourceRollback_stillRetainsLastSuccessfulParameterValues() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "rollback-failed-params-stack-" + suffix;
-        String parameterName = "/cfn/test/rollback-failed-params-" + suffix;
+        String alarmName = "rollback-failed-params-alarm-" + suffix;
         String template = """
             {
               "Parameters": {
@@ -137,19 +137,21 @@ class CloudFormationUpdateRollbackParametersTest {
               },
               "Resources": {
                 "Parameter": {
-                  "Type": "AWS::SSM::Parameter",
+                  "Type": "AWS::CloudWatch::Alarm",
                   "Properties": {
-                    "Name": "%s",
-                    "Type": "String",
-                    "Value": {"Fn::Sub": "value-${Suffix}"}
+                    "AlarmName": "%s",
+                    "Namespace": "RollbackTest", "MetricName": "Sample", "Statistic": "Average",
+                    "Period": 60, "EvaluationPeriods": 1, "Threshold": 1,
+                    "ComparisonOperator": "GreaterThanThreshold",
+                    "AlarmDescription": {"Fn::Sub": "value-${Suffix}"}
                   }
                 }
                 %s
               }
             }
             """;
-        String initialTemplate = template.formatted(parameterName, "");
-        String failingTemplate = template.formatted(parameterName, """
+        String initialTemplate = template.formatted(alarmName, "");
+        String failingTemplate = template.formatted(alarmName, """
             ,
             "BadSecret": {
               "Type": "AWS::SecretsManager::Secret",
@@ -174,9 +176,8 @@ class CloudFormationUpdateRollbackParametersTest {
         .then()
             .statusCode(200);
 
-        // The update changes Suffix (which the Parameter resource's Value depends on) and also
-        // introduces BadSecret, which fails to create. Rollback must then also fail: rollback isn't
-        // implemented for AWS::SSM::Parameter, so the stack lands in UPDATE_ROLLBACK_FAILED.
+        // This fixture deliberately uses the still-unsupported metric-alarm rollback to exercise
+        // parameter restoration when another resource prevents rollback from completing.
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")

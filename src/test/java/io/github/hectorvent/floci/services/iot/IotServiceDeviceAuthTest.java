@@ -378,6 +378,52 @@ class IotServiceDeviceAuthTest {
     }
 
     @Test
+    void aVariableOutsideResourceAndConditionIsNotAVariable() {
+        RegisteredDevice device = registeredDevice(true);
+        createAndAttach("p", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"${iot:Certificate.Subject.CommonName}\","
+                + "\"Effect\":\"Allow\",\"Action\":\"iot:Connect\",\"Resource\":\"arn:aws:iot:*:*:client/*\"}]}", device);
+
+        assertTrue(connect(device, "sensor-1"),
+                "a variable has meaning in the Resource or Condition block, so a Sid is text like any other");
+    }
+
+    @Test
+    void theAsteriskVariableStandsForALiteralAsterisk() {
+        RegisteredDevice device = registeredDevice(true);
+        createAndAttach("p", statement("Allow", "arn:aws:iot:*:*:client/${*}", null), device);
+
+        assertTrue(connect(device, "*"), "the one client id the pattern names");
+        assertFalse(connect(device, "sensor-1"), "the predefined variable is the character, not a wildcard");
+    }
+
+    @Test
+    void aVariableResolvesWhateverCaseItsKeyIsWrittenIn() {
+        RegisteredDevice device = registeredDevice(true);
+        createAndAttach("p", statement("Allow", "arn:aws:iot:*:*:client/${IOT:clientid}", null), device);
+
+        assertTrue(connect(device, "sensor-1"), "key names are case-insensitive, aws:CurrentTime being AWS:currenttime");
+    }
+
+    @Test
+    void aDocumentWithoutTheVersionThatIntroducedVariablesReadsThemLiterally() {
+        RegisteredDevice device = registeredDevice(true);
+        createAndAttach("p", "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"iot:Connect\","
+                + "\"Resource\":\"arn:aws:iot:*:*:client/${iot:ClientId}\"}]}", device);
+
+        assertFalse(connect(device, "sensor-1"), "variables arrived with 2012-10-17 and are literal text without it");
+        assertTrue(connect(device, "${iot:ClientId}"), "which leaves the pattern naming that client id and no other");
+    }
+
+    @Test
+    void anUnresolvedConditionValueIsNullRatherThanAStatementThatVanishes() {
+        RegisteredDevice device = registeredDevice(true);
+        createAndAttach("p", statement("Allow", "arn:aws:iot:*:*:client/*",
+                "{\"StringNotEquals\":{\"iot:ClientId\":\"${iot:Connection.Thing.ThingName}\"}}"), device);
+
+        assertTrue(connect(device, "sensor-1"), "no thing is attached, so the client id is neither equal to nor like a null");
+    }
+
+    @Test
     void aClientIdCarryingJsonSyntaxIsDataNotPolicy() {
         RegisteredDevice device = registeredDevice(true);
         createAndAttach("allow", CONNECT_ANY_CLIENT, device);

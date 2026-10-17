@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.appsync.graphql.js;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.dockerjava.api.model.Container;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -16,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -36,6 +39,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
@@ -113,6 +118,31 @@ class NodeAppSyncJsRuntimeTest {
         verifyNoInteractions(logStreamer);
         assertTrue(requestedPaths.contains("/health"), "the configured URL is probed before use");
         assertTrue(requestedPaths.contains("/evaluate"), "the evaluation goes to the configured URL");
+    }
+
+    @Test
+    void aSurvivingSidecarIsAdoptedThroughTheNetworkItWasCreatedOn() throws IOException {
+        when(jsRuntime.url()).thenReturn(Optional.empty());
+        when(jsRuntime.containerName()).thenReturn("appsync-js-runtime-test");
+        when(jsRuntime.dockerNetwork()).thenReturn(Optional.of("js-net"));
+        when(containerBuilder.resolveDockerNetwork(Optional.of("js-net"))).thenReturn(Optional.of("js-net"));
+        String digest;
+        try (InputStream in = Thread.currentThread().getContextClassLoader()
+                .getResourceAsStream("appsync/appsync-js-runtime.mjs")) {
+            digest = Digests.sha256Hex(new String(in.readAllBytes(), StandardCharsets.UTF_8)).substring(0, 16);
+        }
+        Container survivor = mock(Container.class);
+        when(survivor.getId()).thenReturn("survivor");
+        when(survivor.getLabels()).thenReturn(Map.of("io.floci.appsync.js-runtime.script", digest));
+        when(lifecycleManager.findByName(anyString())).thenReturn(Optional.of(survivor));
+        when(lifecycleManager.adopt("survivor", List.of(4600), Optional.of("js-net"))).thenReturn(
+                new ContainerInfo("survivor", Map.of(4600,
+                        new EndpointInfo("127.0.0.1", server.getAddress().getPort()))));
+
+        runtime.ensureStarted();
+
+        verify(lifecycleManager).adopt("survivor", List.of(4600), Optional.of("js-net"));
+        verify(lifecycleManager, never()).createAndStart(any());
     }
 
 

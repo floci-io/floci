@@ -28,6 +28,13 @@ class S3AclIntegrationTest {
             .put("/" + BUCKET)
         .then()
             .statusCode(200);
+
+        given()
+            .body("<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>")
+        .when()
+            .put("/" + BUCKET + "?ownershipControls")
+        .then()
+            .statusCode(200);
     }
 
     @Test
@@ -401,5 +408,54 @@ class S3AclIntegrationTest {
             .body(containsString("<Permission>READ_ACP</Permission>"))
             .body(containsString("<Permission>FULL_CONTROL</Permission>"))
             .body(not(containsString(ALL_USERS_GROUP_URI)));
+    }
+
+    @Test
+    @Order(18)
+    void initiateMultipartUploadAppliesExplicitGrantReadHeaderOnComplete() {
+        String uploadId = given()
+            .header("x-amz-grant-read", "uri=\"" + ALL_USERS_GROUP_URI + "\"")
+        .when()
+            .post("/" + BUCKET + "/multipart-grant.txt?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        String partETag = given()
+            .body("part-one")
+        .when()
+            .put("/" + BUCKET + "/multipart-grant.txt?uploadId=" + uploadId + "&partNumber=1")
+        .then()
+            .statusCode(200)
+            .extract().header("ETag");
+
+        given()
+            .contentType("application/xml")
+            .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + partETag
+                    + "</ETag></Part></CompleteMultipartUpload>")
+        .when()
+            .post("/" + BUCKET + "/multipart-grant.txt?uploadId=" + uploadId)
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/" + BUCKET + "/multipart-grant.txt?acl")
+        .then()
+            .statusCode(200)
+            .body(containsString(ALL_USERS_GROUP_URI))
+            .body(containsString("<Permission>READ</Permission>"));
+    }
+
+    @Test
+    @Order(19)
+    void initiateMultipartUploadRejectsExplicitGrantByEmailAddress() {
+        // Refused when the upload is created, as PutObject refuses it, not when it completes.
+        given()
+            .header("x-amz-grant-read", "emailAddress=\"someone@example.com\"")
+        .when()
+            .post("/" + BUCKET + "/multipart-grant-email.txt?uploads")
+        .then()
+            .statusCode(501)
+            .body(containsString("NotImplemented"));
     }
 }

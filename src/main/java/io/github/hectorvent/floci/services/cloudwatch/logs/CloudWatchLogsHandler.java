@@ -90,6 +90,7 @@ public class CloudWatchLogsHandler {
 
     private Response handleCreateLogGroup(JsonNode request, String region) {
         String name = request.path("logGroupName").asText();
+        requireLogGroupName(name);
         Integer retentionInDays = request.has("retentionInDays")
                 ? request.path("retentionInDays").asInt() : null;
         boolean deletionProtectionEnabled = request.path("deletionProtectionEnabled").asBoolean(false);
@@ -101,6 +102,7 @@ public class CloudWatchLogsHandler {
 
     private Response handleDeleteLogGroup(JsonNode request, String region) {
         String name = request.path("logGroupName").asText();
+        requireLogGroupName(name);
         logsService.deleteLogGroup(name, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -264,10 +266,14 @@ public class CloudWatchLogsHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    private static void requireLogStreamNames(String group, String stream) {
+    private static void requireLogGroupName(String group) {
         if (group.isEmpty() || group.length() > 512 || !LOG_GROUP_NAME.matcher(group).matches()) {
             throw new AwsException("InvalidParameterException", "Invalid logGroupName.", 400);
         }
+    }
+
+    private static void requireLogStreamNames(String group, String stream) {
+        requireLogGroupName(group);
         int streamLength = stream.codePointCount(0, stream.length());
         if (streamLength < 1 || streamLength > 512 || stream.indexOf(':') >= 0 || stream.indexOf('*') >= 0) {
             throw new AwsException("InvalidParameterException", "Invalid logStreamName.", 400);
@@ -510,6 +516,7 @@ public class CloudWatchLogsHandler {
 
     private Response handlePutRetentionPolicy(JsonNode request, String region) {
         String groupName = request.path("logGroupName").asText();
+        requireLogGroupName(groupName);
         int days = request.path("retentionInDays").asInt();
         logsService.putRetentionPolicy(groupName, days, region);
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -517,6 +524,7 @@ public class CloudWatchLogsHandler {
 
     private Response handleDeleteRetentionPolicy(JsonNode request, String region) {
         String groupName = request.path("logGroupName").asText();
+        requireLogGroupName(groupName);
         logsService.deleteRetentionPolicy(groupName, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -549,7 +557,7 @@ public class CloudWatchLogsHandler {
 
     private Response handleListTagsForResource(JsonNode request, String region) {
         String resourceArn = request.path("resourceArn").asText();
-        String groupName = extractLogGroupNameFromArn(resourceArn);
+        String groupName = logsService.resolveTagTarget(resourceArn, region).name();
         Map<String, String> tags = logsService.listTagsLogGroup(groupName, region);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -561,7 +569,7 @@ public class CloudWatchLogsHandler {
 
     private Response handleTagResource(JsonNode request, String region) {
         String resourceArn = request.path("resourceArn").asText();
-        String groupName = extractLogGroupNameFromArn(resourceArn);
+        String groupName = logsService.resolveTagTarget(resourceArn, region).name();
         Map<String, String> tags = extractTags(request.path("tags"));
         logsService.tagLogGroup(groupName, tags, region);
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -569,7 +577,7 @@ public class CloudWatchLogsHandler {
 
     private Response handleUntagResource(JsonNode request, String region) {
         String resourceArn = request.path("resourceArn").asText();
-        String groupName = extractLogGroupNameFromArn(resourceArn);
+        String groupName = logsService.resolveTagTarget(resourceArn, region).name();
         List<String> tagKeys = new ArrayList<>();
         request.path("tagKeys").forEach(k -> tagKeys.add(k.asText()));
         logsService.untagLogGroup(groupName, tagKeys, region);

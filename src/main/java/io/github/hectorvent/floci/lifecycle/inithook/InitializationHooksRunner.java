@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.lifecycle.inithook;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.lifecycle.InitLifecycleState;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -12,23 +13,55 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
 public class InitializationHooksRunner {
 
     private static final Logger LOG = Logger.getLogger(InitializationHooksRunner.class);
 
-    private static final FilenameFilter SCRIPT_FILE_FILTER =
-            (ignored, name) -> name.endsWith(".sh") || name.endsWith(".py");
-
     private final HookScriptExecutor hookScriptExecutor;
     private final InitLifecycleState initLifecycleState;
+    private final String hooksRoot;
+    private final FilenameFilter scriptFileFilter;
+    private final Set<String> warnedSkips = ConcurrentHashMap.newKeySet();
 
     @Inject
     public InitializationHooksRunner(final HookScriptExecutor hookScriptExecutor,
-                                     final InitLifecycleState initLifecycleState) {
+                                     final InitLifecycleState initLifecycleState,
+                                     final EmulatorConfig emulatorConfig) {
+        this(hookScriptExecutor, initLifecycleState, emulatorConfig, System.getProperty("os.name", ""));
+    }
+
+    InitializationHooksRunner(final HookScriptExecutor hookScriptExecutor,
+                              final InitLifecycleState initLifecycleState,
+                              final EmulatorConfig emulatorConfig,
+                              final String osName) {
         this.hookScriptExecutor = hookScriptExecutor;
         this.initLifecycleState = initLifecycleState;
+        this.hooksRoot = emulatorConfig.initHooks().dir();
+        boolean windows = HookScripts.isWindows(osName);
+        String shell = emulatorConfig.initHooks().shellExecutable();
+        this.scriptFileFilter = (dir, name) -> runnable(dir, name, windows, shell);
+    }
+
+    /**
+     * Whether a file in a hook directory runs here. Windows script types are ignored without a word
+     * on Linux and macOS; a {@code .sh} hook Windows cannot run is warned about once per file, not
+     * on every directory listing.
+     */
+    private boolean runnable(File dir, String name, boolean windows, String shell) {
+        if (!HookScripts.isScript(name, windows)) {
+            return false;
+        }
+        if (HookScripts.canRun(name, windows, shell)) {
+            return true;
+        }
+        if (windows && warnedSkips.add(new File(dir, name).getAbsolutePath())) {
+            LOG.warnv("Skipping hook script {0}: it cannot run on this platform (shell {1})", name, shell);
+        }
+        return false;
     }
 
     public boolean hasHooks(final InitializationHook hook) {
@@ -85,9 +118,9 @@ public class InitializationHooksRunner {
      * Merges scripts from all primary (Floci) paths and then compat (LocalStack) paths.
      * First occurrence of a filename wins; merged list is sorted lexicographically.
      */
-    private static List<File> findMergedScripts(final InitializationHook hook) {
+    private List<File> findMergedScripts(final InitializationHook hook) {
         final Map<String, File> merged = new LinkedHashMap<>();
-        for (final File dir : hook.getPrimaryPaths()) {
+        for (final File dir : hook.getPrimaryPaths(hooksRoot)) {
             collectScripts(hook.getName(), dir, merged);
         }
         for (final File dir : hook.getCompatPaths()) {
@@ -99,7 +132,7 @@ public class InitializationHooksRunner {
                 .toList();
     }
 
-    private static void collectScripts(final String hookName, final File dir,
+    private void collectScripts(final String hookName, final File dir,
                                        final Map<String, File> target) {
         if (!dir.exists()) {
             LOG.debugv("{0} hook directory does not exist: {1}", hookName, dir.getAbsolutePath());
@@ -109,7 +142,7 @@ public class InitializationHooksRunner {
             LOG.warnv("{0} hook path is not a directory: {1}", hookName, dir.getAbsolutePath());
             return;
         }
-        final File[] scripts = dir.listFiles(SCRIPT_FILE_FILTER);
+        final File[] scripts = dir.listFiles(scriptFileFilter);
         if (scripts == null || scripts.length == 0) {
             LOG.debugv("No {0} hook scripts found in {1}", hookName, dir.getAbsolutePath());
             return;
@@ -123,7 +156,7 @@ public class InitializationHooksRunner {
         }
     }
 
-    private static String[] findScriptFileNames(final String hookName, final File hookDirectory) {
+    private String[] findScriptFileNames(final String hookName, final File hookDirectory) {
         if (!hookDirectory.exists()) {
             LOG.debugv("{0} hook directory does not exist: {1}", hookName, hookDirectory.getAbsolutePath());
             return new String[0];
@@ -132,7 +165,7 @@ public class InitializationHooksRunner {
             LOG.warnv("{0} hook path is not a directory: {1}", hookName, hookDirectory.getAbsolutePath());
             return new String[0];
         }
-        final String[] scriptFileNames = hookDirectory.list(SCRIPT_FILE_FILTER);
+        final String[] scriptFileNames = hookDirectory.list(scriptFileFilter);
         if (scriptFileNames == null || scriptFileNames.length == 0) {
             LOG.debugv("No {0} hook scripts found in {1}", hookName, hookDirectory.getAbsolutePath());
             return new String[0];

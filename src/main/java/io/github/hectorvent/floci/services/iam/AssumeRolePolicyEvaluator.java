@@ -26,6 +26,12 @@ import java.util.regex.Pattern;
  * condition value is a policy variable, and applies AWS precedence: an explicit {@code Deny} wins,
  * otherwise a matching {@code Allow} grants.
  *
+ * <p>The condition context is the request's own, with the caller's principal keys written onto it
+ * by {@link IamService.CallerArns#putPrincipalKeys}. The user guide puts {@code aws:PrincipalType}
+ * and {@code aws:userid} in "the request context for all requests" and {@code aws:username} in it
+ * for every IAM user, and an {@code sts:AssumeRole} request is no exception, so a trust policy
+ * condition reads the same principal as an identity or resource policy would.
+ *
  * <p>Only AWS principals are modeled (account-root, bare account id, exact principal ARN, and
  * {@code "*"}); {@code Service} and {@code Federated} principals never match a SigV4 caller and are
  * ignored. A caller using assumed-role temporary credentials matches a trust policy that names its
@@ -67,30 +73,34 @@ public class AssumeRolePolicyEvaluator {
     private enum PrincipalMatch { NONE, ACCOUNT, CALLER }
 
     /**
-     * Returns true if {@code trustPolicyDocument} allows the caller (identified by
-     * {@code callerArn}, in {@code callerAccount}) to perform {@code sts:AssumeRole}, through any
-     * principal: see {@link #decide} for the arguments.
+     * Returns true if {@code trustPolicyDocument} allows {@code caller} (in {@code callerAccount})
+     * to perform {@code sts:AssumeRole}, through any principal: see {@link #decide} for the
+     * arguments.
      */
-    public boolean allows(String trustPolicyDocument, String callerArn, String principalArn,
+    public boolean allows(String trustPolicyDocument, IamService.CallerArns caller,
                           String callerAccount, Map<String, List<String>> requestContext) {
-        TrustDecision decision = decide(trustPolicyDocument, callerArn, principalArn, callerAccount, requestContext);
+        TrustDecision decision = decide(trustPolicyDocument, caller, callerAccount, requestContext);
         return decision == TrustDecision.ALLOW || decision == TrustDecision.ALLOW_ACCOUNT;
     }
 
     /**
-     * Decides whether {@code trustPolicyDocument} lets the caller (identified by {@code callerArn},
-     * in {@code callerAccount}) perform {@code sts:AssumeRole}, and through which principal.
+     * Decides whether {@code trustPolicyDocument} lets {@code caller} (in {@code callerAccount})
+     * perform {@code sts:AssumeRole}, and through which principal.
      *
-     * <p>{@code principalArn} is the caller's IAM identity: the user's ARN, or for a role session
-     * the role's own ARN, path included, which the session ARN does not carry. A {@code Principal}
-     * naming a role is matched against it, and it is the request's {@code aws:PrincipalArn}.
-     * {@code requestContext} holds the other condition keys the request carries, such as
+     * <p>{@code caller} carries both ARNs: the identity it acts as, which for a role session is
+     * its {@code assumed-role} session ARN, and its principal ARN, which for that session is the
+     * role's own ARN, path included. A {@code Principal} naming a role is matched against the
+     * second. It also carries the keys that say who is calling, which it writes onto the context
+     * through {@link IamService.CallerArns#putPrincipalKeys}, the same writer every other context
+     * a request is evaluated against uses: a trust policy sees the caller it would see anywhere
+     * else. {@code requestContext} holds the keys the request itself carries, such as
      * {@code sts:ExternalId}; each statement's {@code Condition} is evaluated against both.
      *
      * <p>A null/blank/unparseable document or one with no matching statement is
-     * {@link TrustDecision#NEUTRAL}.
+     * {@link TrustDecision#NEUTRAL}, and a caller with no principal ARN writes no keys at all,
+     * which leaves every statement keyed on who is calling not applying.
      */
-    public TrustDecision decide(String trustPolicyDocument, String callerArn, String principalArn,
+    public TrustDecision decide(String trustPolicyDocument, IamService.CallerArns caller,
                                 String callerAccount, Map<String, List<String>> requestContext) {
         if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
             return TrustDecision.NEUTRAL;
@@ -107,9 +117,11 @@ public class AssumeRolePolicyEvaluator {
             return TrustDecision.NEUTRAL;
         }
         String version = root.path("Version").asText(null);
+        String callerArn = caller == null ? null : caller.callerArn();
+        String principalArn = caller == null ? null : caller.principalArn();
         Map<String, List<String>> context = new HashMap<>(requestContext);
         if (principalArn != null) {
-            context.put("aws:PrincipalArn", List.of(principalArn));
+            caller.putPrincipalKeys(context);
         }
         Iterable<JsonNode> statementList = statements.isArray() ? statements : List.of(statements);
         TrustDecision decision = TrustDecision.NEUTRAL;

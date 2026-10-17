@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elbv2;
 
 import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
@@ -20,7 +21,6 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -140,10 +140,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
         String loadBalancerArn = null;
         String targetGroupArn = null;
         String listenerArn = null;
-        int failedPort;
-        try (ServerSocket reservation = new ServerSocket(0)) {
-            failedPort = reservation.getLocalPort();
-        }
+        int failedPort = FreePorts.anyInterfacePort();
         try {
             loadBalancerArn = createLoadBalancer();
             targetGroupArn = createTargetGroup(backend.actualPort());

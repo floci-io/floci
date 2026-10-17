@@ -17,7 +17,7 @@
 # way to land here. A name two services define then goes to the one tried first, which
 # is a gap when that one does not handle the name.
 #
-# 171 entries: 171 unrouted, 0 claimed by another service.
+# 170 entries: 170 unrouted, 0 claimed by another service.
 #
 # Shrink this file, never grow it. Removing a line is the point; adding one needs a
 # reason in the PR that adds it. AwsQueryActionRoutingParityTest fails on an entry that
@@ -43,7 +43,7 @@ cloudformation	ActivateOrganizationsAccess	sqs
 cloudformation	DescribeOrganizationsAccess	sqs
 cloudformation	ListStackSetAutoDeploymentTargets	sqs
 
-# ec2: 83 (83 unrouted, 0 claimed elsewhere)
+# ec2: 82 (82 unrouted, 0 claimed elsewhere)
 ec2	AcceptVpcPeeringConnection	sqs
 ec2	AllocateHosts	sqs
 ec2	AllocateIpamPoolCidr	sqs
@@ -70,7 +70,6 @@ ec2	DeleteTransitGatewayRoute	sqs
 ec2	DeleteTransitGatewayRouteTable	sqs
 ec2	DeleteTransitGatewayVpcAttachment	sqs
 ec2	DeleteVpcPeeringConnection	sqs
-ec2	DescribeEgressOnlyInternetGateways	sqs
 ec2	DescribeHosts	sqs
 ec2	DescribeInstanceCreditSpecifications	sqs
 ec2	DescribeIpamByoasn	sqs

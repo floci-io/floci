@@ -2,7 +2,8 @@ package io.github.hectorvent.floci.services.rds.proxy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.CertificateMetadata;
-import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.config.FlociVersion;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
@@ -15,28 +16,30 @@ import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.PosixFileAttributeView;
-import java.nio.file.attribute.PosixFilePermissions;
-import java.security.KeyPair;
+import java.nio.file.StandardCopyOption;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.SecureRandom;
+import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
 /**
- * Owns the RDS auth proxy's self-signed CA certificate: a single trust anchor shared by every
- * proxied Postgres/MySQL instance, cluster, and RDS Proxy target, whose Subject Alternative Names
- * grow to cover every advertised host Floci has handed out (Docker bridge IP, {@code
- * host.docker.internal}, a configured {@code rds.endpointHost}, etc.).
+ * Owns the RDS auth proxy's in-memory server certificate signed by Floci's shared root CA.
+ * The server certificate's SANs cover every advertised Postgres/MySQL host.
  *
- * <p>Persisted at {@code {persistent-path}/tls/rds-ca.{crt,key}} (plus a metadata file recording
- * the current SAN list) so the same root survives restarts — a client only has to trust it once
+ * <p>The shared CA persists at {@code {persistent-path}/tls/floci-root-ca.{crt,key}}. The
+ * {@code rds-ca.crt} compatibility copy preserves existing client paths, and
+ * {@code rds-ca.metadata.json} records the current SAN list. A client trusts the shared CA once
  * (e.g. {@code sslmode=verify-full sslrootcert=<path>}) to keep working across every local
- * database and every restart, as long as the advertised host doesn't change.
+ * database and every restart, including when advertised hosts change.
  */
 @ApplicationScoped
 public class RdsProxyTlsCertificates {
@@ -44,47 +47,48 @@ public class RdsProxyTlsCertificates {
     private static final Logger LOG = Logger.getLogger(RdsProxyTlsCertificates.class);
 
     private static final List<String> DEFAULT_SANS = List.of("localhost", "127.0.0.1");
-    private static final String CERT_NAME = "rds-ca.crt";
-    private static final String KEY_NAME = "rds-ca.key";
     private static final String METADATA_NAME = "rds-ca.metadata.json";
-    private static final String TLS_DIR = "tls";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    private final EmulatorConfig config;
+    private final FlociCertificateAuthority certificateAuthority;
     private final CertificateGenerator certificateGenerator;
+    private final Clock clock;
     private final Object lock = new Object();
 
-    private volatile SSLContext sslContext;
-    private volatile Set<String> currentSans = Set.of();
-    private volatile KeyPair currentKeyPair;
+    private volatile ServerCertificate current;
+
+    private record ServerCertificate(SSLContext context, Set<String> sans, Instant notAfter) {
+    }
 
     @Inject
-    public RdsProxyTlsCertificates(EmulatorConfig config, CertificateGenerator certificateGenerator) {
-        this.config = config;
+    public RdsProxyTlsCertificates(FlociCertificateAuthority certificateAuthority, CertificateGenerator certificateGenerator) {
+        this(certificateAuthority, certificateGenerator, Clock.systemUTC());
+    }
+
+    RdsProxyTlsCertificates(FlociCertificateAuthority certificateAuthority, CertificateGenerator certificateGenerator,
+                            Clock clock) {
+        this.certificateAuthority = certificateAuthority;
         this.certificateGenerator = certificateGenerator;
+        this.clock = clock;
     }
 
     /**
-     * Ensures {@code host} is covered by the current CA's SAN list, reissuing the certificate
-     * (and re-persisting it) if it is a genuinely new host. Reissuing reuses the existing key pair
-     * rather than minting a new one, so a client that already trusts a prior copy of this CA (e.g.
-     * one it copied into its own trust store) keeps validating connections after the SAN list
-     * grows — only the SAN extension and serial change, not the signing key. Cheap no-op once a
-     * host is known.
+     * Ensures {@code host} is covered by the server certificate, issuing a new leaf when needed.
+     * The persisted CA is unchanged, so existing client trust stores continue to work.
      */
     public void ensureHost(String host) {
         if (host == null || host.isBlank()) {
             return;
         }
         ensureInitialized();
-        if (currentSans.contains(host)) {
+        if (current.sans().contains(host)) {
             return;
         }
         synchronized (lock) {
-            if (currentSans.contains(host)) {
+            if (current.sans().contains(host)) {
                 return;
             }
-            Set<String> updated = new LinkedHashSet<>(currentSans);
+            Set<String> updated = new LinkedHashSet<>(current.sans());
             updated.add(host);
             regenerate(updated);
         }
@@ -92,86 +96,99 @@ public class RdsProxyTlsCertificates {
 
     /**
      * Returns the current TLS server context. Handlers should call this per-handshake rather than
-     * caching it themselves — {@link #ensureHost(String)} can swap it out at any time.
+     * caching it themselves; {@link #ensureHost(String)} can swap it out at any time.
      */
     public SSLContext sslContext() {
         ensureInitialized();
-        return sslContext;
+        return current.context();
     }
 
     private void ensureInitialized() {
-        if (sslContext != null) {
+        if (!needsRenewal()) {
             return;
         }
         synchronized (lock) {
-            if (sslContext != null) {
+            if (!needsRenewal()) {
+                return;
+            }
+            if (current != null) {
+                regenerate(current.sans());
                 return;
             }
             Path tlsDir = tlsDir();
-            Path certFile = tlsDir.resolve(CERT_NAME);
-            Path keyFile = tlsDir.resolve(KEY_NAME);
+            Set<String> sans = new LinkedHashSet<>(DEFAULT_SANS);
             Path metadataFile = tlsDir.resolve(METADATA_NAME);
-            if (Files.exists(certFile) && Files.exists(keyFile) && Files.exists(metadataFile)) {
+            if (Files.exists(metadataFile)) {
                 try {
-                    List<String> persistedSans = readMetadata(metadataFile);
-                    loadExisting(certFile, keyFile, persistedSans);
-                    // Re-harden on every load: earlier Floci versions wrote this key world-readable,
-                    // so an existing install must be tightened too, not just newly generated ones.
-                    restrictToOwnerOnly(tlsDir, "rwx------");
-                    restrictToOwnerOnly(keyFile, "rw-------");
-                    LOG.infov("RDS proxy TLS: reusing existing CA cert: {0} (SANs: {1})",
-                            certFile, persistedSans);
-                    logTrustHint(certFile);
-                    return;
-                } catch (Exception e) {
-                    LOG.warnv(e, "RDS proxy TLS: failed to load existing CA cert ({0}); regenerating",
-                            e.getMessage());
+                    sans.addAll(readMetadata(metadataFile));
+                } catch (IOException e) {
+                    LOG.warnv(e, "RDS proxy TLS: invalid SAN metadata at {0}; keeping the CA and using default hosts",
+                            metadataFile);
                 }
             }
-            regenerate(new LinkedHashSet<>(DEFAULT_SANS));
+            refreshLegacyCaFiles();
+            regenerate(sans);
+            logTrustHint(certificateAuthority.certificatePath());
+        }
+    }
+
+    private void refreshLegacyCaFiles() {
+        Path temporary = null;
+        try {
+            Path tlsDir = tlsDir();
+            temporary = Files.createTempFile(tlsDir, "rds-ca-", ".tmp");
+            Files.writeString(temporary, certificateAuthority.caPem());
+            // Replace the path itself, never a legacy symlink's target or a shared inode.
+            Files.move(temporary, tlsDir.resolve("rds-ca.crt"),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            Files.deleteIfExists(tlsDir.resolve("rds-ca.key"));
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to refresh RDS proxy TLS CA compatibility files", e);
+        } finally {
+            if (temporary != null) {
+                try {
+                    Files.deleteIfExists(temporary);
+                } catch (IOException e) {
+                    LOG.warnv(e, "RDS proxy TLS: could not remove temporary CA file {0}", temporary);
+                }
+            }
         }
     }
 
     private void regenerate(Set<String> sans) {
         try {
             Path tlsDir = tlsDir();
-            Files.createDirectories(tlsDir);
-            restrictToOwnerOnly(tlsDir, "rwx------");
             List<String> sanList = new ArrayList<>(sans);
-
-            KeyPair keyPair = this.currentKeyPair;
-            CertificateGenerator.GeneratedCertificate generated = keyPair != null
-                    ? certificateGenerator.generateSelfSignedCertificate(
-                            "localhost", sanList, KeyAlgorithm.RSA_2048, keyPair)
-                    : certificateGenerator.generateSelfSignedCertificate(
-                            "localhost", sanList, KeyAlgorithm.RSA_2048);
-
-            Path certFile = tlsDir.resolve(CERT_NAME);
-            Path keyFile = tlsDir.resolve(KEY_NAME);
-            Files.writeString(certFile, generated.certificatePem());
-            Files.writeString(keyFile, generated.privateKeyPem());
-            restrictToOwnerOnly(keyFile, "rw-------");
-            writeMetadata(tlsDir.resolve(METADATA_NAME), sanList);
-
+            Instant now = clock.instant();
+            certificateAuthority.certificate().checkValidity(Date.from(now));
+            Instant notAfter = now.plus(365, ChronoUnit.DAYS);
+            if (certificateAuthority.certificate().getNotAfter().toInstant().isBefore(notAfter)) {
+                notAfter = certificateAuthority.certificate().getNotAfter().toInstant();
+            }
+            CertificateGenerator.GeneratedCertificate generated = certificateGenerator.generateIssuedCertificate(
+                    "localhost", sanList, KeyAlgorithm.RSA_2048, null, certificateAuthority.issuer(),
+                    CertificateGenerator.LeafUsage.SERVER, notAfter);
             X509Certificate certificate = Pem.parseCertificate(generated.certificatePem());
             PrivateKey privateKey = Pem.parsePrivateKey(generated.privateKeyPem());
-            this.sslContext = buildSslContext(certificate, privateKey);
-            this.currentSans = Set.copyOf(sans);
-            this.currentKeyPair = new KeyPair(certificate.getPublicKey(), privateKey);
-
-            LOG.infov("RDS proxy TLS: generated CA cert at {0}", certFile);
-            logTrustHint(certFile);
+            SSLContext context = buildSslContext(certificate, privateKey);
+            writeMetadata(tlsDir.resolve(METADATA_NAME), sanList);
+            current = new ServerCertificate(context, Set.copyOf(sans), generated.notAfter());
         } catch (Exception e) {
             throw new IllegalStateException("Failed to generate RDS proxy TLS certificate", e);
         }
     }
 
-    private void loadExisting(Path certFile, Path keyFile, List<String> sans) throws Exception {
-        X509Certificate certificate = Pem.parseCertificate(Files.readString(certFile));
-        PrivateKey privateKey = Pem.parsePrivateKey(Files.readString(keyFile));
-        this.sslContext = buildSslContext(certificate, privateKey);
-        this.currentSans = new LinkedHashSet<>(sans);
-        this.currentKeyPair = new KeyPair(certificate.getPublicKey(), privateKey);
+    private boolean needsRenewal() {
+        ServerCertificate certificate = current;
+        if (certificate == null) {
+            return true;
+        }
+        Instant renewAt = certificate.notAfter();
+        // A leaf capped at CA expiry cannot be extended without replacing the trust anchor.
+        if (renewAt.isBefore(certificateAuthority.certificate().getNotAfter().toInstant())) {
+            renewAt = renewAt.minusSeconds(60);
+        }
+        return !renewAt.isAfter(clock.instant());
     }
 
     private SSLContext buildSslContext(X509Certificate certificate, PrivateKey privateKey) throws Exception {
@@ -179,7 +196,7 @@ public class RdsProxyTlsCertificates {
         KeyStore keyStore = KeyStore.getInstance("PKCS12");
         keyStore.load(null, password);
         keyStore.setKeyEntry("floci-rds-proxy", privateKey, password,
-                new java.security.cert.Certificate[]{certificate});
+                new Certificate[]{certificate, certificateAuthority.certificate()});
 
         KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         keyManagerFactory.init(keyStore, password);
@@ -190,24 +207,7 @@ public class RdsProxyTlsCertificates {
     }
 
     private Path tlsDir() {
-        return Path.of(config.storage().persistentPath(), TLS_DIR);
-    }
-
-    /**
-     * Restricts {@code path} to owner-only access. This CA's private key is meant to be trusted by
-     * a developer's client tooling (e.g. {@code sslmode=verify-full}), so unlike Floci's other
-     * generated keys — which only let you impersonate an emulated resource — anyone who can read
-     * this one can mint a certificate for any host the developer's trust store now accepts.
-     * No-ops on filesystems without POSIX permissions (e.g. Windows) rather than failing.
-     */
-    private static void restrictToOwnerOnly(Path path, String posixPermissions) {
-        try {
-            if (Files.getFileStore(path).supportsFileAttributeView(PosixFileAttributeView.class)) {
-                Files.setPosixFilePermissions(path, PosixFilePermissions.fromString(posixPermissions));
-            }
-        } catch (IOException e) {
-            LOG.warnv(e, "RDS proxy TLS: failed to restrict permissions on {0}", path);
-        }
+        return certificateAuthority.certificatePath().getParent();
     }
 
     private void logTrustHint(Path certFile) {
@@ -217,21 +217,17 @@ public class RdsProxyTlsCertificates {
 
     private List<String> readMetadata(Path metadataFile) throws IOException {
         CertificateMetadata metadata = OBJECT_MAPPER.readValue(metadataFile.toFile(), CertificateMetadata.class);
-        List<String> hostnames = metadata.getHostnames();
-        if (hostnames == null || hostnames.isEmpty()) {
-            throw new IOException("RDS proxy TLS metadata file has no hostnames: " + metadataFile);
+        List<String> hostnames = metadata != null ? metadata.getHostnames() : null;
+        if (hostnames == null || hostnames.isEmpty()
+                || hostnames.stream().anyMatch(host -> host == null || host.isBlank())) {
+            throw new IOException("RDS proxy TLS metadata file has invalid hostnames: " + metadataFile);
         }
         return hostnames;
     }
 
     private void writeMetadata(Path metadataFile, List<String> sans) throws IOException {
-        CertificateMetadata metadata = CertificateMetadata.create(sans, resolveFlociVersion());
+        CertificateMetadata metadata = CertificateMetadata.create(sans, FlociVersion.current());
         String json = OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(metadata);
         Files.writeString(metadataFile, json);
-    }
-
-    private static String resolveFlociVersion() {
-        String env = System.getenv("FLOCI_VERSION");
-        return (env != null && !env.isBlank()) ? env : "dev";
     }
 }

@@ -152,7 +152,7 @@ public class AwsQueryController {
             "CreateAutoScalingGroup", "UpdateAutoScalingGroup", "DeleteAutoScalingGroup",
             "DescribeAutoScalingGroups", "SetDesiredCapacity",
             "StartInstanceRefresh", "DescribeInstanceRefreshes",
-            "CreateOrUpdateTags", "DeleteTags",
+            "CreateOrUpdateTags", "DeleteTags", "DescribeTags",
             "DescribeAutoScalingInstances", "AttachInstances", "DetachInstances",
             "TerminateInstanceInAutoScalingGroup",
             "AttachLoadBalancerTargetGroups", "DetachLoadBalancerTargetGroups",
@@ -202,6 +202,8 @@ public class AwsQueryController {
             "CreateTags", "DeleteTags", "DescribeTags",
             "CreateInternetGateway", "DescribeInternetGateways", "DeleteInternetGateway",
             "AttachInternetGateway", "DetachInternetGateway",
+            "CreateEgressOnlyInternetGateway", "DescribeEgressOnlyInternetGateways",
+            "DeleteEgressOnlyInternetGateway",
             "CreateRouteTable", "DescribeRouteTables", "DeleteRouteTable",
             "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "ReplaceRoute", "DeleteRoute",
             "CreateNetworkAcl", "DescribeNetworkAcls", "DeleteNetworkAcl",
@@ -566,6 +568,8 @@ public class AwsQueryController {
             "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
             "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
             "AddRoleToDBCluster", "RemoveRoleFromDBCluster", "AddRoleToDBInstance", "RemoveRoleFromDBInstance",
+            "EnableHttpEndpoint", "DisableHttpEndpoint",
+            "DescribeDBLogFiles", "DownloadDBLogFilePortion",
             "DescribeGlobalClusters",
             "CreateDBParameterGroup", "DescribeDBParameterGroups",
             "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters",
@@ -576,7 +580,8 @@ public class AwsQueryController {
             "ModifyDBClusterParameterGroup", "DeleteDBClusterParameterGroup",
             "DescribeDBClusterParameters",
             "CreateOptionGroup", "DescribeOptionGroups", "ModifyOptionGroup", "DeleteOptionGroup",
-            "DescribeDBSnapshots", "DescribeDBClusterSnapshots"
+            "DescribeDBSnapshots", "DescribeDBClusterSnapshots",
+            "StartExportTask", "DescribeExportTasks", "CancelExportTask"
     );
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(

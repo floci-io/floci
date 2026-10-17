@@ -53,8 +53,11 @@ public class LambdaExecutionRoleCredentials {
      * the existing container credential fallback rather than becoming an implicit deny-all caller.
      */
     public Optional<SessionCreds> forFunction(LambdaFunction function) {
-        String roleArn = function.getRole();
-        String functionAccountId = sessionAccountId(function);
+        return forRole(function.getRole(), sessionAccountId(function), function.getFunctionName());
+    }
+
+    /** A session for {@code roleArn} assumed on behalf of {@code functionName} in {@code functionAccountId}. */
+    public Optional<SessionCreds> forRole(String roleArn, String functionAccountId, String functionName) {
         if (roleArn == null || roleArn.isBlank()
                 || functionAccountId == null || functionAccountId.isBlank()) {
             return Optional.empty();
@@ -84,7 +87,6 @@ public class LambdaExecutionRoleCredentials {
                 "ASIA" + random(UPPER_ALPHANUMERIC, 16),
                 random(SECRET_CHARACTERS, 40),
                 random(SECRET_CHARACTERS, 200));
-        String functionName = function.getFunctionName();
         String assumedRoleId = role.get().getRoleId() != null ? role.get().getRoleId() + ":" + functionName : null;
         iamService.registerLambdaExecutionRoleSession(
                 functionAccountId, credentials.accessKeyId(), credentials.secretAccessKey(),

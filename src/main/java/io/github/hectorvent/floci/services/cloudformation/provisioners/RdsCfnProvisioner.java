@@ -442,6 +442,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         if (!roles.isEmpty()) {
             rdsService.validateClusterRoleAssociations(id, resolveOptional(props, "Engine", engine), roles);
         }
+        boolean httpEndpoint = parseStrictBoolProp(props, "EnableHttpEndpoint", engine);
+        if (httpEndpoint) {
+            // Refused before a new cluster exists, rather than leaving one behind.
+            RdsService.requireDataApiEngine(resolveOptional(props, "Engine", engine));
+        }
         boolean created = cluster == null;
         if (cluster != null) {
             cluster = rdsService.modifyDbCluster(
@@ -470,6 +475,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     false, null, engineMode, storageEncrypted);
         }
         cluster = reconcileClusterRoles(r, cluster, roles, created, ctx.isUpdate(), region);
+        // EnableHttpEndpoint updates with no interruption; a template that leaves it out wants it off.
+        if (httpEndpoint != cluster.isHttpEndpointEnabled()) {
+            cluster = rdsService.setHttpEndpoint(region, cluster.getDbClusterIdentifier(), httpEndpoint);
+        }
         r.setPhysicalId(cluster.getDbClusterIdentifier());
         r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());
         if (cluster.getEndpoint() != null) {
@@ -1061,6 +1070,29 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         } catch (NumberFormatException e) {
             throw new AwsException("InvalidParameterValue", name + " must be an integer.", 400);
         }
+    }
+
+    /**
+     * A Boolean property read strictly: absent, or resolving to {@code AWS::NoValue}, is false; true
+     * and false (in any case, as JSON booleans or strings) are themselves; anything else is a
+     * {@code ValidationError} rather than a silent false.
+     */
+    private boolean parseStrictBoolProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(name)) {
+            return false;
+        }
+        JsonNode value = engine.resolveNodeOmittingNoValue(props.get(name));
+        if (value == null || value.isMissingNode() || value.isNull()) {
+            return false;
+        }
+        if (value.isBoolean()) {
+            return value.booleanValue();
+        }
+        String text = value.asText();
+        if ("true".equalsIgnoreCase(text) || "false".equalsIgnoreCase(text)) {
+            return Boolean.parseBoolean(text);
+        }
+        throw new AwsException("ValidationError", name + " must be true or false, not " + text + ".", 400);
     }
 
     private boolean parseBoolProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {

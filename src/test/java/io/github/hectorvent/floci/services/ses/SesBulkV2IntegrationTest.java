@@ -332,6 +332,21 @@ class SesBulkV2IntegrationTest {
             .body("__type", equalTo("BadRequestException"));
     }
 
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("wrongTypeSendBulkEmailBodies")
+    @Order(12)
+    void sendBulkEmail_wrongMemberType_returnsSerializationException(String label, String body) {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
     static Stream<Arguments> malformedSendBulkEmailBodies() {
         String validDefaultTemplate = "\"DefaultContent\": {\"Template\": {\"TemplateName\": \"v2-bulk-welcome\", \"TemplateData\": \"{\\\"team\\\":\\\"floci\\\",\\\"name\\\":\\\"X\\\"}\"}}";
         return Stream.of(
@@ -345,6 +360,21 @@ class SesBulkV2IntegrationTest {
                       "BulkEmailEntries": [null]
                     }
                     """.formatted(validDefaultTemplate)),
+                Arguments.of("DefaultTemplateData as invalid JSON string", """
+                    {
+                      "FromEmailAddress": "bulk@example.com",
+                      "DefaultContent": {
+                        "Template": {"TemplateName": "v2-bulk-welcome", "TemplateData": "{not json"}
+                      },
+                      "BulkEmailEntries": [{"Destination": {"ToAddresses": ["alice@example.com"]}}]
+                    }
+                    """)
+        );
+    }
+
+    static Stream<Arguments> wrongTypeSendBulkEmailBodies() {
+        String validDefaultTemplate = "\"DefaultContent\": {\"Template\": {\"TemplateName\": \"v2-bulk-welcome\", \"TemplateData\": \"{\\\"team\\\":\\\"floci\\\",\\\"name\\\":\\\"X\\\"}\"}}";
+        return Stream.of(
                 Arguments.of("BulkEmailEntries element is string", """
                     {
                       "FromEmailAddress": "bulk@example.com",
@@ -364,15 +394,6 @@ class SesBulkV2IntegrationTest {
                       "FromEmailAddress": "bulk@example.com",
                       "DefaultContent": {
                         "Template": {"TemplateName": "v2-bulk-welcome", "TemplateData": {"team": "floci"}}
-                      },
-                      "BulkEmailEntries": [{"Destination": {"ToAddresses": ["alice@example.com"]}}]
-                    }
-                    """),
-                Arguments.of("DefaultTemplateData as invalid JSON string", """
-                    {
-                      "FromEmailAddress": "bulk@example.com",
-                      "DefaultContent": {
-                        "Template": {"TemplateName": "v2-bulk-welcome", "TemplateData": "{not json"}
                       },
                       "BulkEmailEntries": [{"Destination": {"ToAddresses": ["alice@example.com"]}}]
                     }

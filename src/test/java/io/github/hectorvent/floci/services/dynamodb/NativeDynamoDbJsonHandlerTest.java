@@ -1283,6 +1283,43 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void scanReportsTheMissingProjectionBeforeTheSegmentPairing() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Select": "SPECIFIC_ATTRIBUTES", "Segment": 5, "TotalSegments": 5}
+                """));
+        assertEquals("1 validation error detected: Must specify the AttributesToGet or ProjectionExpression "
+                + "when choosing to get SPECIFIC_ATTRIBUTES", ex.getMessage());
+    }
+
+    @Test
+    void scanReportsAnUnknownSelectBeforeAMissingTotalSegments() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Users", "Select": "BOGUS", "Segment": 1}
+                """));
+        assertEquals("1 validation error detected: Value 'BOGUS' at 'select' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: "
+                + "[SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]", ex.getMessage());
+    }
+
+    @Test
+    void scanReportsACountProjectionBeforeTheSegmentPairingOnAMissingTable() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Missing", "Select": "COUNT", "ProjectionExpression": "a", "Segment": 1}
+                """));
+        assertEquals("1 validation error detected: "
+                + "Cannot specify the ProjectionExpression when choosing to get only the Count", ex.getMessage());
+    }
+
+    @Test
+    void scanReportsAllProjectedWithoutAnIndexBeforeAMissingSegment() {
+        AwsException ex = expectValidationException("Scan", json("""
+                {"TableName": "Missing", "Select": "ALL_PROJECTED_ATTRIBUTES", "TotalSegments": 2}
+                """));
+        assertEquals("1 validation error detected: "
+                + "ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName", ex.getMessage());
+    }
+
+    @Test
     void scanAcceptsSegmentsAtTheBounds() throws Exception {
         createUsersTable("eu-west-1");
 

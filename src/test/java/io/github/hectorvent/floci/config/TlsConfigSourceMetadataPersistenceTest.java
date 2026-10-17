@@ -179,8 +179,8 @@ class TlsConfigSourceMetadataPersistenceTest {
 
         assertNotNull(metadata.getFlociVersion(),
             "Metadata should contain flociVersion");
-        assertEquals("dev", metadata.getFlociVersion(),
-            "Version should default to 'dev' when FLOCI_VERSION not set");
+        assertEquals(FlociVersion.current(), metadata.getFlociVersion(),
+            "Metadata should record the version this build reports");
     }
 
     /**

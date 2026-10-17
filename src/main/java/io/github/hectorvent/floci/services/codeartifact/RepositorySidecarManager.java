@@ -66,6 +66,21 @@ public interface RepositorySidecarManager {
             String packageName);
 
     /**
+     * {@code true} when this sidecar holds exactly the named version of the named package, for
+     * bridging {@code DescribePackageVersion} when there is no generic-format record to describe:
+     * Maven, npm, and pypi are metadata-free passthroughs straight to their sidecar, so nothing in
+     * {@code CodeArtifactService}'s own package-version store ever records what they hold, the
+     * same reason {@link #fetchPackageVersionAsset} exists. Unlike that method, there is no asset
+     * name to confirm against: real CodeArtifact's own {@code DescribePackageVersion} response has
+     * no asset listing at all, so a cheap existence check is all this needs. {@code namespace}
+     * follows the same convention as {@link #fetchPackageVersionAsset}: {@code null} for a format
+     * that has none. A repository that was never started for this format holds nothing, so this is
+     * {@code false}.
+     */
+    boolean packageVersionExists(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName, String version);
+
+    /**
      * Deletes every version of the named package from this sidecar's own backing storage. Every
      * sidecar Floci currently backs (Reposilite, Verdaccio, pypiserver) can do this; the default
      * throws {@link UnsupportedOperationException} rather than silently leaving the package in place
@@ -75,5 +90,27 @@ public interface RepositorySidecarManager {
     default void deletePackage(String repositoryContainerId, String domain, String repository, String namespace,
             String packageName) {
         throw new UnsupportedOperationException(format() + " packages cannot be deleted through this sidecar");
+    }
+
+    /**
+     * Live readme/descriptive-text lookup for one package version, for a sidecar capable of
+     * answering this for a specific, possibly historical version after the fact. {@code empty()}
+     * by default: Verdaccio (npm) only ever exposes the most-recently-published version's readme,
+     * and pypiserver exposes none at all, so neither can implement this and {@code
+     * CodeArtifactService#getPackageVersionReadme} instead answers npm and pypi from a record
+     * captured at publish time ({@link CodeArtifactService#recordPublishedPackageVersionReadme}).
+     * {@code BagetterSidecarClient} overrides this: BaGetter keeps every version's own readme
+     * addressable by exact version for as long as that version exists, so nuget needs no such
+     * capture step.
+     *
+     * <p>Returning {@code empty()} here is read by the caller as "this sidecar cannot answer
+     * live", not "this version has no readme": an override distinguishes the two with {@code
+     * Optional.of("")} for a published version with nothing to show versus {@code empty()} for a
+     * version that was never published, the same convention {@link #fetchPackageVersionAsset}
+     * already uses for "found, but empty" versus "not found".
+     */
+    default Optional<String> fetchPackageVersionReadme(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
+        return Optional.empty();
     }
 }

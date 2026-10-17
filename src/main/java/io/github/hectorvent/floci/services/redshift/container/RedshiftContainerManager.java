@@ -127,7 +127,8 @@ public class RedshiftContainerManager {
         LOG.infov("Adopting existing container {0} for cluster {1} to avoid discarding its data",
                 containerName, clusterIdentifier);
         int enginePort = 5432;
-        ContainerInfo info = lifecycleManager.adopt(existing.get().getId(), List.of(enginePort));
+        ContainerInfo info = lifecycleManager.adopt(existing.get().getId(), List.of(enginePort),
+                containerBuilder.resolveDockerNetwork(config.services().redshift().dockerNetwork()));
         return initializeAndRegisterHandle(info, accountId, clusterIdentifier, masterUsername, containerName, enginePort,
                 databaseName);
     }

@@ -54,4 +54,18 @@ final class S3AclPublicAccessEvaluator {
             return false;
         }
     }
+
+    static boolean aclGrantsNonOwner(String acl, String ownerId) {
+        if (acl == null || acl.isBlank()) {
+            return false;
+        }
+        try {
+            S3AclPolicy policy = S3AclPolicy.parse(acl);
+            return policy.grants().isEmpty() || policy.grants().stream()
+                    .anyMatch(grant -> !grant.grantee().isCanonicalUser(ownerId));
+        } catch (S3AclPolicy.AclParseException e) {
+            LOG.debugv(e, "Failed to parse S3 ACL for ownership enforcement");
+            return true;
+        }
+    }
 }

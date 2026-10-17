@@ -128,7 +128,7 @@ class CloudFormationRdsIntegrationTest {
             .header("Authorization", CFN_AUTH)
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", dbSubnetGroupTemplate(groupName))
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(dbSubnetGroupTemplate(groupName)))
         .when()
             .post("/")
         .then()

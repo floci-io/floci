@@ -217,6 +217,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private Map<String, CapacityProvider> capacityProviders = new ConcurrentHashMap<>();
     // taskSetArn → TaskSet
     private final Map<String, TaskSet> taskSets = new ConcurrentHashMap<>();
+    // Serializes create/update/delete of one service key (region, cluster, name). A fixed set of
+    // stripes, never cleared, so unknown or failed names retain nothing and a state reset cannot
+    // hand a same-key call a different lock than one still held by an in-flight call.
+    // ponytail: distinct services sharing a stripe serialize too; widen if contention shows.
+    private static final int SERVICE_LOCK_STRIPES = 64;
+    private final Object[] serviceLocks = newServiceLocks();
     // serviceDeploymentArn → ServiceDeployment
     private final Map<String, ServiceDeployment> serviceDeployments = new ConcurrentHashMap<>();
     // serviceRevisionArn → ServiceRevision
@@ -2576,86 +2582,88 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         String serviceName = request.getServiceName();
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
-        if (services.containsKey(key)) {
-            EcsServiceModel existingSvc = services.get(key);
+        synchronized (serviceLock(key)) {
+            if (services.containsKey(key)) {
+                EcsServiceModel existingSvc = services.get(key);
 
-            if ("ACTIVE".equals(existingSvc.getStatus())) {
-                throw new AwsException("InvalidParameterException",
-                        "Creation of service was not idempotent.", 400);
+                if ("ACTIVE".equals(existingSvc.getStatus())) {
+                    throw new AwsException("InvalidParameterException",
+                            "Creation of service was not idempotent.", 400);
+                }
             }
-        }
-        if (request.getLaunchType() != null && request.getCapacityProviderStrategy() != null
-                && !request.getCapacityProviderStrategy().isEmpty()) {
-            throw new AwsException("InvalidParameterException",
-                    "You cannot specify both a launch type and a capacity provider strategy in the "
-                            + "same request. Specify only one.", 400);
-        }
-        validateLaunchNetworking(taskDef, request.getNetworkConfiguration());
+            if (request.getLaunchType() != null && request.getCapacityProviderStrategy() != null
+                    && !request.getCapacityProviderStrategy().isEmpty()) {
+                throw new AwsException("InvalidParameterException",
+                        "You cannot specify both a launch type and a capacity provider strategy in the "
+                                + "same request. Specify only one.", 400);
+            }
+            validateLaunchNetworking(taskDef, request.getNetworkConfiguration());
 
-        EcsServiceModel svc = new EcsServiceModel();
-        svc.setServiceArn(regionResolver.buildArn("ecs", region,
-                "service/" + cluster.getClusterName() + "/" + serviceName));
-        svc.setServiceName(serviceName);
-        svc.setClusterArn(cluster.getClusterArn());
-        svc.setTaskDefinition(taskDefinition);
-        svc.setCapacityProviderStrategy(request.getCapacityProviderStrategy());
-        svc.setLaunchType(serviceLaunchType(cluster, request));
-        int desiredCount = request.getDesiredCount();
-        if (desiredCount < 0) {
-            throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
-        }
-        svc.setDesiredCount(desiredCount);
-        svc.setLoadBalancers(request.getLoadBalancers());
-        svc.setServiceRegistries(request.getServiceRegistries());
-        svc.setNetworkConfiguration(request.getNetworkConfiguration());
-        // AWS echoes these on every DescribeServices; clients that persist them (Terraform's
-        // aws_ecs_service reads all three, and schedulingStrategy is ForceNew) treat a missing
-        // value as drift and replace the service on every apply.
-        String strategy = request.getSchedulingStrategy() != null
-                ? request.getSchedulingStrategy() : DEFAULT_SCHEDULING_STRATEGY;
-        String controller = request.getDeploymentControllerType() != null
-                ? request.getDeploymentControllerType() : DEFAULT_DEPLOYMENT_CONTROLLER;
-        if (SCHEDULING_DAEMON.equals(strategy)
-                && (svc.getLaunchType() == LaunchType.FARGATE || !DEFAULT_DEPLOYMENT_CONTROLLER.equals(controller))) {
-            throw new AwsException("InvalidParameterException",
-                    "Tasks using the Fargate launch type or the CODE_DEPLOY or EXTERNAL deployment "
-                            + "controller types don't support the DAEMON scheduling strategy.", 400);
-        }
-        svc.setSchedulingStrategy(strategy);
-        svc.setDeploymentController(controller);
-        svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing() != null
-                ? request.getAvailabilityZoneRebalancing() : DEFAULT_AZ_REBALANCING_ON_CREATE);
-        svc.setServiceConnectConfiguration(request.getServiceConnectConfiguration());
-        svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
-        svc.setEnableExecuteCommand(request.isEnableExecuteCommand());
-        svc.setEnableECSManagedTags(request.isEnableECSManagedTags());
-        // Both have documented defaults a created service reports back.
-        svc.setPropagateTags(request.getPropagateTags() != null
-                ? request.getPropagateTags() : PROPAGATE_TAGS_NONE);
-        svc.setHealthCheckGracePeriodSeconds(request.getHealthCheckGracePeriodSeconds() != null
-                ? request.getHealthCheckGracePeriodSeconds() : 0);
-        validateServiceRole(request, taskDef);
-        svc.setRoleArn(request.getRoleArn());
-        svc.setUnparsed(request.getUnparsed());
-        applyServicePlatform(svc, taskDef, request.getPlatformVersion());
-        svc.setStatus("ACTIVE");
-        svc.setCreatedAt(Instant.now());
-        svc.setLastDeploymentAt(svc.getCreatedAt());
-        svc.setDeploymentId(newDeploymentId());
-        if (request.getTags() != null && !request.getTags().isEmpty()) {
-            svc.setTags(new LinkedHashMap<>(request.getTags()));
-        }
+            EcsServiceModel svc = new EcsServiceModel();
+            svc.setServiceArn(regionResolver.buildArn("ecs", region,
+                    "service/" + cluster.getClusterName() + "/" + serviceName));
+            svc.setServiceName(serviceName);
+            svc.setClusterArn(cluster.getClusterArn());
+            svc.setTaskDefinition(taskDefinition);
+            svc.setCapacityProviderStrategy(request.getCapacityProviderStrategy());
+            svc.setLaunchType(serviceLaunchType(cluster, request));
+            int desiredCount = request.getDesiredCount();
+            if (desiredCount < 0) {
+                throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
+            }
+            svc.setDesiredCount(desiredCount);
+            svc.setLoadBalancers(request.getLoadBalancers());
+            svc.setServiceRegistries(request.getServiceRegistries());
+            svc.setNetworkConfiguration(request.getNetworkConfiguration());
+            // AWS echoes these on every DescribeServices; clients that persist them (Terraform's
+            // aws_ecs_service reads all three, and schedulingStrategy is ForceNew) treat a missing
+            // value as drift and replace the service on every apply.
+            String strategy = request.getSchedulingStrategy() != null
+                    ? request.getSchedulingStrategy() : DEFAULT_SCHEDULING_STRATEGY;
+            String controller = request.getDeploymentControllerType() != null
+                    ? request.getDeploymentControllerType() : DEFAULT_DEPLOYMENT_CONTROLLER;
+            if (SCHEDULING_DAEMON.equals(strategy)
+                    && (svc.getLaunchType() == LaunchType.FARGATE || !DEFAULT_DEPLOYMENT_CONTROLLER.equals(controller))) {
+                throw new AwsException("InvalidParameterException",
+                        "Tasks using the Fargate launch type or the CODE_DEPLOY or EXTERNAL deployment "
+                                + "controller types don't support the DAEMON scheduling strategy.", 400);
+            }
+            svc.setSchedulingStrategy(strategy);
+            svc.setDeploymentController(controller);
+            svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing() != null
+                    ? request.getAvailabilityZoneRebalancing() : DEFAULT_AZ_REBALANCING_ON_CREATE);
+            svc.setServiceConnectConfiguration(request.getServiceConnectConfiguration());
+            svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
+            svc.setEnableExecuteCommand(request.isEnableExecuteCommand());
+            svc.setEnableECSManagedTags(request.isEnableECSManagedTags());
+            // Both have documented defaults a created service reports back.
+            svc.setPropagateTags(request.getPropagateTags() != null
+                    ? request.getPropagateTags() : PROPAGATE_TAGS_NONE);
+            svc.setHealthCheckGracePeriodSeconds(request.getHealthCheckGracePeriodSeconds() != null
+                    ? request.getHealthCheckGracePeriodSeconds() : 0);
+            validateServiceRole(request, taskDef);
+            svc.setRoleArn(request.getRoleArn());
+            svc.setUnparsed(request.getUnparsed());
+            applyServicePlatform(svc, taskDef, request.getPlatformVersion());
+            svc.setStatus("ACTIVE");
+            svc.setCreatedAt(Instant.now());
+            svc.setLastDeploymentAt(svc.getCreatedAt());
+            svc.setDeploymentId(newDeploymentId());
+            if (request.getTags() != null && !request.getTags().isEmpty()) {
+                svc.setTags(new LinkedHashMap<>(request.getTags()));
+            }
 
-        services.put(key, svc);
-        cluster.setActiveServicesCount(cluster.getActiveServicesCount() + 1);
-        persistCluster(region, cluster);
-        recordServiceDeployment(svc, taskDefinition, region);
-        if (eventPublisher != null) {
-            eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_STARTED",
-                    "ECS deployment " + svc.getDeploymentId() + " started.", region);
+            services.put(key, svc);
+            cluster.setActiveServicesCount(cluster.getActiveServicesCount() + 1);
+            persistCluster(region, cluster);
+            recordServiceDeployment(svc, taskDefinition, region);
+            if (eventPublisher != null) {
+                eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_STARTED",
+                        "ECS deployment " + svc.getDeploymentId() + " started.", region);
+            }
+            LOG.infov("Created ECS service: {0} in cluster {1}", serviceName, cluster.getClusterName());
+            return svc;
         }
-        LOG.infov("Created ECS service: {0} in cluster {1}", serviceName, cluster.getClusterName());
-        return svc;
     }
 
     public EcsServiceModel updateService(String clusterRef, String serviceName, String taskDefinition,
@@ -2704,111 +2712,113 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         boolean forceNewDeployment = request.isForceNewDeployment();
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
-        EcsServiceModel svc = services.get(key);
-        if (svc == null) {
-            throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
-        }
-        synchronized (svc) {
-            if ("INACTIVE".equals(svc.getStatus())) {
-                throw new AwsException("ServiceNotActiveException",
-                        "Service " + serviceName + " is not active.", 400);
+        synchronized (serviceLock(key)) {
+            EcsServiceModel svc = services.get(key);
+            if (svc == null) {
+                throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
             }
-            // Settle the outgoing deployment against the service as it stands, before this request
-            // changes its desired count or task definition: one whose tasks are up has finished,
-            // whether or not anything read it. recordServiceDeployment stops it if it has not.
-            currentServiceDeployment(svc);
-            if (request.getDesiredCount() != null) {
-                if (request.getDesiredCount() < 0) {
-                    throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
+            synchronized (svc) {
+                if ("INACTIVE".equals(svc.getStatus())) {
+                    throw new AwsException("ServiceNotActiveException",
+                            "Service " + serviceName + " is not active.", 400);
                 }
-                svc.setDesiredCount(request.getDesiredCount());
-            }
-            // The members whose change starts new tasks, as UpdateService documents them: the network
-            // configuration, the load balancers, the service registries, the Service Connect
-            // configuration, the task definition and the platform version. The rest (desired count,
-            // deployment configuration, the exec and managed-tag switches, placement, propagateTags,
-            // the capacity provider strategy) are applied without rolling anything.
-            boolean rollingChange = false;
-            if (request.getNetworkConfiguration() != null) {
-                rollingChange |= networkConfigurationChanged(svc.getNetworkConfiguration(),
-                        request.getNetworkConfiguration());
-                svc.setNetworkConfiguration(request.getNetworkConfiguration());
-            }
-            if (request.getAvailabilityZoneRebalancing() != null) {
-                svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing());
-            }
-            if (request.getCapacityProviderStrategy() != null) {
-                svc.setCapacityProviderStrategy(request.getCapacityProviderStrategy());
-                svc.setLaunchType(request.getCapacityProviderStrategy().isEmpty()
-                        ? svc.getLaunchType()
-                        : placementFor(request.getCapacityProviderStrategy().getFirst().capacityProvider()).launchType());
-            }
-            if (request.getEnableExecuteCommand() != null) {
-                svc.setEnableExecuteCommand(request.getEnableExecuteCommand());
-            }
-            if (request.getEnableECSManagedTags() != null) {
-                svc.setEnableECSManagedTags(request.getEnableECSManagedTags());
-            }
-            if (request.getPropagateTags() != null) {
-                svc.setPropagateTags(request.getPropagateTags());
-            }
-            if (request.getHealthCheckGracePeriodSeconds() != null) {
-                svc.setHealthCheckGracePeriodSeconds(request.getHealthCheckGracePeriodSeconds());
-            }
-            if (request.getDeploymentConfiguration() != null) {
-                svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
-            }
-            if (request.getLoadBalancers() != null) {
-                rollingChange |= loadBalancersChanged(svc.getLoadBalancers(), request.getLoadBalancers());
-                svc.setLoadBalancers(request.getLoadBalancers());
-            }
-            if (request.getServiceRegistries() != null) {
-                boolean registriesChanged = !request.getServiceRegistries().equals(svc.getServiceRegistries());
-                rollingChange |= registriesChanged;
-                svc.setServiceRegistries(request.getServiceRegistries());
-                if (registriesChanged) {
-                    reconcileServiceDiscoveryRegistries(svc, cluster, region);
+                // Settle the outgoing deployment against the service as it stands, before this request
+                // changes its desired count or task definition: one whose tasks are up has finished,
+                // whether or not anything read it. recordServiceDeployment stops it if it has not.
+                currentServiceDeployment(svc);
+                if (request.getDesiredCount() != null) {
+                    if (request.getDesiredCount() < 0) {
+                        throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
+                    }
+                    svc.setDesiredCount(request.getDesiredCount());
                 }
-            }
-            if (request.getUnparsed() != null) {
-                svc.setUnparsed(mergedUnparsed(svc.getUnparsed(), request.getUnparsed()));
-            }
-            // UpdateServiceRequest.serviceConnectConfiguration is documented as "This parameter
-            // triggers a new service deployment", so a real change rolls the deployment the way a
-            // task-definition change does. An omitted parameter is not a change and rolls nothing.
-            Map<String, Object> serviceConnectConfiguration = request.getServiceConnectConfiguration();
-            boolean serviceConnectChanged = serviceConnectConfiguration != null
-                    && !serviceConnectConfiguration.equals(svc.getServiceConnectConfiguration());
-            if (serviceConnectConfiguration != null) {
-                svc.setServiceConnectConfiguration(serviceConnectConfiguration);
-            }
-            boolean taskDefChanged = false;
-            String platformVersionBefore = svc.getPlatformVersion();
-            if (request.getTaskDefinition() != null) {
-                TaskDefinition resolved = resolveLaunchableTaskDefinition(request.getTaskDefinition(), region);
-                taskDefChanged = !resolved.getTaskDefinitionArn().equals(svc.getTaskDefinition());
-                svc.setTaskDefinition(resolved.getTaskDefinitionArn());
-                applyServicePlatform(svc, resolved, request.getPlatformVersion() != null
-                        ? request.getPlatformVersion() : svc.getPlatformVersion());
-            } else if (request.getPlatformVersion() != null) {
-                svc.setPlatformVersion(PLATFORM_VERSION_LATEST.equals(request.getPlatformVersion())
-                        ? DEFAULT_PLATFORM_VERSION : request.getPlatformVersion());
-            }
-            // UpdateServiceRequest.platformVersion is documented as "This parameter triggers a new
-            // service deployment". Compared after resolution, so a request that asks for LATEST on a
-            // service already running the version LATEST resolves to is not a change.
-            rollingChange |= !Objects.equals(platformVersionBefore, svc.getPlatformVersion());
-            if (taskDefChanged || forceNewDeployment || serviceConnectChanged || rollingChange) {
-                svc.setDeploymentId(newDeploymentId());
-                svc.setLastDeploymentAt(Instant.now());
-                recordServiceDeployment(svc, svc.getTaskDefinition(), region);
-                if (eventPublisher != null) {
-                    eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_STARTED",
-                            "ECS deployment " + svc.getDeploymentId() + " started.", region);
+                // The members whose change starts new tasks, as UpdateService documents them: the network
+                // configuration, the load balancers, the service registries, the Service Connect
+                // configuration, the task definition and the platform version. The rest (desired count,
+                // deployment configuration, the exec and managed-tag switches, placement, propagateTags,
+                // the capacity provider strategy) are applied without rolling anything.
+                boolean rollingChange = false;
+                if (request.getNetworkConfiguration() != null) {
+                    rollingChange |= networkConfigurationChanged(svc.getNetworkConfiguration(),
+                            request.getNetworkConfiguration());
+                    svc.setNetworkConfiguration(request.getNetworkConfiguration());
                 }
+                if (request.getAvailabilityZoneRebalancing() != null) {
+                    svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing());
+                }
+                if (request.getCapacityProviderStrategy() != null) {
+                    svc.setCapacityProviderStrategy(request.getCapacityProviderStrategy());
+                    svc.setLaunchType(request.getCapacityProviderStrategy().isEmpty()
+                            ? svc.getLaunchType()
+                            : placementFor(request.getCapacityProviderStrategy().getFirst().capacityProvider()).launchType());
+                }
+                if (request.getEnableExecuteCommand() != null) {
+                    svc.setEnableExecuteCommand(request.getEnableExecuteCommand());
+                }
+                if (request.getEnableECSManagedTags() != null) {
+                    svc.setEnableECSManagedTags(request.getEnableECSManagedTags());
+                }
+                if (request.getPropagateTags() != null) {
+                    svc.setPropagateTags(request.getPropagateTags());
+                }
+                if (request.getHealthCheckGracePeriodSeconds() != null) {
+                    svc.setHealthCheckGracePeriodSeconds(request.getHealthCheckGracePeriodSeconds());
+                }
+                if (request.getDeploymentConfiguration() != null) {
+                    svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
+                }
+                if (request.getLoadBalancers() != null) {
+                    rollingChange |= loadBalancersChanged(svc.getLoadBalancers(), request.getLoadBalancers());
+                    svc.setLoadBalancers(request.getLoadBalancers());
+                }
+                if (request.getServiceRegistries() != null) {
+                    boolean registriesChanged = !request.getServiceRegistries().equals(svc.getServiceRegistries());
+                    rollingChange |= registriesChanged;
+                    svc.setServiceRegistries(request.getServiceRegistries());
+                    if (registriesChanged) {
+                        reconcileServiceDiscoveryRegistries(svc, cluster, region);
+                    }
+                }
+                if (request.getUnparsed() != null) {
+                    svc.setUnparsed(mergedUnparsed(svc.getUnparsed(), request.getUnparsed()));
+                }
+                // UpdateServiceRequest.serviceConnectConfiguration is documented as "This parameter
+                // triggers a new service deployment", so a real change rolls the deployment the way a
+                // task-definition change does. An omitted parameter is not a change and rolls nothing.
+                Map<String, Object> serviceConnectConfiguration = request.getServiceConnectConfiguration();
+                boolean serviceConnectChanged = serviceConnectConfiguration != null
+                        && !serviceConnectConfiguration.equals(svc.getServiceConnectConfiguration());
+                if (serviceConnectConfiguration != null) {
+                    svc.setServiceConnectConfiguration(serviceConnectConfiguration);
+                }
+                boolean taskDefChanged = false;
+                String platformVersionBefore = svc.getPlatformVersion();
+                if (request.getTaskDefinition() != null) {
+                    TaskDefinition resolved = resolveLaunchableTaskDefinition(request.getTaskDefinition(), region);
+                    taskDefChanged = !resolved.getTaskDefinitionArn().equals(svc.getTaskDefinition());
+                    svc.setTaskDefinition(resolved.getTaskDefinitionArn());
+                    applyServicePlatform(svc, resolved, request.getPlatformVersion() != null
+                            ? request.getPlatformVersion() : svc.getPlatformVersion());
+                } else if (request.getPlatformVersion() != null) {
+                    svc.setPlatformVersion(PLATFORM_VERSION_LATEST.equals(request.getPlatformVersion())
+                            ? DEFAULT_PLATFORM_VERSION : request.getPlatformVersion());
+                }
+                // UpdateServiceRequest.platformVersion is documented as "This parameter triggers a new
+                // service deployment". Compared after resolution, so a request that asks for LATEST on a
+                // service already running the version LATEST resolves to is not a change.
+                rollingChange |= !Objects.equals(platformVersionBefore, svc.getPlatformVersion());
+                if (taskDefChanged || forceNewDeployment || serviceConnectChanged || rollingChange) {
+                    svc.setDeploymentId(newDeploymentId());
+                    svc.setLastDeploymentAt(Instant.now());
+                    recordServiceDeployment(svc, svc.getTaskDefinition(), region);
+                    if (eventPublisher != null) {
+                        eventPublisher.emitDeploymentStateChange(svc, "SERVICE_DEPLOYMENT_STARTED",
+                                "ECS deployment " + svc.getDeploymentId() + " started.", region);
+                    }
+                }
+                services.put(key, svc);
+                return svc;
             }
-            services.put(key, svc);
-            return svc;
         }
     }
 
@@ -2946,51 +2956,65 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return operatingSystemFamily;
     }
 
+    private static Object[] newServiceLocks() {
+        Object[] locks = new Object[SERVICE_LOCK_STRIPES];
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new Object();
+        }
+        return locks;
+    }
+
+    private Object serviceLock(String key) {
+        return serviceLocks[Math.floorMod(key.hashCode(), SERVICE_LOCK_STRIPES)];
+    }
+
     public EcsServiceModel deleteService(String clusterRef, String serviceName, boolean force, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
 
         serviceName = extractServiceName(serviceName);
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
-        EcsServiceModel svc = services.get(key);
-        if (svc == null) {
-            throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
-        }
-        if ("INACTIVE".equals(svc.getStatus())) {
+        synchronized (serviceLock(key)) {
+            EcsServiceModel svc = services.get(key);
+            if (svc == null) {
+                throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
+            }
+            if ("INACTIVE".equals(svc.getStatus())) {
+                return svc;
+            }
+            if (!force && svc.getDesiredCount() > 0) {
+                throw new AwsException("InvalidParameterException",
+                        "The service cannot be stopped. Update the service to 0 tasks or use the force flag.", 400);
+            }
+            svc.setStatus("INACTIVE");
+            svc.setDesiredCount(0);
+            cluster.setActiveServicesCount(Math.max(0, cluster.getActiveServicesCount() - 1));
+            services.put(key, svc);
+            persistCluster(region, cluster);
+            // Stop tasks before removing the service from the map, so the per-task
+            // ELBv2 deregistration hook can still resolve the service's loadBalancers.
+            tasks.values().stream()
+                    .filter(t -> ownedBy(t, svc, cluster))
+                    .filter(t -> !TaskStatus.STOPPED.name().equals(t.getLastStatus()))
+                    .forEach(t -> {
+                        try {
+                            stopTask(cluster.getClusterName(), t.getTaskArn(), "Service deleted",
+                                    STOP_CODE_SERVICE_SCHEDULER_INITIATED, region);
+                        } catch (Exception e) {
+                            LOG.warnv("Failed to stop task {0} on service delete: {1}",
+                                    t.getTaskArn(), e.getMessage());
+                        }
+                    });
+            // AWS deletes the service's deployments and revisions with the service. A service model
+            // restored from the store may have no ARN, and then owns none.
+            String serviceArn = svc.getServiceArn();
+            if (serviceArn != null) {
+                serviceDeployments.values().removeIf(d -> serviceArn.equals(d.getServiceArn()));
+                serviceRevisions.values().removeIf(r -> serviceArn.equals(r.getServiceArn()));
+                launchFailures.remove(serviceArn);
+            }
             return svc;
         }
-        if (!force && svc.getDesiredCount() > 0) {
-            throw new AwsException("InvalidParameterException",
-                    "The service cannot be stopped. Update the service to 0 tasks or use the force flag.", 400);
-        }
-        svc.setStatus("INACTIVE");
-        svc.setDesiredCount(0);
-        cluster.setActiveServicesCount(Math.max(0, cluster.getActiveServicesCount() - 1));
-        services.put(key, svc);
-        persistCluster(region, cluster);
-        // Stop tasks before removing the service from the map, so the per-task
-        // ELBv2 deregistration hook can still resolve the service's loadBalancers.
-        tasks.values().stream()
-                .filter(t -> ownedBy(t, svc, cluster))
-                .filter(t -> !TaskStatus.STOPPED.name().equals(t.getLastStatus()))
-                .forEach(t -> {
-                    try {
-                        stopTask(cluster.getClusterName(), t.getTaskArn(), "Service deleted",
-                                STOP_CODE_SERVICE_SCHEDULER_INITIATED, region);
-                    } catch (Exception e) {
-                        LOG.warnv("Failed to stop task {0} on service delete: {1}",
-                                t.getTaskArn(), e.getMessage());
-                    }
-                });
-        // AWS deletes the service's deployments and revisions with the service. A service model
-        // restored from the store may have no ARN, and then owns none.
-        String serviceArn = svc.getServiceArn();
-        if (serviceArn != null) {
-            serviceDeployments.values().removeIf(d -> serviceArn.equals(d.getServiceArn()));
-            serviceRevisions.values().removeIf(r -> serviceArn.equals(r.getServiceArn()));
-            launchFailures.remove(serviceArn);
-        }
-        return svc;
     }
 
     /** The services that resolved, plus a {@code MISSING} failure for each reference that did not. */

@@ -87,6 +87,8 @@ class EcrRegistryManagerTest {
         builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(containerBuilder.resolveImage(anyString())).thenAnswer(inv -> inv.getArgument(0));
+        // Echoes its input, so a test sees which network the manager asked to resolve.
+        when(containerBuilder.resolveDockerNetwork(any())).thenAnswer(inv -> inv.<Optional<String>>getArgument(0).map(n -> "resolved:" + n));
         when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
         lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
@@ -256,12 +258,15 @@ class EcrRegistryManagerTest {
         });
         when(lifecycleManager.presenceOf("container-id")).thenReturn(ContainerPresence.STOPPED);
         when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(existing));
-        when(lifecycleManager.adopt("container-id", List.of(5000)))
+        // Floci in a container with no configured network: the registry was created on Floci's own.
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(currentContainerNetworkResolver.resolveNetworkName()).thenReturn(Optional.of("floci_net"));
+        when(lifecycleManager.adopt("container-id", List.of(5000), Optional.of("resolved:floci_net")))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
 
         manager.ensureStarted();
 
-        verify(lifecycleManager).adopt("container-id", List.of(5000));
+        verify(lifecycleManager).adopt("container-id", List.of(5000), Optional.of("resolved:floci_net"));
         verify(lifecycleManager).createAndStart(any());
         assertTrue(manager.isStarted());
     }
@@ -306,7 +311,7 @@ class EcrRegistryManagerTest {
                 new ContainerPort().withIp("127.0.0.1").withPrivatePort(5000).withPublicPort(BASE_PORT + 1)
         });
         when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(existing));
-        when(lifecycleManager.adopt("0123456789abcdef", List.of(5000)))
+        when(lifecycleManager.adopt("0123456789abcdef", List.of(5000), Optional.empty()))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef",
                         Map.of(5000, new ContainerLifecycleManager.EndpointInfo("172.17.0.5", 5000)),
                         Map.of(5000, BASE_PORT + 1)));
@@ -328,7 +333,7 @@ class EcrRegistryManagerTest {
                 new ContainerPort().withIp("127.0.0.1").withPrivatePort(5000).withPublicPort(BASE_PORT + 1)
         });
         when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(existing));
-        when(lifecycleManager.adopt("0123456789abcdef", List.of(5000)))
+        when(lifecycleManager.adopt("0123456789abcdef", List.of(5000), Optional.empty()))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef",
                         Map.of(5000, new ContainerLifecycleManager.EndpointInfo("172.17.0.5", 5000)),
                         Map.of(5000, BASE_PORT + 1)));
@@ -347,7 +352,7 @@ class EcrRegistryManagerTest {
                 new ContainerPort().withIp("127.0.0.1").withPrivatePort(5000).withPublicPort(BASE_PORT)
         });
         when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(existing));
-        when(lifecycleManager.adopt("0123456789abcdef", List.of(5000)))
+        when(lifecycleManager.adopt("0123456789abcdef", List.of(5000), Optional.empty()))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef", Map.of()));
 
         manager.ensureStarted();

@@ -14,6 +14,7 @@ import org.apache.james.mime4j.field.address.ParseException;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -94,10 +95,15 @@ public final class CognitoMessageDispatcher {
 
         for (String medium : mediums) {
             if ("EMAIL".equalsIgnoreCase(medium) && email != null) {
+                // The pool's EmailMfaConfiguration is the template for email MFA codes and, once set, for
+                // USER_AUTH's email sign-in codes too, as SmsAuthenticationMessage is for both SMS ones.
+                Map<String, Object> emailTemplate = purpose == VerificationCode.Purpose.EMAIL_MFA
+                        || (purpose == VerificationCode.Purpose.EMAIL_OTP && pool.getEmailMfaConfiguration() != null)
+                        ? emailMfaTemplate(pool) : template;
                 String subject = stringOrNull(customMessageResponse, "emailSubject");
-                if (subject == null) subject = stringOr(template.get("EmailSubject"), DEFAULT_EMAIL_SUBJECT);
+                if (subject == null) subject = stringOr(emailTemplate.get("EmailSubject"), DEFAULT_EMAIL_SUBJECT);
                 String rawBody = stringOrNull(customMessageResponse, "emailMessage");
-                if (rawBody == null) rawBody = stringOr(template.get(emailTemplateKey()), DEFAULT_EMAIL_BODY);
+                if (rawBody == null) rawBody = stringOr(emailTemplate.get(emailTemplateKey()), DEFAULT_EMAIL_BODY);
                 sendEmail(pool, region, email, subject, renderTemplate(rawBody, code));
             } else if ("SMS".equalsIgnoreCase(medium) && phone != null) {
                 String rawBody = stringOrNull(customMessageResponse, "smsMessage");
@@ -340,6 +346,22 @@ public final class CognitoMessageDispatcher {
 
     /** The From header, and the bare address SES uses as the envelope sender. */
     private record Sender(String from, String address) {
+    }
+
+    /** The pool's EmailMfaConfiguration as an email template ({@code Subject}, {@code Message}). */
+    private static Map<String, Object> emailMfaTemplate(UserPool pool) {
+        Map<String, Object> configuration = pool.getEmailMfaConfiguration();
+        if (configuration == null) {
+            return Map.of();
+        }
+        Map<String, Object> template = new HashMap<>();
+        if (configuration.get("Subject") != null) {
+            template.put("EmailSubject", configuration.get("Subject"));
+        }
+        if (configuration.get("Message") != null) {
+            template.put("EmailMessage", configuration.get("Message"));
+        }
+        return template;
     }
 
     /**

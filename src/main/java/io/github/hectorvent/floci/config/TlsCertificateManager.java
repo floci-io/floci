@@ -206,7 +206,7 @@ public class TlsCertificateManager implements Resettable {
         CertificateGenerator.GeneratedCertificate issued = ca.issueServerCertificate("localhost", sans, keyAlgorithm, keyPair);
 
         Path dir = tlsDir();
-        CertificateMetadata metadata = CertificateMetadata.create(configuredHostnames, resolveFlociVersion());
+        CertificateMetadata metadata = CertificateMetadata.create(configuredHostnames, FlociVersion.current());
         metadata.setLearnedHostnames(new ArrayList<>(learned));
         writeAtomically(dir.resolve(CERT_NAME), issued.certificatePem());
         writeAtomically(dir.resolve(METADATA_NAME), OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(metadata));
@@ -301,10 +301,5 @@ public class TlsCertificateManager implements Resettable {
         } finally {
             Files.deleteIfExists(tmp);
         }
-    }
-
-    private static String resolveFlociVersion() {
-        String env = System.getenv("FLOCI_VERSION");
-        return env == null || env.isBlank() ? "dev" : env;
     }
 }

@@ -362,12 +362,31 @@ change away and straight back that the setting exists for. History is recorded w
 window is set, so switching the policy on has something to compare against, bounded at the 24 the
 policy can ask for, and it goes with the profile when `DeleteLoginProfile` removes it.
 
-`AllowUsersToChangePassword` is accepted and reported but grants nothing. The user
-guide says the option gives all users in the account "access to the iam:ChangePassword action for
-only their user and to the iam:GetAccountPasswordPolicy action", applied at the account level
-rather than by attaching a policy to each user. Floci authorizes both actions from identity
-policies alone, so under [enforcement](#iam-enforcement-mode) a caller needs a policy naming their
-own user however the flag is set.
+`AllowUsersToChangePassword` authorizes. The user guide says the option gives all users in the
+account "access to the iam:ChangePassword action for only their user and to the
+iam:GetAccountPasswordPolicy action", and that it "does not attach a permissions policy to each
+user. Rather, IAM applies the permissions at the account-level for all users". So under
+[enforcement](#iam-enforcement-mode) an IAM user carrying no policy at all may change its own
+password and read the policy while the flag is set, and neither call is authorized once it is
+cleared. The grant is assembled for the caller it applies to, naming that user's own ARN, so it
+authorizes `iam:ChangePassword` for them and for nobody else, and it reaches no other action: not
+`UpdateLoginProfile`, not `GetUser`. The flag that answers for a user is their own account's, so a
+`PolicySourceArn` naming another account's user simulates with that account's grant, over that
+account's user ARNs.
+
+Being account-level rather than attached, the grant appears in nothing that lists a user's
+policies, `ListUserPolicies`, `ListAttachedUserPolicies` and `GetAccountAuthorizationDetails`
+included, nor in `ListPoliciesGrantingServiceAccess`, which reports policies by name and type and
+has none to report here. A last-accessed report answers a different question, "every AWS service
+that the resource could access using permissions policies", so `GenerateServiceLastAccessedDetails`
+does list `iam` for a user carrying no policy of their own while the flag is set, and lists nothing
+for that same user once it is cleared. `GetContextKeysForPrincipalPolicy` stays with the attached
+set, returning "only context keys referenced by the identity-based policies attached to the
+specified entity, and any additional policies that you provide", so it does not name the
+`${aws:username}` the grant's own resource uses, which a simulation populates anyway. In
+authorization it is an identity-based grant like any other: an explicit `Deny` still refuses the
+call and a permissions boundary still caps it. It belongs to IAM users: a role session has no
+console password to change, and the root user is not an IAM user.
 
 `DeleteUser` returns `DeleteConflict`, as on AWS, while the user still has a login profile, access
 keys, inline policies, attached managed policies, group memberships, an
@@ -395,6 +414,20 @@ stripped, and the three single-character escapes (`${*}`, `${?}`, `${$}`) are ex
 they substitute a literal character rather than naming a context key. The list is neither sorted
 nor de-duplicated, matching AWS's own documented
 example response, which repeats a key referenced by more than one statement.
+
+`SimulatePrincipalPolicy` populates the principal keys itself when the policy source is an IAM
+user, as AWS's simulator does: the guide lists `aws:PrincipalAccount`, `aws:PrincipalId`,
+`aws:PrincipalType`, `aws:Type`, `aws:UserId` and `aws:UserName` as "populated for you", with the
+caller providing "the values for all other condition keys", so a policy scoped to
+`${aws:username}` simulates the way it is evaluated. What a simulation gets is the principal half
+of the request context, the same keys the enforcement filter writes: `aws:PrincipalArn`,
+`aws:PrincipalType`, `aws:username`, `aws:userid` and the account. `aws:PrincipalId` and
+`aws:Type` are in no request context here, so a simulation does not populate them either; a
+statement matching on one matches nothing, as it would on an enforced request. A value passed in
+`ContextEntries` wins, being the one the call asked to simulate with, whatever case it spells the
+key in. A role named as the policy source is not a session, so there is no session name for an
+`aws:userid` and no documented `aws:PrincipalType` for it; those keys stay absent and a statement
+matching on one does not match.
 
 `PolicySourceArn` on `SimulatePrincipalPolicy` and `GetContextKeysForPrincipalPolicy` resolves an IAM
 user or role only, not a group. `SimulateCustomPolicy` accepts only one
@@ -1114,6 +1147,41 @@ a Query `Action` field on it does not change the action it is checked as, and it
 still percent-encoded, as the router matches it, so an encoded `/` inside a parameter cannot make
 the route's rule miss.
 
+An S3 object operation is checked as the action the S3 documentation gives it:
+- **Multipart uploads:**
+  - `CreateMultipartUpload`, `UploadPart` and `CompleteMultipartUpload` are checked as
+    `s3:PutObject`.
+  - `AbortMultipartUpload` is checked as `s3:AbortMultipartUpload`.
+  - `ListParts` is checked as `s3:ListMultipartUploadParts`.
+- **Restore and select:** `RestoreObject` is checked as `s3:RestoreObject`, and
+  `SelectObjectContent` as `s3:GetObject`, or `s3:GetObjectVersion` when it names a version.
+- **Object lock:** object retention and legal hold use their own actions: `s3:GetObjectRetention`,
+  `s3:PutObjectRetention`, `s3:GetObjectLegalHold` and `s3:PutObjectLegalHold`.
+- **Annotations:** object annotations use the `s3:*ObjectAnnotation` actions, and
+  `s3:ListObjectAnnotations` when no annotation name is given.
+- **Versions:** a `versionId` selects the version action AWS checks.
+  - Reading or heading a version needs `s3:GetObjectVersion`; `s3:GetObject` is not needed.
+  - Deleting a version needs `s3:DeleteObjectVersion`, so a deny on it stops permanent deletes
+    while a plain delete still adds a delete marker.
+  - A version's ACL, tags and annotations use `s3:GetObjectVersionAcl`, `s3:PutObjectVersionAcl`,
+    the `s3:*ObjectVersionTagging` actions and the `s3:*ObjectVersionAnnotation(s)` actions.
+  - S3's own access check under `floci.services.s3.enforce-auth`, which evaluates bucket policies
+    and ACLs, checks reading, selecting from or deleting a version as `s3:GetObjectVersion` or
+    `s3:DeleteObjectVersion`, but a version's ACL, tagging and annotation requests as the base
+    actions, and offers no `s3:versionid`.
+  - Deleting a version with an `If-Match` ETag also needs `s3:GetObject`, as a plain conditional
+    delete does: the S3 user guide says the condition is evaluated against the current version.
+- **Bucket configurations:**
+  - Analytics, inventory and Intelligent-Tiering configurations use
+    `s3:Get/PutAnalyticsConfiguration`, `s3:Get/PutInventoryConfiguration` and
+    `s3:Get/PutIntelligentTieringConfiguration`.
+  - Removing a configuration needs its Put action.
+  - `DeleteBucketTagging` is checked as `s3:PutBucketTagging`, since AWS has no
+    `s3:DeleteBucketTagging` action.
+
+A request naming several of these sub-resources is checked as the one S3 runs. `GET ?acl&tagging`
+returns the tags, so it needs `s3:GetObjectTagging`.
+
 A request that names its operation, in a Query `Action`, an `X-Amz-Target` header or a Smithy RPC v2
 path (`/service/<service>/operation/<operation>`), is authorized as the action AWS checks for that
 operation, which is usually the operation's own name. An RPC v2 call is checked as the service and
@@ -1142,6 +1210,7 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries regi
 - For detailed S3 bucket policy behavior and configuration, see [S3 Bucket Policy Enforcement](s3.md#bucket-policy-enforcement).
 - Lambda function policies, the statements `AddPermission` adds, take part the same way. An invoke of another account's function by ARN runs it in that account, so its function policy has to allow the caller as well; see [Function policies under IAM enforcement](lambda.md#function-policies-under-iam-enforcement).
 - SNS topic policies take part the same way for a request that names the topic in a JSON-protocol body; a topic with no policy set has the default one AWS gives a new topic. See [SNS](sns.md).
+- SQS queue and API Gateway REST API policies are stored but not evaluated.
 - A call an AWS service makes to another service's resource on its own behalf, such as SES publishing an event or a notification to an SNS topic, has no IAM principal, so the target's resource policy decides it alone and has to allow the calling service, through `{"Service": "<service>.amazonaws.com"}` or `{"AWS": "*"}`. A target with no policy refuses it. Its request context holds `aws:PrincipalIsAWSService` (`true`), `aws:PrincipalServiceName` and `aws:PrincipalServiceNamesList`, `aws:SourceArn` and `aws:SourceAccount` for the resource whose configuration triggered the call, `aws:ResourceAccount` and `aws:RequestedRegion`, and none of the keys that describe an IAM principal. A publish to an SNS topic from SES also carries `aws:SourceOwner`, the key the SNS Developer Guide lists SES among the services setting, which is what the default topic policy checks, so that policy admits SES acting for the topic owner's account and no other. SES is the one service checked this way so far; see [SES IAM enforcement](ses.md#iam-enforcement).
 
 ### Service control policies (SCPs)
@@ -1198,10 +1267,46 @@ These identities always bypass enforcement (backward-compatible defaults):
 specific log-stream ARN, so policies can allow or deny one stream within a group. Their
 `aws:ResourceTag/<key>` conditions read the owning log group's current tags in the request's
 account and region. Both stream operations check the documented group and stream name constraints
-before changing storage, preventing delimiter aliases from targeting another stream. Other Logs
-actions retain their existing wildcard resource evaluation.
+before changing storage, preventing delimiter aliases from targeting another stream.
 These checks also apply to deletion: legacy streams with names containing `:` or `*` cannot be
 deleted through `DeleteLogStream`. Existing stored names are not automatically migrated.
+
+**CloudWatch Logs groups.** `CreateLogGroup`, `DeleteLogGroup`, `PutRetentionPolicy` and
+`DeleteRetentionPolicy` accept policy resources naming the selected group with a bare ARN
+or its legacy `:*` form. Both forms participate in each statement, including explicit denies
+and `NotResource`, without bypassing session, boundary or SCP ceilings. The three operations on
+existing groups read that group's resource tags; creation uses the request's `tags` for
+`aws:RequestTag/<key>` and `aws:TagKeys`. Tagged creation additionally requires either
+`logs:TagResource` on the bare group ARN or `logs:TagLogGroup` on either group ARN form.
+The group name constraints apply before mutation, and deletion preserves streams and filters
+whose stored group identity belongs to another historical group. These four operations reject `:`
+or `*` in a group name. Historical names remain taggable through the ARN tagging APIs below;
+they cannot be newly created or deleted through the group lifecycle APIs. Stored names are not migrated.
+
+**CloudWatch Logs ARN tagging.** For log groups, `logs:TagResource`, `logs:UntagResource`
+and `logs:ListTagsForResource` evaluate the group's ARN without a trailing `:*`. The ARN must
+identify a group in the request's account, region and partition; a different owner or resource
+kind returns `ResourceNotFoundException` without reading or changing a local group's tags.
+All three actions use the group's existing `aws:ResourceTag/<key>` conditions. `TagResource`
+also provides `aws:RequestTag/<key>` and `aws:TagKeys`; `UntagResource` provides `aws:TagKeys`.
+An unauthorized request cannot partially add or remove tags. These ownership checks also apply
+when IAM enforcement is disabled. Shared tag mutations reject storage aliases whose stored group
+name differs from the requested name, without migrating historical records.
+
+This support covers log groups. Tagging destinations and other CloudWatch Logs resource types
+remains unsupported. Plain-name inputs are used literally, including incomplete prefixes such as
+`arn:archive`; arbitrary `:log-group:` substrings never select a different group. Structurally complete
+ARNs take precedence over plain-name interpretation and must identify a local group. A trailing `:*`
+is accepted on a canonical local group ARN. These compatibility forms are not a claim that AWS accepts
+them for these APIs. Other Logs actions retain their existing wildcard resource evaluation.
+
+**Secrets Manager secrets.** A request that names a secret by its name, or by a partial ARN without
+the random suffix, is evaluated against the stored secret's full ARN, suffix included, so a
+`secret:<name>-??????` resource, the pattern the Secrets Manager User Guide documents, matches it as
+it does on AWS, and a `Deny` on the full ARN applies. `CreateSecret` is evaluated against
+`secret:<Name>-??????`, standing in for the suffix the secret is assigned when it is created, so a
+policy scoped to a name prefix such as `secret:app/*` allows it. A name that matches no secret in the
+request's account and region is evaluated as `secret:<name>`, and an ARN that matches none as given.
 
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
 from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
@@ -1378,14 +1483,17 @@ floci populates:
   `s3:PutBucketTagging` (the `<Tagging>` body).
 - `aws:ResourceTag/<key>`: the target resource's current tags, for `ec2:CreateTags`,
   `ec2:DeleteTags`, `ec2:TerminateInstances` and `ec2:DescribeInstances` (the first
-  `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucketTagging`
-  and `s3:DeleteBucket` (the bucket). A request naming several EC2 resources is evaluated
+  `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucket` and the
+  `s3:PutBucketTagging` that `DeleteBucketTagging` is checked as (the bucket). A request naming several EC2 resources is evaluated
   once per resource and denied when any of them fails the condition, as on AWS.
-  `logs:CreateLogStream` and `logs:DeleteLogStream` use the owning log group's tags.
+  `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`,
+  `logs:ListTagsForResource`, `logs:DeleteLogGroup`, `logs:PutRetentionPolicy` and
+  `logs:DeleteRetentionPolicy` use the owning log group's tags.
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
-  `s3:DeleteObjectTagging` and `s3:PutObjectTagging`. A `versionId` in the request selects the
-  version whose tags are read. **`s3:DeleteObject` and `s3:PutObject` do not receive this key**, as measured on AWS.
+  `s3:DeleteObjectTagging`, `s3:PutObjectTagging` and the annotation actions, and for their
+  version actions (`s3:GetObjectVersion`, `s3:GetObjectVersionTagging` and so on). A `versionId` in the request
+  selects the version whose tags are read. **`s3:DeleteObject` and `s3:PutObject` do not receive this key**, as measured on AWS.
   An allow conditioned on it denies the delete of a correctly tagged object, and a create cannot
   be gated on tags an object does not have yet.
 - `s3:RequestObjectTag/<key>`: a tag the request asks to attach. `s3:PutObject` reads these
@@ -1400,9 +1508,12 @@ floci populates:
   `ForAllValues:StringEquals` can limit all requested keys without a `Null` guard; an
   omitted or empty tag set still follows the absent-key rules above. Existing object tags
   do not contribute to this requested set. See the [AWS object-tag policy guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/tagging-and-policies.html).
+- `s3:versionid`: the `versionId` of the request, for the version actions it selects.
 - A `PutObject` carrying `If-Match` is authorized as `s3:GetObject` as well, and that second
-  check is made without the object's tags in the context, as measured on AWS. `If-None-Match`
-  needs no such permission.
+  check is made without the object's tags in the context, as measured on AWS. `CopyObject` and
+  `CompleteMultipartUpload`, the other operations the S3 user guide lists for `If-Match`, get the
+  same check; `CreateMultipartUpload` and `UploadPart` ignore the header. `If-None-Match` needs no
+  such permission.
 - `aws:PrincipalArn`: the caller's ARN, resolved from the signing access key. It is the
   IAM-user ARN for a user access key, and `arn:aws:iam::<account>:root` for the bare account-id
   key (floci's account-root principal), matching the ARN shape AWS itself reports for the account
@@ -1469,10 +1580,14 @@ that way applies when the key is missing.
 
 The keys that say who is calling are written onto every context a request is evaluated against:
 the one the enforcement filter builds, one per resource the request names, one per transaction
-item, and the one S3 builds when it evaluates a bucket policy itself under `s3.enforce-auth`. A
-role trust policy is the exception: `sts:AssumeRole` evaluates its conditions with
-`aws:PrincipalArn` alone, so a trust policy keyed on `aws:userid`, `aws:PrincipalType` or
-`aws:username` does not match yet.
+item, the one S3 builds when it evaluates a bucket policy itself under `s3.enforce-auth`, and the
+trust policy `sts:AssumeRole` reads, which sees the caller through the same writer. A trust policy
+keyed on `aws:userid`, `aws:PrincipalType` or `aws:username` therefore matches the calling user or
+session, and a value the caller carries wins over one the request supplied. A credential that
+resolves to no IAM identity is the account root stand-in, which carries the account id as its
+`aws:userid` and `Account` as its `aws:PrincipalType`. One caller carries no `aws:userid`: the role
+Step Functions assumes for a task, which is a session and says so with `AssumedRole`, but is minted
+without a session name, and a session's `aws:userid` is `role-id:session-name`.
 
 Transactions check each item as `PutItem`, `UpdateItem`, `DeleteItem`, `GetItem`, or
 `ConditionCheckItem` before executing the request. Each item uses its own table, leading key

@@ -9,6 +9,8 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.Map;
@@ -514,4 +516,32 @@ class AccountContextFilterTest {
 
         return ctx;
     }
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void colonRefusalPrecedesStrictPartitionServiceRefusal(boolean query) {
+        allowUnknownRegions = true;
+        strictPartitions = true;
+        RegionResolver gov = new RegionResolver("us-gov-west-1", DEFAULT_ACCOUNT);
+        AccountContextFilter govFilter = new AccountContextFilter(accountResolver, gov, requestContext,
+                key -> Optional.empty(), this::config);
+        String credential = "AKID/20261015/custom:222222222222/cloudfront/aws4_request";
+        ContainerRequestContext ctx = mockContext(query ? null : "AWS4-HMAC-SHA256 Credential=" + credential,
+                query ? credential : null);
+        govFilter.filter(ctx);
+        ArgumentCaptor<Response> error = ArgumentCaptor.forClass(Response.class);
+        verify(ctx).abortWith(error.capture());
+        assertEquals(400, error.getValue().getStatus());
+        assertEquals("InvalidSignatureException", error.getValue().getHeaderString("X-Amzn-Errortype"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"AKID:alias/20261015/us-east-1/sqs/aws4_request",
+            "AKID/20261015/us-east-1/custom:service/aws4_request"})
+    void aColonOutsideTheRegionDoesNotChangeAdmission(String credential) {
+        ContainerRequestContext ctx = mockContext("AWS4-HMAC-SHA256 Credential=" + credential, null);
+        filter.filter(ctx);
+        verify(ctx, never()).abortWith(any());
+        assertEquals(DEFAULT_REGION, requestContext.getRegion());
+    }
+
 }

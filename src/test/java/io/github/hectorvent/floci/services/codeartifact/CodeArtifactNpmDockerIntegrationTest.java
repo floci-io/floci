@@ -360,6 +360,29 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     /**
+     * The real-world gap this closes: {@code DescribePackageVersion} used to 404 for every
+     * npm-published version the same reason {@code GetPackageVersionAsset} did. Confirms the
+     * bridge checks the real Verdaccio packument's own {@code versions} map (not a mock) for the
+     * published version, and 404s for one that was never published.
+     */
+    @Test
+    @Order(10)
+    void describePackageVersionBridgesToTheRealVerdaccioSidecar() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("packageVersion.status", equalTo("Published"))
+                .body("packageVersion.packageName", equalTo(PACKAGE_NAME))
+                .body("packageVersion.version", equalTo("1.0.0"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
+                        + "&package=" + PACKAGE_NAME + "&version=9.9.9")
+                .then().statusCode(404);
+    }
+
+    /**
      * A throwaway package, not {@link #PACKAGE_NAME}: deleting it exercises the real Verdaccio
      * unpublish-whole-package mechanism (GET the packument's own {@code _rev}, then {@code DELETE}
      * with that revision), confirmed live before this was built, and must not disturb the package

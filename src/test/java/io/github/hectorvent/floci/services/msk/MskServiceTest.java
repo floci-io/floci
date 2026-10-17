@@ -1024,4 +1024,25 @@ class MskServiceTest {
 
         assertThrows(AwsException.class, () -> mskService.createCluster(request));
     }
+
+    @Test
+    void createServerlessClusterWithoutDockerDaemonStillReachesActive() {
+        when(config.services().msk().mock()).thenReturn(false);
+        Mockito.doThrow(new RuntimeException("Cannot connect to the Docker daemon"))
+                .when(redpandaManager).startContainer(Mockito.any());
+        when(redpandaManager.tryStartContainer(Mockito.any())).thenReturn(false);
+
+        Serverless serverless = new Serverless();
+        serverless.setVpcConfigs(List.of(new VpcConfig()));
+        CreateClusterV2Request request = new CreateClusterV2Request();
+        request.setClusterName("no-docker-serverless");
+        request.setServerless(serverless);
+
+        MskCluster cluster = mskService.createCluster(request);
+
+        assertEquals(ClusterState.ACTIVE, cluster.getState());
+        assertEquals("localhost:9092", cluster.getBootstrapBrokers());
+        assertEquals(ClusterState.ACTIVE,
+                mskService.describeCluster(cluster.getClusterArn()).getState());
+    }
 }

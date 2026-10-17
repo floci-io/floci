@@ -13,6 +13,7 @@
 | `DeleteResolverEndpoint` | Deletes a resolver endpoint and returns its final description. |
 | `GetResolverEndpoint` | Returns a resolver endpoint by id. |
 | `ListResolverEndpoints` | Lists all resolver endpoints. |
+| `ListResolverEndpointIpAddresses` | Lists a resolver endpoint's IP addresses from those it was created with, each `ATTACHED`; an address left for AWS to choose has no `Ip`. Not paginated. |
 | `UpdateResolverEndpoint` | Updates a resolver endpoint's `Name` and `ResolverEndpointType`; `IpAddresses` changes are not modelled. |
 | `CreateResolverRule` | Creates a resolver rule, returned immediately as `COMPLETE`; `ResolverEndpointId` is not validated against an existing endpoint. |
 | `DeleteResolverRule` | Deletes a resolver rule and returns its final description. |

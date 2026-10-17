@@ -57,6 +57,7 @@ class S3CfnProvisionerTest {
         when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(i -> i.getArgument(0));
         // A bucket carrying a configuration no test declares, so every declared one is a change.
         when(s3.getBucketNotificationConfiguration(anyString())).thenReturn(queueNotification("existing"));
+        when(s3.snapshotBucketConfiguration(anyString())).thenReturn("snapshot");
         ctx = new ProvisionContext(engine, REGION, "000000000000", "my-stack");
     }
 
@@ -79,6 +80,37 @@ class S3CfnProvisionerTest {
         StackResource r = resource("Bucket", "AWS::S3::Bucket");
         provisioner.provision(r, props(json), ctx);
         return r;
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            {"Rules":[{"ObjectOwnership":"Bogus"}]}                    | The XML you provided was not well-formed or did not validate against our published schema.
+            {"Rules":[{}]}                                               | Model validation failed (#/OwnershipControls/Rules/0: required key [ObjectOwnership] not found)
+            {"Rules":[{"ObjectOwnership":["BucketOwnerEnforced"]}]}    | Model validation failed (#/OwnershipControls/Rules/0/ObjectOwnership: expected type: String, found: JSONArray)
+            {"Rules":[]}                                                 | The XML you provided was not well-formed or did not validate against our published schema.
+            {"Rules":"not-an-array"}                                     | Model validation failed (#/OwnershipControls/Rules: expected type: JSONArray, found: String)
+            """)
+    void invalidOwnershipControlsFailBeforeCreatingTheBucket(String controls, String message) {
+        AwsException error = assertThrows(AwsException.class,
+                () -> provisionBucket("{\"BucketName\":\"my-bucket\",\"OwnershipControls\":" + controls + "}"));
+
+        assertEquals(message, error.getMessage());
+        verify(s3, never()).createBucket(anyString(), anyString());
+        verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
+    }
+
+    @Test
+    void multipleOwnershipRulesFailBeforeCreatingTheBucket() {
+        AwsException error = assertThrows(AwsException.class, () -> provisionBucket("""
+                {"BucketName":"my-bucket","OwnershipControls":{"Rules":[
+                  {"ObjectOwnership":"ObjectWriter"},
+                  {"ObjectOwnership":"BucketOwnerEnforced"}]}}
+                """));
+
+        assertEquals("The XML you provided was not well-formed or did not validate against our published schema.",
+                error.getMessage());
+        verify(s3, never()).createBucket(anyString(), anyString());
+        verify(s3, never()).putBucketOwnershipControls(anyString(), anyString());
     }
 
     @Test
@@ -528,13 +560,9 @@ class S3CfnProvisionerTest {
         return config;
     }
 
-    /**
-     * A property that fails after the configuration was put has the replaced configuration put back,
-     * since the engine reports a failed update as rolled back. Its destinations were valid when it
-     * was put, so they are not checked again.
-     */
+    /** A later failure restores all changed bucket settings from the in-place update snapshot. */
     @Test
-    void aLaterFailurePutsTheReplacedNotificationConfigurationBack() {
+    void aLaterFailureRestoresTheBucketSnapshot() {
         NotificationConfiguration before = queueNotification("old");
         when(s3.getBucketNotificationConfiguration("b")).thenReturn(before);
         doThrow(new AwsException("MalformedXML", "bad", 400)).when(s3).putBucketVersioning("b", "Bogus");
@@ -549,7 +577,8 @@ class S3CfnProvisionerTest {
                 event -> { }, props("{\"BucketName\": \"b\"}"))));
 
         verify(s3).putBucketNotificationConfiguration(eq("b"), any());
-        verify(s3).putBucketNotificationConfiguration("b", before, true);
+        verify(s3).restoreBucketConfiguration("b", "snapshot");
+        assertFalse(r.getAttributes().containsKey(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR));
         assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
     }
 
@@ -570,7 +599,7 @@ class S3CfnProvisionerTest {
         when(s3.getBucketNotificationConfiguration("b")).thenReturn(queueNotification("old"));
         doThrow(new AwsException("MalformedXML", "bad", 400)).when(s3).putBucketVersioning("b", "Bogus");
         doThrow(new AwsException("InternalError", "disk", 500))
-                .when(s3).putBucketNotificationConfiguration(eq("b"), any(), eq(true));
+                .when(s3).restoreBucketConfiguration("b", "snapshot");
         StackResource r = resource("Bucket", "AWS::S3::Bucket");
         r.setPhysicalId("b");
 

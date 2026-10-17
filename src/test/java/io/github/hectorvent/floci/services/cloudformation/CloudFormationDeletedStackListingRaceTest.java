@@ -2,9 +2,9 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
+import io.github.hectorvent.floci.testing.CloudFormationSettingsProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
@@ -12,7 +12,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -26,23 +25,16 @@ import static org.junit.jupiter.api.Assertions.fail;
  * A stack being deleted moves from the live map to the retained-deleted one. Handing it over in
  * the wrong order leaves a window in which it is in neither, and a ListStacks landing there loses
  * a stack that both exists and is retained.
+ *
+ * <p>{@link CloudFormationSettingsProfile} keeps a deleted stack for a day, long enough that
+ * retention cannot end this test. The shipped 30 seconds are measured on the test
+ * {@code MutableClock}, which advances a millisecond on every read, and the pollers below read it
+ * thousands of times: left at the default they expire the retained record themselves and lose the
+ * stack for a reason that has nothing to do with the handoff.
  */
 @QuarkusTest
-@TestProfile(CloudFormationDeletedStackListingRaceTest.LongRetentionProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class CloudFormationDeletedStackListingRaceTest {
-
-    /**
-     * Retention long enough that it cannot end this test. The shipped 30 seconds are measured on
-     * the test {@code MutableClock}, which advances a millisecond on every read, and the pollers
-     * below read it thousands of times: left at the default they expire the retained record
-     * themselves and lose the stack for a reason that has nothing to do with the handoff.
-     */
-    public static final class LongRetentionProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.cloudformation.deleted-stack-retention-seconds", "86400");
-        }
-    }
 
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";

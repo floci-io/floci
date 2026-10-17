@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -55,6 +56,13 @@ public class Stack {
     // executeTemplate — used to detect drift in the live SSM value between deploys even when the
     // referencing parameter (name) is unchanged, so change-set previews agree with execution.
     private Map<String, String> resolvedParameters = orderedMap();
+    // A keyed digest of what each string holding a dynamic reference resolved to when the stack's
+    // last operation committed, keyed by the string as the comparison of an update sees it. An
+    // update compares what the string resolves to now against it, so a stored value that moved is a
+    // change, as on AWS; the digest keeps a secret the reference resolves to out of the stored stack.
+    private Map<String, String> dynamicReferenceDigests = orderedMap();
+    // The stack's own random key for those digests.
+    private String dynamicReferenceKey;
     private Map<String, String> outputs = orderedMap();
     private Map<String, String> exports = orderedMap();
     // Maps output key to its export name (when Export.Name is defined on an output)
@@ -109,6 +117,25 @@ public class Stack {
     public void setResolvedParameters(Map<String, String> resolvedParameters) { this.resolvedParameters = orderedMap(resolvedParameters); }
     @JsonProperty("resolvedParameters")
     public Map<String, String> resolvedParametersSnapshot() { return snapshot(resolvedParameters); }
+    public void replaceDynamicReferenceDigests(Map<String, String> source) { replace(dynamicReferenceDigests, source); }
+    @JsonProperty("dynamicReferenceDigests")
+    public void setDynamicReferenceDigests(Map<String, String> dynamicReferenceDigests) {
+        this.dynamicReferenceDigests = orderedMap(dynamicReferenceDigests);
+    }
+    @JsonProperty("dynamicReferenceDigests")
+    public Map<String, String> dynamicReferenceDigestsSnapshot() { return snapshot(dynamicReferenceDigests); }
+    /** The key of the stack's dynamic reference digests, made the first time one is needed. */
+    @JsonProperty("dynamicReferenceKey")
+    public synchronized String dynamicReferenceKey() {
+        if (dynamicReferenceKey == null) {
+            dynamicReferenceKey = UUID.randomUUID().toString();
+        }
+        return dynamicReferenceKey;
+    }
+    @JsonProperty("dynamicReferenceKey")
+    public synchronized void setDynamicReferenceKey(String dynamicReferenceKey) {
+        this.dynamicReferenceKey = dynamicReferenceKey;
+    }
     @JsonIgnore
     public Map<String, String> getOutputs() { return outputs; }
     @JsonProperty("outputs")

@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.TestImages;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import jakarta.inject.Inject;
@@ -22,7 +23,6 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
@@ -125,10 +125,7 @@ class EcsCredentialsProxyDockerIntegrationTest {
                 .post("/").then().statusCode(200);
         String roleArn = "arn:aws:iam::" + account + ":role/" + role;
 
-        int port;
-        try (ServerSocket socket = new ServerSocket(0)) {
-            port = socket.getLocalPort();
-        }
+        int port = FreePorts.anyInterfacePort();
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().taskRoleCredentials().port()).thenReturn(port);
         when(config.services().ecs().taskRoleCredentials().ttlSeconds()).thenReturn(21600L);
@@ -193,10 +190,7 @@ class EcsCredentialsProxyDockerIntegrationTest {
         CreateNetworkResponse created = dockerClient.createNetworkCmd().withName(network).exec();
         networkId = created.getId();
 
-        int port;
-        try (ServerSocket socket = new ServerSocket(0)) {
-            port = socket.getLocalPort();
-        }
+        int port = FreePorts.anyInterfacePort();
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().taskRoleCredentials().proxyImage()).thenReturn("floci/network-helper:local");
         when(config.services().ecs().taskRoleCredentials().port()).thenReturn(port);

@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.services.timestreaminfluxdb;
 
 import com.github.dockerjava.api.DockerClient;
+import io.github.hectorvent.floci.testing.ContainerDataPlaneProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
@@ -28,9 +28,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+/**
+ * Runs Timestream for InfluxDB on real InfluxDB containers, published on host ports 18186 to 18285.
+ * The settings come from {@link ContainerDataPlaneProfile}, which this class shares with
+ * {@code EksImdsDockerIntegrationTest}.
+ */
 @Tag("docker")
 @QuarkusTest
-@TestProfile(TimestreamInfluxDbDockerIntegrationTest.RealContainerProfile.class)
+@TestProfile(ContainerDataPlaneProfile.class)
 // Three 180 s status waits on real containers, plus the requests and cleanup around them.
 @Timeout(value = 15, unit = TimeUnit.MINUTES)
 class TimestreamInfluxDbDockerIntegrationTest {
@@ -39,16 +44,6 @@ class TimestreamInfluxDbDockerIntegrationTest {
     private static final String TARGET = "AmazonTimestreamInfluxDB.";
     private static final String USERNAME = "operator";
     private static final String PASSWORD = "password123";
-
-    public static class RealContainerProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.timestream-influxdb.mock", "false",
-                    "floci.services.timestream-influxdb.host-port-base", "18186",
-                    "floci.services.timestream-influxdb.host-port-max", "18285");
-        }
-    }
 
     @Inject
     DockerClient dockerClient;

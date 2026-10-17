@@ -12,8 +12,11 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.net.URI;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -108,6 +111,50 @@ class SsmSecretsManagerReferenceIamEnforcementIntegrationTest {
         ssm(caller, "GetParameters", "{\"Names\": [\"" + PREFIX + secret + "\"], \"WithDecryption\": true}")
             .statusCode(200)
             .body("Parameters[0].Value", equalTo("secret-value"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"GetParameter,false", "GetParameters,false", "GetParameter,true", "GetParameters,true"})
+    void queryReferenceReadsRetainTheCallersSecretPermission(String action, boolean blankHeader) {
+        String region = "eu-west-1";
+        String secret = "query-secret-" + UUID.randomUUID();
+        String root = auth(ACCOUNT_ID, "secretsmanager").replace("us-east-1", region);
+        given().header("Authorization", root).header("X-Amz-Target", "secretsmanager.CreateSecret")
+                .contentType("application/x-amz-json-1.1")
+                .body(Map.of("Name", secret, "SecretString", "query-secret-value"))
+                .when().post("/").then().statusCode(200);
+        cleanup.register(() -> given().header("Authorization", root)
+                .header("X-Amz-Target", "secretsmanager.DeleteSecret").contentType("application/x-amz-json-1.1")
+                .body(Map.of("SecretId", secret, "ForceDeleteWithoutRecovery", true))
+                .when().post("/").then().statusCode(200));
+        String denied = createUserWithPolicy("query-ssm-only", SSM_ONLY);
+        String allowed = createUserWithPolicy("query-ssm-secret", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["ssm:GetParameter","ssm:GetParameters",
+                    "secretsmanager:GetSecretValue"],"Resource":"*"}
+                ]}""");
+        Map<String, Object> body = action.equals("GetParameter")
+                ? Map.of("Name", PREFIX + secret, "WithDecryption", true)
+                : Map.of("Names", List.of(PREFIX + secret), "WithDecryption", true);
+        queryReference(allowed, action, region, blankHeader, body).statusCode(200)
+                .body(action.equals("GetParameter") ? "Parameter.Value" : "Parameters[0].Value",
+                        equalTo("query-secret-value"));
+        queryReference(denied, action, region, blankHeader, body).statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(DEPENDENCY_FAILED));
+    }
+
+    private static ValidatableResponse queryReference(String caller, String action, String region,
+                                                      boolean blankHeader, Map<String, Object> body) {
+        RequestSpecification request = given().contentType("application/x-amz-json-1.1")
+                .header("X-Amz-Target", "AmazonSSM." + action)
+                .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+                .queryParam("X-Amz-Credential", caller + "/20261015/" + region + "/ssm/aws4_request")
+                .queryParam("X-Amz-Signature", "abc").body(body);
+        if (blankHeader) {
+            request.header("Authorization", "");
+        }
+        return request.when().post("/").then();
     }
 
     private static String createSecret(String prefix) {

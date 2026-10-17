@@ -16,6 +16,7 @@ public class SynchronousBillingEmissionProfile implements QuarkusTestProfile {
     public Map<String, String> getConfigOverrides() {
         return Map.of(
                 "quarkus.http.test-port", "4566",
+                "quarkus.http.port", "4566",
                 "floci.base-url", "http://localhost:4566",
                 "floci.services.cur.emit-mode", "synchronous",
                 "floci.services.bcm-data-exports.emit-mode", "synchronous");

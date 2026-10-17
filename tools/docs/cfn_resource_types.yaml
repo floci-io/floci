@@ -177,6 +177,9 @@ notes:
   AWS::Lambda::EventSourceMapping: 'SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored'
   AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into
   AWS::Lambda::EventInvokeConfig: also what a SAM function's `EventInvokeConfig` expands into
+  AWS::Lambda::WebFunction: control plane only; the endpoint domain does not serve requests yet
+  AWS::Lambda::WebFunctionRevision: every property is createOnly, so a change mints a new revision
+  AWS::Lambda::WebFunctionEndpoint: '`RegionalEndpoints` is not exposed to `Fn::GetAtt` yet'
   AWS::EC2::VPC: 'deleted on stack teardown; a VPC with dependents outside the stack, including anything still holding a network interface in its subnets (an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone interface, an interface endpoint), fails the delete with `DependencyViolation`, as on AWS'
   AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
   AWS::ApplicationAutoScaling::ScalableTarget: '`ScheduledActions` are accepted and not run; Floci has no scheduled scaling'

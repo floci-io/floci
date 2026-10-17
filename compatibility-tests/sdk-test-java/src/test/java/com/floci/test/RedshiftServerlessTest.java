@@ -9,7 +9,9 @@ import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementRespon
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
 import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClient;
 import software.amazon.awssdk.services.redshiftserverless.model.ConflictException;
+import software.amazon.awssdk.services.redshiftserverless.model.EndpointAccess;
 import software.amazon.awssdk.services.redshiftserverless.model.GetCredentialsResponse;
+import software.amazon.awssdk.services.redshiftserverless.model.InvalidPaginationException;
 import software.amazon.awssdk.services.redshiftserverless.model.Namespace;
 import software.amazon.awssdk.services.redshiftserverless.model.NamespaceStatus;
 import software.amazon.awssdk.services.redshiftserverless.model.ResourceNotFoundException;
@@ -20,6 +22,7 @@ import software.amazon.awssdk.services.redshiftserverless.model.UsageLimit;
 import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitBreachAction;
 import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitPeriod;
 import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitUsageType;
+import software.amazon.awssdk.services.redshiftserverless.model.ValidationException;
 import software.amazon.awssdk.services.redshiftserverless.model.Workgroup;
 import software.amazon.awssdk.services.redshiftserverless.model.WorkgroupStatus;
 
@@ -285,6 +288,139 @@ class RedshiftServerlessTest {
             assertThat(client.listReservationOfferings(request -> {}).reservationOfferingsList()).isEmpty();
             assertThatThrownBy(() -> client.getReservation(request -> request.reservationId("r-1")))
                     .isInstanceOf(ResourceNotFoundException.class);
+        }
+    }
+
+    @Test
+    void resourcePolicyUsesAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Creates resources and asserts emulator-local behavior");
+
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
+            String namespaceName = "floci-compat-policy-ns";
+            String snapshotName = "floci-compat-policy-snap";
+            try {
+                client.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin")
+                        .adminUserPassword("Secret123!"));
+                String snapshotArn = client.createSnapshot(request -> request
+                        .snapshotName(snapshotName).namespaceName(namespaceName)).snapshot().snapshotArn();
+
+                client.putResourcePolicy(request -> request.resourceArn(snapshotArn).policy("{\"Version\":\"2012-10-17\"}"));
+                assertThat(client.getResourcePolicy(request -> request.resourceArn(snapshotArn))
+                        .resourcePolicy().policy()).contains("2012-10-17");
+                client.deleteResourcePolicy(request -> request.resourceArn(snapshotArn));
+                assertThatThrownBy(() -> client.getResourcePolicy(request -> request.resourceArn(snapshotArn)))
+                        .isInstanceOf(ResourceNotFoundException.class);
+            } finally {
+                deleteSnapshotBestEffort(client, snapshotName);
+                deleteBestEffort(client, namespaceName);
+            }
+        }
+    }
+
+    @Test
+    void endpointAccessUsesAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Creates resources and asserts emulator-local behavior");
+
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
+            String namespaceName = "floci-compat-endpoint-ns";
+            String workgroupName = "floci-compat-endpoint-wg";
+            try {
+                client.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin")
+                        .adminUserPassword("Secret123!"));
+                client.createWorkgroup(request -> request.workgroupName(workgroupName).namespaceName(namespaceName));
+
+                EndpointAccess endpoint = client.createEndpointAccess(request -> request
+                        .endpointName("floci-compat-endpoint-ep").workgroupName(workgroupName)
+                        .subnetIds("subnet-a")).endpoint();
+                assertThat(endpoint.endpointStatus()).isEqualTo("ACTIVE");
+                assertThat(endpoint.endpointCreateTime()).isNotNull();
+                assertThat(endpoint.vpcSecurityGroups()).isEmpty();
+                assertThatThrownBy(() -> client.createEndpointAccess(request -> request
+                        .endpointName("invalid--endpoint").workgroupName(workgroupName).subnetIds("subnet-a")))
+                        .isInstanceOf(ValidationException.class);
+                assertThat(client.listEndpointAccess(request -> request.workgroupName(workgroupName)).endpoints())
+                        .extracting(EndpointAccess::endpointName).containsExactly("floci-compat-endpoint-ep");
+                client.deleteEndpointAccess(request -> request.endpointName("floci-compat-endpoint-ep"));
+            } finally {
+                deleteWorkgroupBestEffort(client, workgroupName);
+                deleteBestEffort(client, namespaceName);
+            }
+        }
+    }
+
+    @Test
+    void customDomainAssociationUsesAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Creates resources and asserts emulator-local behavior");
+
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
+            String namespaceName = "floci-compat-domain-ns";
+            String workgroupName = "floci-compat-domain-wg";
+            String certificate = "arn:aws:acm:us-east-1:000000000000:certificate/11111111-2222-3333-4444-555555555555";
+            try {
+                client.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin")
+                        .adminUserPassword("Secret123!"));
+                client.createWorkgroup(request -> request.workgroupName(workgroupName).namespaceName(namespaceName));
+
+                client.createCustomDomainAssociation(request -> request.workgroupName(workgroupName)
+                        .customDomainName("db.example.com").customDomainCertificateArn(certificate));
+                assertThat(client.listCustomDomainAssociations(request -> request.customDomainName("db.example.com"))
+                        .associations()).hasSize(1);
+
+                GetCredentialsResponse credentials = client.getCredentials(request -> request
+                        .customDomainName("db.example.com")
+                        .dbName("dev"));
+                assertThat(credentials.dbUser()).isNotBlank();
+                assertThat(credentials.dbPassword()).isNotBlank();
+                assertThat(credentials.expiration()).isAfter(Instant.now());
+
+                assertThatThrownBy(() -> client.getCredentials(request -> request
+                        .customDomainName("db.example.com")
+                        .workgroupName(workgroupName)))
+                        .isInstanceOf(ValidationException.class);
+
+                client.deleteCustomDomainAssociation(request -> request.workgroupName(workgroupName)
+                        .customDomainName("db.example.com"));
+
+                assertThatThrownBy(() -> client.getCredentials(request -> request
+                        .customDomainName("db.example.com")))
+                        .isInstanceOf(ResourceNotFoundException.class);
+            } finally {
+                deleteWorkgroupBestEffort(client, workgroupName);
+                deleteBestEffort(client, namespaceName);
+            }
+        }
+    }
+
+    @Test
+    void snapshotCopyDestinationCanChangeOnlyAfterDeletion() {
+        assumeFalse(TestFixtures.isRealAws(), "Asserts metadata-only snapshot copying");
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
+            String namespaceName = "floci-compat-copy-ns";
+            try {
+                client.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin"));
+                String copyId = client.createSnapshotCopyConfiguration(request -> request
+                        .namespaceName(namespaceName).destinationRegion("us-west-2"))
+                        .snapshotCopyConfiguration().snapshotCopyConfigurationId();
+                assertThatThrownBy(() -> client.createSnapshotCopyConfiguration(request -> request
+                        .namespaceName(namespaceName).destinationRegion("eu-west-1")))
+                        .isInstanceOf(ConflictException.class);
+                client.deleteSnapshotCopyConfiguration(request -> request.snapshotCopyConfigurationId(copyId));
+                String replacementId = client.createSnapshotCopyConfiguration(request -> request
+                        .namespaceName(namespaceName).destinationRegion("eu-west-1"))
+                        .snapshotCopyConfiguration().snapshotCopyConfigurationId();
+                assertThat(client.listSnapshotCopyConfigurations(request -> request.namespaceName(namespaceName))
+                        .snapshotCopyConfigurations()).extracting(configuration -> configuration.destinationRegion())
+                        .containsExactly("eu-west-1");
+                assertThatThrownBy(() -> client.listSnapshotCopyConfigurations(request -> request
+                        .namespaceName(namespaceName).maxResults(0)))
+                        .isInstanceOf(ValidationException.class);
+                assertThatThrownBy(() -> client.listSnapshotCopyConfigurations(request -> request
+                        .namespaceName(namespaceName).nextToken("bad-token")))
+                        .isInstanceOf(InvalidPaginationException.class);
+                client.deleteSnapshotCopyConfiguration(request -> request.snapshotCopyConfigurationId(replacementId));
+            } finally {
+                deleteBestEffort(client, namespaceName);
+            }
         }
     }
 

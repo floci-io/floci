@@ -731,6 +731,172 @@ class SnsServiceTest {
         assertFalse(snsService.matchesFilterPolicy(sub, body("{\"price\":true}"), null));
     }
 
+    /**
+     * suffix, equals-ignore-case, wildcard, and cidr are string operators in the same way prefix
+     * is. A missing value or a non-textual body value does not match.
+     */
+    @Test
+    void filterPolicy_messageBody_suffixEqualsIgnoreCaseWildcardAndCidr() {
+        Subscription prefix = subscriptionWithPolicy(
+                "{\"key\":[{\"prefix\":\"images/\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(prefix, body("{\"key\":\"images/cat.png\"}"), null));
+
+        Subscription suffix = subscriptionWithPolicy(
+                "{\"key\":[{\"suffix\":\".png\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(suffix, body("{\"key\":\"images/cat.png\"}"), null));
+
+        Subscription suffixOnly = subscriptionWithPolicy(
+                "{\"f\":[{\"suffix\":\".png\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(suffixOnly, body("{\"f\":\"img.png\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(suffixOnly, body("{\"f\":\"img.jpg\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(suffixOnly, body("{\"f\":\"img.PNG\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(suffixOnly, body("{}"), null));
+        // A numeric property stays a number: suffix "0" does not match 100.
+        Subscription suffixOnNumber = subscriptionWithPolicy(
+                "{\"f\":[{\"suffix\":\"0\"}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(suffixOnNumber, body("{\"f\":100}"), null));
+
+        Subscription ignoreCase = subscriptionWithPolicy(
+                "{\"f\":[{\"equals-ignore-case\":\"ALERT\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(ignoreCase, body("{\"f\":\"alert\"}"), null));
+        assertTrue(snsService.matchesFilterPolicy(ignoreCase, body("{\"f\":\"Alert\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(ignoreCase, body("{\"f\":\"ALERT!\"}"), null));
+
+        Subscription wildcard = subscriptionWithPolicy(
+                "{\"f\":[{\"wildcard\":\"img*.png\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(wildcard, body("{\"f\":\"img01.png\"}"), null));
+        assertTrue(snsService.matchesFilterPolicy(wildcard, body("{\"f\":\"img.png\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(wildcard, body("{\"f\":\"IMG01.PNG\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(wildcard, body("{\"f\":\"img01.png.bak\"}"), null));
+
+        Subscription cidr = subscriptionWithPolicy(
+                "{\"ip\":[{\"cidr\":\"10.0.0.0/24\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(cidr, body("{\"ip\":\"10.0.0.5\"}"), null));
+        assertTrue(snsService.matchesFilterPolicy(cidr, body("{\"ip\":\"10.0.0.0\"}"), null));
+        assertTrue(snsService.matchesFilterPolicy(cidr, body("{\"ip\":\"10.0.0.255\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(cidr, body("{\"ip\":\"10.0.1.5\"}"), null));
+    }
+
+    /**
+     * anything-but of one nested operator matches a present value only when that operator does not.
+     * A number still matches anything-but of a string operator, and a string still matches
+     * anything-but of a numeric operator it fails.
+     */
+    @Test
+    void filterPolicy_messageBody_nestedAnythingBut() {
+        Subscription prefix = subscriptionWithPolicy(
+                "{\"f\":[{\"anything-but\":{\"prefix\":\"tmp\"}}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(prefix, body("{\"f\":\"img.png\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(prefix, body("{\"f\":\"tmp/a\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(prefix, body("{}"), null));
+
+        Subscription suffix = subscriptionWithPolicy(
+                "{\"f\":[{\"anything-but\":{\"suffix\":\".png\"}}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(suffix, body("{\"f\":\"img.jpg\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(suffix, body("{\"f\":\"img.png\"}"), null));
+
+        Subscription ignoreCase = subscriptionWithPolicy(
+                "{\"f\":[{\"anything-but\":{\"equals-ignore-case\":\"ALERT\"}}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(ignoreCase, body("{\"f\":\"note\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(ignoreCase, body("{\"f\":\"alert\"}"), null));
+
+        Subscription wildcard = subscriptionWithPolicy(
+                "{\"f\":[{\"anything-but\":{\"wildcard\":\"img*.png\"}}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(wildcard, body("{\"f\":\"readme\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(wildcard, body("{\"f\":\"img01.png\"}"), null));
+
+        Subscription cidr = subscriptionWithPolicy(
+                "{\"ip\":[{\"anything-but\":{\"cidr\":\"10.0.0.0/24\"}}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(cidr, body("{\"ip\":\"10.0.1.5\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(cidr, body("{\"ip\":\"10.0.0.5\"}"), null));
+
+        Subscription numeric = subscriptionWithPolicy(
+                "{\"n\":[{\"anything-but\":{\"numeric\":[\"=\",100]}}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(numeric, body("{\"n\":50}"), null));
+        assertFalse(snsService.matchesFilterPolicy(numeric, body("{\"n\":100}"), null));
+        assertTrue(snsService.matchesFilterPolicy(numeric, body("{\"n\":\"100\"}"), null));
+
+        Subscription numberVsPrefix = subscriptionWithPolicy(
+                "{\"n\":[{\"anything-but\":{\"prefix\":\"1\"}}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(numberVsPrefix, body("{\"n\":100}"), null));
+    }
+
+    /** Non-textual and malformed numeric nested operands fail closed in both filter scopes. */
+    @Test
+    void filterPolicy_nestedAnythingBut_malformedOperandDoesNotMatch() {
+        assertMalformedNestedClosed("{\"f\":[{\"anything-but\":{\"suffix\":1}}]}",
+                "f", "x1", "{\"f\":\"x1\"}");
+        assertMalformedNestedClosed("{\"n\":[{\"anything-but\":{\"numeric\":[\"=\",100,\"<\"]}}]}",
+                "n", "50", "{\"n\":50}");
+        assertMalformedNestedClosed("{\"n\":[{\"anything-but\":{\"numeric\":1}}]}",
+                "n", "1", "{\"n\":1}");
+        assertMalformedNestedClosed("{\"n\":[{\"anything-but\":{\"numeric\":[\"=\",\"100\"]}}]}",
+                "n", "50", "{\"n\":50}");
+    }
+
+    private void assertMalformedNestedClosed(String policy, String key, String attribute, String json) {
+        assertFalse(snsService.matchesFilterPolicy(
+                subscriptionWithPolicy(policy, "MessageBody"), body(json), null));
+        assertFalse(snsService.matchesFilterPolicy(
+                subscriptionWithPolicy(policy, null), null, attr(key, attribute, "String")));
+    }
+
+    /** A glob is anchored and literal; a CIDR compares addresses under the prefix and ignores names. */
+    @Test
+    void filterPolicy_messageBody_wildcardAndCidrEdges() {
+        Subscription empty = subscriptionWithPolicy("{\"f\":[{}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(empty, body("{\"f\":\"img.png\"}"), null));
+        Subscription unknown = subscriptionWithPolicy(
+                "{\"f\":[{\"nope\":\"img.png\"}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(unknown, body("{\"f\":\"img.png\"}"), null));
+        Subscription badSuffix = subscriptionWithPolicy("{\"f\":[{\"suffix\":1}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(badSuffix, body("{\"f\":\"x1\"}"), null));
+        Subscription anythingButEmpty = subscriptionWithPolicy(
+                "{\"f\":[{\"anything-but\":{}}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(anythingButEmpty, body("{\"f\":\"img.png\"}"), null));
+        Subscription anythingButUnknown = subscriptionWithPolicy(
+                "{\"f\":[{\"anything-but\":{\"nope\":\"z\"}}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(anythingButUnknown, body("{\"f\":\"img.png\"}"), null));
+
+        Subscription literalDot = subscriptionWithPolicy(
+                "{\"f\":[{\"wildcard\":\"a.b\"}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(literalDot, body("{\"f\":\"axb\"}"), null));
+        Subscription starred = subscriptionWithPolicy(
+                "{\"f\":[{\"wildcard\":\"a*b\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(starred, body("{\"f\":\"axb\"}"), null));
+        Subscription any = subscriptionWithPolicy("{\"f\":[{\"wildcard\":\"*\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(any, body("{\"f\":\"\"}"), null));
+        Subscription multiStar = subscriptionWithPolicy(
+                "{\"f\":[{\"wildcard\":\"a*b*c\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(multiStar, body("{\"f\":\"aXbYc\"}"), null));
+
+        Subscription hostBits = subscriptionWithPolicy(
+                "{\"ip\":[{\"cidr\":\"10.0.0.5/24\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(hostBits, body("{\"ip\":\"10.0.0.9\"}"), null));
+        Subscription tooWide = subscriptionWithPolicy(
+                "{\"ip\":[{\"cidr\":\"10.0.0.0/33\"}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(tooWide, body("{\"ip\":\"10.0.0.1\"}"), null));
+
+        Subscription v6 = subscriptionWithPolicy(
+                "{\"ip\":[{\"cidr\":\"2001:db8::/32\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(v6, body("{\"ip\":\"2001:db8::1\"}"), null));
+        Subscription v4 = subscriptionWithPolicy(
+                "{\"ip\":[{\"cidr\":\"10.0.0.0/24\"}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(v4, body("{\"ip\":\"2001:db8::1\"}"), null));
+
+        Subscription allV4 = subscriptionWithPolicy(
+                "{\"ip\":[{\"cidr\":\"0.0.0.0/0\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(allV4, body("{\"ip\":\"192.0.2.10\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(allV4, body("{\"ip\":\"2001:db8::1\"}"), null));
+
+        Subscription covering = subscriptionWithPolicy(
+                "{\"ip\":[{\"cidr\":\"10.0.0.0/8\"}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(covering, body("{\"ip\":\"10.0.0.5/32\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(covering, body("{\"ip\":\"example.com\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(covering, body("{\"ip\":\"010.0.0.1\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(covering, body("{\"ip\":\"10.0.0.5%eth0\"}"), null));
+    }
+
     @Test
     void filterPolicy_messageBody_anythingButIsTypeAware() {
         Subscription strRule = subscriptionWithPolicy(
@@ -913,6 +1079,114 @@ class SnsServiceTest {
                 stringArray("codes", "[\"12\",\"99\"]")));
     }
 
+    /** The same string operators match a String attribute, and fail when the string does not. */
+    @Test
+    void filterPolicy_messageAttributes_suffixEqualsIgnoreCaseWildcardAndCidr() {
+        Subscription prefix = subscriptionWithPolicy("{\"name\":[{\"prefix\":\"foo\"}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(prefix, null, attr("name", "foobar", "String")));
+        assertFalse(snsService.matchesFilterPolicy(prefix, null, attr("name", "bar", "String")));
+
+        Subscription suffix = subscriptionWithPolicy("{\"name\":[{\"suffix\":\".png\"}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(suffix, null, attr("name", "img.png", "String")));
+        assertFalse(snsService.matchesFilterPolicy(suffix, null, attr("name", "img.jpg", "String")));
+        assertFalse(snsService.matchesFilterPolicy(suffix, null, Map.of()));
+
+        Subscription ignoreCase = subscriptionWithPolicy(
+                "{\"name\":[{\"equals-ignore-case\":\"ALERT\"}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(ignoreCase, null, attr("name", "alert", "String")));
+        assertTrue(snsService.matchesFilterPolicy(ignoreCase, null, attr("name", "Alert", "String")));
+        assertFalse(snsService.matchesFilterPolicy(ignoreCase, null, attr("name", "ALERT!", "String")));
+
+        Subscription wildcard = subscriptionWithPolicy(
+                "{\"name\":[{\"wildcard\":\"img*.png\"}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(wildcard, null, attr("name", "img01.png", "String")));
+        assertTrue(snsService.matchesFilterPolicy(wildcard, null, attr("name", "img.png", "String")));
+        assertFalse(snsService.matchesFilterPolicy(wildcard, null, attr("name", "IMG01.PNG", "String")));
+        assertFalse(snsService.matchesFilterPolicy(wildcard, null, attr("name", "img01.png.bak", "String")));
+
+        Subscription cidr = subscriptionWithPolicy("{\"ip\":[{\"cidr\":\"10.0.0.0/24\"}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(cidr, null, attr("ip", "10.0.0.5", "String")));
+        assertFalse(snsService.matchesFilterPolicy(cidr, null, attr("ip", "10.0.1.5", "String")));
+    }
+
+    /** A String.Array matches these operators when any element does. */
+    @Test
+    void filterPolicy_stringArrayAttribute_stringOperatorsMatchAnyElement() {
+        Subscription suffix = subscriptionWithPolicy("{\"f\":[{\"suffix\":\".png\"}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(suffix, null,
+                stringArray("f", "[\"img.jpg\",\"img.png\"]")));
+        assertFalse(snsService.matchesFilterPolicy(suffix, null,
+                stringArray("f", "[\"img.jpg\",\"img.gif\"]")));
+
+        Subscription ignoreCase = subscriptionWithPolicy(
+                "{\"f\":[{\"equals-ignore-case\":\"ALERT\"}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(ignoreCase, null,
+                stringArray("f", "[\"note\",\"alert\"]")));
+        assertFalse(snsService.matchesFilterPolicy(ignoreCase, null,
+                stringArray("f", "[\"note\",\"warn\"]")));
+
+        Subscription wildcard = subscriptionWithPolicy("{\"f\":[{\"wildcard\":\"img*.png\"}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(wildcard, null,
+                stringArray("f", "[\"readme\",\"img01.png\"]")));
+        assertFalse(snsService.matchesFilterPolicy(wildcard, null,
+                stringArray("f", "[\"readme\",\"notes\"]")));
+
+        Subscription cidr = subscriptionWithPolicy("{\"ip\":[{\"cidr\":\"10.0.0.0/24\"}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(cidr, null,
+                stringArray("ip", "[\"10.0.1.5\",\"10.0.0.5\"]")));
+        assertFalse(snsService.matchesFilterPolicy(cidr, null,
+                stringArray("ip", "[\"10.0.1.5\",\"10.1.0.5\"]")));
+    }
+
+    /**
+     * anything-but on a String.Array matches only when no element is excluded. One excluded
+     * element vetoes the attribute.
+     */
+    @Test
+    void filterPolicy_stringArrayAttribute_nestedAnythingButVetoesOnAnyElement() {
+        Subscription sub = subscriptionWithPolicy(
+                "{\"f\":[{\"anything-but\":{\"prefix\":\"tmp\"}}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(sub, null,
+                stringArray("f", "[\"img.png\",\"readme\"]")));
+        assertFalse(snsService.matchesFilterPolicy(sub, null,
+                stringArray("f", "[\"img.png\",\"tmp/a\"]")));
+    }
+
+    /** Nested anything-but on an attribute uses the same operators, and a missing attribute does not match. */
+    @Test
+    void filterPolicy_messageAttributes_nestedAnythingBut() {
+        Subscription prefix = subscriptionWithPolicy(
+                "{\"f\":[{\"anything-but\":{\"prefix\":\"tmp\"}}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(prefix, null, attr("f", "img.png", "String")));
+        assertFalse(snsService.matchesFilterPolicy(prefix, null, attr("f", "tmp/a", "String")));
+        assertFalse(snsService.matchesFilterPolicy(prefix, null, Map.of()));
+
+        Subscription suffix = subscriptionWithPolicy(
+                "{\"f\":[{\"anything-but\":{\"suffix\":\".png\"}}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(suffix, null, attr("f", "img.jpg", "String")));
+        assertFalse(snsService.matchesFilterPolicy(suffix, null, attr("f", "img.png", "String")));
+
+        Subscription ignoreCase = subscriptionWithPolicy(
+                "{\"f\":[{\"anything-but\":{\"equals-ignore-case\":\"ALERT\"}}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(ignoreCase, null, attr("f", "note", "String")));
+        assertFalse(snsService.matchesFilterPolicy(ignoreCase, null, attr("f", "alert", "String")));
+
+        Subscription wildcard = subscriptionWithPolicy(
+                "{\"f\":[{\"anything-but\":{\"wildcard\":\"img*.png\"}}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(wildcard, null, attr("f", "readme", "String")));
+        assertFalse(snsService.matchesFilterPolicy(wildcard, null, attr("f", "img01.png", "String")));
+
+        Subscription cidr = subscriptionWithPolicy(
+                "{\"ip\":[{\"anything-but\":{\"cidr\":\"10.0.0.0/24\"}}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(cidr, null, attr("ip", "10.0.1.5", "String")));
+        assertFalse(snsService.matchesFilterPolicy(cidr, null, attr("ip", "10.0.0.5", "String")));
+
+        Subscription numeric = subscriptionWithPolicy(
+                "{\"n\":[{\"anything-but\":{\"numeric\":[\"=\",100]}}]}", null);
+        assertTrue(snsService.matchesFilterPolicy(numeric, null, attr("n", "50", "String")));
+        assertFalse(snsService.matchesFilterPolicy(numeric, null, attr("n", "100", "String")));
+    }
+
     /**
      * anything-but does not follow the any-element rule: AWS matches a String.Array only when
      * NONE of its elements are listed, so a single listed element vetoes the whole attribute.
@@ -982,6 +1256,10 @@ class SnsServiceTest {
 
         Subscription absent = subscriptionWithPolicy("{\"updatedFields\":[{\"exists\":false}]}", null);
         assertTrue(snsService.matchesFilterPolicy(absent, null, binary));
+
+        Subscription suffix = subscriptionWithPolicy(
+                "{\"updatedFields\":[{\"suffix\":\".png\"}]}", null);
+        assertFalse(snsService.matchesFilterPolicy(suffix, null, binary));
     }
 
     /**
@@ -1041,6 +1319,11 @@ class SnsServiceTest {
         Subscription reserved = subscriptionWithPolicy(
                 "{\"$or\":[{\"prefix\":\"a\"},{\"tableName\":[\"Asset\"]}]}", null);
         assertFalse(snsService.matchesFilterPolicy(reserved, null,
+                Map.of("tableName", new MessageAttributeValue("Asset", "String"))));
+
+        Subscription suffixField = subscriptionWithPolicy(
+                "{\"$or\":[{\"suffix\":\".png\"},{\"tableName\":[\"Asset\"]}]}", null);
+        assertFalse(snsService.matchesFilterPolicy(suffixField, null,
                 Map.of("tableName", new MessageAttributeValue("Asset", "String"))));
 
         // a literal attribute named "$or" is matched as one

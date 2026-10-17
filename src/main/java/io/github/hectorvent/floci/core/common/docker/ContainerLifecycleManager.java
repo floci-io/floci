@@ -393,6 +393,13 @@ public class ContainerLifecycleManager {
                         .withNetworkId(spec.networkMode())
                         .exec();
                 LOG.debugv("Connected container {0} to network {1}", containerId, spec.networkMode());
+            } catch (NotFoundException e) {
+                // Docker answers 404 when the network does not exist, which fails a container that
+                // joins at creation, or when the container is already gone. Either way it cannot
+                // reach its network, so fail the start instead of leaving it on the default bridge.
+                // Docker's message says which of the two was missing.
+                throw new IllegalStateException("Could not connect container " + containerId
+                        + " to Docker network " + spec.networkMode() + ": " + e.getMessage(), e);
             } catch (Exception e) {
                 LOG.warnv("Could not connect container {0} to network {1}: {2}",
                         containerId, spec.networkMode(), e.getMessage());
@@ -939,6 +946,15 @@ public class ContainerLifecycleManager {
      * @return information about the adopted container
      */
     public ContainerInfo adopt(String containerId, List<Integer> ports) {
+        return adopt(containerId, ports, Optional.empty());
+    }
+
+    /**
+     * Adopts a container and resolves its endpoints on {@code preferredNetwork} when it is attached
+     * there, as {@link #createAndStart} does with the spec's network. A container that is on the
+     * default bridge as well as that network is otherwise reached at whichever address comes first.
+     */
+    public ContainerInfo adopt(String containerId, List<Integer> ports, Optional<String> preferredNetwork) {
         LOG.infov("Adopting existing container {0}", containerId);
 
         InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
@@ -953,7 +969,7 @@ public class ContainerLifecycleManager {
         Map<Integer, EndpointInfo> endpoints = new HashMap<>();
         Map<Integer, Integer> publishedHostPorts = new HashMap<>();
         for (int port : ports) {
-            endpoints.put(port, resolveEndpoint(inspect, port));
+            endpoints.put(port, resolveEndpoint(inspect, port, preferredNetwork.orElse(null)));
             OptionalInt published = readPublishedHostPort(inspect, port);
             if (published.isPresent()) {
                 publishedHostPorts.put(port, published.getAsInt());

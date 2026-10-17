@@ -4,6 +4,7 @@ instanceTypes:
     memoryMib: 512
     supportedArchitectures:
       - x86_64
+      - i386
     currentGeneration: true
     encryptionInTransitSupported: false
     defaultNetworkCardIndex: 0
@@ -17,6 +18,7 @@ instanceTypes:
     memoryMib: 1024
     supportedArchitectures:
       - x86_64
+      - i386
     currentGeneration: true
     encryptionInTransitSupported: false
     defaultNetworkCardIndex: 0
@@ -30,6 +32,7 @@ instanceTypes:
     memoryMib: 2048
     supportedArchitectures:
       - x86_64
+      - i386
     currentGeneration: true
     encryptionInTransitSupported: false
     defaultNetworkCardIndex: 0
@@ -43,6 +46,7 @@ instanceTypes:
     memoryMib: 4096
     supportedArchitectures:
       - x86_64
+      - i386
     currentGeneration: true
     encryptionInTransitSupported: false
     defaultNetworkCardIndex: 0

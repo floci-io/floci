@@ -459,6 +459,8 @@ class ContainerLauncherTest {
 
     @Test
     void launchFunction_appliesConfiguredDockerFlagsToRealContainer() throws Exception {
+        lenient().when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.4"));
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.9");
         when(config.services().lambda().dockerFlags()).thenReturn(Optional.of(
                 "--env NODE_EXTRA_CA_CERTS=/opt/certs/root.pem "
                         + "--volume /tmp/certs:/opt/certs:ro --add-host api.local:host-gateway "
@@ -482,10 +484,30 @@ class ContainerLauncherTest {
         assertEquals(Map.of(5050, 5050), spec.portBindings());
         assertEquals(List.of(5050), spec.loopbackPortBindings());
         assertTrue(spec.extraHosts().contains("api.local:host-gateway"));
-        assertTrue(spec.dnsServers().contains("1.1.1.1"));
+        assertEquals(List.of("1.1.1.1"), spec.dnsServers());
+        assertTrue(spec.env().contains("AWS_ENDPOINT_URL=http://172.18.0.9:4566"));
         assertEquals("debug", spec.labels().get("purpose"));
         assertEquals("/opt/certs", spec.binds().getFirst().getVolume().getPath());
         assertEquals("/tmp/certs", spec.binds().getFirst().getPath());
+    }
+
+    @Test
+    void launchFunction_usesEmbeddedDnsEndpointWithoutExplicitResolvers() throws Exception {
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.4"));
+        when(config.dns()).thenReturn(mock(EmulatorConfig.DnsConfig.class));
+        Path codePath = Files.createDirectory(tempDir.resolve("embedded-dns-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("embedded-dns-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertEquals("172.18.0.4", spec.dnsServers().getFirst());
+        assertTrue(spec.env().contains("AWS_ENDPOINT_URL=http://localhost.floci.io:4566"));
     }
 
     @Test

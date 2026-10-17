@@ -21,6 +21,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
@@ -131,9 +132,13 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
         // Ref is the name, but deletion needs both name and group. The cleanup helper's private
         // identity includes the group so a group move with an unchanged Ref is still tracked.
+        String priorIdentity = null;
+        if (ctx.isUpdate()) {
+            priorIdentity = CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), attributesBefore)
+                    ? ctx.priorPhysicalId() : address(priorGroup, ctx.priorPhysicalId());
+        }
         ProvisionContext cleanupContext = new ProvisionContext(ctx.engine(), ctx.region(), ctx.accountId(),
-                ctx.stackName(), ctx.isUpdate() ? address(priorGroup, ctx.priorPhysicalId()) : null, ctx.progress(),
-                ctx.priorProperties());
+                ctx.stackName(), priorIdentity, ctx.progress(), ctx.priorProperties());
         ReplacementCleanup.record(cleanupResource(resource), cleanupContext, attributesBefore);
         if (moveSnapshot != null) {
             moveSnapshot.put("destinationCreated", true);
@@ -248,8 +253,11 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void delete(StackResource resource, String region) {
-        deleteAddress(address(resource.getAttributes().getOrDefault(GROUP_ATTR, "default"),
-                resource.getPhysicalId()), region);
+        readCleanup(resource);
+        if (!CfnResourceDispatcher.isStub(resource.getPhysicalId(), resource.getAttributes())) {
+            deleteAddress(address(resource.getAttributes().getOrDefault(GROUP_ATTR, "default"),
+                    resource.getPhysicalId()), region);
+        }
         UpdateCleanupResult result = ReplacementCleanup.complete(cleanupResource(resource),
                 (type, id, cleanupRegion) -> deleteAddress(id, cleanupRegion));
         if (result.applicable() && !result.complete()) {
@@ -259,6 +267,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void deleteAddress(String physicalId, String region) {
+        validateAddress(physicalId);
         int separator = physicalId.indexOf('/');
         String group = physicalId.substring(0, separator);
         String name = physicalId.substring(separator + 1);
@@ -287,16 +296,19 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public boolean hasReplacementUpdate(StackResource resource) {
+        readCleanup(resource);
         return ReplacementCleanup.hasReplacement(resource);
     }
 
     @Override
     public String updateCleanupPhysicalId(StackResource resource) {
+        readCleanup(resource);
         return ReplacementCleanup.cleanupPhysicalId(cleanupResource(resource));
     }
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        readCleanup(resource);
         if ("UPDATE_FAILED".equals(resource.getStatus()) && retainsFailedUpdateState(resource)) {
             throw new IllegalStateException("Schedule rollback is still pending; its original configuration "
                     + "cannot be discarded by another resource's update cleanup");
@@ -312,6 +324,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
+        readCleanup(resource);
         UpdateCleanupResult result = ReplacementCleanup.complete(cleanupResource(resource),
                 (type, id, region) -> deleteAddress(id, region));
         return result;
@@ -319,6 +332,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void clearDeleteCleanup(StackResource resource) {
+        readCleanup(resource);
         ReplacementCleanup.clear(resource);
         if (!ReplacementCleanup.hasReplacement(resource)) {
             resource.getAttributes().remove(NAME_REPLACEMENT_ATTR);
@@ -327,6 +341,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void clearUpdate(StackResource resource) {
+        readCleanup(resource);
         resource.getAttributes().remove(SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
         resource.getAttributes().remove(NAME_REPLACEMENT_ATTR);
@@ -334,6 +349,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        readCleanup(previous);
         ObjectNode source = readCleanup(attempted);
         if (source != null) {
             String currentAddress = cleanupResource(previous).getPhysicalId();
@@ -360,15 +376,98 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
             if (!node.isObject() || (node.has("displaced") && !node.path("displaced").isArray())) {
                 throw new IllegalStateException("Invalid schedule replacement cleanup");
             }
-            for (JsonNode entry : node.path("displaced")) {
-                if (!entry.isObject()) {
+            String legacyStubAddress = null;
+            String legacyStubId = null;
+            if (node.has("priorPhysicalId") != node.has("priorAttributes")) {
+                throw new IllegalStateException("Invalid schedule replacement cleanup");
+            }
+            if (node.has("priorPhysicalId")) {
+                JsonNode priorId = node.path("priorPhysicalId");
+                JsonNode priorAttributes = node.path("priorAttributes");
+                if (!priorId.isTextual() || !priorAttributes.isObject()) {
                     throw new IllegalStateException("Invalid schedule replacement cleanup");
                 }
+                Map<String, String> priorValues = new HashMap<>();
+                priorAttributes.fields().forEachRemaining(entry -> {
+                    if (entry.getKey().startsWith("__Floci") || !entry.getValue().isTextual()) {
+                        throw new IllegalStateException("Invalid schedule replacement cleanup");
+                    }
+                    priorValues.put(entry.getKey(), entry.getValue().textValue());
+                });
+                String expectedStubArn = CfnResourceDispatcher.STUB_ARN_PREFIX + resource.getLogicalId();
+                boolean priorStub = CfnResourceDispatcher.isStub(priorId.textValue(), priorValues)
+                        && expectedStubArn.equals(priorValues.get("Arn"));
+                if (!priorStub && priorId.textValue().startsWith("default/")) {
+                    String candidate = priorId.textValue().substring("default/".length());
+                    if (CfnResourceDispatcher.isStub(candidate, priorValues)
+                            && expectedStubArn.equals(priorValues.get("Arn"))) {
+                        legacyStubAddress = priorId.textValue();
+                        legacyStubId = candidate;
+                        priorStub = true;
+                    }
+                }
+                if (!priorStub) {
+                    if (!isValidAddress(priorId.textValue())) {
+                        throw new IllegalStateException("Invalid schedule replacement cleanup");
+                    }
+                    String priorGroup = priorId.textValue().substring(0, priorId.textValue().indexOf('/'));
+                    JsonNode recordedGroup = priorAttributes.path(GROUP_ATTR);
+                    if (recordedGroup.isMissingNode() ? !"default".equals(priorGroup)
+                            : !recordedGroup.isTextual() || !priorGroup.equals(recordedGroup.textValue())) {
+                        throw new IllegalStateException("Invalid schedule replacement cleanup");
+                    }
+                }
+            }
+            for (JsonNode entry : node.path("displaced")) {
+                JsonNode id = entry.path("physicalId");
+                JsonNode type = entry.path("resourceType");
+                JsonNode region = entry.path("region");
+                JsonNode retainable = entry.path("retainable");
+                JsonNode attempts = entry.path("cleanupAttempts");
+                JsonNode failure = entry.path("cleanupFailureReason");
+                boolean legacyStubEntry = id.isTextual() && id.textValue().equals(legacyStubAddress);
+                if (!entry.isObject() || !id.isTextual()
+                        || (!legacyStubEntry && !isValidAddress(id.textValue()))
+                        || (!type.isMissingNode() && (!type.isTextual() || !TYPE.equals(type.textValue())))
+                        || (!region.isMissingNode() && !region.isNull() && !region.isTextual())
+                        || (!retainable.isMissingNode() && !retainable.isBoolean())
+                        || (!attempts.isMissingNode() && (!attempts.isIntegralNumber()
+                        || !attempts.canConvertToInt() || attempts.intValue() < 0))
+                        || (!failure.isMissingNode() && !failure.isNull() && !failure.isTextual())) {
+                    throw new IllegalStateException("Invalid schedule replacement cleanup");
+                }
+            }
+            if (legacyStubAddress != null) {
+                ((ObjectNode) node).put("priorPhysicalId", legacyStubId);
+                ArrayNode remaining = MAPPER.createArrayNode();
+                for (JsonNode entry : node.path("displaced")) {
+                    if (!legacyStubAddress.equals(entry.path("physicalId").asText())) {
+                        remaining.add(entry);
+                    }
+                }
+                ((ObjectNode) node).set("displaced", remaining);
+                resource.getAttributes().put(CfnRollback.REPLACEMENT_CLEANUP_ATTR, node.toString());
             }
             return (ObjectNode) node;
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Could not read schedule replacement cleanup", e);
         }
+    }
+
+    private static void validateAddress(String physicalId) {
+        if (!isValidAddress(physicalId)) {
+            throw new IllegalStateException("Invalid schedule address");
+        }
+    }
+
+    private static boolean isValidAddress(String physicalId) {
+        if (physicalId == null) {
+            return false;
+        }
+        int separator = physicalId.indexOf('/');
+        return separator > 0
+                && SchedulerService.isValidName(physicalId.substring(0, separator))
+                && SchedulerService.isValidName(physicalId.substring(separator + 1));
     }
 
     private static void retireDisplaced(StackResource resource, String physicalId) {
@@ -392,6 +491,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
+        readCleanup(resource);
         JsonNode snapshot = readSnapshot(resource);
         if (snapshot != null && snapshot.path("destinationCreated").asBoolean(false)) {
             // Disable the move's destination before restoring an enabled original, even if deleting

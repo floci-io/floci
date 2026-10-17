@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import org.h2.Driver;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
@@ -1146,11 +1148,70 @@ class RdsDataServiceTest {
                 });
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"ExecuteStatement", "BatchExecuteStatement", "BeginTransaction"})
+    void optedInCallsRejectResumingBackendsBeforeOpeningJdbcAndSucceedOnRetry(String operation) throws Exception {
+        TestHarness harness = new TestHarness(true);
+        harness.createEventsTable();
+        harness.gate.resuming = true;
+
+        AwsException error = assertThrows(AwsException.class, () -> call(harness, operation));
+
+        assertEquals("DatabaseResumingException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(0, harness.connectionsOpened.get());
+        assertEquals(0, harness.gate.held.get());
+
+        harness.gate.resuming = false;
+        call(harness, operation);
+        assertEquals(1, harness.connectionsOpened.get());
+        if ("BatchExecuteStatement".equals(operation)) {
+            assertEquals(1, harness.service.executeStatement(
+                    harness.request("select count(*) from data_api_events"), REGION)
+                    .path("records").get(0).get(0).path("longValue").asInt());
+        }
+        harness.service.shutdown();
+        assertEquals(0, harness.gate.held.get());
+    }
+
+    @Test
+    void defaultConfigurationStillWaitsForResumingBackends() {
+        TestHarness harness = new TestHarness();
+        harness.gate.resuming = true;
+
+        assertEquals(1, harness.service.executeStatement(harness.request("select 1"), REGION)
+                .path("records").get(0).get(0).path("longValue").asInt());
+        assertEquals(0, harness.gate.held.get());
+        harness.service.shutdown();
+    }
+
+    private void call(TestHarness harness, String operation) {
+        switch (operation) {
+            case "ExecuteStatement" -> harness.service.executeStatement(harness.request("select 1"), REGION);
+            case "BatchExecuteStatement" -> {
+                ObjectNode request = harness.request("insert into data_api_events(name) values ('retry')");
+                request.set("parameterSets", objectMapper.createArrayNode().add(objectMapper.createArrayNode()));
+                harness.service.batchExecuteStatement(request, REGION);
+            }
+            case "BeginTransaction" -> harness.service.beginTransaction(harness.beginRequest(), REGION);
+            default -> throw new AssertionError(operation);
+        }
+    }
+
     /** Counts the backends the Data API enters and the holds still open on them. */
     private static final class CountingGate implements RdsBackendGate {
         private final List<String> entered = new CopyOnWriteArrayList<>();
         private final AtomicInteger held = new AtomicInteger();
         private volatile IllegalStateException failure;
+        private boolean resuming;
+
+        @Override
+        public Lease enter(String host, int port, boolean waitForResume) {
+            if (!waitForResume && resuming) {
+                throw new ResumingException();
+            }
+            return enter(host, port);
+        }
 
         @Override
         public Lease enter(String host, int port) {
@@ -1173,10 +1234,15 @@ class RdsDataServiceTest {
         private final RdsDataResourceResolver resolver;
         private final RdsDataResourceResolver.DatabaseTarget target;
         private final CountingGate gate = new CountingGate();
+        private final AtomicInteger connectionsOpened = new AtomicInteger();
         private final RdsDataService service;
 
         private TestHarness() {
             this(DatabaseEngine.MYSQL, Duration.ofSeconds(60));
+        }
+
+        private TestHarness(boolean resumingExceptionEnabled) {
+            this(defaultSecrets(), DatabaseEngine.POSTGRES, Duration.ofSeconds(60), resumingExceptionEnabled);
         }
 
         private TestHarness(SecretsManagerService secrets) {
@@ -1196,6 +1262,11 @@ class RdsDataServiceTest {
         }
 
         private TestHarness(SecretsManagerService secrets, DatabaseEngine engine, Duration transactionTtl) {
+            this(secrets, engine, transactionTtl, false);
+        }
+
+        private TestHarness(SecretsManagerService secrets, DatabaseEngine engine, Duration transactionTtl,
+                            boolean resumingExceptionEnabled) {
             jdbcUrl = "jdbc:h2:mem:rdsdata_" + UUID.randomUUID() + ";MODE=" + h2Mode(engine)
                     + ";DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
             resolver = mock(RdsDataResourceResolver.class);
@@ -1211,10 +1282,12 @@ class RdsDataServiceTest {
                                 String username,
                                 String password,
                                 String database) throws SQLException {
+                    connectionsOpened.incrementAndGet();
                     return getConnection();
                 }
             };
-            service = new RdsDataService(resolver, secrets, objectMapper, connectionFactory, transactionTtl, gate);
+            service = new RdsDataService(resolver, secrets, objectMapper, connectionFactory,
+                    transactionTtl, gate, resumingExceptionEnabled);
         }
 
         private Connection getConnection() throws SQLException {

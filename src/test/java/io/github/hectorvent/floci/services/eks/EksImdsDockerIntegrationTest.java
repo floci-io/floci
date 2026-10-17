@@ -9,8 +9,8 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.testing.ContainerDataPlaneProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -20,7 +20,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,18 +27,15 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Configures the link-local IMDS endpoint on a stand-in cluster container and queries it from the
+ * node and from a pod network namespace. The settings come from
+ * {@link ContainerDataPlaneProfile}, which this class shares with
+ * {@code TimestreamInfluxDbDockerIntegrationTest}.
+ */
 @QuarkusTest
-@TestProfile(EksImdsDockerIntegrationTest.Profile.class)
+@TestProfile(ContainerDataPlaneProfile.class)
 class EksImdsDockerIntegrationTest {
-
-    public static final class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.eks.imds", "true",
-                    "floci.services.eks.imds-pod-network", "true");
-        }
-    }
 
     private static final Logger LOG = Logger.getLogger(EksImdsDockerIntegrationTest.class);
     private static final String TEST_IMAGE = "alpine:3.21";

@@ -639,12 +639,24 @@ public class SqsService implements Resettable, ResourceProvider {
                 Set<String> readOnlyAttrs = Set.of("QueueArn", "CreatedTimestamp", "LastModifiedTimestamp",
                         "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible",
                         "ApproximateNumberOfMessagesDelayed");
+                Map<String, String> effective = new LinkedHashMap<>(existing.getAttributes());
+                applyDerivedAttributes(effective);
                 for (Map.Entry<String, String> entry : attributes.entrySet()) {
                     if (readOnlyAttrs.contains(entry.getKey())) {
                         continue;
                     }
-                    String storedValue = existing.getAttributes().get(entry.getKey());
-                    if (storedValue != null && !storedValue.equals(entry.getValue())) {
+                    // Compare against what GetQueueAttributes reports, not the raw stored map:
+                    // SqsManagedSseEnabled is derived on read and never stored, so the stored map
+                    // alone would let a differing value through.
+                    String storedValue = effective.get(entry.getKey());
+                    String requested = entry.getValue();
+                    // The effective MaximumMessageSize is canonical ("1024"); canonicalise the
+                    // already-validated request too so "01024" is not a conflict with itself,
+                    // and an empty value maps to the same default the effective map reports.
+                    if ("MaximumMessageSize".equals(entry.getKey())) {
+                        requested = String.valueOf(parseMaxMessageSize(requested));
+                    }
+                    if (storedValue != null && !storedValue.equals(requested)) {
                         throw new AwsException("QueueAlreadyExists",
                                 "A queue already exists with the same name but different attributes.", 400);
                     }
@@ -760,6 +772,25 @@ public class SqsService implements Resettable, ResourceProvider {
         attrs.put("ApproximateNumberOfMessagesNotVisible", String.valueOf(counts.inFlight()));
         attrs.put("ApproximateNumberOfMessagesDelayed", String.valueOf(counts.delayed()));
 
+        applyDerivedAttributes(attrs);
+
+        if (attributeNames == null || attributeNames.contains("All")) {
+            return attrs;
+        }
+        Map<String, String> filtered = new LinkedHashMap<>();
+        for (String name : attributeNames) {
+            if (attrs.containsKey(name)) {
+                filtered.put(name, attrs.get(name));
+            }
+        }
+        return filtered;
+    }
+
+    /**
+     * Fills in the attributes reported on read but not necessarily stored. Shared by
+     * GetQueueAttributes and the CreateQueue conflict check so the two cannot drift.
+     */
+    private void applyDerivedAttributes(Map<String, String> attrs) {
         // Derived at read time and never stored, so it cannot go stale behind a
         // KmsMasterKeyId that was later cleared. A KMS key always wins; otherwise an
         // explicit SqsManagedSseEnabled stands, and a queue with neither reports the AWS
@@ -779,17 +810,6 @@ public class SqsService implements Resettable, ResourceProvider {
         attrs.putIfAbsent("DelaySeconds", "0");
         attrs.putIfAbsent("ReceiveMessageWaitTimeSeconds", "0");
         attrs.putIfAbsent("MessageRetentionPeriod", "345600");
-
-        if (attributeNames == null || attributeNames.contains("All")) {
-            return attrs;
-        }
-        Map<String, String> filtered = new LinkedHashMap<>();
-        for (String name : attributeNames) {
-            if (attrs.containsKey(name)) {
-                filtered.put(name, attrs.get(name));
-            }
-        }
-        return filtered;
     }
 
     /**

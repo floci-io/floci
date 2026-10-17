@@ -274,6 +274,48 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void versionActionsCarryTheVersionTheyName() {
+        ContainerRequestContext request = s3Request("/bucket/object", "");
+        request.getUriInfo().getQueryParameters().putSingle("versionId", "v1");
+        when(s3Service.getObjectTagging("bucket", "object", "v1")).thenReturn(Map.of("env", "a"));
+        Map<String, List<String>> read = resolver.resolve("s3", "s3:GetObjectVersion", request);
+        assertEquals(List.of("v1"), read.get("s3:versionid"));
+        assertEquals(List.of("a"), read.get("s3:ExistingObjectTag/env"));
+        // DeleteObjectVersion carries the id but, as DeleteObject, not the object's tags.
+        assertEquals(Map.of("s3:versionid", List.of("v1")),
+                resolver.resolve("s3", "s3:DeleteObjectVersion", request));
+        // A base action never carries it.
+        assertFalse(resolver.resolve("s3", "s3:GetObject", request).containsKey("s3:versionid"));
+    }
+
+    @Test
+    void versionTaggingActionsCarryTheVersionAndItsTags() {
+        ContainerRequestContext request = s3Request("/bucket/object",
+                "<Tagging><TagSet><Tag><Key>Team</Key><Value>payments</Value></Tag></TagSet></Tagging>");
+        request.getUriInfo().getQueryParameters().putSingle("versionId", "v1");
+        when(s3Service.getObjectTagging("bucket", "object", "v1")).thenReturn(Map.of("env", "a"));
+        for (String action : List.of("s3:GetObjectVersionTagging", "s3:DeleteObjectVersionTagging")) {
+            Map<String, List<String>> conditions = resolver.resolve("s3", action, request);
+            assertEquals(List.of("v1"), conditions.get("s3:versionid"), action);
+            assertEquals(List.of("a"), conditions.get("s3:ExistingObjectTag/env"), action);
+        }
+        Map<String, List<String>> put = resolver.resolve("s3", "s3:PutObjectVersionTagging", request);
+        assertEquals(List.of("v1"), put.get("s3:versionid"));
+        assertEquals(List.of("a"), put.get("s3:ExistingObjectTag/env"));
+        assertEquals(List.of("payments"), put.get("s3:RequestObjectTag/Team"));
+    }
+
+    @Test
+    void annotationActionsCarryTheObjectsTags() {
+        when(s3Service.getObjectTagging("bucket", "object", null)).thenReturn(Map.of("env", "a"));
+        for (String action : List.of("s3:GetObjectAnnotation", "s3:ListObjectAnnotations",
+                "s3:PutObjectAnnotation", "s3:DeleteObjectAnnotation")) {
+            assertEquals(List.of("a"), resolver.resolve("s3", action, s3Request("/bucket/object", ""))
+                    .get("s3:ExistingObjectTag/env"), action);
+        }
+    }
+
+    @Test
     void resolvesDynamoDbLeadingKeysForGetItem() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         when(containerRequest.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
@@ -458,11 +500,16 @@ class IamConditionContextResolverTest {
     void bucketActionsResolveResourceTagsFromTheBucketsCurrentTags() {
         when(s3Service.getBucketTagging("my-bucket")).thenReturn(Map.of("Owner", "alice"));
 
-        for (String action : List.of("s3:GetBucketTagging", "s3:DeleteBucketTagging", "s3:DeleteBucket")) {
+        for (String action : List.of("s3:GetBucketTagging", "s3:DeleteBucket")) {
             Map<String, List<String>> conditions =
                     resolver.resolve("s3", action, s3Request("/my-bucket", ""));
             assertEquals(List.of("alice"), conditions.get("aws:ResourceTag/Owner"), action);
         }
+        // DeleteBucketTagging, which AWS checks as s3:PutBucketTagging.
+        ContainerRequestContext deleteTagging = s3Request("/my-bucket", "");
+        when(deleteTagging.getMethod()).thenReturn("DELETE");
+        assertEquals(List.of("alice"), resolver.resolve("s3", "s3:PutBucketTagging", deleteTagging)
+                .get("aws:ResourceTag/Owner"));
     }
 
     @Test

@@ -365,6 +365,27 @@ class LambdaWebServiceTest {
     }
 
     @Test
+    void revisionMatchesComparesTheConfigurationAfterDefaults() {
+        LambdaWebService service = service();
+        WebFunction fn = service.createFunction(REGION, createRequest("app"));
+        WebFunctionRevision revision = fn.revisions.values().iterator().next();
+        assertTrue(service.revisionMatches(revision, revisionConfig(30)));
+        assertFalse(service.revisionMatches(revision, revisionConfig(31)));
+        ObjectNode described = revisionConfig(30).put("description", "d");
+        assertFalse(service.revisionMatches(revision, described));
+        // The default log group is the function's, so writing it out matches and dropping a custom one does not.
+        ObjectNode explicit = revisionConfig(30);
+        ((ObjectNode) explicit.get("serviceConfig")).putObject("telemetryConfig").putObject("loggingConfig")
+                .put("logGroup", "/aws/lambda/web/app");
+        assertTrue(service.revisionMatches(revision, explicit));
+        ObjectNode custom = revisionConfig(30);
+        ((ObjectNode) custom.get("serviceConfig")).putObject("telemetryConfig").putObject("loggingConfig")
+                .put("logGroup", "custom-group");
+        WebFunctionRevision customized = service.createRevision(REGION, "app", custom);
+        assertFalse(service.revisionMatches(customized, revisionConfig(30)));
+    }
+
+    @Test
     void identifiersAcceptArnsOfTheHomeRegionAndAccount() {
         LambdaWebService service = service();
         WebFunction fn = service.createFunction(REGION, createRequest("app"));
@@ -508,9 +529,18 @@ class LambdaWebServiceTest {
         ObjectNode update = mapper.createObjectNode().put("description", "updated");
         first.updateEndpoint(REGION, "durable", "dev", update);
 
+        String domain = first.getEndpoint(REGION, "durable", "dev").domainName;
+        assertEquals("dev", first.locate(domain).orElseThrow().endpoint().endpointName);
+
         LambdaWebService second = service(new FileStorageFactory(storageDir));
         WebFunction restored = second.getFunction(REGION, "durable");
         assertEquals(created.functionArn, restored.functionArn);
+        LambdaWebService.WebFunctionTarget target = second.locate(domain).orElseThrow();
+        assertEquals(ACCOUNT_ID, target.accountId());
+        assertEquals(REGION, target.region());
+        assertEquals("durable", target.function().functionName);
+        assertEquals("dev", target.endpoint().endpointName);
+        assertTrue(second.locate("nope.001.lambda-web.us-east-1.localhost:4566").isEmpty());
         assertEquals(2, restored.revisions.size());
         WebFunctionEndpoint endpoint = second.getEndpoint(REGION, "durable", "dev");
         assertEquals("updated", endpoint.description);
@@ -520,6 +550,8 @@ class LambdaWebServiceTest {
         assertEquals(endpoint.revisionWeights.get(0).revisionId,
                 second.listRevisions(REGION, "durable", mapper.createObjectNode()).items().get(0).revisionId,
                 "the LatestRevision endpoint moved to the newer revision and that move was written back");
+        second.deleteEndpoint(REGION, "durable", "dev");
+        assertTrue(second.locate(domain).isEmpty(), "a deleted endpoint's domain is gone");
     }
 
     private static final class MemoryStorageFactory extends StorageFactory {

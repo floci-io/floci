@@ -167,16 +167,7 @@ public class MskService implements ResourceProvider {
             cluster.getCurrentBrokerSoftwareInfo().setConfigurationRevision(configurationInfo.getRevision());
         }
 
-        if (config.services().msk().mock()) {
-            cluster.setState(ClusterState.ACTIVE);
-            cluster.setBootstrapBrokers("localhost:9092");
-        } else if (!redpandaManager.tryStartContainer(cluster)) {
-            LOG.warnv("MSK cluster {0} created without a backing Kafka broker: no Docker daemon "
-                    + "is reachable. Metadata operations work; producing and consuming do not "
-                    + "until a daemon appears.", clusterName);
-            cluster.setState(ClusterState.ACTIVE);
-            cluster.setBootstrapBrokers("localhost:9092");
-        }
+        startBroker(cluster);
 
         storage.put(clusterArn, cluster);
         return cluster;
@@ -218,6 +209,19 @@ public class MskService implements ResourceProvider {
             merged.setRebalancing(request.getProvisioned().getRebalancing());
         }
         return createCluster(merged);
+    }
+
+    private void startBroker(MskCluster cluster) {
+        if (config.services().msk().mock()) {
+            cluster.setState(ClusterState.ACTIVE);
+            cluster.setBootstrapBrokers("localhost:9092");
+        } else if (!redpandaManager.tryStartContainer(cluster)) {
+            LOG.warnv("MSK cluster {0} created without a backing Kafka broker: no Docker daemon "
+                    + "is reachable. Metadata operations work; producing and consuming do not "
+                    + "until a daemon appears.", cluster.getClusterName());
+            cluster.setState(ClusterState.ACTIVE);
+            cluster.setBootstrapBrokers("localhost:9092");
+        }
     }
 
     /**
@@ -360,12 +364,7 @@ public class MskService implements ResourceProvider {
         cluster.setZookeeperConnectString(null);
         cluster.setCurrentBrokerSoftwareInfo(null);
 
-        if (config.services().msk().mock()) {
-            cluster.setState(ClusterState.ACTIVE);
-            cluster.setBootstrapBrokers("localhost:9092");
-        } else {
-            redpandaManager.startContainer(cluster);
-        }
+        startBroker(cluster);
 
         storage.put(clusterArn, cluster);
         return cluster;

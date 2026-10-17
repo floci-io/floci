@@ -89,12 +89,12 @@ class Ec2ServicePersistenceTest {
     void emptyNetworkDiscoverySurvivesRestart(@TempDir Path dir) {
         Ec2Service first = newService(dir);
         assertTrue(first.describeVpnGatewayIds(List.of(), Map.of()).isEmpty());
-        assertTrue(first.describeEgressOnlyInternetGatewayIds(Map.of()).isEmpty());
+        assertTrue(first.describeEgressOnlyInternetGateways("us-east-1", List.of(), Map.of()).isEmpty());
 
         Ec2Service restarted = newService(dir);
         assertTrue(restarted.describeVpnGatewayIds(
                 List.of(), Map.of("attachment.vpc-id", List.of("vpc-0123456789abcdef0"))).isEmpty());
-        assertTrue(restarted.describeEgressOnlyInternetGatewayIds(Map.of("tag:Owner", List.of("TeamA"))).isEmpty());
+        assertTrue(restarted.describeEgressOnlyInternetGateways("us-east-1", List.of(), Map.of("tag:Owner", List.of("TeamA"))).isEmpty());
     }
 
     @Test

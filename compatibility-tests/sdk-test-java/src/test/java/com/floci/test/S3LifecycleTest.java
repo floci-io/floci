@@ -7,6 +7,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.BucketAlreadyOwnedByYouException;
 import software.amazon.awssdk.services.s3.model.BucketLifecycleConfiguration;
@@ -14,11 +15,19 @@ import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.DeleteBucketRequest;
 import software.amazon.awssdk.services.s3.model.ExpirationStatus;
 import software.amazon.awssdk.services.s3.model.GetBucketLifecycleConfigurationResponse;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.LifecycleExpiration;
 import software.amazon.awssdk.services.s3.model.LifecycleRule;
 import software.amazon.awssdk.services.s3.model.LifecycleRuleFilter;
 import software.amazon.awssdk.services.s3.model.PutBucketLifecycleConfigurationResponse;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.TransitionDefaultMinimumObjectSize;
+
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
+import java.util.Locale;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -40,6 +49,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class S3LifecycleTest {
 
     private static final String BUCKET = "compat-lifecycle-bucket";
+    private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter
+            .ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US)
+            .withZone(ZoneOffset.UTC);
 
     private static S3Client s3;
 
@@ -116,5 +128,26 @@ class S3LifecycleTest {
         assertThat(get.transitionDefaultMinimumObjectSize())
                 .as("GET must default to ALL_STORAGE_CLASSES_128_K when PUT omits the header")
                 .isEqualTo(TransitionDefaultMinimumObjectSize.ALL_STORAGE_CLASSES_128_K);
+    }
+
+    @Test
+    @Order(3)
+    @DisplayName("#5137 objects under an Expiration rule report expiry-date and rule-id")
+    void objectsUnderAnExpirationRuleReportTheirExpiry() {
+        // The configuration from @Order(2): Days 365 on every key, rule id expire-everything.
+        String key = "expiring.txt";
+        try {
+            PutObjectResponse put = s3.putObject(req -> req.bucket(BUCKET).key(key), RequestBody.fromString("hi"));
+            HeadObjectResponse head = s3.headObject(req -> req.bucket(BUCKET).key(key));
+
+            // Creation time plus 365 days, rounded up to the next midnight UTC.
+            Instant expiry = head.lastModified().plus(365, ChronoUnit.DAYS)
+                    .truncatedTo(ChronoUnit.DAYS).plus(1, ChronoUnit.DAYS);
+            String expected = "expiry-date=\"" + HTTP_DATE.format(expiry) + "\", rule-id=\"expire-everything\"";
+            assertThat(head.expiration()).isEqualTo(expected);
+            assertThat(put.expiration()).isEqualTo(expected);
+        } finally {
+            s3.deleteObject(req -> req.bucket(BUCKET).key(key));
+        }
     }
 }

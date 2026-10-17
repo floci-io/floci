@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
+import io.github.hectorvent.floci.services.iot.model.IotShadow;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -24,14 +25,18 @@ import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -39,6 +44,7 @@ import java.util.concurrent.Future;
 import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -48,6 +54,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -60,7 +67,8 @@ import static org.mockito.Mockito.when;
  * Rules engine behaviour of {@link IotService} with in-memory stores and mocked action targets:
  * one failing action never fails the publish or the other actions, the error action receives the
  * failure document, and the {@code firehose} and {@code cloudwatchLogs} actions deliver the payload.
- * Also the five-version cap on a policy, including under racing creates.
+ * Also the five-version cap on a policy, including under racing creates, and the device shadow
+ * events that reach MQTT subscribers and topic rules on the AWS response topics.
  */
 class IotServiceTest {
 
@@ -70,6 +78,16 @@ class IotServiceTest {
     private static final String QUEUE_URL = "http://localhost:4566/000000000000/metrics";
     private static final String FUNCTION_ARN = "arn:aws:lambda:us-east-1:000000000000:function:handler";
     private static final String ERROR_FUNCTION_ARN = "arn:aws:lambda:us-east-1:000000000000:function:errors";
+    private static final String SHADOW_QUEUE_URL = "http://localhost:4566/000000000000/shadow-events";
+    private static final String CLASSIC_QUEUE_URL = "http://localhost:4566/000000000000/classic-shadow-events";
+    private static final String BUILDING_RULE_SQL = "SELECT *, topic() AS topic, clientid() AS cid "
+            + "FROM '$aws/things/+/shadow/name/building/update/accepted' WHERE endswith(clientToken, 'inbound')";
+    private static final String BUILDING_UPDATE = "$aws/things/sensor-1/shadow/name/building/update";
+    private static final String NESTED_SHADOW_UPDATE = """
+        {"state": {"desired": {"lights": {"color": {"r": 255, "g": 255, "b": 255}, "on": true}, "arr": [1, 2], "same": {"x": 1}},
+                   "reported": {"lights": {"color": {"r": 255, "g": 0, "b": 255}, "on": true}, "arr": [1, 3], "same": {"x": 1}}}}
+        """;
+    private static final String NESTED_DELTA = "{\"lights\":{\"color\":{\"g\":255}},\"arr\":[1,2]}";
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final SqsService sqs = mock(SqsService.class);
@@ -78,6 +96,8 @@ class IotServiceTest {
     private final FirehoseService firehose = mock(FirehoseService.class);
     private final CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
     private final IotPublishEventRecorder recorder = new IotPublishEventRecorder();
+    private final IotMqttBrokerService broker = mock(IotMqttBrokerService.class);
+    private final AccountAwareStorageBackend<IotShadow> shadows = AccountAwareStorageBackend.inMemory(ACCOUNT);
     private IotService service;
 
     @BeforeEach
@@ -91,7 +111,7 @@ class IotServiceTest {
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
-                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                shadows,
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT),
@@ -103,7 +123,7 @@ class IotServiceTest {
                 new RegionResolver(REGION, ACCOUNT),
                 mapper,
                 recorder,
-                mock(IotMqttBrokerService.class),
+                broker,
                 sqs,
                 mock(SnsService.class),
                 mock(S3Service.class),
@@ -702,5 +722,659 @@ class IotServiceTest {
                 .map(version -> Integer.parseInt(version.getVersionId()))
                 .sorted()
                 .toList();
+    }
+
+    private JsonNode json(String value) throws Exception {
+        return mapper.readTree(value);
+    }
+
+    /** The node as it reads back from its JSON text, so a long and an int of the same value compare equal. */
+    private JsonNode reparse(JsonNode node) throws Exception {
+        return mapper.readTree(node.toString());
+    }
+
+    private static String leaf(long timestamp) {
+        return "{\"timestamp\":" + timestamp + "}";
+    }
+
+    private static Set<String> fieldNames(JsonNode node) {
+        Set<String> names = new LinkedHashSet<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
+    }
+
+    private List<String> recordedTopics() {
+        return recorder.recentEvents().stream().map(IotPublishEvent::topic).toList();
+    }
+
+    private JsonNode recordedPayload(String topic) throws Exception {
+        List<IotPublishEvent> matching = recorder.recentEvents().stream()
+                .filter(event -> topic.equals(event.topic()))
+                .toList();
+        assertEquals(1, matching.size(), "events recorded on " + topic);
+        return mapper.readTree(matching.get(0).payload());
+    }
+
+    private static String sqsRule(String sql, String queueUrl) {
+        return """
+            {"sql": "%s", "actions": [{"sqs": {"queueUrl": "%s", "roleArn": "arn:aws:iam::000000000000:role/rule"}}]}
+            """.formatted(sql, queueUrl);
+    }
+
+    private void storeShadow(String thingName, String document) throws Exception {
+        IotShadow shadow = new IotShadow();
+        shadow.setThingName(thingName);
+        shadow.setDocument(document);
+        shadow.setVersion(json(document).path("version").asLong());
+        shadows.put("shadow:" + REGION + ":" + thingName + ":", shadow);
+    }
+
+    @Test
+    void shadowUpdateReturnsTheRequestStateAsSentWithItsMetadataVersionTimestampAndClientToken() throws Exception {
+        JsonNode request = json("""
+            {"state": {"desired": {"color": "blue", "modes": ["eco", "boost"], "schedule": {"start": 8}, "legacy": null},
+                       "reported": null},
+             "clientToken": "tok-1"}
+            """);
+
+        JsonNode accepted = service.updateThingShadow("sensor-1", null, request, REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        assertEquals(Set.of("state", "metadata", "version", "timestamp", "clientToken"), fieldNames(accepted));
+        assertEquals(request.get("state"), accepted.get("state"));
+        assertEquals(json("""
+            {"desired": {"color": %1$s, "modes": [%1$s, %1$s], "schedule": {"start": %1$s}, "legacy": %1$s},
+             "reported": %1$s}
+            """.formatted(leaf(timestamp))), reparse(accepted.get("metadata")));
+        assertEquals(1, accepted.get("version").asLong());
+        assertEquals("tok-1", accepted.get("clientToken").asText());
+        assertTrue(Math.abs(System.currentTimeMillis() / 1000 - timestamp) <= 5, "timestamp is in epoch seconds");
+
+        JsonNode second = service.updateThingShadow("sensor-1", null, json("{\"state\":{\"reported\":{\"color\":\"blue\"}}}"), REGION);
+
+        assertEquals(Set.of("state", "metadata", "version", "timestamp"), fieldNames(second));
+        assertEquals(2, second.get("version").asLong());
+    }
+
+    @Test
+    void aBlankClientTokenIsEchoedInTheUpdateResponse() throws Exception {
+        JsonNode accepted = service.updateThingShadow("sensor-15", null,
+                json("{\"state\":{\"desired\":{\"c\":\"x\"}},\"clientToken\":\" \"}"), REGION);
+
+        assertEquals(" ", accepted.path("clientToken").asText());
+    }
+
+    @Test
+    void shadowUpdatePublishesAcceptedDocumentsAndDeltaInThatOrderOnceEach() throws Exception {
+        JsonNode accepted = service.updateThingShadow("sensor-1", "building",
+                json("{\"state\":{\"desired\":{\"color\":\"blue\"}},\"clientToken\":\"tok-1\"}"), REGION);
+        long first = accepted.get("timestamp").asLong();
+
+        assertEquals(List.of(BUILDING_UPDATE + "/accepted", BUILDING_UPDATE + "/documents", BUILDING_UPDATE + "/delta"),
+                recordedTopics());
+        assertEquals(reparse(accepted), recordedPayload(BUILDING_UPDATE + "/accepted"));
+        JsonNode currentAfterFirst = json("""
+            {"state": {"desired": {"color": "blue"}}, "metadata": {"desired": {"color": %s}}, "version": 1}
+            """.formatted(leaf(first)));
+        JsonNode documents = recordedPayload(BUILDING_UPDATE + "/documents");
+        assertEquals(Set.of("previous", "current", "timestamp", "clientToken"), fieldNames(documents));
+        assertTrue(documents.get("previous").isNull(), "previous is JSON null on the first update");
+        assertEquals(currentAfterFirst, documents.get("current"));
+        assertEquals(first, documents.get("timestamp").asLong());
+        assertEquals("tok-1", documents.get("clientToken").asText());
+        assertEquals(json("""
+            {"version": 1, "timestamp": %d, "state": {"color": "blue"}, "metadata": {"color": %s}, "clientToken": "tok-1"}
+            """.formatted(first, leaf(first))), recordedPayload(BUILDING_UPDATE + "/delta"));
+        for (String topic : recordedTopics()) {
+            ArgumentCaptor<byte[]> fannedOut = ArgumentCaptor.forClass(byte[].class);
+            verify(broker, times(1)).publish(eq(topic), fannedOut.capture());
+            assertEquals(recordedPayload(topic), mapper.readTree(fannedOut.getValue()));
+        }
+
+        recorder.clear();
+        JsonNode reported = service.updateThingShadow("sensor-1", "building",
+                json("{\"state\":{\"reported\":{\"color\":\"blue\"}}}"), REGION);
+        long second = reported.get("timestamp").asLong();
+
+        assertEquals(List.of(BUILDING_UPDATE + "/accepted", BUILDING_UPDATE + "/documents"), recordedTopics(),
+                "no delta once reported matches desired");
+        JsonNode secondDocuments = recordedPayload(BUILDING_UPDATE + "/documents");
+        assertEquals(Set.of("previous", "current", "timestamp"), fieldNames(secondDocuments));
+        assertEquals(currentAfterFirst, secondDocuments.get("previous"));
+        assertEquals(json("""
+            {"state": {"desired": {"color": "blue"}, "reported": {"color": "blue"}},
+             "metadata": {"desired": {"color": %s}, "reported": {"color": %s}},
+             "version": 2}
+            """.formatted(leaf(first), leaf(second))), secondDocuments.get("current"));
+    }
+
+    @Test
+    void storedMetadataKeepsTheTimestampOfEveryKeyTheUpdateDidNotTouch() throws Exception {
+        storeShadow("sensor-2", """
+            {"state": {"desired": {"color": "red", "mode": "auto"}, "reported": {"color": "red"}},
+             "metadata": {"desired": {"color": {"timestamp": 1000}, "mode": {"timestamp": 1000}},
+                          "reported": {"color": {"timestamp": 1000}}},
+             "version": 4, "timestamp": 1000}
+            """);
+
+        JsonNode accepted = service.updateThingShadow("sensor-2", null,
+                json("{\"version\":4,\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        JsonNode documents = recordedPayload("$aws/things/sensor-2/shadow/update/documents");
+        assertEquals(json("""
+            {"state": {"desired": {"color": "red", "mode": "auto"}, "reported": {"color": "red"}},
+             "metadata": {"desired": {"color": {"timestamp": 1000}, "mode": {"timestamp": 1000}},
+                          "reported": {"color": {"timestamp": 1000}}},
+             "version": 4}
+            """), documents.get("previous"));
+        assertEquals(json("""
+            {"state": {"desired": {"color": "blue", "mode": "auto"}, "reported": {"color": "red"}},
+             "metadata": {"desired": {"color": %s, "mode": {"timestamp": 1000}}, "reported": {"color": {"timestamp": 1000}}},
+             "version": 5}
+            """.formatted(leaf(timestamp))), documents.get("current"));
+        JsonNode delta = recordedPayload("$aws/things/sensor-2/shadow/update/delta");
+        assertEquals(json("{\"color\":\"blue\",\"mode\":\"auto\"}"), delta.get("state"));
+        assertEquals(json("{\"color\":" + leaf(timestamp) + ",\"mode\":{\"timestamp\":1000}}"), delta.get("metadata"));
+    }
+
+    @Test
+    void aNullKeyOrSectionRemovesItFromStateAndMetadata() throws Exception {
+        storeShadow("sensor-2", """
+            {"state": {"desired": {"color": "red", "mode": "auto"}, "reported": {"color": "red"}},
+             "metadata": {"desired": {"color": {"timestamp": 1000}, "mode": {"timestamp": 1000}},
+                          "reported": {"color": {"timestamp": 1000}}},
+             "version": 4, "timestamp": 1000}
+            """);
+
+        service.updateThingShadow("sensor-2", null, json("{\"state\":{\"desired\":{\"mode\":null},\"reported\":null}}"), REGION);
+
+        JsonNode current = recordedPayload("$aws/things/sensor-2/shadow/update/documents").get("current");
+        assertEquals(json("{\"desired\":{\"color\":\"red\"}}"), current.get("state"));
+        assertEquals(json("{\"desired\":{\"color\":{\"timestamp\":1000}}}"), current.get("metadata"));
+        JsonNode stored = service.getThingShadow("sensor-2", null, REGION);
+        assertEquals(json("{\"desired\":{\"color\":{\"timestamp\":1000}}}"), reparse(stored.get("metadata")));
+    }
+
+    @Test
+    void aStoredShadowWithoutMetadataIsUpdatedWithMetadataFromItsStoredTimestamp() throws Exception {
+        storeShadow("sensor-3", "{\"state\":{\"desired\":{\"color\":\"red\"}},\"version\":2,\"timestamp\":1000}");
+
+        JsonNode accepted = service.updateThingShadow("sensor-3", null,
+                json("{\"state\":{\"reported\":{\"color\":\"red\"}}}"), REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        JsonNode documents = recordedPayload("$aws/things/sensor-3/shadow/update/documents");
+        assertEquals(json("""
+            {"state": {"desired": {"color": "red"}}, "metadata": {"desired": {"color": {"timestamp": 1000}}}, "version": 2}
+            """), documents.get("previous"));
+        assertEquals(json("""
+            {"state": {"desired": {"color": "red"}, "reported": {"color": "red"}},
+             "metadata": {"desired": {"color": {"timestamp": 1000}}, "reported": {"color": %s}}, "version": 3}
+            """.formatted(leaf(timestamp))), documents.get("current"));
+    }
+
+    @Test
+    void aShadowStoredWithoutMetadataGetsMetadataFromItsStoredTimestamp() throws Exception {
+        storeShadow("sensor-9", """
+            {"state": {"desired": {"color": "red", "n": 1}, "reported": {"color": "blue"}}, "version": 3, "timestamp": 100}
+            """);
+
+        JsonNode shadow = service.getThingShadow("sensor-9", null, REGION);
+
+        assertEquals(json("""
+            {"desired": {"color": {"timestamp": 100}, "n": {"timestamp": 100}}, "reported": {"color": {"timestamp": 100}}}
+            """), reparse(shadow.get("metadata")));
+
+        service.updateThingShadow("sensor-9", null, json("{\"state\":{\"reported\":{\"n\":1}}}"), REGION);
+
+        JsonNode delta = recordedPayload("$aws/things/sensor-9/shadow/update/delta");
+        assertEquals(json("{\"color\":\"red\"}"), delta.get("state"));
+        assertEquals(json("{\"color\":{\"timestamp\":100}}"), delta.get("metadata"));
+    }
+
+    @Test
+    void anEmptyShadowNameIsTheClassicShadow() throws Exception {
+        service.updateThingShadow("sensor-6", "", json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+
+        assertEquals("$aws/things/sensor-6/shadow/update/accepted", recordedTopics().get(0));
+        assertEquals("blue", service.getThingShadow("sensor-6", null, REGION).at("/state/desired/color").asText());
+    }
+
+    @Test
+    void aShadowNameOutsideThePatternIsRejectedAndLeavesTheClassicShadowIntact() throws Exception {
+        JsonNode update = json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}");
+        service.updateThingShadow("sensor-6", null, update, REGION);
+
+        List<Executable> calls = List.of(
+                () -> service.getThingShadow("sensor-6", " ", REGION),
+                () -> service.updateThingShadow("sensor-6", " ", update, REGION),
+                () -> service.deleteThingShadow("sensor-6", " ", REGION),
+                () -> service.getThingShadow("sensor-6", "bad!", REGION));
+        for (Executable call : calls) {
+            AwsException e = assertThrows(AwsException.class, call);
+            assertEquals("InvalidRequestException", e.getErrorCode());
+            assertEquals(400, e.getHttpStatus());
+            assertEquals("Bad Request", e.getMessage());
+        }
+
+        JsonNode classic = service.getThingShadow("sensor-6", null, REGION);
+        assertEquals("blue", classic.at("/state/desired/color").asText());
+        assertEquals(1, classic.get("version").asLong());
+    }
+
+    @Test
+    void aShadowNameWithADollarOtherThanPackageIsAnInvalidShadowName() throws Exception {
+        JsonNode update = json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}");
+        for (String name : List.of("$", "$PACKAGE", "$package2", "a$b")) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> service.updateThingShadow("sensor-14", name, update, REGION));
+            assertEquals("InvalidRequestException", e.getErrorCode());
+            assertEquals(400, e.getHttpStatus());
+            assertEquals("Invalid shadow name : " + name, e.getMessage());
+        }
+    }
+
+    @Test
+    void theReservedPackageShadowIsUpdatedReadAndDeleted() throws Exception {
+        service.updateThingShadow("sensor-14", "$package",
+                json("{\"state\":{\"reported\":{\"samplePackage\":{\"version\":\"1.0.0\"}}}}"), REGION);
+
+        assertEquals("1.0.0", service.getThingShadow("sensor-14", "$package", REGION)
+                .at("/state/reported/samplePackage/version").asText());
+        assertEquals(1, service.deleteThingShadow("sensor-14", "$package", REGION).get("version").asLong());
+        assertThrows(AwsException.class, () -> service.getThingShadow("sensor-14", "$package", REGION));
+    }
+
+    @Test
+    void aRuleOnTheNamedShadowAcceptedTopicReceivesTheProjectionWithNoMqttClient() throws Exception {
+        createRule("buildingRule", sqsRule(BUILDING_RULE_SQL, SHADOW_QUEUE_URL));
+
+        JsonNode accepted = service.updateThingShadow("sensor-1", "building",
+                json("{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"job:inbound\"}"), REGION);
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqs).sendMessage(eq(SHADOW_QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        JsonNode message = mapper.readTree(body.getValue());
+        assertEquals(BUILDING_UPDATE + "/accepted", message.get("topic").asText());
+        assertEquals("N/A", message.get("cid").asText());
+        assertEquals("job:inbound", message.get("clientToken").asText());
+        assertEquals(21, message.at("/state/desired/temp").asInt());
+        assertEquals(accepted.get("version").asLong(), message.get("version").asLong());
+        assertEquals(accepted.get("timestamp").asLong(), message.get("timestamp").asLong());
+        assertEquals(reparse(accepted.get("metadata")), message.get("metadata"));
+    }
+
+    @Test
+    void aRuleWhoseFilterStartsWithAWildcardReceivesShadowEvents() throws Exception {
+        createRule("everythingRule", sqsRule("SELECT topic() AS topic FROM '#'", SHADOW_QUEUE_URL));
+        createRule("anyPrefixRule", sqsRule("SELECT topic() AS topic FROM '+/things/sensor-13/shadow/#'", SHADOW_QUEUE_URL));
+
+        service.updateThingShadow("sensor-13", null, json("{\"state\":{\"desired\":{\"temp\":21}}}"), REGION);
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqs, times(6)).sendMessage(eq(SHADOW_QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        List<String> topics = new ArrayList<>();
+        for (String message : body.getAllValues()) {
+            topics.add(mapper.readTree(message).get("topic").asText());
+        }
+        String update = "$aws/things/sensor-13/shadow/update";
+        assertEquals(List.of(update + "/accepted", update + "/accepted", update + "/delta", update + "/delta",
+                update + "/documents", update + "/documents"), topics.stream().sorted().toList());
+    }
+
+    @Test
+    void theNamedShadowRuleSkipsAnotherTokenTheClassicShadowAndAnotherShadowName() throws Exception {
+        createRule("buildingRule", sqsRule(BUILDING_RULE_SQL, SHADOW_QUEUE_URL));
+        String inbound = "{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"job:inbound\"}";
+
+        service.updateThingShadow("sensor-1", "building",
+                json("{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"job:outbound\"}"), REGION);
+        service.updateThingShadow("sensor-1", null, json(inbound), REGION);
+        service.updateThingShadow("sensor-1", "other", json(inbound), REGION);
+
+        verify(sqs, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+    }
+
+    @Test
+    void aRuleOnTheClassicShadowAcceptedTopicFiresForTheClassicShadowOnly() throws Exception {
+        createRule("classicRule", sqsRule("SELECT * FROM '$aws/things/+/shadow/update/accepted'", CLASSIC_QUEUE_URL));
+        String update = "{\"state\":{\"desired\":{\"temp\":21}}}";
+
+        service.updateThingShadow("sensor-1", "building", json(update), REGION);
+        verify(sqs, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+
+        service.updateThingShadow("sensor-1", null, json(update), REGION);
+        verify(sqs, times(1)).sendMessage(eq(CLASSIC_QUEUE_URL), anyString(), eq(0), eq(REGION));
+    }
+
+    @Test
+    void shadowEventsReachOnlyTheRulesOfTheShadowsRegion() throws Exception {
+        service.createTopicRule("buildingRule", json(sqsRule(BUILDING_RULE_SQL, SHADOW_QUEUE_URL)), "eu-west-1");
+        String inbound = "{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"job:inbound\"}";
+
+        service.updateThingShadow("sensor-1", "building", json(inbound), REGION);
+        verify(sqs, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+
+        service.updateThingShadow("sensor-1", "building", json(inbound), "eu-west-1");
+        verify(sqs, times(1)).sendMessage(eq(SHADOW_QUEUE_URL), anyString(), eq(0), eq("eu-west-1"));
+    }
+
+    @Test
+    void deleteReturnsTheDeletedVersionAndPublishesItOnDeleteAccepted() throws Exception {
+        service.updateThingShadow("sensor-4", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        service.updateThingShadow("sensor-4", null, json("{\"state\":{\"desired\":{\"color\":\"red\"}}}"), REGION);
+        recorder.clear();
+
+        JsonNode deleted = service.deleteThingShadow("sensor-4", null, REGION);
+
+        assertEquals(Set.of("version", "timestamp"), fieldNames(deleted));
+        assertEquals(2, deleted.get("version").asLong());
+        assertEquals(List.of("$aws/things/sensor-4/shadow/delete/accepted"), recordedTopics());
+        assertEquals(reparse(deleted), recordedPayload("$aws/things/sensor-4/shadow/delete/accepted"));
+        verify(broker, times(1)).publish(eq("$aws/things/sensor-4/shadow/delete/accepted"), any());
+        AwsException e = assertThrows(AwsException.class, () -> service.getThingShadow("sensor-4", null, REGION));
+        assertEquals(404, e.getHttpStatus());
+    }
+
+    @Test
+    void getReturnsStateWithDeltaTheStoredMetadataVersionAndTimestampAndPublishesNothing() throws Exception {
+        JsonNode accepted = service.updateThingShadow("sensor-5", null, json("""
+            {"state": {"desired": {"color": "blue", "mode": "auto"}, "reported": {"color": "red", "mode": "auto"}}}
+            """), REGION);
+        long timestamp = accepted.get("timestamp").asLong();
+        recorder.clear();
+
+        JsonNode shadow = service.getThingShadow("sensor-5", null, REGION);
+
+        assertEquals(Set.of("state", "metadata", "version", "timestamp"), fieldNames(shadow));
+        assertEquals(json("""
+            {"desired": {"color": "blue", "mode": "auto"}, "reported": {"color": "red", "mode": "auto"},
+             "delta": {"color": "blue"}}
+            """), reparse(shadow.get("state")));
+        assertEquals(json("""
+            {"desired": {"color": %1$s, "mode": %1$s}, "reported": {"color": %1$s, "mode": %1$s}}
+            """.formatted(leaf(timestamp))), reparse(shadow.get("metadata")));
+        assertEquals(1, shadow.get("version").asLong());
+        assertTrue(shadow.get("timestamp").asLong() >= timestamp);
+        assertTrue(recorder.recentEvents().isEmpty(), "GetThingShadow publishes nothing");
+    }
+
+    @Test
+    void getLeavesOutTheDeltaWhenDesiredAndReportedAgree() throws Exception {
+        service.updateThingShadow("sensor-5", null,
+                json("{\"state\":{\"desired\":{\"color\":\"blue\"},\"reported\":{\"color\":\"blue\"}}}"), REGION);
+
+        assertFalse(service.getThingShadow("sensor-5", null, REGION).get("state").has("delta"));
+    }
+
+    @Test
+    void getComparesNumbersAsAwsDoesThroughNestedObjectsAndArraysExactly() throws Exception {
+        service.updateThingShadow("sensor-15", null, json("{\"state\":{"
+                + "\"desired\":{\"n\":1.0,\"nested\":{\"n\":1.0},\"arr\":[1],\"objs\":[{\"n\":1}],"
+                + "\"max\":9223372036854775807,\"big\":10000000000000000000000,\"long\":9007199254740993,"
+                + "\"mixed\":9007199254740993,\"over\":9223372036854775807},"
+                + "\"reported\":{\"n\":1,\"nested\":{\"n\":1},\"arr\":[1.0],\"objs\":[{\"n\":1.0}],"
+                + "\"max\":9.223372036854776e18,\"big\":1e22,\"long\":9007199254740992,"
+                + "\"mixed\":9007199254740992.0,\"over\":1e19}}}"), REGION);
+
+        JsonNode shadow = service.getThingShadow("sensor-15", null, REGION);
+
+        assertEquals(json("{\"arr\":[1],\"objs\":[{\"n\":1}],\"big\":10000000000000000000000,"
+                + "\"long\":9007199254740993,\"mixed\":9007199254740993,\"over\":9223372036854775807}"),
+                reparse(shadow.at("/state/delta")));
+    }
+
+    @Test
+    void anUpdateWithANumberBeyondTheDoubleRangeDoesNotThrow() throws Exception {
+        JsonNode update = json("{\"state\":{\"desired\":{\"n\":1e309},\"reported\":{\"n\":0}}}");
+
+        assertDoesNotThrow(() -> service.updateThingShadow("sensor-16", null, update, REGION));
+    }
+
+    @Test
+    void getComputesTheDeltaThroughNestedObjectsAndComparesArraysWhole() throws Exception {
+        service.updateThingShadow("sensor-7", null, json(NESTED_SHADOW_UPDATE), REGION);
+
+        JsonNode shadow = service.getThingShadow("sensor-7", null, REGION);
+
+        assertEquals(json(NESTED_DELTA), reparse(shadow.get("state").get("delta")));
+    }
+
+    @Test
+    void deltaEventCarriesOnlyTheNestedDifferencesAndTheirStoredMetadata() throws Exception {
+        JsonNode accepted = service.updateThingShadow("sensor-7", null, json(NESTED_SHADOW_UPDATE), REGION);
+        long timestamp = accepted.get("timestamp").asLong();
+
+        JsonNode delta = recordedPayload("$aws/things/sensor-7/shadow/update/delta");
+
+        assertEquals(json(NESTED_DELTA), delta.get("state"));
+        assertEquals(json("""
+            {"lights": {"color": {"g": %1$s}}, "arr": [%1$s, %1$s]}
+            """.formatted(leaf(timestamp))), delta.get("metadata"));
+    }
+
+    @Test
+    void racingShadowUpdatesEachGetTheirOwnConsecutiveVersion() throws Exception {
+        int writers = 8;
+        int updatesEach = 25;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(writers);
+        List<Future<?>> outcomes = new ArrayList<>();
+        try {
+            for (int i = 0; i < writers; i++) {
+                String key = "k" + i;
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    for (int n = 0; n < updatesEach; n++) {
+                        service.updateThingShadow("raced", null,
+                                json("{\"state\":{\"reported\":{\"" + key + "\":" + n + "}}}"), REGION);
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> outcome : outcomes) {
+                outcome.get();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(writers * updatesEach, service.getThingShadow("raced", null, REGION).get("version").asLong());
+        Set<Long> versions = new LinkedHashSet<>();
+        for (IotPublishEvent event : recorder.recentEvents()) {
+            if (event.topic().endsWith("/documents")) {
+                JsonNode documents = mapper.readTree(event.payload());
+                long current = documents.at("/current/version").asLong();
+                versions.add(current);
+                assertEquals(current - 1, documents.get("previous").isNull() ? 0 : documents.at("/previous/version").asLong());
+            }
+        }
+        assertEquals(writers * updatesEach, versions.size());
+    }
+
+    private void mqttShadowRequest(String topic, String payload) {
+        Executor inline = Runnable::run;
+        service.handleReservedMqttPublish(topic, payload.getBytes(StandardCharsets.UTF_8), inline);
+    }
+
+    /** The payload fanned out on the topic, verifying the broker received exactly one publish on it. */
+    private JsonNode fannedOut(String topic) throws Exception {
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(broker, times(1)).publish(eq(topic), payload.capture());
+        return mapper.readTree(payload.getValue());
+    }
+
+    @Test
+    void anMqttShadowUpdateFansOutRecordsAndAnswersEachEventOnce() throws Exception {
+        String update = "$aws/things/sensor-7/shadow/name/building/update";
+
+        mqttShadowRequest(update, "{\"state\":{\"desired\":{\"color\":\"blue\"}},\"clientToken\":\"c-1\"}");
+
+        List<String> topics = List.of(update + "/accepted", update + "/documents", update + "/delta");
+        assertEquals(topics, recordedTopics());
+        for (String topic : topics) {
+            assertEquals(recordedPayload(topic), fannedOut(topic));
+            assertEquals("c-1", recordedPayload(topic).get("clientToken").asText());
+        }
+        verify(broker, times(3)).publish(anyString(), any());
+        assertEquals("blue", service.getThingShadow("sensor-7", "building", REGION).at("/state/desired/color").asText());
+    }
+
+    @Test
+    void anMqttShadowUpdateRunsTheRulesOnTheGivenRuleRunnerWithNoMqttClient() throws Exception {
+        createRule("classicRule", sqsRule(
+                "SELECT clientid() AS cid, topic() AS topic FROM '$aws/things/+/shadow/update/accepted'", CLASSIC_QUEUE_URL));
+        List<Runnable> deferred = new ArrayList<>();
+
+        service.handleReservedMqttPublish("$aws/things/sensor-10/shadow/update",
+                "{\"state\":{\"desired\":{\"color\":\"blue\"}}}".getBytes(StandardCharsets.UTF_8), deferred::add);
+
+        verifyNoInteractions(sqs);
+        assertEquals(3, deferred.size(), "one rule evaluation per event");
+        deferred.forEach(Runnable::run);
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqs).sendMessage(eq(CLASSIC_QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        assertEquals(json("{\"cid\":\"N/A\",\"topic\":\"$aws/things/sensor-10/shadow/update/accepted\"}"),
+                mapper.readTree(body.getValue()));
+    }
+
+    @Test
+    void anMqttShadowGetPublishesGetAcceptedWithTheRequestClientToken() throws Exception {
+        service.updateThingShadow("sensor-8", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        recorder.clear();
+        clearInvocations(broker);
+
+        mqttShadowRequest("$aws/things/sensor-8/shadow/get", "{\"clientToken\":\"g-1\"}");
+
+        JsonNode accepted = fannedOut("$aws/things/sensor-8/shadow/get/accepted");
+        assertEquals(Set.of("state", "metadata", "version", "timestamp", "clientToken"), fieldNames(accepted));
+        assertEquals("blue", accepted.at("/state/delta/color").asText());
+        assertEquals("g-1", accepted.get("clientToken").asText());
+        assertEquals(List.of("$aws/things/sensor-8/shadow/get/accepted"), recordedTopics());
+    }
+
+    @Test
+    void anMqttShadowDeletePublishesDeleteAcceptedWithTheVersionAndClientToken() throws Exception {
+        service.updateThingShadow("sensor-8", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        service.updateThingShadow("sensor-8", null, json("{\"state\":{\"desired\":{\"color\":\"red\"}}}"), REGION);
+        recorder.clear();
+        clearInvocations(broker);
+
+        mqttShadowRequest("$aws/things/sensor-8/shadow/delete", "{\"clientToken\":\"d-1\"}");
+
+        JsonNode accepted = fannedOut("$aws/things/sensor-8/shadow/delete/accepted");
+        assertEquals(Set.of("version", "timestamp", "clientToken"), fieldNames(accepted));
+        assertEquals(2, accepted.get("version").asLong());
+        assertEquals("d-1", accepted.get("clientToken").asText());
+        assertEquals(List.of("$aws/things/sensor-8/shadow/delete/accepted"), recordedTopics());
+    }
+
+    @Test
+    void anMqttVersionConflictPublishesRejectedWithTheHttpStatusAndClientToken() throws Exception {
+        service.updateThingShadow("sensor-9", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        recorder.clear();
+        clearInvocations(broker);
+
+        mqttShadowRequest("$aws/things/sensor-9/shadow/update",
+                "{\"version\":7,\"state\":{\"desired\":{\"color\":\"red\"}},\"clientToken\":\"c-9\"}");
+
+        assertEquals(json("{\"code\":409,\"message\":\"Version conflict\",\"clientToken\":\"c-9\"}"),
+                fannedOut("$aws/things/sensor-9/shadow/update/rejected"));
+        assertEquals(List.of("$aws/things/sensor-9/shadow/update/rejected"), recordedTopics());
+        verify(broker, times(1)).publish(anyString(), any());
+    }
+
+    @Test
+    void restVersionConflictIsConflictExceptionWithStatus409() throws Exception {
+        service.updateThingShadow("sensor-9", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        recorder.clear();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updateThingShadow("sensor-9", null,
+                json("{\"version\":7,\"state\":{\"desired\":{\"color\":\"red\"}}}"), REGION));
+
+        assertEquals("ConflictException", e.getErrorCode());
+        assertEquals(409, e.getHttpStatus());
+        assertEquals("Version conflict", e.getMessage());
+        assertTrue(recorder.recentEvents().isEmpty(), "a REST error publishes nothing");
+    }
+
+    @Test
+    void malformedMqttShadowJsonPublishesRejectedInvalidJsonWithoutAClientToken() throws Exception {
+        mqttShadowRequest("$aws/things/sensor-9/shadow/update", "{\"clientToken\":\"c-9\",");
+
+        assertEquals(json("{\"code\":400,\"message\":\"Invalid JSON\"}"),
+                fannedOut("$aws/things/sensor-9/shadow/update/rejected"));
+    }
+
+    @Test
+    void anMqttGetOfAMissingShadowPublishesRejected404WithTheClientToken() throws Exception {
+        mqttShadowRequest("$aws/things/nobody/shadow/name/building/get", "{\"clientToken\":\"g-2\"}");
+
+        JsonNode rejected = fannedOut("$aws/things/nobody/shadow/name/building/get/rejected");
+        assertEquals(Set.of("code", "message", "clientToken"), fieldNames(rejected));
+        assertEquals(404, rejected.get("code").asInt());
+        assertEquals("g-2", rejected.get("clientToken").asText());
+    }
+
+    @Test
+    void anUnsupportedMqttShadowOperationPublishesRejected400WithTheClientToken() throws Exception {
+        mqttShadowRequest("$aws/things/sensor-9/shadow/name/building/list", "{\"clientToken\":\"u-1\"}");
+
+        assertEquals(json("{\"code\":400,\"message\":\"Unsupported shadow operation: list\",\"clientToken\":\"u-1\"}"),
+                fannedOut("$aws/things/sensor-9/shadow/name/building/list/rejected"));
+    }
+
+    @Test
+    void anMqttPublishOnAShadowResponseTopicIsNotProcessedAsARequest() throws Exception {
+        mqttShadowRequest("$aws/things/sensor-11/shadow/update/accepted", "{\"state\":{\"desired\":{\"color\":\"blue\"}}}");
+        mqttShadowRequest("$aws/things/sensor-11/shadow/name/building/update/delta", "{\"state\":{\"color\":\"blue\"}}");
+
+        verifyNoInteractions(broker);
+        assertTrue(recorder.recentEvents().isEmpty());
+        assertThrows(AwsException.class, () -> service.getThingShadow("sensor-11", null, REGION));
+    }
+
+    @Test
+    void anMqttRequestOnANamedTopicWithAnInvalidNameIsIgnored() throws Exception {
+        service.updateThingShadow("sensor-12", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        recorder.clear();
+        clearInvocations(broker);
+        String update = "{\"state\":{\"desired\":{\"color\":\"green\"}},\"clientToken\":\"t\"}";
+
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name/ /update", update);
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name//update", update);
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name/bad!/delete", "{}");
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name/ /get", "{}");
+
+        assertEquals(List.of(), recordedTopics());
+        verifyNoInteractions(broker);
+        JsonNode classic = service.getThingShadow("sensor-12", null, REGION);
+        assertEquals("blue", classic.at("/state/desired/color").asText());
+        assertEquals(1, classic.get("version").asLong());
+    }
+
+    @Test
+    void anMqttUpdateOnTheReservedPackageShadowIsApplied() throws Exception {
+        String update = "$aws/things/sensor-14/shadow/name/$package/update";
+
+        mqttShadowRequest(update, "{\"state\":{\"reported\":{\"samplePackage\":{\"version\":\"1.0.0\"}}}}");
+
+        assertEquals(1, fannedOut(update + "/accepted").get("version").asLong());
+        assertEquals("1.0.0", service.getThingShadow("sensor-14", "$package", REGION)
+                .at("/state/reported/samplePackage/version").asText());
+    }
+
+    @Test
+    void anMqttUpdateOnADollarShadowNameOtherThanPackagePublishesRejected400() throws Exception {
+        String update = "$aws/things/sensor-14/shadow/name/a$b/update";
+
+        mqttShadowRequest(update, "{\"state\":{\"desired\":{\"color\":\"blue\"}},\"clientToken\":\"c-14\"}");
+
+        assertEquals(json("{\"code\":400,\"message\":\"Invalid shadow name : a$b\",\"clientToken\":\"c-14\"}"),
+                fannedOut(update + "/rejected"));
+        assertEquals(List.of(update + "/rejected"), recordedTopics());
+        assertEquals(List.of(), service.listNamedShadowsForThing("sensor-14", REGION));
     }
 }

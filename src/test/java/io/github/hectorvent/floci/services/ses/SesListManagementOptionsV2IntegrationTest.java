@@ -109,7 +109,7 @@ class SesListManagementOptionsV2IntegrationTest {
 
     @Test
     @Order(4)
-    void listManagementOptionsWithNonStringTopicName_returns400() {
+    void listManagementOptionsWithNonStringTopicName_returnsSerializationException() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("""
                     {
@@ -120,7 +120,8 @@ class SesListManagementOptionsV2IntegrationTest {
                     }
                     """.formatted(FROM, LIST))
         .when().post("/v2/email/outbound-emails").then().statusCode(400)
-                .body("__type", equalTo("BadRequestException"));
+                .body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("NUMBER_VALUE can not be converted to a String"));
     }
 
     @Test

@@ -34,14 +34,17 @@ import software.amazon.awssdk.services.rds.model.DbClusterRoleNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbClusterSnapshotNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbInstanceRoleAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbInstanceRoleNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbLogFileNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.DescribeDBLogFilesDetails;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxiesResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyTargetsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
+import software.amazon.awssdk.services.rds.model.DownloadDbLogFilePortionResponse;
 import software.amazon.awssdk.services.rds.model.EngineDefaults;
 import software.amazon.awssdk.services.rds.model.InvalidDbInstanceStateException;
 import software.amazon.awssdk.services.rds.model.InvalidOptionGroupStateException;
@@ -57,6 +60,7 @@ import software.amazon.awssdk.services.rds.model.OptionGroupNotFoundException;
 import software.amazon.awssdk.services.rds.model.OptionSetting;
 import software.amazon.awssdk.services.rds.model.RdsException;
 import software.amazon.awssdk.services.rds.model.RegisterDbProxyTargetsResponse;
+import software.amazon.awssdk.services.rds.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.rds.model.Tag;
 import software.amazon.awssdk.services.rds.model.UpgradeTarget;
 import software.amazon.awssdk.services.rds.model.ValidStorageOptions;
@@ -761,6 +765,59 @@ class RdsControlPlaneTest {
             } catch (Exception e) {
                 LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + clusterName, e);
             }
+        }
+    }
+
+    @Test
+    @DisplayName("Data API endpoint: enable, describe and disable on an Aurora cluster")
+    void sdkTogglesTheDataApiEndpoint() {
+        String clusterName = TestFixtures.uniqueName("rds-data-api");
+        try {
+            String arn = rds.createDBCluster(b -> b
+                    .dbClusterIdentifier(clusterName)
+                    .engine("aurora-postgresql")
+                    .engineVersion("16.3")
+                    .masterUsername("admin")
+                    .masterUserPassword("data-api-secret")).dbCluster().dbClusterArn();
+            assertThat(rds.enableHttpEndpoint(b -> b.resourceArn(arn)).httpEndpointEnabled()).isTrue();
+            assertThat(rds.describeDBClusters(b -> b.dbClusterIdentifier(clusterName))
+                    .dbClusters().get(0).httpEndpointEnabled()).isTrue();
+            assertThat(rds.disableHttpEndpoint(b -> b.resourceArn(arn)).httpEndpointEnabled()).isFalse();
+            assertThatThrownBy(() -> rds.enableHttpEndpoint(b -> b.resourceArn(arn + "-missing")))
+                    .isInstanceOf(ResourceNotFoundException.class);
+        } finally {
+            try {
+                rds.deleteDBCluster(b -> b.dbClusterIdentifier(clusterName).skipFinalSnapshot(true));
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Failed to clean up RDS cluster " + clusterName, e);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Log files: list an instance's log files and download a block")
+    void sdkReadsInstanceLogFiles() {
+        String instanceName = TestFixtures.uniqueName("rds-log-files");
+        try {
+            createDbInstance(rds, instanceName, "log-files-secret");
+            List<DescribeDBLogFilesDetails> files =
+                    rds.describeDBLogFiles(b -> b.dbInstanceIdentifier(instanceName)).describeDBLogFiles();
+            assertThat(files).isNotEmpty();
+            assertThat(files).allSatisfy(f -> {
+                assertThat(f.logFileName()).startsWith("error/postgresql.log.");
+                assertThat(f.size()).isPositive();
+                assertThat(f.lastWritten()).isPositive();
+            });
+            String name = files.get(0).logFileName();
+            DownloadDbLogFilePortionResponse portion = rds.downloadDBLogFilePortion(b -> b
+                    .dbInstanceIdentifier(instanceName).logFileName(name).marker("0").numberOfLines(1));
+            assertThat(portion.logFileData()).isNotEmpty();
+            assertThat(portion.marker()).isEqualTo("1");
+            assertThatThrownBy(() -> rds.downloadDBLogFilePortion(b -> b
+                    .dbInstanceIdentifier(instanceName).logFileName("error/no-such.log")))
+                    .isInstanceOf(DbLogFileNotFoundException.class);
+        } finally {
+            deleteDbInstance(rds, instanceName);
         }
     }
 

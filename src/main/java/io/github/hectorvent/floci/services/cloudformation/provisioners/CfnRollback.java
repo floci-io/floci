@@ -103,6 +103,7 @@ public final class CfnRollback {
      * {@code rollbackUpdate}.
      */
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
+    public static final String S3_BUCKET_UPDATE_SNAPSHOT_ATTR = "__FlociS3BucketUpdateSnapshot";
 
     /**
      * Holds the description, event pattern and retention an EventBridge archive carried before an
@@ -127,6 +128,14 @@ public final class CfnRollback {
      * update call and spent by its {@code rollbackUpdate}.
      */
     public static final String REST_API_UPDATE_SNAPSHOT_ATTR = "__FlociRestApiUpdateSnapshot";
+
+    /**
+     * Holds the tags a web function or the mutable configuration a web function endpoint carried
+     * before the in-place update in flight changed it, so a failed stack update can put it back.
+     * Written by {@code LambdaWebCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR = "__FlociLambdaWebUpdateSnapshot";
 
     /**
      * Holds the function ARN, status, caching flag, token settings and tags an IoT authorizer
@@ -225,6 +234,14 @@ public final class CfnRollback {
      * so a failed stack update can restore them.
      */
     public static final String SQS_UPDATE_SNAPSHOT_ATTR = "__FlociSqsUpdateSnapshot";
+
+    /**
+     * Holds the value, settings and managed tags an SSM parameter carried before an in-place
+     * update changed them, with the resource's attributes from before, so a failed stack update
+     * can put them back. Written by {@code SsmCfnProvisioner} before its put and spent by its
+     * {@code rollbackUpdate}; a rename leaves its rollback to {@link #REPLACEMENT_CLEANUP_ATTR}.
+     */
+    public static final String SSM_PARAMETER_UPDATE_SNAPSHOT_ATTR = "__FlociSsmParameterUpdateSnapshot";
 
     /**
      * Holds the settings a Cognito user pool or user pool client had before an in-place update

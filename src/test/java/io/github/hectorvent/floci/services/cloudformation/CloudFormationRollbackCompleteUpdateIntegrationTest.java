@@ -159,7 +159,7 @@ class CloudFormationRollbackCompleteUpdateIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", topicTemplate(topicName))
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(topicTemplate(topicName)))
         .when()
             .post("/")
         .then()

@@ -66,6 +66,8 @@ class RedshiftContainerManagerTest {
     @BeforeEach
     void setUp() {
         containerBuilder = mock(ContainerBuilder.class);
+        // Echoes its input, so a test sees which network the manager asked to resolve.
+        when(containerBuilder.resolveDockerNetwork(any())).thenAnswer(inv -> inv.<Optional<String>>getArgument(0).map(n -> "resolved:" + n));
         lifecycleManager = mock(ContainerLifecycleManager.class);
         logStreamer = mock(ContainerLogStreamer.class);
         containerDetector = mock(ContainerDetector.class);
@@ -360,7 +362,8 @@ class RedshiftContainerManagerTest {
         when(existing.getId()).thenReturn("cont-existing");
         when(lifecycleManager.findByName(containerName)).thenReturn(Optional.of(existing));
         ContainerInfo adopted = new ContainerInfo("cont-existing", Map.of(5432, new EndpointInfo("localhost", 6000)));
-        when(lifecycleManager.adopt(eq("cont-existing"), any())).thenReturn(adopted);
+        when(config.services().redshift().dockerNetwork()).thenReturn(Optional.of("redshift-net"));
+        when(lifecycleManager.adopt(eq("cont-existing"), any(), eq(Optional.of("resolved:redshift-net")))).thenReturn(adopted);
 
         RedshiftContainerHandle handle = manager.adoptOrStart(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
@@ -385,7 +388,7 @@ class RedshiftContainerManagerTest {
         RedshiftContainerHandle handle = manager.adoptOrStart(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
         assertEquals("cont-fresh", handle.getContainerId());
-        verify(lifecycleManager, never()).adopt(any(), any());
+        verify(lifecycleManager, never()).adopt(any(), any(), any());
     }
 
     @Test
@@ -551,7 +554,7 @@ class RedshiftContainerManagerTest {
         when(existing.getId()).thenReturn("cont-adopt-stream");
         when(lifecycleManager.findByName(containerName)).thenReturn(Optional.of(existing));
         ContainerInfo adopted = new ContainerInfo("cont-adopt-stream", Map.of(5432, new EndpointInfo("localhost", 6000)));
-        when(lifecycleManager.adopt(eq("cont-adopt-stream"), any())).thenReturn(adopted);
+        when(lifecycleManager.adopt(eq("cont-adopt-stream"), any(), eq(Optional.empty()))).thenReturn(adopted);
         Closeable stream = mock(Closeable.class);
         when(logStreamer.attach("cont-adopt-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster"))
                 .thenReturn(stream);

@@ -7,13 +7,16 @@
 Floci answers Service Quotas lookups from a generated in-memory catalog. Every service code
 resolves to a quota list: a curated set with real AWS quota codes where tooling depends on
 them — CodeBuild's `L-2DC20C30` ("Concurrently running builds") and Lambda's `L-B99A9384`
-("Concurrent executions") — plus a deterministic generic set for any other service code. All
-values are deliberately generous so local pipelines that gate on quota headroom, such
+("Concurrent executions") — plus a deterministic generic set for any other service code.
+Unmodeled values are deliberately generous so local pipelines that gate on quota headroom, such
 as AWS Landing Zone Accelerator, never stall on a limit the emulator does not enforce. The
 Organizations `Maximum number of accounts` quota uses AWS quota code `L-E619E033` and a local value
 of 50. VPC's `L-FE5A380F` ("NAT gateways per Availability Zone", 5) and `L-2AEEBF1A` ("Rules per
 network ACL", 20) carry their AWS default values, so tooling that compares a desired value against
 the default before requesting an increase takes the same path it would against AWS.
+EC2's `L-1216C47A` ("Running On-Demand Standard (A, C, D, H, I, M, R, T, Z)
+instances") also reports its AWS default of 5. This catalog entry does not enforce
+a vCPU admission limit on EC2.
 
 Applied quotas and AWS default quotas return the same data, and quota values are static.
 `RequestServiceQuotaIncrease` is accepted and validated, records the request, and lets you read

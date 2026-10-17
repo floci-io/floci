@@ -129,10 +129,12 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
         // Two versions of one key with different tags. The current version carries the tag the
         // policy allows; the one under it does not.
         String denied = f.seedVersion("a/rolled", "env=b");
-        f.seedVersion("a/rolled", "env=a");
+        String allowed = f.seedVersion("a/rolled", "env=a");
 
-        f.policy(allow("s3:GetObject", f.objects(), EXISTING_A));
+        // A read naming a version is checked as s3:GetObjectVersion, which carries the key too.
+        f.policy(allow("\"s3:GetObject\",\"s3:GetObjectVersion\"", f.objects(), EXISTING_A));
         assertEquals(200, f.get("a/rolled"), "the current version carries the allowed tag");
+        assertEquals(200, f.getVersion("a/rolled", allowed), "the same version, named by its id");
         assertEquals(403, f.getVersion("a/rolled", denied),
                 "the older version carries a foreign tag, so its own tags decide");
     }
@@ -145,6 +147,21 @@ class S3ObjectTagConditionEnforcementIntegrationTest {
         // is refused by the policy rather than escaping the filter as a 500.
         assertEquals(403, f.put("a/bad", "env=%zz", null), "an undecodable value");
         assertEquals(403, f.put("a/bad", "%zz=a", null), "an undecodable key");
+    }
+
+    @Test
+    void aReadNamingTheNullVersionIsAuthorizedAgainstTheVersionItServes() {
+        Fixture f = new Fixture("nullversion", true);
+        // Written with versioning on, the key has no null version. S3 answers a read naming one with
+        // NoSuchVersion, but floci serves it the current version, so that version's tags must decide
+        // or the deny on them would be skipped.
+        f.seedVersion("a/secret", "env=b");
+        f.policy(allow("\"s3:GetObject\",\"s3:GetObjectVersion\"", f.objects(), null) + ","
+                + "{\"Effect\":\"Deny\",\"Action\":[\"s3:GetObject\",\"s3:GetObjectVersion\"],"
+                + "\"Resource\":\"" + f.objects() + "\","
+                + "\"Condition\":{\"StringEquals\":{\"s3:ExistingObjectTag/env\":\"b\"}}}");
+        assertEquals(403, f.get("a/secret"), "the current version carries the denied tag");
+        assertEquals(403, f.getVersion("a/secret", "null"), "the same version, reached through versionId=null");
     }
 
     private static String allow(String actions, String resource, String condition) {

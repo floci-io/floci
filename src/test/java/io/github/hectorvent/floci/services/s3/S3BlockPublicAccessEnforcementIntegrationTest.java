@@ -159,6 +159,9 @@ class S3BlockPublicAccessEnforcementIntegrationTest {
     private static String createBucket() {
         String bucket = "bpa-enforce-" + UUID.randomUUID();
         given().filter(OWNER).when().put("/" + bucket).then().statusCode(200);
+        given().filter(OWNER)
+                .body("<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>")
+                .when().put("/" + bucket + "?ownershipControls").then().statusCode(200);
         return bucket;
     }
 

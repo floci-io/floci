@@ -230,7 +230,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
     }
 
     @Test
-    void omittedParameterWithNoDefault_isReportedAsAChange() {
+    void omittedParameterWithNoDefault_isRefused() {
         String stackName = "cs-diff-omitted-param-no-default-stack";
         stacksToDelete.add(stackName);
 
@@ -262,9 +262,9 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Same template, but the update omits Suffix entirely and the template has no Default -
-        // resolveDefaultParameters drops the parameter, and ExecuteChangeSet would apply the
-        // resulting (missing) value. The preview must flag the resource as changed too.
+        // Same template, but the update omits Suffix entirely and the template has no Default. An
+        // update does not carry the deployed value over, so CloudFormation refuses the change set
+        // rather than preview, or apply, the parameter without a value.
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateChangeSet")
@@ -275,19 +275,9 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200);
-
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeChangeSet")
-            .formParam("StackName", stackName)
-            .formParam("ChangeSetName", "omitted-param-no-default-cs")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<LogicalResourceId>Q</LogicalResourceId>"))
-            .body(containsString("<Action>Modify</Action>"));
+            .statusCode(400)
+            .body(containsString("<Code>ValidationError</Code>"))
+            .body(containsString("<Message>Parameters: [Suffix] must have values</Message>"));
     }
 
     @Test

@@ -614,7 +614,7 @@ public class SwfService implements Resettable {
 
             applyDecisions(execution, decisions, queued, decisionEventId);
 
-            if (execution.isOpen() && (execution.isDecisionNeeded() || hasNothingPending(execution))) {
+            if (execution.isOpen() && execution.isDecisionNeeded()) {
                 execution.setDecisionNeeded(false);
                 scheduleDecisionTask(execution);
             }
@@ -1036,6 +1036,7 @@ public class SwfService implements Resettable {
                 .attr("workflowExecution", Map.of("workflowId", target.getWorkflowId(),
                         "runId", target.getRunId()))
                 .attr("initiatedEventId", initiated.getEventId());
+        execution.setDecisionNeeded(true);
     }
 
     private void cancelExternal(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {
@@ -1067,6 +1068,7 @@ public class SwfService implements Resettable {
                 .attr("workflowExecution", Map.of("workflowId", target.getWorkflowId(),
                         "runId", target.getRunId()))
                 .attr("initiatedEventId", initiated.getEventId());
+        execution.setDecisionNeeded(true);
     }
 
     private void startChild(SwfWorkflowExecution execution, Decision decision, long decisionEventId) {

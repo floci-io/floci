@@ -2107,7 +2107,24 @@ public class IamQueryHandler {
         CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
         List<String> actionNames = requireActionNames(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
-        Map<String, List<String>> context = extractContextEntries(params);
+        // Keyed without regard to case, as the evaluator compares condition key names: a value
+        // the call supplied has to shadow a populated one however the call spelled the key.
+        Map<String, List<String>> context = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        context.putAll(extractContextEntries(params));
+        // The simulator fills the principal keys in itself rather than asking for them, so a
+        // policy scoped to ${aws:username} or keyed on who is calling simulates as it evaluates.
+        // A value the call supplied stays, being the one the caller asked to simulate with. The
+        // account comes from the identity that was resolved, not from the ARN the call wrote,
+        // which need not be one this evaluator can parse.
+        iamService.simulationPrincipalKeys(policySourceArn).ifPresent(principal -> {
+            Map<String, List<String>> populated = new HashMap<>();
+            principal.putPrincipalKeys(populated);
+            String account = AwsArnUtils.accountOrDefault(principal.principalArn(), null);
+            if (account != null) {
+                populated.put("aws:PrincipalAccount", List.of(account));
+            }
+            populated.forEach(context::putIfAbsent);
+        });
         String result = simulationResultsXml(caller, actionNames, resourceArns, context);
         return Response.ok(AwsQueryResponse.envelope("SimulatePrincipalPolicy", AwsNamespaces.IAM, result)).build();
     }
@@ -2177,7 +2194,11 @@ public class IamQueryHandler {
 
     private Response handleGetContextKeysForPrincipalPolicy(MultivaluedMap<String, String> params) {
         String policySourceArn = getParam(params, "PolicySourceArn");
-        CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
+        // "Only context keys referenced by the identity-based policies attached to the specified
+        // entity, and any additional policies that you provide, are included": a grant the account
+        // applies without attaching it is therefore not read here, though a simulation evaluates
+        // with it.
+        CallerContext caller = iamService.resolveAttachedPrincipalContext(policySourceArn);
         List<String> allDocuments = new ArrayList<>(caller.identityPolicies());
         allDocuments.addAll(extractIndexedValues(params, "PolicyInputList.member"));
         List<String> keys = policyEvaluator.contextKeysReferencedIn(allDocuments);
@@ -2543,7 +2564,15 @@ public class IamQueryHandler {
             case "user" -> {
                 IamUser user = requireMatchingArn(iamService.getUser(parsed.name()).getArn(), arn,
                         iamService.getUser(parsed.name()));
-                yield new AccessAdvisorTarget(identityPolicyDocuments(accountId, arn), List.of(entityOf(user)));
+                // The report lists "every AWS service that the resource could access using
+                // permissions policies", so a permission the account applies to its users without
+                // attaching it counts: a user with no policies of their own still reaches IAM
+                // while the password policy allows self-service. It is added to the documents the
+                // service list is read from rather than to policiesForIdentity, since it is no
+                // policy of the user's and has no name or ARN to report as one.
+                List<String> documents = new ArrayList<>(identityPolicyDocuments(accountId, arn));
+                documents.addAll(iamService.accountLevelUserGrants(accountId));
+                yield new AccessAdvisorTarget(documents, List.of(entityOf(user)));
             }
             case "role" -> {
                 IamRole role = requireMatchingArn(iamService.getRole(parsed.name()).getArn(), arn,
@@ -2715,7 +2744,11 @@ public class IamQueryHandler {
         }
     }
 
-    /** The documents behind an identity ARN, reusing the scoping rules above. */
+    /**
+     * The documents behind an identity ARN, reusing the scoping rules above. These are the
+     * identity's own policies only: a grant the account applies without attaching it is no policy
+     * of theirs, so the user branch above adds it to what it reports rather than finding it here.
+     */
     private List<String> identityPolicyDocuments(String accountId, String arn) {
         List<String> documents = new ArrayList<>();
         for (GrantingPolicy candidate : policiesForIdentity(accountId, arn)) {

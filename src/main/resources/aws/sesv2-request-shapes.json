@@ -1,0 +1,1788 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_sesv2_shapes.py",
+    "botocore": "botocore 1.43.113 (installed package)"
+  },
+  "operations": {
+    "AssociateEmailIdentityCertificate": "AssociateEmailIdentityCertificateRequest",
+    "BatchGetMetricData": "BatchGetMetricDataRequest",
+    "CancelExportJob": "CancelExportJobRequest",
+    "CreateConfigurationSet": "CreateConfigurationSetRequest",
+    "CreateConfigurationSetEventDestination": "CreateConfigurationSetEventDestinationRequest",
+    "CreateContact": "CreateContactRequest",
+    "CreateContactList": "CreateContactListRequest",
+    "CreateCustomVerificationEmailTemplate": "CreateCustomVerificationEmailTemplateRequest",
+    "CreateDedicatedIpPool": "CreateDedicatedIpPoolRequest",
+    "CreateDeliverabilityTestReport": "CreateDeliverabilityTestReportRequest",
+    "CreateEmailIdentity": "CreateEmailIdentityRequest",
+    "CreateEmailIdentityPolicy": "CreateEmailIdentityPolicyRequest",
+    "CreateEmailTemplate": "CreateEmailTemplateRequest",
+    "CreateExportJob": "CreateExportJobRequest",
+    "CreateImportJob": "CreateImportJobRequest",
+    "CreateMultiRegionEndpoint": "CreateMultiRegionEndpointRequest",
+    "CreateTenant": "CreateTenantRequest",
+    "CreateTenantResourceAssociation": "CreateTenantResourceAssociationRequest",
+    "DeleteConfigurationSet": "DeleteConfigurationSetRequest",
+    "DeleteConfigurationSetEventDestination": "DeleteConfigurationSetEventDestinationRequest",
+    "DeleteContact": "DeleteContactRequest",
+    "DeleteContactList": "DeleteContactListRequest",
+    "DeleteCustomVerificationEmailTemplate": "DeleteCustomVerificationEmailTemplateRequest",
+    "DeleteDedicatedIpPool": "DeleteDedicatedIpPoolRequest",
+    "DeleteEmailIdentity": "DeleteEmailIdentityRequest",
+    "DeleteEmailIdentityPolicy": "DeleteEmailIdentityPolicyRequest",
+    "DeleteEmailTemplate": "DeleteEmailTemplateRequest",
+    "DeleteMultiRegionEndpoint": "DeleteMultiRegionEndpointRequest",
+    "DeleteSuppressedDestination": "DeleteSuppressedDestinationRequest",
+    "DeleteTenant": "DeleteTenantRequest",
+    "DeleteTenantResourceAssociation": "DeleteTenantResourceAssociationRequest",
+    "DisassociateEmailIdentityCertificate": "DisassociateEmailIdentityCertificateRequest",
+    "GetAccount": "GetAccountRequest",
+    "GetBlacklistReports": "GetBlacklistReportsRequest",
+    "GetConfigurationSet": "GetConfigurationSetRequest",
+    "GetConfigurationSetEventDestinations": "GetConfigurationSetEventDestinationsRequest",
+    "GetContact": "GetContactRequest",
+    "GetContactList": "GetContactListRequest",
+    "GetCustomVerificationEmailTemplate": "GetCustomVerificationEmailTemplateRequest",
+    "GetDedicatedIp": "GetDedicatedIpRequest",
+    "GetDedicatedIpPool": "GetDedicatedIpPoolRequest",
+    "GetDedicatedIps": "GetDedicatedIpsRequest",
+    "GetDeliverabilityDashboardOptions": "GetDeliverabilityDashboardOptionsRequest",
+    "GetDeliverabilityTestReport": "GetDeliverabilityTestReportRequest",
+    "GetDomainDeliverabilityCampaign": "GetDomainDeliverabilityCampaignRequest",
+    "GetDomainStatisticsReport": "GetDomainStatisticsReportRequest",
+    "GetEmailAddressInsights": "GetEmailAddressInsightsRequest",
+    "GetEmailIdentity": "GetEmailIdentityRequest",
+    "GetEmailIdentityPolicies": "GetEmailIdentityPoliciesRequest",
+    "GetEmailTemplate": "GetEmailTemplateRequest",
+    "GetExportJob": "GetExportJobRequest",
+    "GetImportJob": "GetImportJobRequest",
+    "GetMessageInsights": "GetMessageInsightsRequest",
+    "GetMultiRegionEndpoint": "GetMultiRegionEndpointRequest",
+    "GetReputationEntity": "GetReputationEntityRequest",
+    "GetSuppressedDestination": "GetSuppressedDestinationRequest",
+    "GetTenant": "GetTenantRequest",
+    "ListConfigurationSets": "ListConfigurationSetsRequest",
+    "ListContactLists": "ListContactListsRequest",
+    "ListContacts": "ListContactsRequest",
+    "ListCustomVerificationEmailTemplates": "ListCustomVerificationEmailTemplatesRequest",
+    "ListDedicatedIpPools": "ListDedicatedIpPoolsRequest",
+    "ListDeliverabilityTestReports": "ListDeliverabilityTestReportsRequest",
+    "ListDomainDeliverabilityCampaigns": "ListDomainDeliverabilityCampaignsRequest",
+    "ListEmailIdentities": "ListEmailIdentitiesRequest",
+    "ListEmailIdentityCertificates": "ListEmailIdentityCertificatesRequest",
+    "ListEmailTemplates": "ListEmailTemplatesRequest",
+    "ListExportJobs": "ListExportJobsRequest",
+    "ListImportJobs": "ListImportJobsRequest",
+    "ListMultiRegionEndpoints": "ListMultiRegionEndpointsRequest",
+    "ListRecommendations": "ListRecommendationsRequest",
+    "ListReputationEntities": "ListReputationEntitiesRequest",
+    "ListResourceTenants": "ListResourceTenantsRequest",
+    "ListSuppressedDestinations": "ListSuppressedDestinationsRequest",
+    "ListTagsForResource": "ListTagsForResourceRequest",
+    "ListTenantResources": "ListTenantResourcesRequest",
+    "ListTenants": "ListTenantsRequest",
+    "PutAccountDedicatedIpWarmupAttributes": "PutAccountDedicatedIpWarmupAttributesRequest",
+    "PutAccountDetails": "PutAccountDetailsRequest",
+    "PutAccountPricingAttributes": "PutAccountPricingAttributesRequest",
+    "PutAccountSendingAttributes": "PutAccountSendingAttributesRequest",
+    "PutAccountSuppressionAttributes": "PutAccountSuppressionAttributesRequest",
+    "PutAccountVdmAttributes": "PutAccountVdmAttributesRequest",
+    "PutConfigurationSetArchivingOptions": "PutConfigurationSetArchivingOptionsRequest",
+    "PutConfigurationSetDeliveryOptions": "PutConfigurationSetDeliveryOptionsRequest",
+    "PutConfigurationSetReputationOptions": "PutConfigurationSetReputationOptionsRequest",
+    "PutConfigurationSetSendingOptions": "PutConfigurationSetSendingOptionsRequest",
+    "PutConfigurationSetSuppressionOptions": "PutConfigurationSetSuppressionOptionsRequest",
+    "PutConfigurationSetTrackingOptions": "PutConfigurationSetTrackingOptionsRequest",
+    "PutConfigurationSetVdmOptions": "PutConfigurationSetVdmOptionsRequest",
+    "PutDedicatedIpInPool": "PutDedicatedIpInPoolRequest",
+    "PutDedicatedIpPoolScalingAttributes": "PutDedicatedIpPoolScalingAttributesRequest",
+    "PutDedicatedIpWarmupAttributes": "PutDedicatedIpWarmupAttributesRequest",
+    "PutDeliverabilityDashboardOption": "PutDeliverabilityDashboardOptionRequest",
+    "PutEmailIdentityConfigurationSetAttributes": "PutEmailIdentityConfigurationSetAttributesRequest",
+    "PutEmailIdentityDkimAttributes": "PutEmailIdentityDkimAttributesRequest",
+    "PutEmailIdentityDkimSigningAttributes": "PutEmailIdentityDkimSigningAttributesRequest",
+    "PutEmailIdentityFeedbackAttributes": "PutEmailIdentityFeedbackAttributesRequest",
+    "PutEmailIdentityMailFromAttributes": "PutEmailIdentityMailFromAttributesRequest",
+    "PutSuppressedDestination": "PutSuppressedDestinationRequest",
+    "PutTenantSuppressionAttributes": "PutTenantSuppressionAttributesRequest",
+    "SendBulkEmail": "SendBulkEmailRequest",
+    "SendCustomVerificationEmail": "SendCustomVerificationEmailRequest",
+    "SendEmail": "SendEmailRequest",
+    "TagResource": "TagResourceRequest",
+    "TestRenderEmailTemplate": "TestRenderEmailTemplateRequest",
+    "UntagResource": "UntagResourceRequest",
+    "UpdateConfigurationSet": "UpdateConfigurationSetRequest",
+    "UpdateConfigurationSetEventDestination": "UpdateConfigurationSetEventDestinationRequest",
+    "UpdateContact": "UpdateContactRequest",
+    "UpdateContactList": "UpdateContactListRequest",
+    "UpdateCustomVerificationEmailTemplate": "UpdateCustomVerificationEmailTemplateRequest",
+    "UpdateEmailIdentityPolicy": "UpdateEmailIdentityPolicyRequest",
+    "UpdateEmailTemplate": "UpdateEmailTemplateRequest",
+    "UpdateReputationEntityCustomerManagedStatus": "UpdateReputationEntityCustomerManagedStatusRequest",
+    "UpdateReputationEntityPolicy": "UpdateReputationEntityPolicyRequest"
+  },
+  "shapes": {
+    "AdditionalContactEmailAddress": {
+      "type": "string"
+    },
+    "AdditionalContactEmailAddresses": {
+      "type": "list",
+      "member": "AdditionalContactEmailAddress"
+    },
+    "AmazonResourceName": {
+      "type": "string"
+    },
+    "ArchiveArn": {
+      "type": "string"
+    },
+    "ArchivingOptions": {
+      "type": "structure",
+      "members": {
+        "ArchiveArn": "ArchiveArn"
+      }
+    },
+    "AssociateEmailIdentityCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "EmailIdentity": "Identity",
+        "FromAddress": "EmailAddress",
+        "CertificateArn": "CertificateArn"
+      }
+    },
+    "Attachment": {
+      "type": "structure",
+      "members": {
+        "RawContent": "RawAttachmentData",
+        "ContentDisposition": "AttachmentContentDisposition",
+        "FileName": "AttachmentFileName",
+        "ContentDescription": "AttachmentContentDescription",
+        "ContentId": "AttachmentContentId",
+        "ContentTransferEncoding": "AttachmentContentTransferEncoding",
+        "ContentType": "AttachmentContentType"
+      }
+    },
+    "AttachmentContentDescription": {
+      "type": "string"
+    },
+    "AttachmentContentDisposition": {
+      "type": "string"
+    },
+    "AttachmentContentId": {
+      "type": "string"
+    },
+    "AttachmentContentTransferEncoding": {
+      "type": "string"
+    },
+    "AttachmentContentType": {
+      "type": "string"
+    },
+    "AttachmentFileName": {
+      "type": "string"
+    },
+    "AttachmentList": {
+      "type": "list",
+      "member": "Attachment"
+    },
+    "AttributesData": {
+      "type": "string"
+    },
+    "BatchGetMetricDataQueries": {
+      "type": "list",
+      "member": "BatchGetMetricDataQuery"
+    },
+    "BatchGetMetricDataQuery": {
+      "type": "structure",
+      "members": {
+        "Id": "QueryIdentifier",
+        "Namespace": "MetricNamespace",
+        "Metric": "Metric",
+        "Dimensions": "Dimensions",
+        "StartDate": "Timestamp",
+        "EndDate": "Timestamp"
+      }
+    },
+    "BatchGetMetricDataRequest": {
+      "type": "structure",
+      "members": {
+        "Queries": "BatchGetMetricDataQueries"
+      }
+    },
+    "BehaviorOnMxFailure": {
+      "type": "string"
+    },
+    "Body": {
+      "type": "structure",
+      "members": {
+        "Text": "Content",
+        "Html": "Content"
+      }
+    },
+    "BulkEmailContent": {
+      "type": "structure",
+      "members": {
+        "Template": "Template"
+      }
+    },
+    "BulkEmailEntry": {
+      "type": "structure",
+      "members": {
+        "Destination": "Destination",
+        "ReplacementTags": "MessageTagList",
+        "ReplacementEmailContent": "ReplacementEmailContent",
+        "ReplacementHeaders": "MessageHeaderList"
+      }
+    },
+    "BulkEmailEntryList": {
+      "type": "list",
+      "member": "BulkEmailEntry"
+    },
+    "CancelExportJobRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "CertificateArn": {
+      "type": "string"
+    },
+    "Charset": {
+      "type": "string"
+    },
+    "CloudWatchDestination": {
+      "type": "structure",
+      "members": {
+        "DimensionConfigurations": "CloudWatchDimensionConfigurations"
+      }
+    },
+    "CloudWatchDimensionConfiguration": {
+      "type": "structure",
+      "members": {
+        "DimensionName": "DimensionName",
+        "DimensionValueSource": "DimensionValueSource",
+        "DefaultDimensionValue": "DefaultDimensionValue"
+      }
+    },
+    "CloudWatchDimensionConfigurations": {
+      "type": "list",
+      "member": "CloudWatchDimensionConfiguration"
+    },
+    "ConfigurationOverrides": {
+      "type": "structure",
+      "members": {
+        "Tracking": "TrackingConfigurationOverrides"
+      }
+    },
+    "ConfigurationSetFilter": {
+      "type": "map",
+      "value": "ConfigurationSetFilterValue"
+    },
+    "ConfigurationSetFilterValue": {
+      "type": "string"
+    },
+    "ConfigurationSetName": {
+      "type": "string"
+    },
+    "ContactLanguage": {
+      "type": "string"
+    },
+    "ContactListDestination": {
+      "type": "structure",
+      "members": {
+        "ContactListName": "ContactListName",
+        "ContactListImportAction": "ContactListImportAction"
+      }
+    },
+    "ContactListImportAction": {
+      "type": "string"
+    },
+    "ContactListName": {
+      "type": "string"
+    },
+    "Content": {
+      "type": "structure",
+      "members": {
+        "Data": "MessageData",
+        "Charset": "Charset"
+      }
+    },
+    "CreateConfigurationSetEventDestinationRequest": {
+      "type": "structure",
+      "members": {
+        "EventDestinationName": "EventDestinationName",
+        "EventDestination": "EventDestinationDefinition"
+      }
+    },
+    "CreateConfigurationSetRequest": {
+      "type": "structure",
+      "members": {
+        "ConfigurationSetName": "ConfigurationSetName",
+        "TrackingOptions": "TrackingOptions",
+        "DeliveryOptions": "DeliveryOptions",
+        "ReputationOptions": "ReputationOptions",
+        "SendingOptions": "SendingOptions",
+        "Tags": "TagList",
+        "SuppressionOptions": "SuppressionOptions",
+        "VdmOptions": "VdmOptions",
+        "ArchivingOptions": "ArchivingOptions",
+        "MessageSecurityOptions": "MessageSecurityOptions"
+      }
+    },
+    "CreateContactListRequest": {
+      "type": "structure",
+      "members": {
+        "ContactListName": "ContactListName",
+        "Topics": "Topics",
+        "Description": "Description",
+        "Tags": "TagList"
+      }
+    },
+    "CreateContactRequest": {
+      "type": "structure",
+      "members": {
+        "EmailAddress": "EmailAddress",
+        "TopicPreferences": "TopicPreferenceList",
+        "UnsubscribeAll": "UnsubscribeAll",
+        "AttributesData": "AttributesData"
+      }
+    },
+    "CreateCustomVerificationEmailTemplateRequest": {
+      "type": "structure",
+      "members": {
+        "TemplateName": "EmailTemplateName",
+        "FromEmailAddress": "EmailAddress",
+        "TemplateSubject": "EmailTemplateSubject",
+        "TemplateContent": "TemplateContent",
+        "Tags": "TagList",
+        "SuccessRedirectionURL": "SuccessRedirectionURL",
+        "FailureRedirectionURL": "FailureRedirectionURL"
+      }
+    },
+    "CreateDedicatedIpPoolRequest": {
+      "type": "structure",
+      "members": {
+        "PoolName": "PoolName",
+        "Tags": "TagList",
+        "ScalingMode": "ScalingMode"
+      }
+    },
+    "CreateDeliverabilityTestReportRequest": {
+      "type": "structure",
+      "members": {
+        "ReportName": "ReportName",
+        "FromEmailAddress": "EmailAddress",
+        "Content": "EmailContent",
+        "Tags": "TagList"
+      }
+    },
+    "CreateEmailIdentityPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "Policy": "Policy"
+      }
+    },
+    "CreateEmailIdentityRequest": {
+      "type": "structure",
+      "members": {
+        "EmailIdentity": "Identity",
+        "Tags": "TagList",
+        "DkimSigningAttributes": "DkimSigningAttributes",
+        "ConfigurationSetName": "ConfigurationSetName"
+      }
+    },
+    "CreateEmailTemplateRequest": {
+      "type": "structure",
+      "members": {
+        "TemplateName": "EmailTemplateName",
+        "TemplateContent": "EmailTemplateContent",
+        "Tags": "TagList"
+      }
+    },
+    "CreateExportJobRequest": {
+      "type": "structure",
+      "members": {
+        "ExportDataSource": "ExportDataSource",
+        "ExportDestination": "ExportDestination"
+      }
+    },
+    "CreateImportJobRequest": {
+      "type": "structure",
+      "members": {
+        "ImportDestination": "ImportDestination",
+        "ImportDataSource": "ImportDataSource"
+      }
+    },
+    "CreateMultiRegionEndpointRequest": {
+      "type": "structure",
+      "members": {
+        "EndpointName": "EndpointName",
+        "Details": "Details",
+        "Tags": "TagList"
+      }
+    },
+    "CreateTenantRequest": {
+      "type": "structure",
+      "members": {
+        "TenantName": "TenantName",
+        "Tags": "TagList",
+        "SuppressionAttributes": "TenantSuppressionAttributes"
+      }
+    },
+    "CreateTenantResourceAssociationRequest": {
+      "type": "structure",
+      "members": {
+        "TenantName": "TenantName",
+        "ResourceArn": "AmazonResourceName"
+      }
+    },
+    "CustomRedirectDomain": {
+      "type": "string"
+    },
+    "DashboardAttributes": {
+      "type": "structure",
+      "members": {
+        "EngagementMetrics": "FeatureStatus"
+      }
+    },
+    "DashboardOptions": {
+      "type": "structure",
+      "members": {
+        "EngagementMetrics": "FeatureStatus"
+      }
+    },
+    "DataFormat": {
+      "type": "string"
+    },
+    "DefaultDimensionValue": {
+      "type": "string"
+    },
+    "DefaultSigningScheme": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteConfigurationSetEventDestinationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteConfigurationSetRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteContactListRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteContactRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteCustomVerificationEmailTemplateRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteDedicatedIpPoolRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteEmailIdentityPolicyRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteEmailIdentityRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteEmailTemplateRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteMultiRegionEndpointRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteSuppressedDestinationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteTenantRequest": {
+      "type": "structure",
+      "members": {
+        "TenantName": "TenantName"
+      }
+    },
+    "DeleteTenantResourceAssociationRequest": {
+      "type": "structure",
+      "members": {
+        "TenantName": "TenantName",
+        "ResourceArn": "AmazonResourceName"
+      }
+    },
+    "DeliveryEventType": {
+      "type": "string"
+    },
+    "DeliveryOptions": {
+      "type": "structure",
+      "members": {
+        "TlsPolicy": "TlsPolicy",
+        "SendingPoolName": "PoolName",
+        "MaxDeliverySeconds": "MaxDeliverySeconds"
+      }
+    },
+    "Description": {
+      "type": "string"
+    },
+    "Destination": {
+      "type": "structure",
+      "members": {
+        "ToAddresses": "EmailAddressList",
+        "CcAddresses": "EmailAddressList",
+        "BccAddresses": "EmailAddressList"
+      }
+    },
+    "Details": {
+      "type": "structure",
+      "members": {
+        "RoutesDetails": "RoutesDetails"
+      }
+    },
+    "DimensionName": {
+      "type": "string"
+    },
+    "DimensionValueSource": {
+      "type": "string"
+    },
+    "Dimensions": {
+      "type": "map",
+      "value": "MetricDimensionValue"
+    },
+    "DisassociateEmailIdentityCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "EmailIdentity": "Identity",
+        "FromAddress": "EmailAddress"
+      }
+    },
+    "DisplayName": {
+      "type": "string"
+    },
+    "DkimSigningAttributes": {
+      "type": "structure",
+      "members": {
+        "DomainSigningSelector": "Selector",
+        "DomainSigningPrivateKey": "PrivateKey",
+        "NextSigningKeyLength": "DkimSigningKeyLength",
+        "DomainSigningAttributesOrigin": "DkimSigningAttributesOrigin"
+      }
+    },
+    "DkimSigningAttributesOrigin": {
+      "type": "string"
+    },
+    "DkimSigningKeyLength": {
+      "type": "string"
+    },
+    "Domain": {
+      "type": "string"
+    },
+    "DomainDeliverabilityTrackingOption": {
+      "type": "structure",
+      "members": {
+        "Domain": "Domain",
+        "SubscriptionStartDate": "Timestamp",
+        "InboxPlacementTrackingOption": "InboxPlacementTrackingOption"
+      }
+    },
+    "DomainDeliverabilityTrackingOptions": {
+      "type": "list",
+      "member": "DomainDeliverabilityTrackingOption"
+    },
+    "EmailAddress": {
+      "type": "string"
+    },
+    "EmailAddressFilterList": {
+      "type": "list",
+      "member": "InsightsEmailAddress"
+    },
+    "EmailAddressList": {
+      "type": "list",
+      "member": "EmailAddress"
+    },
+    "EmailContent": {
+      "type": "structure",
+      "members": {
+        "Simple": "Message",
+        "Raw": "RawMessage",
+        "Template": "Template"
+      }
+    },
+    "EmailSubject": {
+      "type": "string"
+    },
+    "EmailSubjectFilterList": {
+      "type": "list",
+      "member": "EmailSubject"
+    },
+    "EmailTemplateContent": {
+      "type": "structure",
+      "members": {
+        "Subject": "EmailTemplateSubject",
+        "Text": "EmailTemplateText",
+        "Html": "EmailTemplateHtml"
+      }
+    },
+    "EmailTemplateData": {
+      "type": "string"
+    },
+    "EmailTemplateHtml": {
+      "type": "string"
+    },
+    "EmailTemplateName": {
+      "type": "string"
+    },
+    "EmailTemplateSubject": {
+      "type": "string"
+    },
+    "EmailTemplateText": {
+      "type": "string"
+    },
+    "Enabled": {
+      "type": "boolean"
+    },
+    "EnabledWrapper": {
+      "type": "boolean"
+    },
+    "EndpointId": {
+      "type": "string"
+    },
+    "EndpointName": {
+      "type": "string"
+    },
+    "EngagementEventType": {
+      "type": "string"
+    },
+    "EventBridgeDestination": {
+      "type": "structure",
+      "members": {
+        "EventBusArn": "AmazonResourceName"
+      }
+    },
+    "EventDestinationDefinition": {
+      "type": "structure",
+      "members": {
+        "Enabled": "Enabled",
+        "MatchingEventTypes": "EventTypes",
+        "KinesisFirehoseDestination": "KinesisFirehoseDestination",
+        "CloudWatchDestination": "CloudWatchDestination",
+        "SnsDestination": "SnsDestination",
+        "EventBridgeDestination": "EventBridgeDestination",
+        "PinpointDestination": "PinpointDestination"
+      }
+    },
+    "EventDestinationName": {
+      "type": "string"
+    },
+    "EventType": {
+      "type": "string"
+    },
+    "EventTypes": {
+      "type": "list",
+      "member": "EventType"
+    },
+    "ExportDataSource": {
+      "type": "structure",
+      "members": {
+        "MetricsDataSource": "MetricsDataSource",
+        "MessageInsightsDataSource": "MessageInsightsDataSource"
+      }
+    },
+    "ExportDestination": {
+      "type": "structure",
+      "members": {
+        "DataFormat": "DataFormat",
+        "S3Url": "S3Url"
+      }
+    },
+    "ExportDimensionValue": {
+      "type": "list",
+      "member": "MetricDimensionValue"
+    },
+    "ExportDimensions": {
+      "type": "map",
+      "value": "ExportDimensionValue"
+    },
+    "ExportMetric": {
+      "type": "structure",
+      "members": {
+        "Name": "Metric",
+        "Aggregation": "MetricAggregation"
+      }
+    },
+    "ExportMetrics": {
+      "type": "list",
+      "member": "ExportMetric"
+    },
+    "ExportSourceType": {
+      "type": "string"
+    },
+    "FailureRedirectionURL": {
+      "type": "string"
+    },
+    "FeatureStatus": {
+      "type": "string"
+    },
+    "GetAccountRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetBlacklistReportsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetConfigurationSetEventDestinationsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetConfigurationSetRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetContactListRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetContactRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetCustomVerificationEmailTemplateRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDedicatedIpPoolRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDedicatedIpRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDedicatedIpsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDeliverabilityDashboardOptionsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDeliverabilityTestReportRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDomainDeliverabilityCampaignRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDomainStatisticsReportRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetEmailAddressInsightsRequest": {
+      "type": "structure",
+      "members": {
+        "EmailAddress": "EmailAddress"
+      }
+    },
+    "GetEmailIdentityPoliciesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetEmailIdentityRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetEmailTemplateRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetExportJobRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetImportJobRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetMessageInsightsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetMultiRegionEndpointRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetReputationEntityRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetSuppressedDestinationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetTenantRequest": {
+      "type": "structure",
+      "members": {
+        "TenantName": "TenantName"
+      }
+    },
+    "GuardianAttributes": {
+      "type": "structure",
+      "members": {
+        "OptimizedSharedDelivery": "FeatureStatus"
+      }
+    },
+    "GuardianOptions": {
+      "type": "structure",
+      "members": {
+        "OptimizedSharedDelivery": "FeatureStatus"
+      }
+    },
+    "HttpsPolicy": {
+      "type": "string"
+    },
+    "Identity": {
+      "type": "string"
+    },
+    "IdentityFilter": {
+      "type": "map",
+      "value": "IdentityFilterValue"
+    },
+    "IdentityFilterValue": {
+      "type": "string"
+    },
+    "ImportDataSource": {
+      "type": "structure",
+      "members": {
+        "S3Url": "S3Url",
+        "DataFormat": "DataFormat"
+      }
+    },
+    "ImportDestination": {
+      "type": "structure",
+      "members": {
+        "SuppressionListDestination": "SuppressionListDestination",
+        "ContactListDestination": "ContactListDestination"
+      }
+    },
+    "ImportDestinationType": {
+      "type": "string"
+    },
+    "InboxPlacementTrackingOption": {
+      "type": "structure",
+      "members": {
+        "Global": "Enabled",
+        "TrackedIsps": "IspNameList"
+      }
+    },
+    "InsightsEmailAddress": {
+      "type": "string"
+    },
+    "Isp": {
+      "type": "string"
+    },
+    "IspFilterList": {
+      "type": "list",
+      "member": "Isp"
+    },
+    "IspName": {
+      "type": "string"
+    },
+    "IspNameList": {
+      "type": "list",
+      "member": "IspName"
+    },
+    "JobStatus": {
+      "type": "string"
+    },
+    "KinesisFirehoseDestination": {
+      "type": "structure",
+      "members": {
+        "IamRoleArn": "AmazonResourceName",
+        "DeliveryStreamArn": "AmazonResourceName"
+      }
+    },
+    "LastDeliveryEventList": {
+      "type": "list",
+      "member": "DeliveryEventType"
+    },
+    "LastEngagementEventList": {
+      "type": "list",
+      "member": "EngagementEventType"
+    },
+    "LastFreshStart": {
+      "type": "timestamp"
+    },
+    "ListConfigurationSetsRequest": {
+      "type": "structure",
+      "members": {
+        "Filter": "ConfigurationSetFilter",
+        "NextToken": "NextToken",
+        "PageSize": "MaxItems"
+      }
+    },
+    "ListContactListsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListContactsFilter": {
+      "type": "structure",
+      "members": {
+        "FilteredStatus": "SubscriptionStatus",
+        "TopicFilter": "TopicFilter"
+      }
+    },
+    "ListContactsRequest": {
+      "type": "structure",
+      "members": {
+        "Filter": "ListContactsFilter",
+        "PageSize": "MaxItems",
+        "NextToken": "NextToken"
+      }
+    },
+    "ListCustomVerificationEmailTemplatesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListDedicatedIpPoolsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListDeliverabilityTestReportsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListDomainDeliverabilityCampaignsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListEmailIdentitiesRequest": {
+      "type": "structure",
+      "members": {
+        "Filter": "IdentityFilter",
+        "NextToken": "NextToken",
+        "PageSize": "MaxItems"
+      }
+    },
+    "ListEmailIdentityCertificatesRequest": {
+      "type": "structure",
+      "members": {
+        "EmailIdentity": "Identity",
+        "NextToken": "NextToken",
+        "PageSize": "MaxItems"
+      }
+    },
+    "ListEmailTemplatesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListExportJobsRequest": {
+      "type": "structure",
+      "members": {
+        "NextToken": "NextToken",
+        "PageSize": "MaxItems",
+        "ExportSourceType": "ExportSourceType",
+        "JobStatus": "JobStatus"
+      }
+    },
+    "ListImportJobsRequest": {
+      "type": "structure",
+      "members": {
+        "ImportDestinationType": "ImportDestinationType",
+        "NextToken": "NextToken",
+        "PageSize": "MaxItems"
+      }
+    },
+    "ListManagementOptions": {
+      "type": "structure",
+      "members": {
+        "ContactListName": "ContactListName",
+        "TopicName": "TopicName"
+      }
+    },
+    "ListMultiRegionEndpointsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListRecommendationFilterValue": {
+      "type": "string"
+    },
+    "ListRecommendationsFilter": {
+      "type": "map",
+      "value": "ListRecommendationFilterValue"
+    },
+    "ListRecommendationsRequest": {
+      "type": "structure",
+      "members": {
+        "Filter": "ListRecommendationsFilter",
+        "NextToken": "NextToken",
+        "PageSize": "MaxItems"
+      }
+    },
+    "ListReputationEntitiesRequest": {
+      "type": "structure",
+      "members": {
+        "Filter": "ReputationEntityFilter",
+        "NextToken": "NextToken",
+        "PageSize": "MaxItems"
+      }
+    },
+    "ListResourceTenantsRequest": {
+      "type": "structure",
+      "members": {
+        "ResourceArn": "AmazonResourceName",
+        "PageSize": "MaxItems",
+        "NextToken": "NextToken"
+      }
+    },
+    "ListSuppressedDestinationsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListTagsForResourceRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListTenantResourcesFilter": {
+      "type": "map",
+      "value": "ListTenantResourcesFilterValue"
+    },
+    "ListTenantResourcesFilterValue": {
+      "type": "string"
+    },
+    "ListTenantResourcesRequest": {
+      "type": "structure",
+      "members": {
+        "TenantName": "TenantName",
+        "Filter": "ListTenantResourcesFilter",
+        "PageSize": "MaxItems",
+        "NextToken": "NextToken"
+      }
+    },
+    "ListTenantsFilter": {
+      "type": "map",
+      "value": "ListTenantsFilterValue"
+    },
+    "ListTenantsFilterValue": {
+      "type": "string"
+    },
+    "ListTenantsRequest": {
+      "type": "structure",
+      "members": {
+        "Filter": "ListTenantsFilter",
+        "NextToken": "NextToken",
+        "PageSize": "MaxItems"
+      }
+    },
+    "MailFromDomainName": {
+      "type": "string"
+    },
+    "MailType": {
+      "type": "string"
+    },
+    "MaxDeliverySeconds": {
+      "type": "long"
+    },
+    "MaxItems": {
+      "type": "integer"
+    },
+    "Message": {
+      "type": "structure",
+      "members": {
+        "Subject": "Content",
+        "Body": "Body",
+        "Headers": "MessageHeaderList",
+        "Attachments": "AttachmentList"
+      }
+    },
+    "MessageData": {
+      "type": "string"
+    },
+    "MessageHeader": {
+      "type": "structure",
+      "members": {
+        "Name": "MessageHeaderName",
+        "Value": "MessageHeaderValue"
+      }
+    },
+    "MessageHeaderList": {
+      "type": "list",
+      "member": "MessageHeader"
+    },
+    "MessageHeaderName": {
+      "type": "string"
+    },
+    "MessageHeaderValue": {
+      "type": "string"
+    },
+    "MessageInsightsDataSource": {
+      "type": "structure",
+      "members": {
+        "StartDate": "Timestamp",
+        "EndDate": "Timestamp",
+        "Include": "MessageInsightsFilters",
+        "Exclude": "MessageInsightsFilters",
+        "MaxResults": "MessageInsightsExportMaxResults"
+      }
+    },
+    "MessageInsightsExportMaxResults": {
+      "type": "integer"
+    },
+    "MessageInsightsFilters": {
+      "type": "structure",
+      "members": {
+        "FromEmailAddress": "EmailAddressFilterList",
+        "Destination": "EmailAddressFilterList",
+        "Subject": "EmailSubjectFilterList",
+        "Isp": "IspFilterList",
+        "TenantName": "TenantNameFilterList",
+        "LastDeliveryEvent": "LastDeliveryEventList",
+        "LastEngagementEvent": "LastEngagementEventList"
+      }
+    },
+    "MessageSecurityOptions": {
+      "type": "structure",
+      "members": {
+        "SigningScheme": "SigningScheme"
+      }
+    },
+    "MessageTag": {
+      "type": "structure",
+      "members": {
+        "Name": "MessageTagName",
+        "Value": "MessageTagValue"
+      }
+    },
+    "MessageTagList": {
+      "type": "list",
+      "member": "MessageTag"
+    },
+    "MessageTagName": {
+      "type": "string"
+    },
+    "MessageTagValue": {
+      "type": "string"
+    },
+    "Metric": {
+      "type": "string"
+    },
+    "MetricAggregation": {
+      "type": "string"
+    },
+    "MetricDimensionValue": {
+      "type": "string"
+    },
+    "MetricNamespace": {
+      "type": "string"
+    },
+    "MetricsDataSource": {
+      "type": "structure",
+      "members": {
+        "Dimensions": "ExportDimensions",
+        "Namespace": "MetricNamespace",
+        "Metrics": "ExportMetrics",
+        "StartDate": "Timestamp",
+        "EndDate": "Timestamp"
+      }
+    },
+    "NextToken": {
+      "type": "string"
+    },
+    "Percentage100Wrapper": {
+      "type": "integer"
+    },
+    "PinpointDestination": {
+      "type": "structure",
+      "members": {
+        "ApplicationArn": "AmazonResourceName"
+      }
+    },
+    "Policy": {
+      "type": "string"
+    },
+    "PoolName": {
+      "type": "string"
+    },
+    "PricingPlan": {
+      "type": "string"
+    },
+    "PrivateKey": {
+      "type": "string"
+    },
+    "PutAccountDedicatedIpWarmupAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "AutoWarmupEnabled": "Enabled"
+      }
+    },
+    "PutAccountDetailsRequest": {
+      "type": "structure",
+      "members": {
+        "MailType": "MailType",
+        "WebsiteURL": "WebsiteURL",
+        "ContactLanguage": "ContactLanguage",
+        "UseCaseDescription": "UseCaseDescription",
+        "AdditionalContactEmailAddresses": "AdditionalContactEmailAddresses",
+        "ProductionAccessEnabled": "EnabledWrapper"
+      }
+    },
+    "PutAccountPricingAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "Plan": "PricingPlan"
+      }
+    },
+    "PutAccountSendingAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "SendingEnabled": "Enabled"
+      }
+    },
+    "PutAccountSuppressionAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "SuppressedReasons": "SuppressionListReasons",
+        "ValidationAttributes": "SuppressionValidationAttributes"
+      }
+    },
+    "PutAccountVdmAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "VdmAttributes": "VdmAttributes"
+      }
+    },
+    "PutConfigurationSetArchivingOptionsRequest": {
+      "type": "structure",
+      "members": {
+        "ArchiveArn": "ArchiveArn"
+      }
+    },
+    "PutConfigurationSetDeliveryOptionsRequest": {
+      "type": "structure",
+      "members": {
+        "TlsPolicy": "TlsPolicy",
+        "SendingPoolName": "SendingPoolName",
+        "MaxDeliverySeconds": "MaxDeliverySeconds"
+      }
+    },
+    "PutConfigurationSetReputationOptionsRequest": {
+      "type": "structure",
+      "members": {
+        "ReputationMetricsEnabled": "Enabled"
+      }
+    },
+    "PutConfigurationSetSendingOptionsRequest": {
+      "type": "structure",
+      "members": {
+        "SendingEnabled": "Enabled"
+      }
+    },
+    "PutConfigurationSetSuppressionOptionsRequest": {
+      "type": "structure",
+      "members": {
+        "SuppressionScope": "SuppressionListScope",
+        "SuppressedReasons": "SuppressionListReasons",
+        "ValidationOptions": "SuppressionValidationOptions"
+      }
+    },
+    "PutConfigurationSetTrackingOptionsRequest": {
+      "type": "structure",
+      "members": {
+        "CustomRedirectDomain": "CustomRedirectDomain",
+        "HttpsPolicy": "HttpsPolicy"
+      }
+    },
+    "PutConfigurationSetVdmOptionsRequest": {
+      "type": "structure",
+      "members": {
+        "VdmOptions": "VdmOptions"
+      }
+    },
+    "PutDedicatedIpInPoolRequest": {
+      "type": "structure",
+      "members": {
+        "DestinationPoolName": "PoolName"
+      }
+    },
+    "PutDedicatedIpPoolScalingAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "ScalingMode": "ScalingMode"
+      }
+    },
+    "PutDedicatedIpWarmupAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "WarmupPercentage": "Percentage100Wrapper"
+      }
+    },
+    "PutDeliverabilityDashboardOptionRequest": {
+      "type": "structure",
+      "members": {
+        "DashboardEnabled": "Enabled",
+        "SubscribedDomains": "DomainDeliverabilityTrackingOptions"
+      }
+    },
+    "PutEmailIdentityConfigurationSetAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "ConfigurationSetName": "ConfigurationSetName"
+      }
+    },
+    "PutEmailIdentityDkimAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "SigningEnabled": "Enabled"
+      }
+    },
+    "PutEmailIdentityDkimSigningAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "SigningAttributesOrigin": "DkimSigningAttributesOrigin",
+        "SigningAttributes": "DkimSigningAttributes"
+      }
+    },
+    "PutEmailIdentityFeedbackAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "EmailForwardingEnabled": "Enabled"
+      }
+    },
+    "PutEmailIdentityMailFromAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "MailFromDomain": "MailFromDomainName",
+        "BehaviorOnMxFailure": "BehaviorOnMxFailure"
+      }
+    },
+    "PutSuppressedDestinationRequest": {
+      "type": "structure",
+      "members": {
+        "EmailAddress": "EmailAddress",
+        "Reason": "SuppressionListReason",
+        "TenantName": "TenantName"
+      }
+    },
+    "PutTenantSuppressionAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "TenantName": "TenantName",
+        "SuppressedReasons": "SuppressionListReasons",
+        "SuppressionScope": "SuppressionListScope"
+      }
+    },
+    "QueryIdentifier": {
+      "type": "string"
+    },
+    "RawAttachmentData": {
+      "type": "blob"
+    },
+    "RawMessage": {
+      "type": "structure",
+      "members": {
+        "Data": "RawMessageData"
+      }
+    },
+    "RawMessageData": {
+      "type": "blob"
+    },
+    "Region": {
+      "type": "string"
+    },
+    "ReplacementEmailContent": {
+      "type": "structure",
+      "members": {
+        "ReplacementTemplate": "ReplacementTemplate"
+      }
+    },
+    "ReplacementTemplate": {
+      "type": "structure",
+      "members": {
+        "ReplacementTemplateData": "EmailTemplateData"
+      }
+    },
+    "ReportName": {
+      "type": "string"
+    },
+    "ReputationEntityFilter": {
+      "type": "map",
+      "value": "ReputationEntityFilterValue"
+    },
+    "ReputationEntityFilterValue": {
+      "type": "string"
+    },
+    "ReputationOptions": {
+      "type": "structure",
+      "members": {
+        "ReputationMetricsEnabled": "Enabled",
+        "LastFreshStart": "LastFreshStart"
+      }
+    },
+    "RouteDetails": {
+      "type": "structure",
+      "members": {
+        "Region": "Region"
+      }
+    },
+    "RoutesDetails": {
+      "type": "list",
+      "member": "RouteDetails"
+    },
+    "S3Url": {
+      "type": "string"
+    },
+    "ScalingMode": {
+      "type": "string"
+    },
+    "Selector": {
+      "type": "string"
+    },
+    "SendBulkEmailRequest": {
+      "type": "structure",
+      "members": {
+        "FromEmailAddress": "EmailAddress",
+        "FromEmailAddressIdentityArn": "AmazonResourceName",
+        "ReplyToAddresses": "EmailAddressList",
+        "FeedbackForwardingEmailAddress": "EmailAddress",
+        "FeedbackForwardingEmailAddressIdentityArn": "AmazonResourceName",
+        "DefaultEmailTags": "MessageTagList",
+        "DefaultContent": "BulkEmailContent",
+        "BulkEmailEntries": "BulkEmailEntryList",
+        "ConfigurationSetName": "ConfigurationSetName",
+        "EndpointId": "EndpointId",
+        "TenantName": "TenantName",
+        "ConfigurationOverrides": "ConfigurationOverrides"
+      }
+    },
+    "SendCustomVerificationEmailRequest": {
+      "type": "structure",
+      "members": {
+        "EmailAddress": "EmailAddress",
+        "TemplateName": "EmailTemplateName",
+        "ConfigurationSetName": "ConfigurationSetName"
+      }
+    },
+    "SendEmailRequest": {
+      "type": "structure",
+      "members": {
+        "FromEmailAddress": "EmailAddress",
+        "FromEmailAddressIdentityArn": "AmazonResourceName",
+        "Destination": "Destination",
+        "ReplyToAddresses": "EmailAddressList",
+        "FeedbackForwardingEmailAddress": "EmailAddress",
+        "FeedbackForwardingEmailAddressIdentityArn": "AmazonResourceName",
+        "Content": "EmailContent",
+        "EmailTags": "MessageTagList",
+        "ConfigurationSetName": "ConfigurationSetName",
+        "EndpointId": "EndpointId",
+        "TenantName": "TenantName",
+        "ListManagementOptions": "ListManagementOptions",
+        "ConfigurationOverrides": "ConfigurationOverrides"
+      }
+    },
+    "SendingOptions": {
+      "type": "structure",
+      "members": {
+        "SendingEnabled": "Enabled"
+      }
+    },
+    "SendingPoolName": {
+      "type": "string"
+    },
+    "SendingStatus": {
+      "type": "string"
+    },
+    "SignatureFormat": {
+      "type": "string"
+    },
+    "SigningScheme": {
+      "type": "structure",
+      "members": {
+        "DefaultScheme": "DefaultSigningScheme",
+        "SmimeScheme": "SmimeSigningScheme"
+      }
+    },
+    "SmimeSigningScheme": {
+      "type": "structure",
+      "members": {
+        "SignatureFormat": "SignatureFormat"
+      }
+    },
+    "SnsDestination": {
+      "type": "structure",
+      "members": {
+        "TopicArn": "AmazonResourceName"
+      }
+    },
+    "SubscriptionStatus": {
+      "type": "string"
+    },
+    "SuccessRedirectionURL": {
+      "type": "string"
+    },
+    "SuppressionConditionThreshold": {
+      "type": "structure",
+      "members": {
+        "ConditionThresholdEnabled": "FeatureStatus",
+        "OverallConfidenceThreshold": "SuppressionConfidenceThreshold"
+      }
+    },
+    "SuppressionConfidenceThreshold": {
+      "type": "structure",
+      "members": {
+        "ConfidenceVerdictThreshold": "SuppressionConfidenceVerdictThreshold"
+      }
+    },
+    "SuppressionConfidenceVerdictThreshold": {
+      "type": "string"
+    },
+    "SuppressionListDestination": {
+      "type": "structure",
+      "members": {
+        "SuppressionListImportAction": "SuppressionListImportAction"
+      }
+    },
+    "SuppressionListImportAction": {
+      "type": "string"
+    },
+    "SuppressionListReason": {
+      "type": "string"
+    },
+    "SuppressionListReasons": {
+      "type": "list",
+      "member": "SuppressionListReason"
+    },
+    "SuppressionListScope": {
+      "type": "string"
+    },
+    "SuppressionOptions": {
+      "type": "structure",
+      "members": {
+        "SuppressedReasons": "SuppressionListReasons",
+        "SuppressionScope": "SuppressionListScope",
+        "ValidationOptions": "SuppressionValidationOptions"
+      }
+    },
+    "SuppressionValidationAttributes": {
+      "type": "structure",
+      "members": {
+        "ConditionThreshold": "SuppressionConditionThreshold"
+      }
+    },
+    "SuppressionValidationOptions": {
+      "type": "structure",
+      "members": {
+        "ConditionThreshold": "SuppressionConditionThreshold"
+      }
+    },
+    "Tag": {
+      "type": "structure",
+      "members": {
+        "Key": "TagKey",
+        "Value": "TagValue"
+      }
+    },
+    "TagKey": {
+      "type": "string"
+    },
+    "TagList": {
+      "type": "list",
+      "member": "Tag"
+    },
+    "TagResourceRequest": {
+      "type": "structure",
+      "members": {
+        "ResourceArn": "AmazonResourceName",
+        "Tags": "TagList"
+      }
+    },
+    "TagValue": {
+      "type": "string"
+    },
+    "Template": {
+      "type": "structure",
+      "members": {
+        "TemplateName": "EmailTemplateName",
+        "TemplateArn": "AmazonResourceName",
+        "TemplateContent": "EmailTemplateContent",
+        "TemplateData": "EmailTemplateData",
+        "Headers": "MessageHeaderList",
+        "Attachments": "AttachmentList"
+      }
+    },
+    "TemplateContent": {
+      "type": "string"
+    },
+    "TenantName": {
+      "type": "string"
+    },
+    "TenantNameFilterList": {
+      "type": "list",
+      "member": "TenantName"
+    },
+    "TenantSuppressionAttributes": {
+      "type": "structure",
+      "members": {
+        "SuppressedReasons": "SuppressionListReasons",
+        "SuppressionScope": "SuppressionListScope"
+      }
+    },
+    "TestRenderEmailTemplateRequest": {
+      "type": "structure",
+      "members": {
+        "TemplateData": "EmailTemplateData"
+      }
+    },
+    "Timestamp": {
+      "type": "timestamp"
+    },
+    "TlsPolicy": {
+      "type": "string"
+    },
+    "Topic": {
+      "type": "structure",
+      "members": {
+        "TopicName": "TopicName",
+        "DisplayName": "DisplayName",
+        "Description": "Description",
+        "DefaultSubscriptionStatus": "SubscriptionStatus"
+      }
+    },
+    "TopicFilter": {
+      "type": "structure",
+      "members": {
+        "TopicName": "TopicName",
+        "UseDefaultIfPreferenceUnavailable": "UseDefaultIfPreferenceUnavailable"
+      }
+    },
+    "TopicName": {
+      "type": "string"
+    },
+    "TopicPreference": {
+      "type": "structure",
+      "members": {
+        "TopicName": "TopicName",
+        "SubscriptionStatus": "SubscriptionStatus"
+      }
+    },
+    "TopicPreferenceList": {
+      "type": "list",
+      "member": "TopicPreference"
+    },
+    "Topics": {
+      "type": "list",
+      "member": "Topic"
+    },
+    "TrackingConfigurationOverrides": {
+      "type": "structure",
+      "members": {
+        "OpenTrackingEnabled": "FeatureStatus",
+        "ClickTrackingEnabled": "FeatureStatus"
+      }
+    },
+    "TrackingOptions": {
+      "type": "structure",
+      "members": {
+        "CustomRedirectDomain": "CustomRedirectDomain",
+        "HttpsPolicy": "HttpsPolicy"
+      }
+    },
+    "UnsubscribeAll": {
+      "type": "boolean"
+    },
+    "UntagResourceRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "UpdateConfigurationSetEventDestinationRequest": {
+      "type": "structure",
+      "members": {
+        "EventDestination": "EventDestinationDefinition"
+      }
+    },
+    "UpdateConfigurationSetRequest": {
+      "type": "structure",
+      "members": {
+        "ConfigurationSetName": "ConfigurationSetName",
+        "MessageSecurityOptions": "MessageSecurityOptions"
+      }
+    },
+    "UpdateContactListRequest": {
+      "type": "structure",
+      "members": {
+        "Topics": "Topics",
+        "Description": "Description"
+      }
+    },
+    "UpdateContactRequest": {
+      "type": "structure",
+      "members": {
+        "TopicPreferences": "TopicPreferenceList",
+        "UnsubscribeAll": "UnsubscribeAll",
+        "AttributesData": "AttributesData"
+      }
+    },
+    "UpdateCustomVerificationEmailTemplateRequest": {
+      "type": "structure",
+      "members": {
+        "FromEmailAddress": "EmailAddress",
+        "TemplateSubject": "EmailTemplateSubject",
+        "TemplateContent": "TemplateContent",
+        "SuccessRedirectionURL": "SuccessRedirectionURL",
+        "FailureRedirectionURL": "FailureRedirectionURL"
+      }
+    },
+    "UpdateEmailIdentityPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "Policy": "Policy"
+      }
+    },
+    "UpdateEmailTemplateRequest": {
+      "type": "structure",
+      "members": {
+        "TemplateContent": "EmailTemplateContent"
+      }
+    },
+    "UpdateReputationEntityCustomerManagedStatusRequest": {
+      "type": "structure",
+      "members": {
+        "SendingStatus": "SendingStatus"
+      }
+    },
+    "UpdateReputationEntityPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "ReputationEntityPolicy": "AmazonResourceName"
+      }
+    },
+    "UseCaseDescription": {
+      "type": "string"
+    },
+    "UseDefaultIfPreferenceUnavailable": {
+      "type": "boolean"
+    },
+    "VdmAttributes": {
+      "type": "structure",
+      "members": {
+        "VdmEnabled": "FeatureStatus",
+        "DashboardAttributes": "DashboardAttributes",
+        "GuardianAttributes": "GuardianAttributes"
+      }
+    },
+    "VdmOptions": {
+      "type": "structure",
+      "members": {
+        "DashboardOptions": "DashboardOptions",
+        "GuardianOptions": "GuardianOptions"
+      }
+    },
+    "WebsiteURL": {
+      "type": "string"
+    }
+  }
+}

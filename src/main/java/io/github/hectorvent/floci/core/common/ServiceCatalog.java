@@ -111,6 +111,12 @@ public class ServiceCatalog {
         return matchTarget(target).map(TargetMatch::descriptor);
     }
 
+    /** Targeted application/json requests are accepted only by descriptors declaring that format. */
+    public Optional<TargetMatch> matchPlainJsonTarget(String target) {
+        return matchTarget(target)
+                .filter(match -> match.descriptor().supportsProtocol(ServiceProtocol.PLAIN_JSON));
+    }
+
     public List<ServiceDescriptor> all() {
         return all;
     }

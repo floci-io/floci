@@ -591,6 +591,76 @@ class SqsIntegrationTest {
     }
 
     @Test
+    void createQueue_conflictOnDerivedSqsManagedSseEnabled_returns400() {
+        String queueName = "conflict-sse-queue";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The queue reports SqsManagedSseEnabled=true without storing it.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+            .formParam("Attribute.1.Name", "SqsManagedSseEnabled")
+            .formParam("Attribute.1.Value", "false")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("QueueAlreadyExists"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+            .formParam("Attribute.1.Name", "SqsManagedSseEnabled")
+            .formParam("Attribute.1.Value", "true")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/" + queueName)
+        .when()
+            .post("/");
+    }
+
+    @Test
+    void createQueue_recreateWithSameEmptyMaximumMessageSize_returnsExistingQueue() {
+        String queueName = "empty-max-size-queue";
+        for (int i = 0; i < 2; i++) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateQueue")
+                .formParam("QueueName", queueName)
+                .formParam("Attribute.1.Name", "MaximumMessageSize")
+                .formParam("Attribute.1.Value", "")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("CreateQueueResponse.CreateQueueResult.QueueUrl", endsWith("/" + queueName));
+        }
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/" + queueName)
+        .when()
+            .post("/");
+    }
+
+    @Test
     void jsonProtocol_nonExistentQueue_returnsQueueDoesNotExist() {
         given()
             .contentType("application/x-amz-json-1.0")

@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.iam;
 
-import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.LogsAuthorizationFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -18,7 +18,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -87,18 +86,13 @@ class LogsNoncommercialUnknownRegionAuthorizationIntegrationTest {
                     "logEvents", List.of(Map.of("timestamp", System.currentTimeMillis(), "message", "retained"))))
                     .then().statusCode(200);
         }
-        String user = "logs-partition-" + UUID.randomUUID();
-        String root = EnforcementFixtures.auth(ACCOUNT, "iam");
-        String caller = EnforcementFixtures.createUser(cleanup, port, root, user).accessKeyId();
         String allow = deny ? "{\"Effect\":\"Allow\",\"Action\":\"logs:" + action
                 + "\",\"Resource\":\"*\"}," : "";
         String effect = deny ? "Deny" : "Allow";
         String statement = "{\"Effect\":\"" + effect + "\",\"Action\":\"logs:" + action
                 + "\",\"Resource\":\"" + groupArn + ":log-stream:s\"}";
-        given().port(port).header("Authorization", root).formParam("Action", "PutUserPolicy")
-                .formParam("UserName", user).formParam("PolicyName", "streams")
-                .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[" + allow + statement + "]}")
-                .when().post("/").then().statusCode(200);
+        String caller = LogsAuthorizationFixtures.user(cleanup, port, ACCOUNT, "logs-partition-", "streams",
+                allow + statement);
         Response response = call(caller, region, action, Map.of("logGroupName", group, "logStreamName", "s"));
         assertAll("canonical partition governs the same stream and retained events",
                 () -> response.then().statusCode(deny ? 400 : 200),
@@ -125,10 +119,6 @@ class LogsNoncommercialUnknownRegionAuthorizationIntegrationTest {
     }
 
     private Response call(String caller, String region, String action, Map<String, ?> body) {
-        String auth = "AWS4-HMAC-SHA256 Credential=" + caller + "/20261015/" + region
-                + "/logs/aws4_request, SignedHeaders=host, Signature=abc";
-        return given().port(endpoint.getPort()).contentType("application/x-amz-json-1.1")
-                .header("Authorization", auth).header("X-Amz-Target", "Logs_20140328." + action)
-                .body(body).when().post("/");
+        return LogsAuthorizationFixtures.call(endpoint.getPort(), caller, region, action, body);
     }
 }

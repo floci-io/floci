@@ -5,6 +5,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.ChangeSetType;
+import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.cloudformation.model.Tag;
 
@@ -13,6 +14,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class CloudFormationStackTagsUpdateTest {
 
@@ -68,9 +70,12 @@ class CloudFormationStackTagsUpdateTest {
         assertThat(awaitStatus("UPDATE_COMPLETE")).isEqualTo("UPDATE_COMPLETE");
         assertThat(tags()).containsExactlyInAnyOrderEntriesOf(Map.of("Env", "final"));
 
-        cloudFormation.updateStack(request -> request.stackName(stackName)
-                .usePreviousTemplate(true));
-        assertThat(awaitStatus("UPDATE_COMPLETE")).isEqualTo("UPDATE_COMPLETE");
+        // Without Tags an update keeps the stack's, so with the same template it changes nothing
+        // and CloudFormation refuses it.
+        assertThatThrownBy(() -> cloudFormation.updateStack(request -> request.stackName(stackName)
+                .usePreviousTemplate(true)))
+                .isInstanceOf(CloudFormationException.class)
+                .hasMessageContaining("No updates are to be performed.");
         assertThat(tags()).containsExactlyInAnyOrderEntriesOf(Map.of("Env", "final"));
     }
 

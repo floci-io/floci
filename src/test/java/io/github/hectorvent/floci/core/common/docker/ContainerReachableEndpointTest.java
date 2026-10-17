@@ -46,6 +46,15 @@ class ContainerReachableEndpointTest {
     }
 
     @Test
+    void explicitDnsUsesDockerHostEvenWhenEmbeddedDnsIsRunning() {
+        hostMappedTo4811();
+        lenient().when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.2"));
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.9");
+
+        assertEquals("http://172.18.0.9:4566", endpoint.baseUrl(false));
+    }
+
+    @Test
     void dockerHostFallbackUsesListenPortNotAdvertisedPort() {
         hostMappedTo4811();
         when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
@@ -76,6 +85,7 @@ class ContainerReachableEndpointTest {
         when(dockerHostResolver.resolve()).thenReturn("172.18.0.2");
 
         assertEquals("http://172.18.0.2:4811", endpoint(4811).baseUrl());
+        assertEquals("http://172.18.0.2:4811", endpoint(4811).baseUrl(false));
     }
 
     @Test
@@ -88,5 +98,6 @@ class ContainerReachableEndpointTest {
         when(dockerHostResolver.resolve()).thenReturn("172.18.0.2");
 
         assertEquals("http://172.18.0.2:4566", endpoint(4510).baseUrl());
+        assertEquals("http://172.18.0.2:4566", endpoint(4510).baseUrl(false));
     }
 }

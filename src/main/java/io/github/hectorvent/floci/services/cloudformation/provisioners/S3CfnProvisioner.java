@@ -26,19 +26,20 @@ import java.util.Set;
  * Provisions {@code AWS::S3::Bucket} and {@code AWS::S3::BucketPolicy}.
  *
  * <p>A property this class covers is translated into the XML its own S3 API call takes and handed
- * to the same service method, so the service validates and stores it exactly as it would a direct
- * {@code PutBucket*} request. A property the template does not declare is left alone, except that
- * an update removing {@code NotificationConfiguration} clears it.
+ * to the same S3 service method used by a direct {@code PutBucket*} request. Ownership controls
+ * are validated here before the service stores their XML. A property the template does not declare is left alone, except that
+ * an update removing {@code NotificationConfiguration} or {@code OwnershipControls} clears it.
  *
  * <p>Covered on {@code AWS::S3::Bucket}: {@code BucketName}, {@code CorsConfiguration},
  * {@code VersioningConfiguration}, {@code PublicAccessBlockConfiguration},
- * {@code BucketEncryption}, {@code LifecycleConfiguration}, {@code NotificationConfiguration} and
+ * {@code BucketEncryption}, {@code LifecycleConfiguration},
+ * {@code OwnershipControls}, {@code NotificationConfiguration} and
  * {@code Tags}. {@code NotificationConfiguration} is the exception to the XML translation: its
  * service method takes the parsed model, so the provisioner builds that model instead.
  *
  * <p><b>Silently dropped</b>, each of which has a service method waiting for it:
  * {@code WebsiteConfiguration}, {@code LoggingConfiguration},
- * {@code ObjectLockConfiguration}, {@code OwnershipControls}, {@code ReplicationConfiguration},
+ * {@code ObjectLockConfiguration}, {@code ReplicationConfiguration},
  * {@code AccelerateConfiguration}, {@code AccessControl}, and the four numbered configuration
  * lists ({@code AnalyticsConfigurations}, {@code IntelligentTieringConfigurations},
  * {@code InventoryConfigurations}, {@code MetricsConfigurations}). Declaring one of these still
@@ -87,9 +88,15 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         // and only reconcile the bucket's configuration. A replacing update derives a different
         // name and still creates, hence reusesPriorEntity rather than isUpdate.
         Unwind unwind = new Unwind();
+        r.getAttributes().remove(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
         try {
             // Built before anything is created, so a configuration that fails validation creates nothing.
             NotificationConfiguration notifications = notificationConfiguration(props, ctx);
+            String ownershipControlsXml = ownershipControlsXml(props, ctx);
+            if (ctx.reusesPriorEntity(bucketName)) {
+                r.getAttributes().put(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR,
+                        s3Service.snapshotBucketConfiguration(bucketName));
+            }
             if (!ctx.reusesPriorEntity(bucketName)) {
                 // In us-east-1 CreateBucket also answers for a bucket the account already owns,
                 // which this resource must never delete.
@@ -113,6 +120,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             applyBucketEncryption(bucketName, props, ctx);
             applyLifecycleConfiguration(bucketName, props, ctx);
             applyBucketTags(bucketName, props, ctx);
+            applyBucketOwnershipControls(bucketName, ownershipControlsXml, ctx);
         } catch (RuntimeException failure) {
             unwind(r, bucketName, unwind, ctx, failure);
             throw failure;
@@ -228,6 +236,40 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         s3Service.putBucketLifecycle(bucketName, lifecycleXml(lifecycle.get("Rules"), ctx), null);
     }
 
+    private String ownershipControlsXml(JsonNode props, ProvisionContext ctx) {
+        JsonNode declaredNode = declared(props, "OwnershipControls");
+        if (declaredNode == null) {
+            return null;
+        }
+        JsonNode controls = ctx.engine().resolveNodeOmittingNoValue(declaredNode);
+        if (controls == null || controls.isMissingNode() || controls.isNull()) {
+            return null;
+        }
+        String path = "#/OwnershipControls";
+        requireObject(controls, path);
+        JsonNode rules = declaredArray(controls, "Rules", path);
+        XmlBuilder xml = new XmlBuilder().start("OwnershipControls", AwsNamespaces.S3);
+        for (int index = 0; rules != null && index < rules.size(); index++) {
+            String rulePath = path + "/Rules/" + index;
+            JsonNode rule = requireObject(rules.get(index), rulePath);
+            String ownership = required(rule, "ObjectOwnership", rulePath);
+            xml.start("Rule");
+            xml.elem("ObjectOwnership", ownership);
+            xml.end("Rule");
+        }
+        String document = xml.end("OwnershipControls").build();
+        S3Service.validateOwnershipControls(document);
+        return document;
+    }
+
+    private void applyBucketOwnershipControls(String bucketName, String ownershipControlsXml,
+                                              ProvisionContext ctx) {
+        if (ownershipControlsXml != null) {
+            s3Service.putBucketOwnershipControls(bucketName, ownershipControlsXml);
+        } else if (ctx.reusesPriorEntity(bucketName) && ctx.previouslyDeclared("OwnershipControls")) {
+            s3Service.deleteBucketOwnershipControls(bucketName);
+        }
+    }
     private void applyBucketTags(String bucketName, JsonNode props, ProvisionContext ctx) {
         if (declared(props, "Tags") == null) {
             return;
@@ -241,19 +283,14 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         private NotificationConfiguration replacedNotifications;
     }
 
-    /**
-     * Undoes what a failed provision changed. On a failed update the engine restores the previous
-     * resource record and reports it rolled back unless the provisioner records why it could not
-     * be, so the bucket itself has to be put back: one this attempt created is deleted, and a
-     * notification configuration it replaced is put back. The other properties have no restore;
-     * the notification configuration goes ahead of them, so a destination S3 rejects leaves them
-     * untouched.
-     */
+    /** Restores an in-place bucket update or removes a newly created bucket after a failed provision. */
     private void unwind(StackResource r, String bucketName, Unwind unwind, ProvisionContext ctx,
                         RuntimeException failure) {
         try {
             if (unwind.created) {
                 s3Service.deleteBucket(bucketName);
+            } else if (r.getAttributes().containsKey(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR)) {
+                rollbackUpdate(r);
             } else if (unwind.replacedNotifications != null) {
                 // Valid when it was put; its destinations are not checked again on the way back.
                 s3Service.putBucketNotificationConfiguration(bucketName, unwind.replacedNotifications, true);
@@ -266,6 +303,32 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
                         "Could not restore bucket " + bucketName + ": " + e.getMessage());
             }
         }
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (!BUCKET.equals(resource.getResourceType())) {
+            return false;
+        }
+        String snapshot = resource.getAttributes().get(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot == null) {
+            return false;
+        }
+        s3Service.restoreBucketConfiguration(resource.getPhysicalId(), snapshot);
+        resource.getAttributes().remove(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return resource.getAttributes().containsKey(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR)
+                ? new UpdateCleanupResult(true, true, null, 0, null)
+                : UpdateCleanupResult.notApplicable();
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR);
     }
 
     private static boolean sameConfiguration(NotificationConfiguration desired, NotificationConfiguration current) {

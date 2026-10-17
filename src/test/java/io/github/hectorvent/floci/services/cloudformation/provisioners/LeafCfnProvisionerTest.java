@@ -160,7 +160,8 @@ class LeafCfnProvisionerTest {
                     {"Name": "/app/db", "Value": "secret", "Type": "String"}
                     """), ctx);
 
-            verify(ssm).putParameter("/app/db", "secret", "String", null, true, REGION);
+            // A create never overwrites: a parameter already under that name is not the stack's.
+            verify(ssm).putParameter("/app/db", "secret", "String", null, false, Map.of(), REGION);
             assertEquals("/app/db", r.getPhysicalId());
             assertEquals(Map.of("Name", "/app/db", "Type", "String", "Value", "secret",
                     "Arn", "arn:aws:ssm:us-east-1:000000000000:parameter/app/db"), r.getAttributes());
@@ -186,7 +187,8 @@ class LeafCfnProvisionerTest {
             assertTrue(r.getPhysicalId().startsWith("my-stack-Param-"),
                     "generated names stay stack-scoped: " + r.getPhysicalId());
             // Absent Value and Type fall back rather than reaching the service as null.
-            verify(ssm).putParameter(anyString(), eq(""), eq("String"), eq(null), eq(true), eq(REGION));
+            verify(ssm).putParameter(anyString(), eq(""), eq("String"), eq(null), eq(false), eq(Map.of()),
+                    eq(REGION));
         }
 
         @Test

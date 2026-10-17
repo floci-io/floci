@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.lifecycle;
 
+import io.github.hectorvent.floci.config.FlociVersion;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -20,7 +21,7 @@ public class HealthController {
     @Inject
     public HealthController(ServiceRegistry serviceRegistry) {
         this.serviceRegistry = serviceRegistry;
-        this.version = resolveVersion();
+        this.version = FlociVersion.current();
     }
 
     @GET
@@ -30,13 +31,5 @@ public class HealthController {
                 "edition", "community",
                 "original_edition", "floci-always-free",
                 "version", version)).build();
-    }
-
-    static String resolveVersion() {
-        String env = System.getenv("FLOCI_VERSION");
-        if (env != null && !env.isBlank()) {
-            return env;
-        }
-        return "dev";
     }
 }

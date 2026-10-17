@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssm.model.Command;
 import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -43,6 +44,12 @@ class SsmCommandServiceDirectExecutionTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final RegionResolver regionResolver = mock(RegionResolver.class);
+
+    @BeforeEach
+    void requestRegion() {
+        when(regionResolver.getRegion()).thenReturn("us-west-2");
+    }
+
 
     @Test
     void agentRegistrationChecksEc2BackingOnFirstRegistrationOnly() throws Exception {

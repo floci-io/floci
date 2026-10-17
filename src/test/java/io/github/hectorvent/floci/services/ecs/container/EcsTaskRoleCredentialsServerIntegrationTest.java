@@ -2,13 +2,13 @@ package io.github.hectorvent.floci.services.ecs.container;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonObject;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -55,10 +55,7 @@ class EcsTaskRoleCredentialsServerIntegrationTest {
         String roleArn = "arn:aws:iam::" + account + ":role/" + role;
 
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        int port;
-        try (ServerSocket socket = new ServerSocket(0)) {
-            port = socket.getLocalPort();
-        }
+        int port = FreePorts.anyInterfacePort();
         when(config.services().ecs().taskRoleCredentials().port()).thenReturn(port);
         when(config.services().ecs().taskRoleCredentials().ttlSeconds()).thenReturn(21600L);
 

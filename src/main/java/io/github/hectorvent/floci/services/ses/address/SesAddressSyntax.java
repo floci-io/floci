@@ -31,6 +31,8 @@ public final class SesAddressSyntax {
 
     private static final List<String> RAW_CHECKED_HEADERS = List.of("To", "Cc", "Bcc");
     private static final String MISSING_FINAL_DOMAIN = "Missing final '@domain'";
+    private static final String NULL_ADDRESS = "Invalid email address null.";
+    private static final String EMPTY_DESTINATION = "Destination cannot be empty";
     private static final String PHRASE_SPECIALS = "()<>@,;:\\\".[]";
     private static final String ADDRESS_SPECIALS = "()<>,;:\\\"[]";
 
@@ -195,13 +197,29 @@ public final class SesAddressSyntax {
      * malformed entry recipient as that entry's status, and a malformed Reply-To as the status of
      * every entry, not as a request error (probe-confirmed). An address list of the wrong JSON type
      * never reaches this check: the controller rejects the whole request with SerializationException.
+     *
+     * <p>A null element passes deserialization and fails here as "Invalid email address null.",
+     * unless no entry of the request has a non-null recipient: then an entry holding one answers
+     * "Destination cannot be empty" (probe-confirmed for To lists of nulls; how SES words an entry
+     * whose lists are merely empty was not probed, so that case is left as it was).
      */
-    public static void requireBulkDestination(BulkEmailEntry entry, List<String> replyToAddresses) {
-        for (List<String> addresses : Arrays.asList(entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses(),
-                replyToAddresses)) {
-            if (addresses != null) {
-                addresses.forEach(SesAddressSyntax::require);
+    public static void requireBulkDestination(BulkEmailEntry entry, List<String> replyToAddresses,
+                                              boolean requestHasRecipient) {
+        for (List<String> addresses : Arrays.asList(entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses())) {
+            requireBulkAddresses(addresses, requestHasRecipient ? NULL_ADDRESS : EMPTY_DESTINATION);
+        }
+        requireBulkAddresses(replyToAddresses, NULL_ADDRESS);
+    }
+
+    private static void requireBulkAddresses(List<String> addresses, String nullMessage) {
+        if (addresses == null) {
+            return;
+        }
+        for (String address : addresses) {
+            if (address == null) {
+                throw new AwsException("InvalidParameterValue", nullMessage, 400);
             }
+            require(address);
         }
     }
 

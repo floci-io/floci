@@ -78,6 +78,8 @@ class CloudFrontS3AuthServingTest {
                 false,
                 null,
                 "origin-access-identity/cloudfront/" + oai.getId());
+        s3Service.putBucketOwnershipControls(bucket, "<OwnershipControls><Rule>"
+                + "<ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>");
         s3Service.putObjectAcl(
                 bucket,
                 "index.html",

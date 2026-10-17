@@ -140,6 +140,8 @@ floci:
     s3:
       enabled: true
       default-presign-expiry-seconds: 3600
+      lifecycle-sweep-enabled: true            # Apply bucket lifecycle expiration rules in the background
+      lifecycle-sweep-interval-seconds: 60     # Seconds between lifecycle sweeps
 
     dynamodb:
       enabled: true
@@ -220,6 +222,7 @@ floci:
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
+      database-resuming-exception-enabled: false
 
     eventbridge:
       enabled: true
@@ -348,6 +351,7 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_DOCKER_NETWORK`                    | *(unset)*        | Shared Docker network for Lambda, RDS, ElastiCache containers |
 | `FLOCI_SERVICES_RDS_DATA_ENABLED`                  | `true`           | Enable the RDS Data API service                               |
 | `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS`  | `180`            | Idle timeout, in seconds, before leaked RDS Data API transactions expire |
+| `FLOCI_SERVICES_RDS_DATA_DATABASE_RESUMING_EXCEPTION_ENABLED` | `false` | Return HTTP 400 `DatabaseResumingException` during Aurora resume instead of waiting |
 | `FLOCI_SERVICES_ECS_MOCK`                          | `false`          | Skip Docker; tasks go straight to RUNNING (useful for CI)     |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK`                | *(unset)*        | Docker network for ECS task containers                        |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB`             | `512`            | Default memory (MB) when task definition omits it             |

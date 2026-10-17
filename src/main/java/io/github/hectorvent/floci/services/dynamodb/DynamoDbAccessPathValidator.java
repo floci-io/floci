@@ -52,15 +52,19 @@ final class DynamoDbAccessPathValidator {
         return partitionKeyValuePlaceholder;
     }
 
-    static void validateSelection(TableDefinition table, DynamoDbAccessPath accessPath,
-                                  String select, String projectionExpression,
-                                  JsonNode attributesToGet, JsonNode expressionAttributeNames) {
+    static void validateSelection(String select, String indexName,
+                                  String projectionExpression, JsonNode attributesToGet) {
         rejectWithSelect("ProjectionExpression", projectionExpression != null, select);
         rejectWithSelect("AttributesToGet", attributesToGet != null, select);
-        if ("ALL_PROJECTED_ATTRIBUTES".equals(select) && !accessPath.isIndex()) {
+        if ("ALL_PROJECTED_ATTRIBUTES".equals(select) && indexName == null) {
             throw validationException("1 validation error detected: "
                     + "ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName");
         }
+    }
+
+    static void validateGsiProjection(TableDefinition table, DynamoDbAccessPath accessPath,
+                                      String select, String projectionExpression,
+                                      JsonNode attributesToGet, JsonNode expressionAttributeNames) {
         if (!accessPath.isGlobalSecondaryIndex() || "ALL".equals(accessPath.projectionType())) {
             return;
         }

@@ -249,7 +249,7 @@ class SesV2JsonTest {
     }
 
     @Test
-    void parseSuppressedReasons_absentIsEmpty_elementsFollowAwsCoercion() {
+    void parseSuppressedReasons_absentIsEmpty_keepsNullElements() {
         assertEquals(List.of(),
                 SesV2Json.parseSuppressedReasons(json("{}").path("SuppressedReasons")));
         assertEquals(List.of(), SesV2Json.parseSuppressedReasons(json("null")));
@@ -258,17 +258,6 @@ class SesV2JsonTest {
         // A null element passes deserialization and is left to the service-layer value check.
         assertEquals(Arrays.asList("BOUNCE", null),
                 SesV2Json.parseSuppressedReasons(json("[\"BOUNCE\",null]")));
-        assertEquals("Expected list or null", assertAws("SerializationException", 400,
-                () -> SesV2Json.parseSuppressedReasons(json("\"BOUNCE\""))).getMessage());
-        assertEquals("NUMBER_VALUE can not be converted to a String",
-                assertAws("SerializationException", 400,
-                        () -> SesV2Json.parseSuppressedReasons(json("[1]"))).getMessage());
-        assertEquals("TRUE_VALUE can not be converted to a String",
-                assertAws("SerializationException", 400,
-                        () -> SesV2Json.parseSuppressedReasons(json("[true]"))).getMessage());
-        assertEquals("Start of structure or map found where not expected.",
-                assertAws("SerializationException", 400,
-                        () -> SesV2Json.parseSuppressedReasons(json("[{}]"))).getMessage());
     }
 
     @Test

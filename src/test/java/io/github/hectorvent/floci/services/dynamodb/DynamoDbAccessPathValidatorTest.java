@@ -327,27 +327,27 @@ class DynamoDbAccessPathValidatorTest {
         ObjectNode names = mapper.createObjectNode();
         names.put("#summary", "summary");
 
-        assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateSelection(
+        assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateGsiProjection(
                 table, gsiPath, "SPECIFIC_ATTRIBUTES", "pk, status, #summary",
                 null, names));
         AwsException projectionError = assertThrows(AwsException.class,
-                () -> DynamoDbAccessPathValidator.validateSelection(
+                () -> DynamoDbAccessPathValidator.validateGsiProjection(
                         table, gsiPath, "SPECIFIC_ATTRIBUTES", "zeta, details",
                         null, null));
         assertEquals("One or more parameter values were invalid: Global secondary index "
                 + "status-index does not project details, zeta", projectionError.getMessage());
-        assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateSelection(
+        assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateGsiProjection(
                 table, gsiPath, "ALL_ATTRIBUTES", null, null, null));
-        assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateSelection(
+        assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateGsiProjection(
                 table, lsiPath, "ALL_ATTRIBUTES", null, null, null));
     }
 
     @Test
     void rejectsTableAllProjectedAttributesAndInvalidSelectProjectionCombination() {
         assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateSelection(
-                table, tablePath, "ALL_PROJECTED_ATTRIBUTES", null, null, null));
+                "ALL_PROJECTED_ATTRIBUTES", null, null, null));
         assertThrows(AwsException.class, () -> DynamoDbAccessPathValidator.validateSelection(
-                table, tablePath, "COUNT", "pk", null, null));
+                "COUNT", null, "pk", null));
     }
 
     @Test
@@ -391,14 +391,14 @@ class DynamoDbAccessPathValidatorTest {
     void namesTheSelectValueWhenRejectingAProjectionExpression() {
         AwsException allAttributes = assertThrows(AwsException.class,
                 () -> DynamoDbAccessPathValidator.validateSelection(
-                        table, tablePath, "ALL_ATTRIBUTES", "sk", null, null));
+                        "ALL_ATTRIBUTES", null, "sk", null));
         assertEquals("1 validation error detected: "
                 + "Cannot specify the ProjectionExpression when choosing to get ALL_ATTRIBUTES",
                 allAttributes.getMessage());
 
         AwsException count = assertThrows(AwsException.class,
                 () -> DynamoDbAccessPathValidator.validateSelection(
-                        table, tablePath, "COUNT", "sk", null, null));
+                        "COUNT", null, "sk", null));
         assertEquals("1 validation error detected: "
                 + "Cannot specify the ProjectionExpression when choosing to get only the Count",
                 count.getMessage());
@@ -408,14 +408,14 @@ class DynamoDbAccessPathValidatorTest {
     void reportsTheProjectionExpressionConflictBeforeTheMissingIndex() {
         AwsException both = assertThrows(AwsException.class,
                 () -> DynamoDbAccessPathValidator.validateSelection(
-                        table, tablePath, "ALL_PROJECTED_ATTRIBUTES", "sk", null, null));
+                        "ALL_PROJECTED_ATTRIBUTES", null, "sk", null));
         assertEquals("1 validation error detected: "
                 + "Cannot specify the ProjectionExpression when choosing to get ALL_PROJECTED_ATTRIBUTES",
                 both.getMessage());
 
         AwsException indexOnly = assertThrows(AwsException.class,
                 () -> DynamoDbAccessPathValidator.validateSelection(
-                        table, tablePath, "ALL_PROJECTED_ATTRIBUTES", null, null, null));
+                        "ALL_PROJECTED_ATTRIBUTES", null, null, null));
         assertEquals("1 validation error detected: "
                 + "ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName",
                 indexOnly.getMessage());

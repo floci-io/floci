@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -389,5 +392,119 @@ class S3ObjectLockIntegrationTest {
         .then()
             .statusCode(403)
             .body(containsString("AccessDenied"));
+    }
+
+    // --- Object Lock headers on CopyObject and CreateMultipartUpload ---
+
+    @Test
+    @Order(22)
+    void copyObjectAppliesItsObjectLockHeaders() {
+        given().body("source").when().put("/" + LOCK_BUCKET + "/copy-lock-source.txt").then().statusCode(200);
+
+        given()
+            .header("x-amz-copy-source", "/" + LOCK_BUCKET + "/copy-lock-source.txt")
+            .header("x-amz-object-lock-mode", "GOVERNANCE")
+            .header("x-amz-object-lock-retain-until-date", "2099-01-01T00:00:00Z")
+            .header("x-amz-object-lock-legal-hold", "ON")
+        .when()
+            .put("/" + LOCK_BUCKET + "/copy-lock-target.txt")
+        .then()
+            .statusCode(200);
+
+        assertLockedUntil2099("/" + LOCK_BUCKET + "/copy-lock-target.txt");
+    }
+
+    @Test
+    @Order(23)
+    void multipartUploadAppliesItsObjectLockHeadersOnCompletion() {
+        String path = "/" + LOCK_BUCKET + "/multipart-lock.txt";
+        String uploadId = given()
+            .header("x-amz-object-lock-mode", "GOVERNANCE")
+            .header("x-amz-object-lock-retain-until-date", "2099-01-01T00:00:00Z")
+            .header("x-amz-object-lock-legal-hold", "ON")
+        .when()
+            .post(path + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        String partETag = given()
+            .body("part-one")
+        .when()
+            .put(path + "?uploadId=" + uploadId + "&partNumber=1")
+        .then()
+            .statusCode(200)
+            .extract().header("ETag");
+
+        given()
+            .contentType("application/xml")
+            .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + partETag
+                    + "</ETag></Part></CompleteMultipartUpload>")
+        .when()
+            .post(path + "?uploadId=" + uploadId)
+        .then()
+            .statusCode(200);
+
+        assertLockedUntil2099(path);
+    }
+
+    @Test
+    @Order(24)
+    void objectLockHeadersAreCheckedOnEveryObjectCreation() {
+        // The errors S3 was recorded answering: a mode and a date come together, and the mode is one
+        // S3 knows. The unparseable date was not recorded, and is refused the same way.
+        String copySource = "/" + LOCK_BUCKET + "/copy-lock-source.txt";
+        for (String[] request : new String[][] {{"put", null}, {"copy", copySource}, {"upload", null}}) {
+            assertInvalidLockHeaders(request[0], request[1], "GOVERNANCE", null,
+                    "x-amz-object-lock-retain-until-date", null, "must both be supplied");
+            assertInvalidLockHeaders(request[0], request[1], null, "2099-01-01T00:00:00Z",
+                    "x-amz-object-lock-mode", null, "must both be supplied");
+            assertInvalidLockHeaders(request[0], request[1], "BAD-VALUE", "2099-01-01T00:00:00Z",
+                    "x-amz-object-lock-mode", "BAD-VALUE", "Unknown wormMode directive.");
+            assertInvalidLockHeaders(request[0], request[1], "GOVERNANCE", "next-week",
+                    "x-amz-object-lock-retain-until-date", "next-week", "ISO 8601");
+        }
+    }
+
+    /** A PutObject, a CopyObject of {@code copySource} or a CreateMultipartUpload refused for its lock headers. */
+    private static void assertInvalidLockHeaders(String operation, String copySource, String mode, String until,
+                                                 String argumentName, String argumentValue, String message) {
+        RequestSpecification request = given();
+        if (mode != null) {
+            request = request.header("x-amz-object-lock-mode", mode);
+        }
+        if (until != null) {
+            request = request.header("x-amz-object-lock-retain-until-date", until);
+        }
+        String path = "/" + LOCK_BUCKET + "/invalid-lock-" + operation + ".txt";
+        Response response = switch (operation) {
+            case "put" -> request.body("x").when().put(path);
+            case "copy" -> request.header("x-amz-copy-source", copySource).when().put(path);
+            default -> request.when().post(path + "?uploads");
+        };
+        ValidatableResponse then = response.then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidArgument</Code>"))
+            .body(containsString(message))
+            .body(containsString("<ArgumentName>" + argumentName + "</ArgumentName>"));
+        if (argumentValue != null) {
+            then.body(containsString("<ArgumentValue>" + argumentValue + "</ArgumentValue>"));
+        }
+    }
+
+    /** The object holds the GOVERNANCE retention until 2099 and the legal hold its request set. */
+    private static void assertLockedUntil2099(String path) {
+        given()
+        .when()
+            .get(path + "?retention")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Mode>GOVERNANCE</Mode>"))
+            .body(containsString("<RetainUntilDate>2099-01-01T00:00:00"));
+        given()
+        .when()
+            .get(path + "?legal-hold")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Status>ON</Status>"));
     }
 }

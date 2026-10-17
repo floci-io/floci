@@ -17,6 +17,8 @@ setup() {
 teardown() {
     if [ -n "$FUNCTION_NAME" ]; then
         aws_cmd lambda-web delete-web-function --function-name "$FUNCTION_NAME" >/dev/null 2>&1 || true
+        aws_cmd iam delete-role-policy --role-name "awscli-lambdaweb-$FUNCTION_NAME" --policy-name awscli-lambdaweb-logs >/dev/null 2>&1 || true
+        aws_cmd iam delete-role --role-name "awscli-lambdaweb-$FUNCTION_NAME" >/dev/null 2>&1 || true
     fi
     aws_cmd s3 rb "s3://$BUCKET" --force >/dev/null 2>&1 || true
 }
@@ -129,6 +131,27 @@ create_function() {
         --endpoint-config '{"endpointName":"dev","endpointType":"HomeRegion","authType":"ApplicationManaged"}'
     assert_failure
     assert_output --partial "Invalid function name or ARN '-bad'"
+}
+
+@test "Lambda Web: deploy the hello world app and invoke its endpoint" {
+    FUNCTION_NAME=$(unique_name "cli-web")
+    # deploy passes --endpoint-url only to its Lambda Web client, so the environment variable routes the rest.
+    run bash -c "cd '$BATS_TEST_TMPDIR' && AWS_ENDPOINT_URL='$FLOCI_ENDPOINT' aws lambda-web deploy --name '$FUNCTION_NAME' --hello-world --create"
+    assert_success
+    domain=$(aws_cmd lambda-web get-web-function-endpoint --function-name "$FUNCTION_NAME" --endpoint-name dev | jq -r '.domainName')
+
+    run curl -sS -i -H "Host: $domain" "$FLOCI_ENDPOINT/hello?from=bats"
+    assert_success
+    assert_output --partial "HTTP/1.1 200"
+    assert_output --partial "lambda-web-request-id: "
+    assert_output --partial "lambda-web-logstream: "
+    assert_output --partial "Hello from Lambda Web!"
+
+    # A domain Floci never minted, in the shape it mints.
+    run curl -sS -i -H "Host: nopenopenopenope.001.lambda-web.us-east-1.localhost:4566" "$FLOCI_ENDPOINT/"
+    assert_success
+    assert_output --partial "HTTP/1.1 404"
+    assert_output --partial "lambda-web-error-type: Platform.InvalidEndpoint"
 }
 
 @test "Lambda Web: delete removes the function and the waiter settles" {

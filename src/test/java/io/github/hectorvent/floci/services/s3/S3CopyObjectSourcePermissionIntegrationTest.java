@@ -372,6 +372,9 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
         createBucketAsRoot(sourceBucket);
         createBucketAsRoot(destBucket);
+        given().filter(ROOT_SIGNER)
+                .body("<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>")
+                .when().put("/" + sourceBucket + "?ownershipControls").then().statusCode(200);
         putPublicObjectAsRoot(sourceBucket, "public.txt", "public source");
         putBucketPolicyAsRoot(destBucket, allowPublicPutObjectPolicy(destBucket));
 

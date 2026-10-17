@@ -64,6 +64,7 @@ public class AmiImageResolver {
         return switch (architecture) {
             case "arm64" -> "linux/arm64";
             case "x86_64" -> "linux/amd64";
+            case "i386" -> "linux/386";
             default -> null;
         };
     }

@@ -11,12 +11,15 @@ import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.Response;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 import java.net.URI;
@@ -92,8 +95,9 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
         Mockito.verify(lambdaService, Mockito.never()).invoke(any(), eq(functionArn), any(), any());
     }
 
-    @Test
-    void presignedRotateSecretIsCheckedLikeASignedOne() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void presignedRotateSecretIsCheckedLikeASignedOne(boolean blankHeader) {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String functionArn = "arn:aws:lambda:" + REGION + ":" + ACCOUNT_ID + ":function:rotator-" + suffix;
         String accessKeyId = createUserWithPolicy("sm-presigned-" + suffix, """
@@ -105,7 +109,7 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
         deleteSecretAfterwards(secretName);
 
         String amzDate = AMZ_DATE_FMT.format(Instant.now());
-        given()
+        RequestSpecification request = given()
                 .queryParam("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
                 .queryParam("X-Amz-Credential",
                         accessKeyId + "/" + amzDate.substring(0, 8) + "/" + REGION + "/secretsmanager/aws4_request")
@@ -115,11 +119,15 @@ class SecretsManagerRotationInvokeAuthorizationIntegrationTest {
                 .queryParam("X-Amz-Signature", "abc")
                 .header("X-Amz-Target", "secretsmanager.RotateSecret")
                 .contentType(SM_CONTENT_TYPE)
-                .body("{\"SecretId\":\"" + secretName + "\",\"RotationLambdaARN\":\"" + functionArn + "\"}")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(400)
+                .body("{\"SecretId\":\"" + secretName + "\",\"RotationLambdaARN\":\"" + functionArn + "\"}");
+        if (blankHeader) {
+            request.header("Authorization", "");
+        }
+        Response response = request.when().post("/");
+        if (response.statusCode() == 200) {
+            awaitRotationFinished(secretName);
+        }
+        response.then().statusCode(400)
                 .body("__type", equalTo("AccessDeniedException"));
 
         Mockito.verify(lambdaService, Mockito.never()).invoke(any(), eq(functionArn), any(), any());

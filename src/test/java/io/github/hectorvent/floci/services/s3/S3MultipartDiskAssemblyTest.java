@@ -150,6 +150,8 @@ class S3MultipartDiskAssemblyTest {
     @Test
     void failedStoreRemovesTheAssembledFileAndKeepsThePartsForARetry() throws Exception {
         byte[] firstPart = new byte[5 * 1024 * 1024];
+        s3Service.putBucketOwnershipControls("test-bucket", "<OwnershipControls><Rule>"
+                + "<ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>");
         MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "public.bin", null,
                 null, null, null, null, "public-read");
         s3Service.uploadPart("test-bucket", "public.bin", upload.getUploadId(), 1, firstPart);

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.CloudFormationSettingsProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -48,7 +49,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * domain under a key with several levels, which CDK maps with {@code AWS::ApiGatewayV2::ApiMapping}.
  */
 @QuarkusTest
-@TestProfile(CloudFormationUnsupportedResourceTypeStrictIntegrationTest.StrictProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class ApiGatewayV2DomainCfnIntegrationTest {
 
     private static final String CFN_AUTH =

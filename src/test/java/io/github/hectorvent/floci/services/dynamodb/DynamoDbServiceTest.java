@@ -2349,6 +2349,142 @@ class DynamoDbServiceTest {
         assertEquals("owner-2", item2.get("owner").get("S").asText());
     }
 
+    private void createEventsTableWithNumericSortKey(String region) {
+        service.createTable("Events",
+                List.of(
+                        new KeySchemaElement("deviceId", "HASH"),
+                        new KeySchemaElement("timestamp", "RANGE")),
+                List.of(
+                        new AttributeDefinition("deviceId", "S"),
+                        new AttributeDefinition("timestamp", "N")),
+                5L, 5L, region);
+    }
+
+    @Test
+    void updateItem_numericSortKeyWithEquivalentRepresentation_updatesStoredItem() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"},"status":{"S":"before"}}
+                """), region);
+
+        JsonNode key = mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000.0"}}
+                """);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":status", attributeValue("S", "after"));
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#status", "status");
+
+        assertDoesNotThrow(() -> service.updateItem("Events", key, null,
+                "SET #status = :status", exprNames, exprValues, null, region));
+
+        JsonNode stored = service.getItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+        assertEquals("after", stored.path("status").path("S").asText());
+    }
+
+    @Test
+    void transactWriteUpdate_numericSortKeyWithEquivalentRepresentation_updatesStoredItem() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"},"status":{"S":"before"}}
+                """), region);
+        JsonNode update = mapper.readTree("""
+                {"Update":{"TableName":"Events",
+                  "Key":{"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000.0"}},
+                  "UpdateExpression":"SET #status = :status",
+                  "ExpressionAttributeNames":{"#status":"status"},
+                  "ExpressionAttributeValues":{":status":{"S":"after"}}}}
+                """);
+
+        assertDoesNotThrow(() -> service.transactWriteItems(List.of(update), region));
+
+        JsonNode stored = service.getItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+        assertEquals("after", stored.path("status").path("S").asText());
+    }
+
+    @Test
+    void updateItem_numericSortKeyChangedToDifferentValue_throwsValidationException() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+
+        JsonNode key = mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000.0"}}
+                """);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":ts", attributeValue("N", "1700000001"));
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#ts", "timestamp");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Events", key, null,
+                        "SET #ts = :ts", exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Cannot update attribute timestamp"));
+    }
+
+    @Test
+    void updateItem_sortKeySetToValueWithExtraTypeMember_throwsValidationException() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+
+        JsonNode key = mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """);
+        ObjectNode exprValues = (ObjectNode) mapper.readTree("""
+                {":ts":{"N":"1700000000","S":"extra"}}
+                """);
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#ts", "timestamp");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Events", key, null,
+                        "SET #ts = :ts", exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("more than one datatypes"));
+
+        JsonNode stored = service.getItem("Events", key, region);
+        assertFalse(stored.path("timestamp").has("S"));
+    }
+
+    @Test
+    void updateItem_partitionKeySetToValueWithExtraTypeMember_throwsValidationException() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+
+        JsonNode key = mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """);
+        ObjectNode exprValues = (ObjectNode) mapper.readTree("""
+                {":id":{"S":"d1","N":"5"}}
+                """);
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#id", "deviceId");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Events", key, null,
+                        "SET #id = :id", exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("more than one datatypes"));
+
+        JsonNode stored = service.getItem("Events", key, region);
+        assertFalse(stored.path("deviceId").has("N"));
+    }
+
     @Test
     void updateItemMissingSortKeyThrowsValidationException() {
         String region = "eu-west-1";

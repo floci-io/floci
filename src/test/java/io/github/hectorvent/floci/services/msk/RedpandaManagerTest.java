@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.msk;
 
+import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -356,6 +357,27 @@ class RedpandaManagerTest {
 
         verify(portAllocator).release(9306);
         verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void tryStartContainerReportsUnavailableWhenNoDaemonAnswers() {
+        when(lifecycleManager.createAndStart(any()))
+                .thenThrow(new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.getDockerClient())
+                .thenThrow(new RuntimeException("java.net.SocketException: No such file or directory"));
+
+        assertFalse(manager.tryStartContainer(newCluster()));
+    }
+
+    @Test
+    void tryStartContainerPropagatesFailuresWhileTheDaemonIsReachable() {
+        when(lifecycleManager.createAndStart(any()))
+                .thenThrow(new RuntimeException("no such image: redpandadata/redpanda:latest"));
+        when(lifecycleManager.getDockerClient()).thenReturn(mock(DockerClient.class, RETURNS_DEEP_STUBS));
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> manager.tryStartContainer(newCluster()));
+        assertEquals("no such image: redpandadata/redpanda:latest", failure.getMessage());
     }
 
     @Test

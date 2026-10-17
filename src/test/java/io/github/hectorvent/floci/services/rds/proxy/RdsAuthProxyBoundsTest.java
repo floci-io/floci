@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
@@ -23,7 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Covers the connection bounds (handshake timeout, backend-connect deferral, permit pool) added
@@ -145,11 +144,7 @@ class RdsAuthProxyBoundsTest {
     }
 
     private RdsProxyTlsCertificates realTls() {
-        // The real bean generates a self-signed cert on demand; no Docker or network needed.
-        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
-        when(storage.persistentPath()).thenReturn(tempDir.toString());
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        when(config.storage()).thenReturn(storage);
-        return new RdsProxyTlsCertificates(config, new CertificateGenerator());
+        return new RdsProxyTlsCertificates(FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls")),
+                new CertificateGenerator());
     }
 }

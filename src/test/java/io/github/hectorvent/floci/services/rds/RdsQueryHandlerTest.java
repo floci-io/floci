@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
+import io.github.hectorvent.floci.services.rds.export.RdsExportTaskService;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
@@ -20,6 +21,7 @@ import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.EventSubscription;
+import io.github.hectorvent.floci.services.rds.model.ExportTask;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -33,6 +35,7 @@ import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -46,6 +49,7 @@ import static org.mockito.Mockito.*;
 class RdsQueryHandlerTest {
 
     private RdsService service;
+    private RdsExportTaskService exportTaskService;
     private DocDbQueryHandler docDbHandler;
     private NeptuneQueryHandler neptuneHandler;
     private RdsQueryHandler handler;
@@ -61,7 +65,8 @@ class RdsQueryHandlerTest {
         when(config.defaultAvailabilityZone()).thenReturn("us-east-1a");
         docDbHandler = mock(DocDbQueryHandler.class);
         neptuneHandler = mock(NeptuneQueryHandler.class);
-        handler = new RdsQueryHandler(service, config, docDbHandler, neptuneHandler);
+        exportTaskService = mock(RdsExportTaskService.class);
+        handler = new RdsQueryHandler(service, exportTaskService, config, docDbHandler, neptuneHandler);
     }
 
     @ParameterizedTest
@@ -3033,6 +3038,107 @@ class RdsQueryHandlerTest {
         OptionGroup group = new OptionGroup(name, "mysql", "8.0", "my og");
         group.setOptionGroupArn("arn:aws:rds:us-east-1:123456789012:og:" + name);
         return group;
+    }
+
+    @Test
+    void startExportTask_passesTheRequestAndAnswersWithTheTask() {
+        ExportTask task = exportTask("appdb-export", ExportTask.STATUS_STARTING);
+        when(exportTaskService.startExportTask(eq("appdb-export"), eq(task.getSourceArn()), eq("exports"),
+                eq("items/rds"), eq("arn:aws:iam::000000000000:role/export"), eq("alias/export"),
+                eq(List.of("appdb.public.items", "appdb.audit")), eq("us-east-1"))).thenReturn(task);
+        MultivaluedMap<String, String> params = params();
+        params.add("ExportTaskIdentifier", "appdb-export");
+        params.add("SourceArn", task.getSourceArn());
+        params.add("S3BucketName", "exports");
+        params.add("S3Prefix", "items/rds");
+        params.add("IamRoleArn", "arn:aws:iam::000000000000:role/export");
+        params.add("KmsKeyId", "alias/export");
+        params.add("ExportOnly.member.2", "appdb.audit");
+        params.add("ExportOnly.member.1", "appdb.public.items");
+
+        String body = (String) handler.handle("StartExportTask", params, "us-east-1").getEntity();
+
+        assertTrue(body.contains("<StartExportTaskResult><ExportTaskIdentifier>appdb-export</ExportTaskIdentifier>"), body);
+        assertTrue(body.contains("<ExportOnly><member>appdb.public.items</member></ExportOnly>"), body);
+        assertTrue(body.contains("<SourceType>SNAPSHOT</SourceType>"), body);
+        assertTrue(body.contains("<SnapshotTime>2026-10-13T08:00:00Z</SnapshotTime>"), body);
+        assertTrue(body.contains("<Status>STARTING</Status>"), body);
+        assertTrue(body.contains("<PercentProgress>0</PercentProgress>"), body);
+        assertTrue(body.contains("<TotalExtractedDataInGB>0</TotalExtractedDataInGB>"), body);
+        assertFalse(body.contains("<TaskEndTime>"), body);
+    }
+
+    @Test
+    void startExportTask_requiresTheRoleAndTheKey() {
+        MultivaluedMap<String, String> params = params();
+        params.add("ExportTaskIdentifier", "appdb-export");
+        params.add("SourceArn", "arn:aws:rds:us-east-1:000000000000:snapshot:snap");
+        params.add("S3BucketName", "exports");
+
+        String body = (String) handler.handle("StartExportTask", params, "us-east-1").getEntity();
+
+        assertTrue(body.contains("IamRoleArn"), body);
+        verifyNoInteractions(exportTaskService);
+    }
+
+    @Test
+    void describeExportTasks_listsEachTaskAndPassesFilters() {
+        when(exportTaskService.describeExportTasks(eq(null), eq(null), eq("SNAPSHOT"), any(), eq("us-east-1")))
+                .thenReturn(List.of(exportTask("one", ExportTask.STATUS_COMPLETE),
+                        exportTask("two", ExportTask.STATUS_IN_PROGRESS)));
+        MultivaluedMap<String, String> params = params();
+        params.add("SourceType", "SNAPSHOT");
+        params.add("Filters.Filter.1.Name", "status");
+        params.add("Filters.Filter.1.Values.Value.1", "complete");
+
+        String body = (String) handler.handle("DescribeExportTasks", params, "us-east-1").getEntity();
+
+        assertTrue(body.contains("<ExportTasks><ExportTask><ExportTaskIdentifier>one</ExportTaskIdentifier>"), body);
+        assertTrue(body.contains("<ExportTask><ExportTaskIdentifier>two</ExportTaskIdentifier>"), body);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, List<String>>> filters = ArgumentCaptor.forClass(Map.class);
+        verify(exportTaskService).describeExportTasks(eq(null), eq(null), eq("SNAPSHOT"), filters.capture(),
+                eq("us-east-1"));
+        assertEquals(Map.of("status", List.of("complete")), filters.getValue());
+    }
+
+    @Test
+    void cancelExportTask_answersCanceling() {
+        when(exportTaskService.cancelExportTask("appdb-export", "us-east-1"))
+                .thenReturn(exportTask("appdb-export", ExportTask.STATUS_CANCELING));
+        MultivaluedMap<String, String> params = params();
+        params.add("ExportTaskIdentifier", "appdb-export");
+
+        String body = (String) handler.handle("CancelExportTask", params, "us-east-1").getEntity();
+
+        assertTrue(body.contains("<CancelExportTaskResult>"), body);
+        assertTrue(body.contains("<Status>CANCELING</Status>"), body);
+    }
+
+    @Test
+    void exportTaskErrorsKeepTheirRdsCode() {
+        when(exportTaskService.cancelExportTask("missing", "us-east-1")).thenThrow(new AwsException(
+                "ExportTaskNotFound", "The export task with the ID missing doesn't exist.", 404));
+        MultivaluedMap<String, String> params = params();
+        params.add("ExportTaskIdentifier", "missing");
+
+        Response response = handler.handle("CancelExportTask", params, "us-east-1");
+
+        assertEquals(404, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>ExportTaskNotFound</Code>"));
+    }
+
+    private static ExportTask exportTask(String id, String status) {
+        ExportTask task = new ExportTask();
+        task.setExportTaskIdentifier(id);
+        task.setSourceArn("arn:aws:rds:us-east-1:000000000000:snapshot:appdb-snap");
+        task.setSourceType(ExportTask.SOURCE_TYPE_SNAPSHOT);
+        task.setExportOnly(List.of("appdb.public.items"));
+        task.setSnapshotTime(Instant.parse("2026-10-13T08:00:00Z"));
+        task.setTaskStartTime(Instant.parse("2026-10-13T09:00:00Z"));
+        task.setS3Bucket("exports");
+        task.setStatus(status);
+        return task;
     }
 
     private static MultivaluedMap<String, String> params() {

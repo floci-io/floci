@@ -454,6 +454,37 @@ public final class XmlParser {
         return null;
     }
 
+    /**
+     * Parses a whole document into its document element's tree, or returns {@code null} when the
+     * document is empty or not well-formed anywhere, after its document element included.
+     *
+     * <p>For a stored document whose every part has effect, where {@link #extractElementTree}
+     * would return a complete element followed by content that never parsed.
+     */
+    public static XmlElement parseDocumentElementTree(String xml) {
+        if (xml == null || xml.isEmpty()) {
+            return null;
+        }
+        try {
+            XMLStreamReader r = FACTORY.createXMLStreamReader(new StringReader(xml));
+            try {
+                XmlElement root = null;
+                while (r.hasNext()) {
+                    int event = r.next();
+                    if (root == null && event == XMLStreamConstants.START_ELEMENT) {
+                        root = readElementTree(r);
+                    }
+                }
+                return root;
+            } finally {
+                r.close();
+            }
+        } catch (XMLStreamException e) {
+            LOG.debugv("Ignoring malformed XML document: {0}", e.getMessage());
+            return null;
+        }
+    }
+
     private static XmlElement readElementTree(XMLStreamReader r) throws XMLStreamException {
         String name = r.getLocalName();
         StringBuilder text = new StringBuilder();

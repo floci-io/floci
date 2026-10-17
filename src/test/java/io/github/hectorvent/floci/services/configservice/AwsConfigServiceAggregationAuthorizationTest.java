@@ -1,9 +1,16 @@
 package io.github.hectorvent.floci.services.configservice;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.configservice.model.AggregationAuthorization;
+import io.github.hectorvent.floci.services.configservice.model.ConformancePack;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -16,10 +23,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -201,6 +211,71 @@ class AwsConfigServiceAggregationAuthorizationTest {
 
         assertTrue(service.listTagsForResource(created.aggregationAuthorizationArn()).isEmpty(),
                 "tags of a deleted authorization must not resurface on the reused ARN");
+    }
+
+    @Test
+    void deleteConformancePackDropsItsTags() {
+        AwsConfigService service = service();
+        String arn = service.putConformancePack(REGION, "pack", "s3://bucket/template.yaml", null)
+                .conformancePackArn();
+        service.tagResource(arn, List.of(Map.of("Key", "env", "Value", "prod")));
+
+        service.deleteConformancePack(REGION, "pack");
+
+        assertTrue(service.listTagsForResource(arn).isEmpty(),
+                "tags of a deleted conformance pack must not outlive it");
+    }
+
+    /**
+     * Put on an existing pack is a get-then-put. Unlocked, a Delete landing between the get and
+     * the put removes the pack and its tags, then the Put re-inserts the pack under its old ARN:
+     * Delete reported success, yet the pack survives with its tags silently gone. The window is a
+     * few in-memory instructions, so rather than sample it, the Put is parked in its persist,
+     * still inside the section the lock guards, and the Delete must be seen waiting on it.
+     */
+    @Test
+    void aPackDeleteWaitsForAnUpdateAlreadyInProgress() throws Exception {
+        ParkingStore<Map<String, ConformancePack>> packs = new ParkingStore<>();
+        AwsConfigService service = new AwsConfigService(new RegionResolver(REGION, ACCOUNT),
+                new StorageFactory(null, null) {
+                    @Override
+                    @SuppressWarnings("unchecked")
+                    public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                            TypeReference<Map<String, V>> typeReference, WriteProfile profile) {
+                        return fileName.equals("config-conformance-packs.json")
+                                ? new AccountAwareStorageBackend<>((StorageBackend<String, V>) (Object) packs,
+                                        null, ACCOUNT)
+                                : AccountAwareStorageBackend.inMemory(ACCOUNT);
+                    }
+                });
+        service.initializeStorage();
+        String arn = service.putConformancePack(REGION, "pack", "s3://bucket/v1.yaml", null)
+                .conformancePackArn();
+        service.tagResource(arn, List.of(Map.of("Key", "env", "Value", "prod")));
+
+        packs.parkNextWrite();
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> put = pool.submit(() -> service.putConformancePack(REGION, "pack", "s3://bucket/v2.yaml", null));
+            assertTrue(packs.awaitParked(), "the update must reach its persist");
+            AtomicReference<Thread> deleteThread = new AtomicReference<>();
+            Future<?> delete = pool.submit(() -> {
+                deleteThread.set(Thread.currentThread());
+                service.deleteConformancePack(REGION, "pack");
+            });
+            awaitBlockedOrDone(deleteThread, delete);
+            assertFalse(delete.isDone(), "the delete ran while an update of the same pack was mid-write");
+
+            packs.release();
+            put.get(2, TimeUnit.SECONDS);
+            delete.get(2, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertTrue(service.describeConformancePacks(REGION, null).isEmpty(),
+                "a Delete that succeeded left the pack it deleted in the store");
+        assertTrue(service.listTagsForResource(arn).isEmpty(), "the deleted pack's tags survived");
     }
 
     @Test

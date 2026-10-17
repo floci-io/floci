@@ -10,9 +10,11 @@ import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.NetworkSettings;
+import com.github.dockerjava.api.model.Ports;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
@@ -127,6 +129,34 @@ class ContainerLifecycleManagerNetworkTest {
         assertThrows(IllegalStateException.class, () -> manager().create(specWithLinkLocalIp(Map.of())));
 
         verify(dockerClient).removeContainerCmd("container-id");
+    }
+
+    @Test
+    void createAndStartFailsAndRemovesThePublishingContainerWhenItsNetworkDoesNotExist() {
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        RemoveContainerCmd removeCmd = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(removeCmd);
+        doThrow(new NotFoundException("network floci-nte not found")).when(connectCmd).exec();
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> manager().createAndStart(spec("floci-nte", Map.of(8080, 18080), List.of())));
+
+        assertTrue(e.getMessage().contains("Docker network floci-nte"), e.getMessage());
+        assertTrue(e.getMessage().contains("network floci-nte not found"), e.getMessage());
+        verify(removeCmd).exec();
+    }
+
+    @Test
+    void createAndStartKeepsThePublishingContainerWhenJoiningAnExistingNetworkFails() {
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        doThrow(new RuntimeException("endpoint already exists")).when(connectCmd).exec();
+        NetworkSettings networks = mock(NetworkSettings.class);
+        InspectContainerResponse inspect = inspectOf("container-id");
+        when(inspect.getNetworkSettings()).thenReturn(networks);
+
+        manager().createAndStart(spec("floci-net", Map.of(8080, 18080), List.of()));
+
+        verify(dockerClient, never()).removeContainerCmd(any(String.class));
     }
 
     @Test
@@ -251,6 +281,74 @@ class ContainerLifecycleManagerNetworkTest {
 
         assertEquals(new EndpointInfo("172.20.0.4", 9644),
                 manager().resolveEndpoint("container-id", 9644, "floci-net"));
+    }
+
+    @Test
+    void adoptReachesASurvivorOnSeveralNetworksThroughThePreferredOne() {
+        // A container created on the default bridge and then connected to Floci's network lists
+        // both; only the one Floci shares is reachable from Floci.
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        InspectContainerResponse.ContainerState running = runningState();
+        InspectContainerResponse survivor = inspectOf("survivor-id");
+        when(survivor.getState()).thenReturn(running);
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(survivor.getNetworkSettings()).thenReturn(networks);
+        when(survivor.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
+        Map<String, ContainerNetwork> attached = new LinkedHashMap<>();
+        attached.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.3"));
+        attached.put("floci_default", new ContainerNetwork().withIpv4Address("172.18.0.3"));
+        when(networks.getNetworks()).thenReturn(attached);
+        when(networks.getPorts()).thenReturn(new Ports());
+
+        ContainerInfo info = manager().adopt("survivor-id", List.of(6443), Optional.of("floci_default"));
+
+        assertEquals(new EndpointInfo("172.18.0.3", 6443), info.getEndpoint(6443));
+    }
+
+    @Test
+    void adoptWithoutAPreferredNetworkKeepsTakingTheFirstAddress() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        InspectContainerResponse.ContainerState running = runningState();
+        InspectContainerResponse survivor = inspectOf("survivor-id");
+        when(survivor.getState()).thenReturn(running);
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(survivor.getNetworkSettings()).thenReturn(networks);
+        when(survivor.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
+        Map<String, ContainerNetwork> attached = new LinkedHashMap<>();
+        attached.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.3"));
+        attached.put("floci_default", new ContainerNetwork().withIpv4Address("172.18.0.3"));
+        when(networks.getNetworks()).thenReturn(attached);
+        when(networks.getPorts()).thenReturn(new Ports());
+
+        ContainerInfo info = manager().adopt("survivor-id", List.of(6443));
+
+        assertEquals(new EndpointInfo("172.17.0.3", 6443), info.getEndpoint(6443));
+    }
+
+    @Test
+    void adoptFallsBackToTheFirstAddressWhenTheSurvivorIsNotOnThePreferredNetwork() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        InspectContainerResponse.ContainerState running = runningState();
+        InspectContainerResponse survivor = inspectOf("survivor-id");
+        when(survivor.getState()).thenReturn(running);
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(survivor.getNetworkSettings()).thenReturn(networks);
+        when(survivor.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
+        Map<String, ContainerNetwork> attached = new LinkedHashMap<>();
+        attached.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.3"));
+        attached.put("other", new ContainerNetwork().withIpv4Address("172.19.0.3"));
+        when(networks.getNetworks()).thenReturn(attached);
+        when(networks.getPorts()).thenReturn(new Ports());
+
+        ContainerInfo info = manager().adopt("survivor-id", List.of(6443), Optional.of("floci_default"));
+
+        assertEquals(new EndpointInfo("172.17.0.3", 6443), info.getEndpoint(6443));
+    }
+
+    private static InspectContainerResponse.ContainerState runningState() {
+        InspectContainerResponse.ContainerState state = mock(InspectContainerResponse.ContainerState.class);
+        when(state.getRunning()).thenReturn(true);
+        return state;
     }
 
     private InspectContainerResponse inspectOf(String containerId) {

@@ -19,6 +19,12 @@ class AssumeRolePolicyEvaluatorTest {
 
     private static final String CALLER_ARN = "arn:aws:iam::111111111111:user/alice";
     private static final String CALLER_ACCOUNT = "111111111111";
+    private static final IamService.CallerArns CALLER = caller(CALLER_ARN, CALLER_ARN);
+
+    /** A caller carrying its two ARNs and no principal keys, which is what most of these need. */
+    private static IamService.CallerArns caller(String callerArn, String principalArn) {
+        return new IamService.CallerArns(callerArn, principalArn);
+    }
 
     private static String trust(String principal) {
         return """
@@ -63,47 +69,47 @@ class AssumeRolePolicyEvaluatorTest {
     void allowsAccountRootPrincipal() {
         assertTrue(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws:iam::111111111111:root\"}"),
-                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
     void allowsBareAccountPrincipal() {
         assertTrue(evaluator.allows(trust("{\"AWS\":\"111111111111\"}"),
-                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
     void allowsExactPrincipalArn() {
         assertTrue(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws:iam::111111111111:user/alice\"}"),
-                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
     void allowsWildcardPrincipal() {
-        assertTrue(evaluator.allows(trust("\"*\""), CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
-        assertTrue(evaluator.allows(trust("{\"AWS\":\"*\"}"), CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertTrue(evaluator.allows(trust("\"*\""), CALLER, CALLER_ACCOUNT, Map.of()));
+        assertTrue(evaluator.allows(trust("{\"AWS\":\"*\"}"), CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
     void allowsWhenPrincipalListContainsCaller() {
         assertTrue(evaluator.allows(
                 trust("{\"AWS\":[\"arn:aws:iam::999999999999:root\",\"arn:aws:iam::111111111111:root\"]}"),
-                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
     void deniesWhenAccountDoesNotMatch() {
         assertFalse(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws:iam::999999999999:root\"}"),
-                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
     void deniesWhenPrincipalArnDiffers() {
         assertFalse(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws:iam::111111111111:user/bob\"}"),
-                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -113,7 +119,7 @@ class AssumeRolePolicyEvaluatorTest {
               {"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"},
               {"Effect":"Deny","Principal":{"AWS":"arn:aws:iam::111111111111:root"},"Action":"sts:AssumeRole"}]}
             """;
-        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -122,7 +128,7 @@ class AssumeRolePolicyEvaluatorTest {
             {"Version":"2012-10-17","Statement":[
               {"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:TagSession"}]}
             """;
-        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -131,7 +137,7 @@ class AssumeRolePolicyEvaluatorTest {
             {"Version":"2012-10-17","Statement":[
               {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:*"}]}
             """;
-        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertTrue(evaluator.allows(doc, CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -142,7 +148,7 @@ class AssumeRolePolicyEvaluatorTest {
               {"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"},
               {"Effect":"Deny","Principal":{"AWS":"*"},"NotAction":"sts:TagSession"}]}
             """;
-        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -153,7 +159,7 @@ class AssumeRolePolicyEvaluatorTest {
               {"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"},
               {"Effect":"Deny","Principal":{"AWS":"*"},"NotAction":"sts:AssumeRole"}]}
             """;
-        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertTrue(evaluator.allows(doc, CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -163,7 +169,7 @@ class AssumeRolePolicyEvaluatorTest {
             {"Version":"2012-10-17","Statement":[
               {"Effect":"Allow","Principal":{"AWS":"111111111111"},"NotAction":"sts:GetSessionToken"}]}
             """;
-        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertTrue(evaluator.allows(doc, CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -174,7 +180,7 @@ class AssumeRolePolicyEvaluatorTest {
         String assumedRoleArn = "arn:aws:sts::111111111111:assumed-role/AppRole/session-abc";
         assertTrue(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws:iam::111111111111:role/AppRole\"}"),
-                assumedRoleArn, "arn:aws:iam::111111111111:role/AppRole", CALLER_ACCOUNT, Map.of()));
+                caller(assumedRoleArn, "arn:aws:iam::111111111111:role/AppRole"), CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -184,9 +190,9 @@ class AssumeRolePolicyEvaluatorTest {
         String assumedRoleArn = "arn:aws:sts::111111111111:assumed-role/AppRole/session-abc";
         String roleArn = "arn:aws:iam::111111111111:role/team/AppRole";
         assertTrue(evaluator.allows(trust("{\"AWS\":\"arn:aws:iam::111111111111:role/team/AppRole\"}"),
-                assumedRoleArn, roleArn, CALLER_ACCOUNT, Map.of()));
+                caller(assumedRoleArn, roleArn), CALLER_ACCOUNT, Map.of()));
         assertFalse(evaluator.allows(trust("{\"AWS\":\"arn:aws:iam::111111111111:role/AppRole\"}"),
-                assumedRoleArn, roleArn, CALLER_ACCOUNT, Map.of()));
+                caller(assumedRoleArn, roleArn), CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -195,7 +201,7 @@ class AssumeRolePolicyEvaluatorTest {
         String assumedRoleArn = "arn:aws:sts::111111111111:assumed-role/AppRole/session-abc";
         assertFalse(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws:iam::111111111111:role/OtherRole\"}"),
-                assumedRoleArn, "arn:aws:iam::111111111111:role/AppRole", CALLER_ACCOUNT, Map.of()));
+                caller(assumedRoleArn, "arn:aws:iam::111111111111:role/AppRole"), CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -204,7 +210,7 @@ class AssumeRolePolicyEvaluatorTest {
         String assumedRoleArn = "arn:aws:sts::111111111111:assumed-role/AppRole/session-abc";
         assertTrue(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws:sts::111111111111:assumed-role/AppRole/session-abc\"}"),
-                assumedRoleArn, "arn:aws:iam::111111111111:role/AppRole", CALLER_ACCOUNT, Map.of()));
+                caller(assumedRoleArn, "arn:aws:iam::111111111111:role/AppRole"), CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -212,7 +218,7 @@ class AssumeRolePolicyEvaluatorTest {
         String assumedRoleArn = "arn:aws-us-gov:sts::111111111111:assumed-role/AppRole/session-abc";
         assertTrue(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws-us-gov:iam::111111111111:role/AppRole\"}"),
-                assumedRoleArn, "arn:aws-us-gov:iam::111111111111:role/AppRole", CALLER_ACCOUNT, Map.of()));
+                caller(assumedRoleArn, "arn:aws-us-gov:iam::111111111111:role/AppRole"), CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -220,7 +226,7 @@ class AssumeRolePolicyEvaluatorTest {
         String assumedRoleArn = "arn:aws-cn:sts::111111111111:assumed-role/AppRole/session-abc";
         assertTrue(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws-cn:iam::111111111111:role/AppRole\"}"),
-                assumedRoleArn, "arn:aws-cn:iam::111111111111:role/AppRole", CALLER_ACCOUNT, Map.of()));
+                caller(assumedRoleArn, "arn:aws-cn:iam::111111111111:role/AppRole"), CALLER_ACCOUNT, Map.of()));
     }
 
     /**
@@ -232,7 +238,7 @@ class AssumeRolePolicyEvaluatorTest {
         String assumedRoleArn = "arn:aws-us-gov:sts::111111111111:assumed-role/AppRole/session-abc";
         assertFalse(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws:iam::111111111111:role/AppRole\"}"),
-                assumedRoleArn, "arn:aws-us-gov:iam::111111111111:role/AppRole", CALLER_ACCOUNT, Map.of()));
+                caller(assumedRoleArn, "arn:aws-us-gov:iam::111111111111:role/AppRole"), CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -240,13 +246,13 @@ class AssumeRolePolicyEvaluatorTest {
         String userArn = "arn:aws-us-gov:iam::111111111111:user/alice";
         assertTrue(evaluator.allows(
                 trust("{\"AWS\":\"arn:aws-us-gov:iam::111111111111:root\"}"),
-                userArn, userArn, CALLER_ACCOUNT, Map.of()));
+                caller(userArn, userArn), CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
     void deniesServiceOnlyPrincipal() {
         assertFalse(evaluator.allows(
-                trust("{\"Service\":\"lambda.amazonaws.com\"}"), CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                trust("{\"Service\":\"lambda.amazonaws.com\"}"), CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -314,10 +320,10 @@ class AssumeRolePolicyEvaluatorTest {
               {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
                "Condition":{"StringEquals":{"sts:ExternalId":"Unique-ID-1"}}}]}
             """;
-        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
-        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT,
                 Map.of("sts:ExternalId", List.of("unique-id-1"))));
-        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+        assertTrue(evaluator.allows(doc, CALLER, CALLER_ACCOUNT,
                 Map.of("sts:ExternalId", List.of("Unique-ID-1"))));
     }
 
@@ -330,10 +336,10 @@ class AssumeRolePolicyEvaluatorTest {
               {"Effect":"Deny","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
                "Condition":{"StringNotEquals":{"sts:ExternalId":"Unique-ID-1"}}}]}
             """;
-        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
-        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT,
                 Map.of("sts:ExternalId", List.of("other-id"))));
-        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+        assertTrue(evaluator.allows(doc, CALLER, CALLER_ACCOUNT,
                 Map.of("sts:ExternalId", List.of("Unique-ID-1"))));
     }
 
@@ -345,9 +351,9 @@ class AssumeRolePolicyEvaluatorTest {
               {"Effect":"Deny","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
                "Condition":{"StringLike":{"sts:RoleSessionName":"blocked-*"}}}]}
             """;
-        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+        assertTrue(evaluator.allows(doc, CALLER, CALLER_ACCOUNT,
                 Map.of("sts:RoleSessionName", List.of("alice"))));
-        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT,
                 Map.of("sts:RoleSessionName", List.of("blocked-alice"))));
     }
 
@@ -359,9 +365,9 @@ class AssumeRolePolicyEvaluatorTest {
                "Condition":{"ArnLike":{"aws:PrincipalArn":"arn:aws:iam::111111111111:role/team/*"}}}]}
             """;
         String sessionArn = "arn:aws:sts::111111111111:assumed-role/AppRole/session-abc";
-        assertTrue(evaluator.allows(doc, sessionArn, "arn:aws:iam::111111111111:role/team/AppRole",
+        assertTrue(evaluator.allows(doc, caller(sessionArn, "arn:aws:iam::111111111111:role/team/AppRole"),
                 CALLER_ACCOUNT, Map.of()));
-        assertFalse(evaluator.allows(doc, sessionArn, "arn:aws:iam::111111111111:role/AppRole",
+        assertFalse(evaluator.allows(doc, caller(sessionArn, "arn:aws:iam::111111111111:role/AppRole"),
                 CALLER_ACCOUNT, Map.of()));
     }
 
@@ -373,7 +379,7 @@ class AssumeRolePolicyEvaluatorTest {
               {"Effect":"Deny","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
                "Condition":{"StringEquals":"sts:ExternalId"}}]}
             """;
-        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -401,9 +407,9 @@ class AssumeRolePolicyEvaluatorTest {
               {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
                "Condition":{"StringLike":{"sts:RoleSessionName":"${aws:PrincipalAccount}-*"}}}]}
             """;
-        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+        assertTrue(evaluator.allows(doc, CALLER, CALLER_ACCOUNT,
                 sessionNamed(CALLER_ACCOUNT + "-build")));
-        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT,
                 sessionNamed("222222222222-build")));
     }
 
@@ -415,10 +421,65 @@ class AssumeRolePolicyEvaluatorTest {
               {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
                "Condition":{"StringLike":{"sts:RoleSessionName":"${aws:PrincipalAccount}-*"}}}]}
             """;
-        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT,
                 sessionNamed(CALLER_ACCOUNT + "-build")));
-        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT,
+        assertTrue(evaluator.allows(doc, CALLER, CALLER_ACCOUNT,
                 sessionNamed("${aws:PrincipalAccount}-build")));
+    }
+
+    @Test
+    void aTrustConditionReadsTheCallersPrincipalKeys() {
+        String doc = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
+               "Condition":{"StringEquals":{"aws:username":"alice"}}}]}
+            """;
+        IamService.CallerArns alice = new IamService.CallerArns(CALLER_ARN, CALLER_ARN,
+                IamService.CallerArns.TYPE_USER, "AIDAALICE", "alice");
+
+        assertTrue(evaluator.allows(doc, alice, CALLER_ACCOUNT, Map.of()));
+        // The same caller without the keys: aws:username is absent, so the statement does not apply.
+        assertFalse(evaluator.allows(doc, CALLER, CALLER_ACCOUNT, Map.of()));
+    }
+
+    @Test
+    void aTrustConditionTellsAUserApartFromARoleSession() {
+        String sessionArn = "arn:aws:sts::111111111111:assumed-role/AppRole/session-abc";
+        String roleArn = "arn:aws:iam::111111111111:role/AppRole";
+        IamService.CallerArns session = new IamService.CallerArns(sessionArn, roleArn,
+                IamService.CallerArns.TYPE_ASSUMED_ROLE, "AROAAPPROLE:session-abc", null);
+        IamService.CallerArns alice = new IamService.CallerArns(CALLER_ARN, CALLER_ARN,
+                IamService.CallerArns.TYPE_USER, "AIDAALICE", "alice");
+        String byType = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
+               "Condition":{"StringEquals":{"aws:PrincipalType":"AssumedRole"}}}]}
+            """;
+        String bySessionId = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
+               "Condition":{"StringLike":{"aws:userid":"AROAAPPROLE:*"}}}]}
+            """;
+
+        assertTrue(evaluator.allows(byType, session, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows(byType, alice, CALLER_ACCOUNT, Map.of()));
+        assertTrue(evaluator.allows(bySessionId, session, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows(bySessionId, alice, CALLER_ACCOUNT, Map.of()));
+    }
+
+    @Test
+    void aPrincipalKeyTheCallerCarriesWinsOverTheRequestsOwnCopy() {
+        // The caller is who the request is from, so its keys are written over the context the
+        // request assembled, exactly as the enforcement filter writes them last.
+        String doc = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole",
+               "Condition":{"StringEquals":{"aws:username":"alice"}}}]}
+            """;
+        IamService.CallerArns alice = new IamService.CallerArns(CALLER_ARN, CALLER_ARN,
+                IamService.CallerArns.TYPE_USER, "AIDAALICE", "alice");
+
+        assertTrue(evaluator.allows(doc, alice, CALLER_ACCOUNT, Map.of("aws:username", List.of("mallory"))));
     }
 
     private static Map<String, List<String>> sessionNamed(String sessionName) {
@@ -429,19 +490,19 @@ class AssumeRolePolicyEvaluatorTest {
     @Test
     void aGrantNamingTheCallerIsToldApartFromAGrantToItsAccount() {
         assertEquals(TrustDecision.ALLOW, evaluator.decide(trust("{\"AWS\":\"" + CALLER_ARN + "\"}"),
-                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                CALLER, CALLER_ACCOUNT, Map.of()));
         assertEquals(TrustDecision.ALLOW, evaluator.decide(trust("\"*\""),
-                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                CALLER, CALLER_ACCOUNT, Map.of()));
         assertEquals(TrustDecision.ALLOW_ACCOUNT, evaluator.decide(trust("{\"AWS\":\"arn:aws:iam::111111111111:root\"}"),
-                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                CALLER, CALLER_ACCOUNT, Map.of()));
         assertEquals(TrustDecision.ALLOW_ACCOUNT, evaluator.decide(trust("{\"AWS\":\"111111111111\"}"),
-                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
     void aStatementNamingBothTheAccountAndTheCallerGrantsToTheCaller() {
         String doc = trust("{\"AWS\":[\"111111111111\",\"" + CALLER_ARN + "\"]}");
-        assertEquals(TrustDecision.ALLOW, evaluator.decide(doc, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertEquals(TrustDecision.ALLOW, evaluator.decide(doc, CALLER, CALLER_ACCOUNT, Map.of()));
 
         String twoStatements = """
             {"Version":"2012-10-17","Statement":[
@@ -449,7 +510,7 @@ class AssumeRolePolicyEvaluatorTest {
               {"Effect":"Allow","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole"}]}
             """.formatted(CALLER_ARN);
         assertEquals(TrustDecision.ALLOW,
-                evaluator.decide(twoStatements, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                evaluator.decide(twoStatements, CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
@@ -459,17 +520,17 @@ class AssumeRolePolicyEvaluatorTest {
               {"Effect":"Allow","Principal":{"AWS":"%1$s"},"Action":"sts:AssumeRole"},
               {"Effect":"Deny","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole"}]}
             """.formatted(CALLER_ARN);
-        assertEquals(TrustDecision.EXPLICIT_DENY, evaluator.decide(deny, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertEquals(TrustDecision.EXPLICIT_DENY, evaluator.decide(deny, CALLER, CALLER_ACCOUNT, Map.of()));
         assertEquals(TrustDecision.NEUTRAL, evaluator.decide(trust("{\"AWS\":\"222222222222\"}"),
-                CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
-        assertEquals(TrustDecision.NEUTRAL, evaluator.decide(null, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+                CALLER, CALLER_ACCOUNT, Map.of()));
+        assertEquals(TrustDecision.NEUTRAL, evaluator.decide(null, CALLER, CALLER_ACCOUNT, Map.of()));
     }
 
     @Test
     void deniesBlankOrMalformedDocument() {
-        assertFalse(evaluator.allows(null, CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
-        assertFalse(evaluator.allows("", CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
-        assertFalse(evaluator.allows("{}", CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
-        assertFalse(evaluator.allows("not json", CALLER_ARN, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows(null, CALLER, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows("", CALLER, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows("{}", CALLER, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allows("not json", CALLER, CALLER_ACCOUNT, Map.of()));
     }
 }

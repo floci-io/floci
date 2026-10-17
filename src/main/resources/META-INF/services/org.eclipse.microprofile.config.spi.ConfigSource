@@ -1,1 +1,2 @@
 io.github.hectorvent.floci.config.TlsConfigSource
+io.github.hectorvent.floci.config.HostDefaultsConfigSource

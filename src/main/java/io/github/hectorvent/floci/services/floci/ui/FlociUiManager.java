@@ -779,7 +779,8 @@ public class FlociUiManager {
         this.containerId = existing.getId();
         try {
             int internalPort = profile.internalPort();
-            ContainerInfo info = lifecycleManager.adopt(containerId, List.of(internalPort));
+            ContainerInfo info = lifecycleManager.adopt(containerId, List.of(internalPort),
+                    containerBuilder.resolveDockerNetwork(resolveDockerNetwork()));
             EndpointInfo endpoint = info.getEndpoint(internalPort);
             this.hostPort = resolveHostPort(endpoint, config.services().ui().port());
             this.probeUrl = resolveProbeUrl(profile, endpoint, hostPort);

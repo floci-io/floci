@@ -821,33 +821,47 @@ public class AwsConfigService {
 
     // --- Conformance Packs ---
 
+    /** Put on an existing pack is a get-then-put, so it runs under the lock delete takes. Unlocked,
+     *  a delete landing between the get and the put would remove the pack and its tags, and the
+     *  put would then re-insert it under its old ARN: a successful delete, a pack that survives,
+     *  and tags silently gone. */
     public ConformancePack putConformancePack(String region, String packName,
                                               String templateS3Uri, String templateBody) {
-        Map<String, ConformancePack> store = packsFor(region);
-        ConformancePack existing = store.get(packName);
-        if (existing != null) {
-            ConformancePack updated = new ConformancePack(existing.conformancePackName(), existing.conformancePackArn(),
-                    existing.conformancePackId(), templateS3Uri, templateBody);
-            store.put(packName, updated);
+        synchronized (lockFor(conformancePackLockKey(region, packName))) {
+            Map<String, ConformancePack> store = packsFor(region);
+            ConformancePack existing = store.get(packName);
+            if (existing != null) {
+                ConformancePack updated = new ConformancePack(existing.conformancePackName(),
+                        existing.conformancePackArn(), existing.conformancePackId(), templateS3Uri, templateBody);
+                store.put(packName, updated);
+                persistRegion(conformancePacks, region);
+                return updated;
+            }
+            String packId = "conformance-pack-" + shortId();
+            String packArn = AwsArnUtils.Arn.of("config", region, regionResolver.getAccountId(),
+                    "conformance-pack/" + packName + "/" + packId).toString();
+            ConformancePack pack = new ConformancePack(packName, packArn, packId, templateS3Uri, templateBody);
+            store.put(packName, pack);
             persistRegion(conformancePacks, region);
-            return updated;
+            return pack;
         }
-        String packId = "conformance-pack-" + shortId();
-        String packArn = AwsArnUtils.Arn.of("config", region, regionResolver.getAccountId(),
-                "conformance-pack/" + packName + "/" + packId).toString();
-        ConformancePack pack = new ConformancePack(packName, packArn, packId, templateS3Uri, templateBody);
-        store.put(packName, pack);
-        persistRegion(conformancePacks, region);
-        return pack;
     }
 
     public void deleteConformancePack(String region, String packName) {
-        Map<String, ConformancePack> store = packsFor(region);
-        if (store.remove(packName) == null) {
-            throw new AwsException("NoSuchConformancePackException",
-                    "Conformance pack '" + packName + "' does not exist.", 400);
+        synchronized (lockFor(conformancePackLockKey(region, packName))) {
+            Map<String, ConformancePack> store = packsFor(region);
+            ConformancePack removed = store.remove(packName);
+            if (removed == null) {
+                throw new AwsException("NoSuchConformancePackException",
+                        "Conformance pack '" + packName + "' does not exist.", 400);
+            }
+            persistRegion(conformancePacks, region);
+            tags.remove(removed.conformancePackArn());
         }
-        persistRegion(conformancePacks, region);
+    }
+
+    private static String conformancePackLockKey(String region, String packName) {
+        return "conformance-pack|" + region + "|" + packName;
     }
 
     public List<ConformancePack> describeConformancePacks(String region, List<String> names) {

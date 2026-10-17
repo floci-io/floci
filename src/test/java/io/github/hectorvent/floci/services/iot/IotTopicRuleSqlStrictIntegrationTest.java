@@ -1,18 +1,24 @@
 package io.github.hectorvent.floci.services.iot;
 
+import io.github.hectorvent.floci.testing.IotSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
+/**
+ * With {@code floci.services.iot.rule-sql-strict} on, a topic rule whose SQL is outside the subset
+ * Floci evaluates is rejected with {@code SqlParseException}, while one inside it is still accepted.
+ * Off, the default, such a rule is stored and fires on every matching topic with the whole payload.
+ *
+ * <p>The setting comes from {@link IotSettingsProfile}, which this class shares with the other IoT
+ * class that changes a default.
+ */
 @QuarkusTest
-@TestProfile(IotTopicRuleSqlStrictIntegrationTest.StrictRuleSqlProfile.class)
+@TestProfile(IotSettingsProfile.class)
 class IotTopicRuleSqlStrictIntegrationTest {
 
     @Test
@@ -55,12 +61,5 @@ class IotTopicRuleSqlStrictIntegrationTest {
                   }
                 }
                 """.formatted(sql);
-    }
-
-    public static final class StrictRuleSqlProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iot.rule-sql-strict", "true");
-        }
     }
 }

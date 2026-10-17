@@ -49,8 +49,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 /**
  * What is left of the original single SES service after the store-based domain split and the
@@ -1680,10 +1682,11 @@ public class SesService {
             }
         }
 
+        boolean requestHasRecipient = request.entries().stream().anyMatch(SesService::hasNonNullRecipient);
         List<BulkEmailEntryResult> results = new ArrayList<>(request.entries().size());
         for (BulkEmailEntry entry : request.entries()) {
             try {
-                SesAddressSyntax.requireBulkDestination(entry, request.replyToAddresses());
+                SesAddressSyntax.requireBulkDestination(entry, request.replyToAddresses(), requestHasRecipient);
                 JsonNode merged = mergeTemplateData(template.templateData(), entry.replacementTemplateData());
                 List<MessageTag> mergedTags = mergeEmailTags(request.defaultEmailTags(), entry.replacementEmailTags());
                 List<MessageHeader> mergedHeaders = mergeHeaders(template.headers(), entry.replacementHeaders());
@@ -1718,6 +1721,13 @@ public class SesService {
             }
         }
         return results;
+    }
+
+    private static boolean hasNonNullRecipient(BulkEmailEntry entry) {
+        return Stream.of(entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses())
+                .filter(Objects::nonNull)
+                .flatMap(List::stream)
+                .anyMatch(Objects::nonNull);
     }
 
     private static List<String> headerText(List<MessageHeader> headers) {

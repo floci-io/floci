@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elasticache;
 
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterAll;
@@ -15,6 +16,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
@@ -49,6 +51,9 @@ class ElastiCacheIntegrationTest {
     private static final int READ_LINE_MAX_ATTEMPTS = 3;
 
     private static int firstProxyPort;
+
+    @TestHTTPResource("/")
+    static URI baseUri;
     private static int crossGroupPort;
 
     @BeforeAll
@@ -63,6 +68,7 @@ class ElastiCacheIntegrationTest {
         for (String groupId : List.of(CROSS_GROUP_ID, GROUP_ID, GROUP_ID + "-reused")) {
             try {
                 given()
+                    .port(baseUri.getPort())
                     .formParam("Action", "DeleteReplicationGroup")
                     .formParam("ReplicationGroupId", groupId)
                     .header("Authorization", AUTH_HEADER)
@@ -71,6 +77,7 @@ class ElastiCacheIntegrationTest {
         }
         try {
             given()
+                .port(baseUri.getPort())
                 .formParam("Action", "DeleteUser")
                 .formParam("UserId", USER_ID)
                 .header("Authorization", AUTH_HEADER)

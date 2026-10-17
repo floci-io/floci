@@ -416,9 +416,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         List<String> resources = resolveResourceArns(credentialScope,
-                "logs".equals(credentialScope)
-                        ? arnBuilder.buildLogStreamResources(action, ctx, region, accountId, requestPartition())
-                        : arnBuilder.buildResources(credentialScope, ctx, region, accountId));
+                targetResources(credentialScope, action, ctx, region, accountId));
 
         Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);
         if (presignedScope.isPresent()) {
@@ -446,7 +444,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         "s3", "", decodedPath.substring(1)).toString());
             }
             // IAM's resource glob treats * and ? in object keys as patterns. An internal URL
-            // credential is narrower: it may authorize only its literal object and action.
+            // credential is narrower: it may authorize only its literal object and action. That
+            // action is never a version action: a generated URL signs only its X-Amz-* parameters,
+            // so it names no versionId, and PreSignedUrlFilter refuses one appended to it as a
+            // signature mismatch before this check.
             if (!scope.action().equals(action) || resources.isEmpty()
                     || resources.stream().anyMatch(resource -> !scope.resourceArn().equals(resource))) {
                 ctx.abortWith(accessDeniedForRequest(action, credentialScope, ctx));
@@ -515,20 +516,45 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return;
         }
 
+        // Tagged group creation requires either tagging permission, using the same resolved
+        // caller (including session, boundary and SCP ceilings) as the primary operation.
+        if ("logs:CreateLogGroup".equals(action) && conditionContext != null
+                && !conditionContext.getOrDefault("aws:TagKeys", List.of()).isEmpty()) {
+            String groupResource = resources.getFirst();
+            String taggingResource = groupResource.substring(0, groupResource.length() - 2);
+            Map<String, List<String>> taggingContext = IamConditionContextResolver.withGlobalContext(
+                    conditionContext, taggingResource, region, accountId, accountId);
+            Map<String, List<String>> groupContext = IamConditionContextResolver.withGlobalContext(
+                    conditionContext, groupResource, region, accountId, accountId);
+            if (evaluator.evaluate(caller, null, "logs:TagResource", taggingResource, taggingContext) == Decision.DENY
+                    && evaluator.evaluate(caller, null, "logs:TagLogGroup", groupResource, groupContext) == Decision.DENY) {
+                LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}",
+                        akid, "logs:TagResource", taggingResource);
+                ctx.abortWith(accessDeniedForRequest("logs:TagResource", credentialScope, ctx, taggingResource));
+                return;
+            }
+        }
+
         // A PutObject carrying If-Match compares against the object it replaces, and S3 authorizes
         // that read as s3:GetObject, WITHOUT the object's tags in the request context. Measured
         // against real AWS: under a GetObject allow conditioned on s3:ExistingObjectTag the
         // conditional write is AccessDenied, under a GetObject allow scoped by prefix alone it
         // succeeds, and with no GetObject at all it is denied. If-None-Match needs no such
-        // permission.
-        if ("s3:PutObject".equals(action) && ctx.getHeaderString("If-Match") != null) {
+        // permission. The user guide's conditional writes page lists PutObject, CopyObject and
+        // CompleteMultipartUpload as the operations that take If-Match; CreateMultipartUpload and
+        // UploadPart, also checked as s3:PutObject, ignore it, so it adds nothing to them.
+        if ("s3:PutObject".equals(action) && evaluatesIfMatch(ctx) && ctx.getHeaderString("If-Match") != null) {
             abortIfDenied(ctx, caller, principal, "s3:GetObject", credentialScope, resources,
                     withoutObjectTags(targetContexts), region, accountId, akid);
         }
         // A DeleteObject conditioned on an ETag reveals whether the object still has it, and the
         // conditional-deletes guide requires s3:GetObject for it; If-Match: * (existence only)
-        // needs just s3:DeleteObject. The read is checked the way the PutObject case above is.
-        if ("s3:DeleteObject".equals(action) && isPlainDeleteObject(ctx)
+        // needs just the delete. A delete naming a version, checked as s3:DeleteObjectVersion, is
+        // checked the same way: the guide says the condition is evaluated against the current
+        // version only, so the read is of that one, s3:GetObject. The read is checked the way the
+        // PutObject case above is.
+        if (("s3:DeleteObject".equals(action) || "s3:DeleteObjectVersion".equals(action))
+                && isPlainDeleteObject(ctx)
                 && isETagCondition(ctx.getHeaderString("If-Match"))) {
             abortIfDenied(ctx, caller, principal, "s3:GetObject", credentialScope, resources,
                     withoutObjectTags(targetContexts), region, accountId, akid);
@@ -536,9 +562,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     // The DELETE subresources S3Controller.deleteObject routes away from DeleteObject (?uploadId= is
-    // AbortMultipartUpload, which the action registry also files under s3:DeleteObject). Everything
-    // else, including the x-id and X-Amz-* parameters SDKs and presigned URLs add, is a DeleteObject.
+    // AbortMultipartUpload). Everything else, including the x-id and X-Amz-* parameters SDKs and
+    // presigned URLs add, is a DeleteObject.
     private static final Set<String> NON_DELETE_OBJECT_SUBRESOURCES = Set.of("uploadId", "tagging", "annotation");
+
+    // PutObject and CopyObject are any PUT S3Controller does not run as UploadPart or UploadPartCopy,
+    // which name both an uploadId and a partNumber; CompleteMultipartUpload is a POST naming its
+    // upload, without ?uploads.
+    private static boolean evaluatesIfMatch(ContainerRequestContext ctx) {
+        MultivaluedMap<String, String> params = ctx.getUriInfo().getQueryParameters();
+        boolean namesUpload = params.containsKey("uploadId");
+        if ("PUT".equalsIgnoreCase(ctx.getMethod())) {
+            return !(namesUpload && params.containsKey("partNumber"));
+        }
+        return "POST".equalsIgnoreCase(ctx.getMethod()) && namesUpload && !params.containsKey("uploads");
+    }
 
     private static boolean isPlainDeleteObject(ContainerRequestContext ctx) {
         return "DELETE".equalsIgnoreCase(ctx.getMethod())
@@ -724,7 +762,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /** Floci's account-root principal, which is both the caller and the request's aws:PrincipalArn. */
     private CallerArns accountRootArns(String accountId) {
         String rootArn = AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString();
-        return new CallerArns(rootArn, rootArn, CallerArns.TYPE_ACCOUNT, accountId, null);
+        return CallerArns.accountRoot(rootArn, accountId);
     }
 
     /**
@@ -752,10 +790,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             for (Map<String, List<String>> targetContext : targetContexts) {
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
                         targetContext, resource, region, accountId, resourceOwnerAccountId);
-                if ("logs".equals(credentialScope)
-                        && ("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action))) {
-                    effectiveContext.put("aws:ResourceAccount", List.of(accountId));
-                }
                 if ("dynamodb".equals(credentialScope)) {
                     Map<String, List<String>> batchContext =
                             conditionContextResolver.dynamoDbBatchConditionContext(action, ctx, resource);
@@ -1125,20 +1159,38 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (action == null) return null;
         // Action set sourced from IamActionRegistry — see that file for any
         // additions. HEAD on an object is bucketed under s3:GetObject by the
-        // registry, so we distinguish via httpMethod.
+        // registry, so we distinguish via httpMethod. The POST operations checked as
+        // s3:PutObject or s3:GetObject (multipart create and complete, Select) cannot
+        // be told apart from the action, so they get no name rather than a wrong one.
+        if ("POST".equalsIgnoreCase(httpMethod)) {
+            return null;
+        }
         return switch (action) {
-            case "s3:GetObject" -> "HEAD".equalsIgnoreCase(httpMethod) ? "HeadObject" : "GetObject";
+            case "s3:GetObject", "s3:GetObjectVersion" ->
+                    "HEAD".equalsIgnoreCase(httpMethod) ? "HeadObject" : "GetObject";
             case "s3:PutObject" -> "PutObject";
-            case "s3:DeleteObject" -> "DeleteObject";
+            case "s3:DeleteObject", "s3:DeleteObjectVersion" -> "DeleteObject";
             case "s3:ListBucket" -> "ListObjects";
             case "s3:ListAllMyBuckets" -> "ListBuckets";
-            case "s3:GetObjectAcl" -> "GetObjectAcl";
-            case "s3:PutObjectAcl" -> "PutObjectAcl";
-            case "s3:GetObjectTagging" -> "GetObjectTagging";
-            case "s3:PutObjectTagging" -> "PutObjectTagging";
-            case "s3:DeleteObjectTagging" -> "DeleteObjectTagging";
+            case "s3:GetObjectAcl", "s3:GetObjectVersionAcl" -> "GetObjectAcl";
+            case "s3:PutObjectAcl", "s3:PutObjectVersionAcl" -> "PutObjectAcl";
+            case "s3:GetObjectTagging", "s3:GetObjectVersionTagging" -> "GetObjectTagging";
+            case "s3:PutObjectTagging", "s3:PutObjectVersionTagging" -> "PutObjectTagging";
+            case "s3:DeleteObjectTagging", "s3:DeleteObjectVersionTagging" -> "DeleteObjectTagging";
             default -> null;
         };
+    }
+
+    /** Logs and Secrets Manager targets depend on the serving operation and the request's partition. */
+    private List<String> targetResources(String credentialScope, String action, ContainerRequestContext ctx,
+                                         String region, String accountId) {
+        if ("logs".equals(credentialScope)) {
+            return arnBuilder.buildLogResources(action, ctx, region, accountId, requestPartition());
+        }
+        if ("secretsmanager".equals(credentialScope)) {
+            return arnBuilder.buildSecretsManagerResources(action, ctx, region, accountId, requestPartition());
+        }
+        return arnBuilder.buildResources(credentialScope, ctx, region, accountId);
     }
 
     /**

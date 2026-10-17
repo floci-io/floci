@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.lifecycle;
 import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.config.FlociVersion;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.ContainerTeardowns;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -63,7 +64,7 @@ public class EmulatorInfoController {
         this.certificateAuthority = certificateAuthority;
         this.config = config;
         this.dynamoDbBackendSelector = dynamoDbBackendSelector;
-        this.version = resolveVersion();
+        this.version = FlociVersion.current();
     }
 
     @GET
@@ -206,13 +207,5 @@ public class EmulatorInfoController {
         if (failure != null) {
             throw failure;
         }
-    }
-
-    static String resolveVersion() {
-        String env = System.getenv("FLOCI_VERSION");
-        if (env != null && !env.isBlank()) {
-            return env;
-        }
-        return "dev";
     }
 }

@@ -22,6 +22,7 @@ public class DbCluster {
     private DbEndpoint endpoint;
     private DbEndpoint readerEndpoint;
     private boolean iamDatabaseAuthenticationEnabled;
+    private boolean httpEndpointEnabled;
     private List<String> dbClusterMembers = new ArrayList<>();
     // The member that holds the writer role. Null on a cluster persisted before the role was
     // modelled, in which case the first member is the writer, as it always was reported.
@@ -117,6 +118,10 @@ public class DbCluster {
     public void setIamDatabaseAuthenticationEnabled(boolean iamDatabaseAuthenticationEnabled) {
         this.iamDatabaseAuthenticationEnabled = iamDatabaseAuthenticationEnabled;
     }
+
+    /** Whether the Data API endpoint is on; EnableHttpEndpoint and DisableHttpEndpoint set it. */
+    public boolean isHttpEndpointEnabled() { return httpEndpointEnabled; }
+    public void setHttpEndpointEnabled(boolean httpEndpointEnabled) { this.httpEndpointEnabled = httpEndpointEnabled; }
 
     public List<String> getDbClusterMembers() { return dbClusterMembers; }
     public void setDbClusterMembers(List<String> dbClusterMembers) { this.dbClusterMembers = dbClusterMembers; }

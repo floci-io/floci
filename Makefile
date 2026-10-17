@@ -17,6 +17,8 @@
 # src/main/resources/aws/redshift-serverless-request-shapes.json is generated from botocore's Redshift
 # Serverless model by tools/aws/regen_redshift_serverless_shapes.py.
 # API Gateway integration types come from the public service model via tools/aws/regen_apigateway_types.py.
+# src/main/resources/aws/sesv2-request-shapes.json is generated from botocore's SES v2 model
+# by tools/aws/regen_sesv2_shapes.py.
 
 PYTHON ?= python3
 
@@ -209,6 +211,7 @@ aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-p
 	$(PYTHON) tools/aws/regen_dynamodb_shapes.py
 	$(PYTHON) tools/aws/regen_redshift_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
+	$(PYTHON) tools/aws/regen_sesv2_shapes.py
 	$(PYTHON) tools/aws/regen_managed_policies.py
 
 aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
@@ -238,6 +241,12 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 	}
 	@$(PYTHON) tools/aws/regen_apigateway_types.py --check || { \
 		echo "error: API Gateway integration types are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_sesv2_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/sesv2-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
 	@$(PYTHON) tools/aws/regen_managed_policies.py --check || { \

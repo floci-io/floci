@@ -26,7 +26,9 @@ public final class VerificationCode {
         // USER_AUTH choice-based sign-in codes (distinct from SMS_MFA/attribute verification
         // so a sign-in code can't be replayed against those other purposes' consume() calls).
         EMAIL_OTP,
-        SMS_OTP
+        SMS_OTP,
+        // An email MFA code after a password, the email twin of SMS_MFA.
+        EMAIL_MFA
     }
 
     private final String userPoolId;

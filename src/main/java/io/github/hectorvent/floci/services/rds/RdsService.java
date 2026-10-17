@@ -34,6 +34,7 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.rds.container.AutoPauseListener;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
+import io.github.hectorvent.floci.services.rds.export.SnapshotExportSource;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
@@ -2213,18 +2214,30 @@ public class RdsService implements Resettable, ResourceProvider {
         if (!source.startsWith("arn:")) {
             return source;
         }
+        return clusterIdFromArn(source, region,
+                () -> new AwsException("InvalidParameterValue", "Invalid DB cluster identifier: " + source, 400),
+                () -> new AwsException("DBClusterNotFoundFault", "DB cluster " + source + " not found.", 404));
+    }
+
+    /**
+     * The cluster identifier an RDS cluster ARN names. An ARN that does not parse or is not an RDS
+     * cluster ARN raises {@code malformed}; one for another account or Region names no cluster here
+     * and raises {@code elsewhere}. Each caller supplies the errors its API documents.
+     */
+    private String clusterIdFromArn(String source, String region, Supplier<AwsException> malformed,
+                                    Supplier<AwsException> elsewhere) {
         AwsArnUtils.Arn arn;
         try {
             arn = AwsArnUtils.parse(source);
-        } catch (IllegalArgumentException malformed) {
-            throw new AwsException("InvalidParameterValue", "Invalid DB cluster identifier: " + source, 400);
+        } catch (IllegalArgumentException e) {
+            throw malformed.get();
         }
         String resource = arn.resource();
         if (!"rds".equals(arn.service()) || !resource.startsWith("cluster:")) {
-            throw new AwsException("InvalidParameterValue", "Invalid DB cluster identifier: " + source, 400);
+            throw malformed.get();
         }
         if (!region.equals(arn.region()) || !currentAccountId().equals(arn.accountId())) {
-            throw new AwsException("DBClusterNotFoundFault", "DB cluster " + source + " not found.", 404);
+            throw elsewhere.get();
         }
         return resource.substring("cluster:".length());
     }
@@ -2251,6 +2264,69 @@ public class RdsService implements Resettable, ResourceProvider {
                     "Cross-region snapshot copy is not supported: " + source, 400);
         }
         return resource.substring("cluster-snapshot:".length());
+    }
+
+    /**
+     * The DB snapshot or DB cluster snapshot {@code sourceArn} names, as an export task reads it.
+     * Floci keeps PostgreSQL data in its snapshots, so a snapshot of any other engine cannot be
+     * exported, and an ARN naming a live cluster rather than a snapshot is refused.
+     */
+    public SnapshotExportSource snapshotExportSource(String sourceArn, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String accountId = currentAccountId();
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(sourceArn);
+        } catch (IllegalArgumentException malformed) {
+            throw new AwsException("InvalidParameterValue", "Invalid SourceArn: " + sourceArn, 400);
+        }
+        String resource = arn.resource();
+        boolean clusterSnapshot = resource.startsWith("cluster-snapshot:");
+        if (!"rds".equals(arn.service()) || !(clusterSnapshot || resource.startsWith("snapshot:"))) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceArn must name a DB snapshot or a DB cluster snapshot: " + sourceArn, 400);
+        }
+        boolean ours = AwsRegions.partitionFor(effectiveRegion).equals(arn.partition())
+                && effectiveRegion.equals(arn.region()) && accountId.equals(arn.accountId());
+        String snapshotId = resource.substring(resource.indexOf(':') + 1);
+        if (clusterSnapshot) {
+            if (!ours) {
+                throw new AwsException("DBClusterSnapshotNotFoundFault",
+                        "DBClusterSnapshot " + snapshotId + " not found.", 404);
+            }
+            DbClusterSnapshot snapshot = requireClusterSnapshot(accountId, effectiveRegion, snapshotId);
+            requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
+            String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, snapshotId))
+                    .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
+                            "DB cluster snapshot data for " + snapshotId + " not found.", 404));
+            return new SnapshotExportSource(snapshot.getDbClusterSnapshotArn(),
+                    imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
+                    snapshot.getMasterUsername(), snapshot.getMasterPassword(),
+                    snapshot.getSnapshotCreateTime(), sqlDump);
+        }
+        DbSnapshot snapshot = ours ? findSnapshotForScope(accountId, effectiveRegion, snapshotId) : null;
+        if (snapshot == null) {
+            throw new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404);
+        }
+        requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
+        String sqlDump = getSnapshotDataForScope(accountId, effectiveRegion, snapshotId)
+                .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
+                        "DBSnapshot data for " + snapshotId + " not found.", 404));
+        return new SnapshotExportSource(snapshot.getDbSnapshotArn(),
+                imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
+                snapshot.getMasterUsername(), snapshot.getMasterPassword(),
+                snapshot.getSnapshotCreateTime(), sqlDump);
+    }
+
+    private static void requireExportable(String status, DatabaseEngine engine, String sourceArn) {
+        if (!"available".equals(status)) {
+            throw new AwsException("InvalidExportSourceState",
+                    "The snapshot " + sourceArn + " is not available for export.", 400);
+        }
+        if (engine != DatabaseEngine.POSTGRES) {
+            throw new AwsException("InvalidExportSourceState",
+                    "Floci exports PostgreSQL snapshots only: " + sourceArn, 400);
+        }
     }
 
     /** Cluster snapshot dumps share the snapshot data store with instance snapshots under their own prefix. */
@@ -9538,9 +9614,12 @@ public class RdsService implements Resettable, ResourceProvider {
             } catch (NumberFormatException e) {
                 throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
             }
+            if (from < 0) {
+                throw new AwsException("InvalidParameterValue", "Invalid marker: " + marker, 400);
+            }
         }
         int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
-        int start = Math.min(Math.max(from, 0), matching.size());
+        int start = Math.min(from, matching.size());
         int to = Math.min(matching.size(), start + limit);
         return new OffsetPage<>(matching.subList(start, to), to < matching.size() ? Integer.toString(to) : null);
     }
@@ -9751,6 +9830,140 @@ public class RdsService implements Resettable, ResourceProvider {
             eventSubscriptions.put(eventSubscriptionKey(region, name), subscription);
         }
         return subscription;
+    }
+
+    // ── Data API endpoint ─────────────────────────────────────────────────────
+
+    /**
+     * Turns a cluster's Data API endpoint on or off by the cluster's ARN, as EnableHttpEndpoint and
+     * DisableHttpEndpoint do. An ARN that names no cluster here is {@code ResourceNotFoundFault}, a
+     * cluster that is not available {@code InvalidResourceStateFault}. The flag is recorded and
+     * reported; the Data API does not consult it.
+     */
+    public synchronized DbCluster setHttpEndpointByArn(String region, String resourceArn, boolean enabled) {
+        requireParameter(resourceArn, "ResourceArn");
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = clusterForResourceArn(resourceArn, effectiveRegion);
+        if (cluster.getStatus() != null && cluster.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidResourceStateFault",
+                    "DB cluster " + cluster.getDbClusterIdentifier() + " is not in available state.", 400);
+        }
+        return setHttpEndpoint(effectiveRegion, cluster, enabled);
+    }
+
+    /** Sets the flag on a cluster named by identifier, for CreateDBCluster, ModifyDBCluster and CloudFormation. */
+    public synchronized DbCluster setHttpEndpoint(String region, String clusterId, boolean enabled) {
+        String effectiveRegion = effectiveRegion(region);
+        return setHttpEndpoint(effectiveRegion, getDbCluster(clusterId, effectiveRegion), enabled);
+    }
+
+    private DbCluster setHttpEndpoint(String effectiveRegion, DbCluster cluster, boolean enabled) {
+        if (enabled) {
+            requireDataApiEngine(engineName(cluster));
+        }
+        cluster.setHttpEndpointEnabled(enabled);
+        putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
+        LOG.infov("Data API endpoint {0} for DB cluster {1}", enabled ? "enabled" : "disabled",
+                cluster.getDbClusterIdentifier());
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    private static final Set<String> DATA_API_ENGINES = Set.of("aurora-postgresql", "aurora-mysql");
+
+    /**
+     * The Data API is offered for Aurora PostgreSQL and Aurora MySQL only, so turning it on for any
+     * other engine is refused; a create checks this before the cluster exists.
+     */
+    public static void requireDataApiEngine(String engine) {
+        String name = engine == null ? "postgres" : engine.toLowerCase(Locale.ROOT);
+        if (!DATA_API_ENGINES.contains(name)) {
+            throw new AwsException("InvalidParameterCombination", "The Data API (HTTP endpoint) is available for "
+                    + "Aurora PostgreSQL and Aurora MySQL DB clusters only, not for engine " + name + ".", 400);
+        }
+    }
+
+    private DbCluster clusterForResourceArn(String resourceArn, String region) {
+        Supplier<AwsException> notFound = () -> new AwsException("ResourceNotFoundFault",
+                "The specified resource ARN " + resourceArn + " doesn't refer to an existing DB cluster.", 404);
+        DbCluster cluster = findClusterForScope(currentAccountId(), region,
+                clusterIdFromArn(resourceArn, region, notFound, notFound));
+        if (cluster == null || !resourceArn.equals(cluster.getDbClusterArn())) {
+            throw notFound.get();
+        }
+        return cluster;
+    }
+
+    // ── Log files ─────────────────────────────────────────────────────────────
+
+    /** One page of an instance's log files, plus the marker to continue from. */
+    public record LogFilePage(List<RdsLogFiles.LogFile> files, String marker) {}
+
+    /**
+     * The instance's log files, read from its database container's log and named as RDS names them.
+     * An instance without a container (mock RDS) has none.
+     */
+    public LogFilePage describeDbLogFiles(String region, String instanceId, String filenameContains,
+                                          Long fileLastWritten, Long fileSize, Integer maxRecords, String marker) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireValidMaxRecords(maxRecords);
+        if (fileLastWritten != null && fileLastWritten < 0) {
+            throw new AwsException("InvalidParameterValue", "FileLastWritten must not be negative.", 400);
+        }
+        if (fileSize != null && fileSize < 0) {
+            throw new AwsException("InvalidParameterValue", "FileSize must not be negative.", 400);
+        }
+        List<RdsLogFiles.LogFile> files = RdsLogFiles.matching(logFiles(region, instanceId),
+                filenameContains, fileLastWritten, fileSize);
+        OffsetPage<RdsLogFiles.LogFile> page = offsetPage(files, maxRecords, marker);
+        return new LogFilePage(page.items(), page.marker());
+    }
+
+    /** One block of a log file; see {@link RdsLogFiles#portion}. */
+    public RdsLogFiles.Portion downloadDbLogFilePortion(String region, String instanceId, String logFileName,
+                                                        String marker, Integer numberOfLines) {
+        requireParameter(instanceId, "DBInstanceIdentifier");
+        requireParameter(logFileName, "LogFileName");
+        RdsLogFiles.LogFile file = logFiles(region, instanceId).stream()
+                .filter(f -> f.name().equals(logFileName))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("DBLogFileNotFoundFault",
+                        "DBLogFile " + logFileName + " not found for DB instance " + instanceId + ".", 404));
+        return RdsLogFiles.portion(file, marker, numberOfLines);
+    }
+
+    private List<RdsLogFiles.LogFile> logFiles(String region, String instanceId) {
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        if (instance.getStatus() != null && instance.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("DBInstanceNotReady",
+                    "DB instance " + instanceId + " is not in available state.", 400);
+        }
+        if (config.services().rds().mock()) {
+            return List.of();
+        }
+        // Container ids are not persisted, and a container can be removed outside Floci: when there is
+        // no id, or Docker no longer knows it, the backend is found or started once before giving up.
+        String containerId = instance.getContainerId();
+        List<String> raw = containerId != null ? readContainerLog(containerId) : null;
+        if (raw == null) {
+            containerId = ensureInstanceBackend(instanceId, effectiveRegion).getContainerId();
+            raw = containerId != null ? readContainerLog(containerId) : null;
+        }
+        if (raw == null) {
+            throw new AwsException("DBInstanceNotReady",
+                    "DB instance " + instanceId + " has no running database container.", 400);
+        }
+        String engine = !isBlank(instance.getEngineIdentifier()) ? instance.getEngineIdentifier()
+                : instance.getEngine() != null ? instance.getEngine().name() : null;
+        return RdsLogFiles.files(engine, RdsLogFiles.parseDockerLines(raw));
+    }
+
+    private List<String> readContainerLog(String containerId) {
+        try {
+            return containerManager.readLog(containerId);
+        } catch (IllegalStateException e) {
+            throw new AwsException("InternalFailure", e.getMessage(), 500);
+        }
     }
 
     // ── IAM role associations ─────────────────────────────────────────────────

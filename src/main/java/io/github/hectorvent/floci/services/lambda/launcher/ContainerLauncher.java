@@ -217,6 +217,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         String cwLogStream = LOG_STREAM_DATE_FMT.format(LocalDate.now()) + "/[$LATEST]" + shortId;
         String lambdaRegion = extractRegionFromArn(fn.getFunctionArn(), config.defaultRegion());
         String lambdaAccountId = AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId());
+        LambdaDockerFlags dockerFlags = configuredDockerFlags();
 
         // Build env vars
         List<String> env = new ArrayList<>();
@@ -239,7 +240,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
         env.addAll(awsEnv.sdkBaselineEnv(lambdaRegion,
                 awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty(),
-                roleCredentials, lambdaAccountId));
+                awsEnv.flociEndpoint(dockerFlags.dnsServers().isEmpty()), roleCredentials, lambdaAccountId));
         if (fn.getEnvironment() != null) {
             boolean hasExecutionRoleCredentials = roleCredentials.isPresent();
             boolean userDefinesFullCredentialTriad = definesFullCredentialTriad(fn.getEnvironment());
@@ -273,7 +274,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "lambda", fn.getFunctionName(), lambdaAccountId, lambdaRegion));
 
-        LambdaDockerFlags dockerFlags = configuredDockerFlags();
         applyDockerFlags(specBuilder, dockerFlags);
 
         specBuilder.withEmbeddedDns();

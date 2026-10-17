@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
+import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -64,9 +65,12 @@ import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.io.StringReader;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.security.interfaces.RSAPrivateCrtKey;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -84,6 +88,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.function.BiPredicate;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -99,6 +105,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -756,16 +763,90 @@ class Ec2ServiceTest {
                 "tag-value", List.of("TeamA"));
 
         for (Map.Entry<String, List<String>> filter : supportedFilters.entrySet()) {
-            assertTrue(service.describeEgressOnlyInternetGatewayIds(
+            assertTrue(service.describeEgressOnlyInternetGateways("us-east-1", List.of(),
                     Map.of(filter.getKey(), filter.getValue())).isEmpty());
         }
 
         AwsException filterError = assertThrows(AwsException.class,
-                () -> service.describeEgressOnlyInternetGatewayIds(
+                () -> service.describeEgressOnlyInternetGateways("us-east-1", List.of(),
                         Map.of("unsupported", List.of("value"))));
         assertEquals("InvalidParameterValue", filterError.getErrorCode());
         assertEquals("The filter 'unsupported' is invalid", filterError.getMessage());
         assertEquals(400, filterError.getHttpStatus());
+    }
+
+    @Test
+    void egressOnlyInternetGatewayDeleteWaitsForTheLockTagWritesTake() throws Exception {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.43.0.0/16", false).getVpcId();
+        String eigwId = service.createEgressOnlyInternetGateway(region, vpcId, null, List.of())
+                .getEgressOnlyInternetGatewayId();
+        Method lockFor = Ec2Service.class.getDeclaredMethod("lockFor", String.class);
+        lockFor.setAccessible(true);
+        Object tagLock = lockFor.invoke(service, region + "::" + eigwId);
+        AtomicReference<Thread> deleter = new AtomicReference<>();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> deleting;
+            synchronized (tagLock) {
+                deleting = worker.submit(() -> {
+                    deleter.set(Thread.currentThread());
+                    service.deleteEgressOnlyInternetGateway(region, eigwId);
+                });
+                Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> deleting.isDone()
+                        || (deleter.get() != null && deleter.get().getState() == Thread.State.BLOCKED));
+                assertFalse(deleting.isDone(), "delete must take the gateway's tag lock");
+            }
+            deleting.get(5, TimeUnit.SECONDS);
+            assertTrue(service.describeEgressOnlyInternetGateways(region, List.of(eigwId), Map.of()).isEmpty());
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void egressOnlyInternetGatewayIsCreatedDescribedAndDeleted() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.42.0.0/16", false).getVpcId();
+
+        AwsException noVpc = assertThrows(AwsException.class,
+                () -> service.createEgressOnlyInternetGateway(region, "vpc-00000000000000000", null, List.of()));
+        assertEquals("InvalidVpcID.NotFound", noVpc.getErrorCode());
+
+        String eigwId = service.createEgressOnlyInternetGateway(region, vpcId, null, List.of())
+                .getEgressOnlyInternetGatewayId();
+        assertTrue(eigwId.matches("eigw-[0-9a-f]{17}"), eigwId);
+        service.createTags(region, List.of(eigwId), List.of(new Tag("Owner", "TeamA")));
+
+        List<EgressOnlyInternetGateway> found = service.describeEgressOnlyInternetGateways(region, List.of(eigwId), Map.of());
+        assertEquals(1, found.size());
+        assertEquals(vpcId, found.getFirst().getAttachments().getFirst().getVpcId());
+        assertEquals("attached", found.getFirst().getAttachments().getFirst().getState());
+        assertEquals("TeamA", found.getFirst().getTags().getFirst().getValue());
+        assertEquals(1, service.describeEgressOnlyInternetGateways(region, List.of(),
+                Map.of("attachment.vpc-id", List.of(vpcId), "tag:Owner", List.of("TeamA"))).size());
+        assertTrue(service.describeEgressOnlyInternetGateways(region, List.of(),
+                Map.of("attachment.state", List.of("detached"))).isEmpty());
+        assertTrue(service.describeEgressOnlyInternetGateways("eu-west-1", List.of(eigwId), Map.of()).isEmpty());
+
+        AwsException vpcInUse = assertThrows(AwsException.class, () -> service.deleteVpc(region, vpcId));
+        assertEquals("DependencyViolation", vpcInUse.getErrorCode());
+
+        service.deleteEgressOnlyInternetGateway(region, eigwId);
+        assertTrue(service.describeEgressOnlyInternetGateways(region, List.of(eigwId), Map.of()).isEmpty());
+        AwsException gone = assertThrows(AwsException.class,
+                () -> service.deleteEgressOnlyInternetGateway(region, eigwId));
+        assertEquals("InvalidGatewayID.NotFound", gone.getErrorCode());
+        service.deleteVpc(region, vpcId);
     }
 
     @Test
@@ -3373,18 +3454,9 @@ class Ec2ServiceTest {
 
     @Test
     void runInstancesRejectsIncompatibleInstanceTypeForCreatedArmImage() {
-        Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
-        Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();
-        source.imageId = "ami-arm-source";
-        source.architecture = "arm64";
-        source.rootDeviceName = "/dev/xvda";
-        when(catalog.findByIdOrAlias("ami-arm-source")).thenReturn(Optional.of(source));
-
         AmiImageResolver resolver = mock(AmiImageResolver.class);
-        when(resolver.resolveImage("ami-arm-source"))
-                .thenReturn(new ResolvedAmiImage("arm-image", ResolvedAmiImage.DEFAULT_RUNTIME, false,
-                        "linux/arm64"));
-        Ec2Service service = liveService(capturingContainerManager(), resolver, catalog);
+        Ec2Service service = serviceWithCatalogImage(resolver, "ami-arm-source", "arm64", "arm-image",
+                "linux/arm64");
         Reservation sourceReservation = service.runInstances("us-east-1", "ami-arm-source", "t4g.medium",
                 1, 1, null, List.of(), null, null, List.of(), null, null);
 
@@ -3402,6 +3474,35 @@ class Ec2ServiceTest {
         Reservation compatible = service.runInstances("us-east-1", createdAmi, "t4g.medium", 1, 1,
                 null, List.of(), null, null, List.of(), null, null);
         assertEquals("arm64", compatible.getInstances().getFirst().getArchitecture());
+    }
+
+    @Test
+    void runInstancesAcceptsI386ImageOnT2MediumAndRefusesItOnT2Large() {
+        Ec2Service service = serviceWithCatalogImage(mock(AmiImageResolver.class), "ami-i386", "i386",
+                "i386/alpine:3", "linux/386");
+
+        Reservation medium = service.runInstances("us-east-1", "ami-i386", "t2.medium", 1, 1,
+                null, List.of(), null, null, List.of(), null, null);
+        assertEquals("i386", medium.getInstances().getFirst().getArchitecture());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-i386", "t2.large", 1, 1,
+                        null, List.of(), null, null, List.of(), null, null));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+    }
+
+    private Ec2Service serviceWithCatalogImage(AmiImageResolver resolver, String imageId, String architecture,
+                                               String dockerImage, String dockerPlatform) {
+        Ec2ImageCatalog catalog = mock(Ec2ImageCatalog.class);
+        Ec2ImageCatalog.CatalogImage source = new Ec2ImageCatalog.CatalogImage();
+        source.imageId = imageId;
+        source.architecture = architecture;
+        source.rootDeviceName = "/dev/xvda";
+        when(catalog.findByIdOrAlias(imageId)).thenReturn(Optional.of(source));
+        when(resolver.resolveImage(imageId))
+                .thenReturn(new ResolvedAmiImage(dockerImage, ResolvedAmiImage.DEFAULT_RUNTIME, false,
+                        dockerPlatform));
+        return liveService(capturingContainerManager(), resolver, catalog);
     }
 
     @Test
@@ -3570,6 +3671,180 @@ class Ec2ServiceTest {
 
         verify(vpcNetworks).reservePrivateIp("us-east-1", "subnet-a", "10.0.1.10");
         verify(vpcNetworks, never()).reservePrivateIp("us-east-1", "subnet-a", "10.0.1.11");
+    }
+
+    @Test
+    void restoreRebuildsTheVpcNetworkPlanOfEveryAccount() {
+        // Startup runs with no request account, so an account-scoped keys() sees only the default
+        // account's VPCs: every other account's VPC network was never re-declared after a restart.
+        AccountAwareStorageBackend<Vpc> vpcStore = AccountAwareStorageBackend.inMemory("000000000000");
+        AccountAwareStorageBackend<Subnet> subnetStore = AccountAwareStorageBackend.inMemory("000000000000");
+        AccountAwareStorageBackend<Instance> instanceStore = AccountAwareStorageBackend.inMemory("000000000000");
+        Vpc vpc = new Vpc();
+        vpc.setRegion("us-east-1");
+        vpc.setVpcId("vpc-a");
+        vpc.setCidrBlock("10.20.0.0/16");
+        vpcStore.putForAccount("111122223333", "us-east-1::vpc-a", vpc);
+        Subnet subnet = new Subnet();
+        subnet.setRegion("us-east-1");
+        subnet.setVpcId("vpc-a");
+        subnet.setSubnetId("subnet-a");
+        subnet.setCidrBlock("10.20.1.0/24");
+        subnetStore.putForAccount("111122223333", "us-east-1::subnet-a", subnet);
+        instanceStore.putForAccount("111122223333", "us-east-1::i-other",
+                persistedInstance("i-other", "10.20.1.10", InstanceState.running()));
+
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        when(vpcNetworks.enabled()).thenReturn(true);
+        Ec2Service service = new Ec2Service(mockConfig(false), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-vpcs.json", vpcStore, "ec2-subnets.json", subnetStore,
+                        "ec2-instances.json", instanceStore)), vpcNetworks);
+
+        service.restoreMetadataRegistrations();
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<BiPredicate<String, String>> stillDeclared = ArgumentCaptor.forClass(BiPredicate.class);
+        verify(vpcNetworks).reconcileOrphans(stillDeclared.capture());
+        assertTrue(stillDeclared.getValue().test("us-east-1", "vpc-a"));
+        assertFalse(stillDeclared.getValue().test("us-east-1", "vpc-gone"));
+        verify(vpcNetworks).declareVpc("us-east-1", "vpc-a", "10.20.0.0/16");
+        verify(vpcNetworks).declareSubnet("us-east-1", "vpc-a", "subnet-a", "10.20.1.0/24");
+        verify(vpcNetworks).reservePrivateIp("us-east-1", "subnet-a", "10.20.1.10");
+    }
+
+    @Test
+    void restoreDeclaresTheDefaultAccountsVpcFirstWhenCidrsOverlap() {
+        // The default account sorts after one of the others by id, so only the default-first rule puts it first.
+        AccountAwareStorageBackend<Vpc> vpcStore = AccountAwareStorageBackend.inMemory("555555555555");
+        for (String[] owned : new String[][] {{"999999999999", "vpc-z"}, {"111122223333", "vpc-y"}, {"555555555555", "vpc-x"}}) {
+            Vpc vpc = new Vpc();
+            vpc.setRegion("us-east-1");
+            vpc.setVpcId(owned[1]);
+            vpc.setCidrBlock("10.0.0.0/16");
+            vpcStore.putForAccount(owned[0], "us-east-1::" + owned[1], vpc);
+        }
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        when(vpcNetworks.enabled()).thenReturn(true);
+        EmulatorConfig config = mockConfig(false);
+        when(config.defaultAccountId()).thenReturn("555555555555");
+        Ec2Service service = new Ec2Service(config, mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-vpcs.json", vpcStore)), vpcNetworks);
+
+        service.restoreMetadataRegistrations();
+
+        InOrder declared = inOrder(vpcNetworks);
+        declared.verify(vpcNetworks).declareVpc("us-east-1", "vpc-x", "10.0.0.0/16");
+        declared.verify(vpcNetworks).declareVpc("us-east-1", "vpc-y", "10.0.0.0/16");
+        declared.verify(vpcNetworks).declareVpc("us-east-1", "vpc-z", "10.0.0.0/16");
+    }
+
+    @Test
+    void aLatePersistForAnInstanceNoAccountHoldsWritesNothing() {
+        AccountAwareStorageBackend<Instance> instanceStore = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2PortForwardManager portForwardManager = mock(Ec2PortForwardManager.class);
+        Ec2Service service = new Ec2Service(mockConfig(false), mock(Ec2ContainerManager.class),
+                portForwardManager, mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-instances.json", instanceStore)), mock(VpcNetworkManager.class));
+        service.restoreMetadataRegistrations();
+        ArgumentCaptor<Consumer<Instance>> persister = ArgumentCaptor.captor();
+        verify(portForwardManager).setPersister(persister.capture());
+
+        // Terminated and deleted from its account before the port-forward persister ran.
+        persister.getValue().accept(persistedInstance("i-gone", "10.20.1.10", InstanceState.terminated()));
+
+        assertTrue(instanceStore.scanAllAccountEntries(key -> true).isEmpty());
+    }
+
+    @Test
+    void restoreWritesARestoredInstanceBackUnderItsOwnAccount() {
+        AccountAwareStorageBackend<Instance> instanceStore = AccountAwareStorageBackend.inMemory("000000000000");
+        Instance instance = persistedInstance("i-other", "10.20.1.10", InstanceState.running());
+        instance.setDockerContainerId("container-other");
+        instanceStore.putForAccount("111122223333", "us-east-1::i-other", instance);
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.restoreMetadataRegistration(any())).thenReturn(true);
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager,
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-instances.json", instanceStore)), mock(VpcNetworkManager.class));
+
+        service.restoreMetadataRegistrations();
+
+        verify(containerManager).restoreMetadataRegistration(argThat(restored -> "i-other".equals(restored.getInstanceId())));
+        assertEquals(List.of("111122223333"), instanceStore.scanAllAccountEntries(key -> key.endsWith("i-other")).stream()
+                .map(AccountAwareStorageBackend.AccountEntry::accountId).toList());
+    }
+
+    @Test
+    void restoreMigratesALegacyInstanceKeyInsteadOfCopyingIt() {
+        InMemoryStorage<String, Instance> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Instance> instanceStore = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        Instance instance = persistedInstance("i-legacy", "10.20.1.10", InstanceState.running());
+        instance.setDockerContainerId("container-legacy");
+        raw.put("us-east-1::i-legacy", instance);
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.restoreMetadataRegistration(any())).thenReturn(true);
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager,
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-instances.json", instanceStore)), mock(VpcNetworkManager.class));
+
+        service.restoreMetadataRegistrations();
+
+        verify(containerManager, times(1)).restoreMetadataRegistration(any());
+        assertEquals(Set.of("000000000000/us-east-1::i-legacy"), Set.copyOf(raw.keys()));
+    }
+
+    @Test
+    void restoreDropsALegacyKeyWhoseScopedTwinAlreadyExists() {
+        // Left behind, the legacy copy would come back the moment the scoped one is pruned.
+        InMemoryStorage<String, Instance> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Instance> instanceStore = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        Instance stale = persistedInstance("i-twin", "10.20.1.10", InstanceState.running());
+        stale.setDockerContainerId("container-stale");
+        raw.put("us-east-1::i-twin", stale);
+        Instance current = persistedInstance("i-twin", "10.20.1.10", InstanceState.running());
+        current.setDockerContainerId("container-current");
+        raw.put("000000000000/us-east-1::i-twin", current);
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.restoreMetadataRegistration(any())).thenReturn(true);
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager,
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-instances.json", instanceStore)), mock(VpcNetworkManager.class));
+
+        service.restoreMetadataRegistrations();
+
+        verify(containerManager, times(1)).restoreMetadataRegistration(any());
+        verify(containerManager).restoreMetadataRegistration(argThat(restored ->
+                "container-current".equals(restored.getDockerContainerId())));
+        assertEquals(Set.of("000000000000/us-east-1::i-twin"), Set.copyOf(raw.keys()));
+    }
+
+    @Test
+    void shutdownStopsAnotherAccountsRunningInstanceInItsOwnPartition() {
+        AccountAwareStorageBackend<Instance> instanceStore = AccountAwareStorageBackend.inMemory("000000000000");
+        Instance instance = persistedInstance("i-other", "10.20.1.10", InstanceState.running());
+        instance.setDockerContainerId("container-other");
+        instanceStore.putForAccount("111122223333", "us-east-1::i-other", instance);
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager,
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-instances.json", instanceStore)), mock(VpcNetworkManager.class));
+
+        service.stopManagedContainers();
+
+        verify(containerManager).stopForShutdown(argThat(stopped -> "i-other".equals(stopped.getInstanceId())));
+        List<AccountAwareStorageBackend.AccountEntry<Instance>> stored =
+                instanceStore.scanAllAccountEntries(key -> key.endsWith("i-other"));
+        assertEquals(List.of("111122223333"), stored.stream().map(AccountAwareStorageBackend.AccountEntry::accountId).toList());
+        assertEquals("stopped", stored.get(0).value().getState().getName());
     }
 
     @Test

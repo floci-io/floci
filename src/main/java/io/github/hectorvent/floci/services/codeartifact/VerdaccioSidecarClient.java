@@ -100,6 +100,16 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         return fetchPackageDocument(baseUrl, namespace, packageName).isPresent();
     }
 
+    /** Verdaccio's own packument already lists every version it holds, keyed by version string. */
+    @Override
+    public boolean packageVersionExists(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        return fetchPackageDocument(baseUrl, namespace, packageName)
+                .map(document -> document.path("versions").has(version))
+                .orElse(false);
+    }
+
     /**
      * Removes a whole package, every version at once, the same way the real npm CLI's final
      * unpublish step does: fetch the packument for its current {@code _rev}, then {@code DELETE} the

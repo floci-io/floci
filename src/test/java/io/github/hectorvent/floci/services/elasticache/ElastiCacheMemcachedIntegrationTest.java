@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elasticache;
 
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.AfterAll;
@@ -14,6 +15,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 
 import static io.restassured.RestAssured.given;
@@ -32,6 +34,9 @@ class ElastiCacheMemcachedIntegrationTest {
     private static final int SOCKET_TIMEOUT_MS = 10_000;
 
     private static String clusterHost;
+
+    @TestHTTPResource("/")
+    static URI baseUri;
     private static int clusterPort;
 
     @BeforeAll
@@ -43,6 +48,7 @@ class ElastiCacheMemcachedIntegrationTest {
     static void cleanup() {
         try {
             given()
+                .port(baseUri.getPort())
                 .formParam("Action", "DeleteCacheCluster")
                 .formParam("CacheClusterId", CLUSTER_ID)
                 .header("Authorization", AUTH_HEADER)

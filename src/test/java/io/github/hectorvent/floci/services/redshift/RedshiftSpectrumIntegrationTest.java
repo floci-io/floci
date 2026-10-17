@@ -53,7 +53,8 @@ class RedshiftSpectrumIntegrationTest {
     public static class SpectrumProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
-            return Map.of("quarkus.http.test-port", "17866", "floci.base-url", "http://localhost:17866",
+            return Map.of("quarkus.http.test-port", "17866", "quarkus.http.port", "17866",
+                    "floci.base-url", "http://localhost:17866",
                     "floci.docker.resource-namespace", "spectrum-relational-tests");
         }
     }

@@ -1679,6 +1679,16 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void describeSnapshotCopyGrantsRejectsMalformedMarkerNamingMarker() {
+        when(snapshotCopyGrantBackend.scan(any())).thenReturn(List.of(new SnapshotCopyGrant("grant-a", "key-a")));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.describeSnapshotCopyGrants(null, null, "!!!"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Invalid Marker.", ex.getMessage());
+    }
+
+    @Test
     void describeSnapshotCopyGrantsOmitsMarkerWhenPageExactlyFits() {
         List<SnapshotCopyGrant> stored = new ArrayList<>();
         for (int i = 1; i <= 20; i++) {

@@ -13,6 +13,9 @@ import java.util.Set;
  */
 public final class SwfConstants {
 
+    public static final String TARGET_PREFIX = "SimpleWorkflowService.";
+    public static final String LEGACY_TARGET_PREFIX = "com.amazonaws.swf.service.model.SimpleWorkflowService.";
+
     public static final String FAULT_NAMESPACE = "com.amazonaws.swf.base.model#";
     public static final String VALIDATION_NAMESPACE = "com.amazon.coral.validate#";
 
@@ -92,4 +95,5 @@ public final class SwfConstants {
 
     private SwfConstants() {
     }
+
 }

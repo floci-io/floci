@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -88,5 +89,24 @@ class DbClusterPersistenceTest {
         reader.load();
 
         assertTrue(reader.get("legacy-cluster").orElseThrow().getAssociatedRoles().isEmpty());
+        assertFalse(reader.get("legacy-cluster").orElseThrow().isHttpEndpointEnabled());
+    }
+
+    @Test
+    void httpEndpointFlagPersistsAcrossInstances(@TempDir Path directory) {
+        Path file = directory.resolve("rds-clusters.json");
+        DbCluster cluster = new DbCluster();
+        cluster.setDbClusterIdentifier("data-api-cluster");
+        cluster.setHttpEndpointEnabled(true);
+
+        PersistentStorage<String, DbCluster> writer = new PersistentStorage<>(
+                file, new TypeReference<Map<String, DbCluster>>() {});
+        writer.put(cluster.getDbClusterIdentifier(), cluster);
+
+        PersistentStorage<String, DbCluster> reader = new PersistentStorage<>(
+                file, new TypeReference<Map<String, DbCluster>>() {});
+        reader.load();
+
+        assertTrue(reader.get("data-api-cluster").orElseThrow().isHttpEndpointEnabled());
     }
 }

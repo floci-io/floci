@@ -382,6 +382,46 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
     }
 
     @Test
+    void anOrganizationalUnitThatCannotBeResolvedFailsTheOperation() {
+        // Resolving the targets is part of the operation: a target that fails ends it FAILED rather
+        // than leave it RUNNING, which would refuse every later operation on the stack set.
+        String management = "646464646464";
+        organizations(management, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
+                .post("/").then().statusCode(200);
+        String rootId = organizations(management, "ListRoots", "{}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("Roots[0].Id");
+        cloudFormation(management, "ActivateOrganizationsAccess")
+                .post("/").then().statusCode(200);
+
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String stackSet = "missing-ou-" + suffix;
+        cloudFormation(management, "CreateStackSet")
+                .formParam("StackSetName", stackSet)
+                .formParam("TemplateBody", queueTemplate("missing-ou-q-" + suffix))
+                .formParam("PermissionModel", "SERVICE_MANAGED")
+                .post("/").then().statusCode(200);
+
+        cloudFormation(management, "CreateStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", "ou-zzzz-zzzzzzzz")
+                .formParam("Regions.member.1", REGION)
+                .post("/").then().statusCode(400)
+                .body(containsString("OrganizationalUnitNotFoundException"));
+        cloudFormation(management, "ListStackSetOperations")
+                .formParam("StackSetName", stackSet)
+                .post("/").then().statusCode(200)
+                .body(containsString("<Status>FAILED</Status>"))
+                .body(not(containsString("<Status>RUNNING</Status>")));
+
+        cloudFormation(management, "CreateStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", rootId)
+                .formParam("Regions.member.1", REGION)
+                .post("/").then().statusCode(200);
+    }
+
+    @Test
     void activateOrganizationsAccessRequiresAllFeatures() {
         String management = "939393939393";
         organizations(management, "CreateOrganization", "{\"FeatureSet\":\"CONSOLIDATED_BILLING\"}")

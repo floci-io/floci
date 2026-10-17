@@ -59,6 +59,20 @@ class ServiceEnablementIntegrationTest {
     }
 
     @Test
+    void legacySwfJsonRequestsAreRejectedWhenServiceDisabled() {
+        given()
+            .contentType("application/json; charset=UTF-8")
+            .header("X-Amz-Target", "com.amazonaws.swf.service.model.SimpleWorkflowService.ListDomains")
+            .body("{\"registrationStatus\":\"REGISTERED\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ServiceNotAvailableException"))
+            .body("message", equalTo("Service swf is not enabled."));
+    }
+
+    @Test
     void sqsQueueUrlJsonRequestsAreRejectedWhenServiceDisabled() {
         given()
             .contentType("application/x-amz-json-1.0")
@@ -253,7 +267,8 @@ class ServiceEnablementIntegrationTest {
                     "floci.services.lambda.enabled", "false",
                     "floci.services.opensearch.enabled", "false",
                     "floci.services.rds-data.enabled", "false",
-                    "floci.services.sqs.enabled", "false"
+                    "floci.services.sqs.enabled", "false",
+                    "floci.services.swf.enabled", "false"
             );
         }
     }

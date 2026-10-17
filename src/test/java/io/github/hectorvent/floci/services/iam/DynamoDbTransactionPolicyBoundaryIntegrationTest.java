@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -30,8 +31,16 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertAll;
 
+/**
+ * The boundaries of IAM authorization for DynamoDB transaction items: the caller's account and
+ * region, foreign ARNs, session policies, service control policies and request shape checks.
+ *
+ * <p>{@code scpDeniesUnderlyingItemActionForMemberRootAndUser} relies on the SCP enforcement that
+ * {@link IamEnforcementProfile} turns on next to IAM enforcement, and removes the organization it
+ * creates once it ends.
+ */
 @QuarkusTest
-@TestProfile(ScpEnforcementLeaveOrganizationIntegrationTest.ScpEnforcementProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class DynamoDbTransactionPolicyBoundaryIntegrationTest {
 
     @RegisterExtension

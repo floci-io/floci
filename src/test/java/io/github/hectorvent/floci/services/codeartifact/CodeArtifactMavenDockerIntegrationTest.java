@@ -410,6 +410,57 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     /**
+     * The real-world gap this closes: {@code DescribePackageVersion} used to 404 for every
+     * Maven-deployed version the same reason {@code GetPackageVersionAsset} did. Confirms the
+     * bridge asks the real Reposilite sidecar (via its details API, not a mock) whether the
+     * version directory itself exists, and that the synthesized revision matches what {@link
+     * #getPackageVersionAssetBridgesToTheRealReposiliteSidecar} already got for the same
+     * coordinates.
+     */
+    @Test
+    @Order(12)
+    void describePackageVersionBridgesToTheRealReposiliteSidecar() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=spike&version=1.0.0")
+                .then().statusCode(200)
+                .body("packageVersion.status", equalTo("Published"))
+                .body("packageVersion.namespace", equalTo("com.example"))
+                .body("packageVersion.packageName", equalTo("spike"))
+                .body("packageVersion.version", equalTo("1.0.0"));
+
+        String assetRevision = given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=spike&version=1.0.0&asset=spike-1.0.0.jar")
+                .then().statusCode(200)
+                .extract().header("X-PackageVersionRevision");
+        String describeRevision = given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=spike&version=1.0.0")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("packageVersion.revision");
+        assertEquals(assetRevision, describeRevision);
+    }
+
+    @Test
+    @Order(16)
+    void describePackageVersionRequiresANamespaceForMaven() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&package=spike&version=1.0.0")
+                .then().statusCode(400);
+    }
+
+    @Test
+    @Order(17)
+    void describePackageVersionReturns404ForAMavenVersionThatWasNeverDeployed() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=spike&version=9.9.9")
+                .then().statusCode(404);
+    }
+
+    /**
      * A throwaway groupId/artifactId, not {@link #GAV}: deleting it exercises Reposilite's real
      * directory delete (confirmed live before this was built: a single {@code DELETE} on the
      * group/artifact path removes everything beneath it), and must not disturb the artifact every

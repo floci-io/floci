@@ -1153,4 +1153,12 @@ public class RedshiftOperationsTest {
 
         assertEquals(200, redshift("DeleteCluster", "ClusterIdentifier", "cluster-sched").statusCode());
     }
+
+    @Test
+    @Order(11)
+    void describeSnapshotSchedulesRejectsMalformedMarkerNamingMarker() {
+        Response response = redshift("DescribeSnapshotSchedules", "Marker", "!!!");
+        assertFault(response, 400, "InvalidParameterValue");
+        assertEquals("Invalid Marker.", XmlPath.from(response.asString()).getString("ErrorResponse.Error.Message"));
+    }
 }

@@ -85,6 +85,14 @@ class PaginationTest {
         assertEquals("Invalid nextToken.", e.getMessage());
     }
 
+    @Test
+    void legacyPaging_namesTheTokenParameterTheCallerGives() {
+        AwsException e = assertThrows(AwsException.class, () -> Pagination.paginate(ITEMS,
+                Function.identity(), 1, "!!!", 3, 3, "InvalidParameterValue", "Marker"));
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertEquals("Invalid Marker.", e.getMessage());
+    }
+
     private static PaginatedResult<String> page(int limit, String token, String namespace) {
         return Pagination.paginate(ITEMS, Function.identity(), limit, token, namespace, INVALID_TOKEN);
     }

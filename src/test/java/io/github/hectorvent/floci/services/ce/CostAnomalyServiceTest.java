@@ -190,6 +190,9 @@ class CostAnomalyServiceTest {
                 () -> service.getMonitors(mapper.createObjectNode().put("MaxResults", 0)));
         assertError("InvalidNextTokenException",
                 () -> service.getMonitors(mapper.createObjectNode().put("NextPageToken", "!not-base64")));
+        AwsException badToken = assertThrows(AwsException.class,
+                () -> service.getSubscriptions(mapper.createObjectNode().put("NextPageToken", "!not-base64")));
+        assertEquals("Invalid NextPageToken.", badToken.getMessage());
     }
 
     @Test

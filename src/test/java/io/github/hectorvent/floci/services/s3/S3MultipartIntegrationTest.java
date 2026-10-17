@@ -119,6 +119,70 @@ class S3MultipartIntegrationTest {
     }
 
     @Test
+    @Order(7)
+    void completeMultipartUploadWithoutPartsIsInvalidRequest() {
+        String key = "no-parts-complete.bin";
+        String newUploadId = given()
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        // The CLI omits --multipart-upload and sends an empty body; the SDKs send an empty
+        // element. AWS answers both with InvalidRequest, while non-XML stays MalformedXML.
+        given()
+            .contentType("application/xml")
+            .body("")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("InvalidRequest"))
+            .body("Error.Message", equalTo("You must specify at least one part"));
+
+        given()
+            .contentType("application/xml")
+            .body("<CompleteMultipartUpload/>")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("InvalidRequest"))
+            .body("Error.Message", equalTo("You must specify at least one part"));
+
+        given()
+            .contentType("application/xml")
+            .body("<CompleteMultipartUpload></CompleteMultipartUpload>")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("InvalidRequest"))
+            .body("Error.Message", equalTo("You must specify at least one part"));
+
+        given()
+            .contentType("application/xml")
+            .body("   \n  ")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("MalformedXML"));
+
+        given()
+            .contentType("application/xml")
+            .body("<CompleteMultipartUpload><Part></CompleteMultipartUpload>")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId)
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("MalformedXML"));
+
+        given().when().delete("/" + BUCKET + "/" + key + "?uploadId=" + newUploadId).then().statusCode(204);
+    }
+
+    @Test
     @Order(8)
     void completeMultipartUpload() {
         String completeXml = """

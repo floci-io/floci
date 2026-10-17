@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matcher;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -516,5 +517,79 @@ class S3VersioningIntegrationTest {
         given().when().delete("/" + bucket + "/key?versionId=" + markerId).then().statusCode(204);
         given().when().delete("/" + bucket + "/key?versionId=" + versionId).then().statusCode(204);
         given().when().delete("/" + bucket).then().statusCode(204);
+    }
+
+    @Test
+    @Order(22)
+    void taggingActsOnTheVersionNamed() {
+        String bucket = "versioned-tagging-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        // Written before versioning, "old" is the null version, which has no version id to report.
+        given().body("v0").when().put("/" + bucket + "/old").then().statusCode(200);
+        given().body(tagging("unversioned")).when().put("/" + bucket + "/old?tagging")
+                .then().statusCode(200).header("x-amz-version-id", nullValue());
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        String v1 = given().body("v1").when().put("/" + bucket + "/key")
+                .then().statusCode(200).extract().header("x-amz-version-id");
+        String v2 = given().body("v2").when().put("/" + bucket + "/key")
+                .then().statusCode(200).extract().header("x-amz-version-id");
+
+        given().body(tagging("first")).when().put("/" + bucket + "/key?tagging&versionId=" + v1)
+                .then().statusCode(200).header("x-amz-version-id", v1);
+        given().when().get("/" + bucket + "/key?tagging&versionId=" + v1)
+                .then().statusCode(200).header("x-amz-version-id", v1)
+                .body(containsString("<Value>first</Value>"));
+        given().when().get("/" + bucket + "/key?tagging")
+                .then().statusCode(200).header("x-amz-version-id", v2)
+                .body(not(containsString("<Tag>")));
+        given().when().delete("/" + bucket + "/key?tagging&versionId=" + v1)
+                .then().statusCode(204).header("x-amz-version-id", v1);
+        given().when().get("/" + bucket + "/key?tagging&versionId=" + v1)
+                .then().statusCode(200).body(not(containsString("<Tag>")));
+
+        // versionId=null names the null version only: "key" was written with versioning on.
+        given().when().get("/" + bucket + "/old?tagging&versionId=null")
+                .then().statusCode(200).body(containsString("<Value>unversioned</Value>"));
+        given().body(tagging("other")).when().put("/" + bucket + "/key?tagging&versionId=null")
+                .then().statusCode(404).body(containsString("<Code>NoSuchVersion</Code>"));
+        given().when().get("/" + bucket + "/key?tagging")
+                .then().statusCode(200).body(not(containsString("<Value>other</Value>")));
+    }
+
+    @Test
+    @Order(23)
+    void taggingADeleteMarkerIsNotAllowed() {
+        String bucket = "versioned-tagging-marker-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given().body("data").when().put("/" + bucket + "/key").then().statusCode(200);
+        String markerId = given().when().delete("/" + bucket + "/key")
+                .then().statusCode(204).extract().header("x-amz-version-id");
+
+        // Refused whether the request names the marker or the marker is the current version.
+        String key = "/" + bucket + "/key?tagging";
+        for (String path : List.of(key, key + "&versionId=" + markerId)) {
+            given().body(tagging("v")).when().put(path)
+                    .then().statusCode(405).header("x-amz-delete-marker", "true")
+                    .body(deleteMarkerRefused("PUT"));
+            given().when().get(path)
+                    .then().statusCode(405).header("x-amz-delete-marker", "true")
+                    .body(deleteMarkerRefused("GET"));
+            given().when().delete(path)
+                    .then().statusCode(405).header("x-amz-delete-marker", "true")
+                    .body(deleteMarkerRefused("DELETE"));
+        }
+    }
+
+    private static String tagging(String value) {
+        return "<Tagging><TagSet><Tag><Key>version</Key><Value>" + value + "</Value></Tag></TagSet></Tagging>";
+    }
+
+    private static Matcher<String> deleteMarkerRefused(String method) {
+        return allOf(containsString("<Code>MethodNotAllowed</Code>"),
+                containsString("<Method>" + method + "</Method>"),
+                containsString("<ResourceType>DeleteMarker</ResourceType>"));
     }
 }

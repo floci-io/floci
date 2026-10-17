@@ -1,10 +1,14 @@
 package io.github.hectorvent.floci.services.rds.container;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.command.LogContainerCmd;
 import com.github.dockerjava.api.command.PauseContainerCmd;
 import com.github.dockerjava.api.command.UnpauseContainerCmd;
 import com.github.dockerjava.api.model.Bind;
+import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
@@ -24,9 +28,12 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
 
+import java.io.Closeable;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -238,6 +245,40 @@ class RdsContainerManagerTest {
         manager.start("db1", "vol1", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
 
         verify(lifecycleManager, never()).getDockerClient();
+    }
+
+    @Test
+    void aLogReadThatTimesOutFailsAndClosesTheStream() throws Exception {
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        LogContainerCmd logCmd = mock(LogContainerCmd.class);
+        when(dockerClient.logContainerCmd("slow")).thenReturn(logCmd);
+        when(logCmd.withStdOut(true)).thenReturn(logCmd);
+        when(logCmd.withStdErr(true)).thenReturn(logCmd);
+        when(logCmd.withTimestamps(true)).thenReturn(logCmd);
+        when(logCmd.withTail(RdsContainerManager.MAX_LOG_LINES)).thenReturn(logCmd);
+        Closeable stream = mock(Closeable.class);
+        // Docker starts the stream and sends one frame, then never completes.
+        when(logCmd.exec(any())).thenAnswer(invocation -> {
+            ResultCallback.Adapter<Frame> callback = invocation.getArgument(0);
+            callback.onStart(stream);
+            callback.onNext(new Frame(StreamType.STDOUT,
+                    "2026-10-15T10:00:00Z partial\n".getBytes(StandardCharsets.UTF_8)));
+            return callback;
+        });
+
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, mock(ContainerLogStreamer.class), mock(ContainerDetector.class), config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+
+        IllegalStateException timedOut = assertThrows(IllegalStateException.class,
+                () -> manager.readLog("slow", Duration.ofMillis(50)));
+        assertTrue(timedOut.getMessage().contains("Timed out"), timedOut.getMessage());
+        verify(stream).close();
     }
 
     @Test
@@ -1234,6 +1275,7 @@ class RdsContainerManagerTest {
         assertTrue(manager.pauseIfIdle(runtimeId));
         verify(pause).exec();
 
+        assertThrows(RdsBackendGate.ResumingException.class, () -> manager.enter("db1", 3306, false));
         manager.enter("db1", 3306).close();
         verify(unpause).exec();
 

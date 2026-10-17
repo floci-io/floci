@@ -87,6 +87,21 @@ class Route53ResolverReplayFallbackTest {
     }
 
     @Test
+    void listingIpAddressesWithoutARecordFailsInsteadOfReturningEmpty() {
+        // An empty list beside IpAddressCount=2 would be a silent wrong answer; the modeled
+        // InternalServiceErrorException says the state is broken.
+        ObjectNode created = service.createResolverEndpoint(createRequest("tok-list", "10.0.0.5"), REGION, ACCOUNT);
+        String id = created.get("Id").asText();
+        assertEquals(2, service.listResolverEndpointIpAddresses(id).size());
+
+        endpointIpRequests.delete(id);
+        AwsException broken = assertThrows(AwsException.class,
+                () -> service.listResolverEndpointIpAddresses(id));
+        assertEquals("InternalServiceErrorException", broken.jsonType());
+        assertEquals(400, broken.getHttpStatus());
+    }
+
+    @Test
     void anIntactRecordStillReplaysAnIdenticalRequest() {
         // Guard against over-correcting: the ordinary path must stay idempotent.
         String token = "tok-fallback-intact";

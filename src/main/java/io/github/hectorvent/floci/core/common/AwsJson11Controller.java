@@ -304,20 +304,22 @@ public class AwsJson11Controller {
         }
 
         try {
-            String region = regionResolver.resolveRegion(httpHeaders);
+            String region = regionResolver.getRegion();
+            String authorization = httpHeaders.getHeaderString("Authorization");
+            if (authorization == null || authorization.isBlank()) {
+                authorization = IamEnforcementFilter.requestAuthorization(null, uriInfo.getQueryParameters());
+            }
 
             Response delegated = switch (serviceKey) {
                 case "ssm" -> ssmJsonHandler.handle(
-                        action, request, region, httpHeaders.getHeaderString("Authorization"));
+                        action, request, region, authorization);
                 case "events" -> eventBridgeHandler.handle(action, request, region);
                 case "servicediscovery" -> cloudMapHandler.handle(action, request, region);
                 case "elasticmapreduce" -> emrHandler.handle(action, request, region);
                 case "wafv2" -> wafV2Handler.handle(action, request, region);
                 case "memorydb" -> memoryDbHandler.handle(action, request, region);
-                case "logs" -> cloudWatchLogsHandler.handle(action, request, regionResolver.getRegion());
-                case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region,
-                        IamEnforcementFilter.requestAuthorization(
-                                httpHeaders.getHeaderString("Authorization"), uriInfo.getQueryParameters()));
+                case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
+                case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region, authorization);
                 case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
                 case "kinesisanalytics" -> kinesisAnalyticsV2JsonHandler.handle(action, request, region);
                 case "apigatewayv2" -> apigwV2JsonHandler.handle(action, request, region);
@@ -330,7 +332,7 @@ public class AwsJson11Controller {
                 case "athena" -> athenaJsonHandler.handle(action, request, region);
                 case "redshift-data" -> redshiftDataJsonHandler.handle(action, request, region);
                 case "redshift-serverless" -> redshiftServerlessJsonHandler.handle(
-                        action, request, region, httpHeaders.getHeaderString("Authorization"));
+                        action, request, region, authorization);
                 case "firehose" -> firehoseJsonHandler.handle(action, request, region);
                 case "tagging" -> resourceGroupsTaggingJsonHandler.handle(action, request, region);
                 case "codebuild" -> codeBuildJsonHandler.handle(action, request, region, regionResolver.getAccountId());

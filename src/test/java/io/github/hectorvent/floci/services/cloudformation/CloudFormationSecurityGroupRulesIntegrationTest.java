@@ -235,7 +235,7 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
         assertEquals(1, occurrences(describeGroup(groupId), "<cidrIp>10.3.0.0/16</cidrIp>"));
 
         // Unchanged template: the append-only authorize API would double the permission.
-        updateStack(stackName, standaloneIngressTemplate(groupId, "10.3.0.0/16"));
+        updateStack(stackName, CfnUpdates.forceUpdate(standaloneIngressTemplate(groupId, "10.3.0.0/16")));
         assertEquals(1, occurrences(describeGroup(groupId), "<cidrIp>10.3.0.0/16</cidrIp>"),
                 "update duplicated an unchanged standalone rule");
 

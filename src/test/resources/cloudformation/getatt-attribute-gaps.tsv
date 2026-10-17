@@ -19,6 +19,7 @@ AWS::Lambda::MicrovmImage	LatestFailedImageVersion	failure history is not tracke
 AWS::Lambda::MicrovmImage	State	microvm image state is not modelled
 AWS::Lambda::MicrovmImage	UpdatedAt	microvm image lifecycle fields are not tracked
 AWS::Lambda::NetworkConnector	State	network connector state is not modelled
+AWS::Lambda::WebFunctionEndpoint	RegionalEndpoints	the attribute is a map of per-region state, and Floci GetAtt values are strings; the endpoint's own State and UpdateStatus carry the same values
 AWS::Lambda::Permission	Id	schema gives no description and AWS's value is unclear; the physical id is a composite functionName|statementId
 AWS::Pipes::Pipe	CreationTime	pipe lifecycle timestamps are not tracked
 AWS::Pipes::Pipe	CurrentState	pipe state transitions are not modelled

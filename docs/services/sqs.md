@@ -98,7 +98,7 @@ aws sqs set-queue-attributes \
 
 `MaximumMessageSize` defaults to `1048576` bytes, the AWS default and maximum since August 2025, when AWS raised both from `262144`. `CreateQueue` and `SetQueueAttributes` reject values outside 1024 to 1048576 with `InvalidAttributeValue`; raising `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` above the AWS maximum raises that accepted ceiling with it. Lowering the variable below 1048576 only changes the default a new queue receives: the accepted ceiling stays at the AWS maximum, so a queue can still be set to `1048576` explicitly.
 
-`SqsManagedSseEnabled` is `true` for a queue with no `KmsMasterKeyId`, matching AWS, and `false` once a KMS key is set. It is derived on read rather than stored, so clearing `KmsMasterKeyId` returns the queue to `true`, unless you set `SqsManagedSseEnabled` yourself, in which case your value stands. AWS does not document the cleared-key case crisply, so that behaviour is Floci's choice rather than a copied one.
+`SqsManagedSseEnabled` is `true` for a queue with no `KmsMasterKeyId`, matching AWS, and `false` once a KMS key is set. It is derived on read rather than stored, so clearing `KmsMasterKeyId` returns the queue to `true`, unless you set `SqsManagedSseEnabled` yourself, in which case your value stands. AWS does not document the cleared-key case crisply, so that behaviour is Floci's choice rather than a copied one. `CreateQueue` on an existing name compares requested attributes against these reported values, so asking for `SqsManagedSseEnabled=false` on a queue that reports `true` fails with `QueueAlreadyExists` (`QueueNameExists` over JSON).
 
 ## Message Retention
 

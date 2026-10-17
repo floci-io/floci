@@ -515,7 +515,7 @@ class FlociUiManagerTest {
         when(lifecycleManager.findByName("floci-ui")).thenReturn(Optional.of(existing));
         when(lifecycleManager.containerEnv("abc123")).thenReturn(Optional.empty());
         EndpointInfo endpoint = new EndpointInfo("localhost", 4500);
-        when(lifecycleManager.adopt("abc123", List.of(4500)))
+        when(lifecycleManager.adopt("abc123", List.of(4500), Optional.empty()))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo("abc123", Map.of(4500, endpoint)));
         // Running when it is first adopted, gone by the time status() checks on it.
         when(lifecycleManager.presenceOf("abc123"))
@@ -535,7 +535,7 @@ class FlociUiManagerTest {
 
         manager.ensureStartedAsync();
         await().atMost(2, TimeUnit.SECONDS)
-                .untilAsserted(() -> verify(lifecycleManager, times(1)).adopt("abc123", List.of(4500)));
+                .untilAsserted(() -> verify(lifecycleManager, times(1)).adopt("abc123", List.of(4500), Optional.empty()));
 
         // The sidecar is gone (ABSENT) and unreachable (nothing listens on localhost:4500), so
         // status() must trigger a second async restart. That restart no longer re-adopts the dead
@@ -1033,13 +1033,15 @@ class FlociUiManagerTest {
 
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         when(containerBuilder.resolveImage(image)).thenReturn(image);
+        when(containerBuilder.resolveDockerNetwork(any())).thenAnswer(inv -> inv.<Optional<String>>getArgument(0).map(n -> "resolved:" + n));
+        when(ui.dockerNetwork()).thenReturn(Optional.of("ui-net"));
 
         Container existing = mock(Container.class);
         when(existing.getId()).thenReturn("ui-container");
         when(lifecycleManager.findByName("floci-ui")).thenReturn(Optional.of(existing));
         when(lifecycleManager.containerEnv("ui-container"))
                 .thenReturn(Optional.of(List.of("AWS_ENDPOINT_URL=http://custom:4566")));
-        when(lifecycleManager.adopt("ui-container", List.of(4500))).thenReturn(
+        when(lifecycleManager.adopt("ui-container", List.of(4500), Optional.of("resolved:ui-net"))).thenReturn(
                 new ContainerInfo("ui-container", Map.of(4500, new EndpointInfo("127.0.0.1", port))));
 
         FlociUiManager manager = newManager(containerBuilder);

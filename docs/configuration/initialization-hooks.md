@@ -34,12 +34,25 @@ Floci merges scripts from two directory trees. The Floci-native tree has priorit
 The LocalStack-compat paths let existing LocalStack bootstrap scripts work without modification.
 Mount them under `/etc/localstack/init/` and they run as-is.
 
+The Floci root is `/etc/floci/init` by default, which is where the image expects the directories to be
+mounted. When Floci runs as a binary on the host, set `FLOCI_INIT_HOOKS_DIR` to a directory of your
+own: the phase directories are read from under it (for example `~/floci-init/ready.d`).
+
 ## Script Types
 
 Floci discovers scripts with the following extensions:
 
 - `.sh` — executed with the configured shell (default `/bin/sh`)
 - `.py` — executed with `python3`
+
+On Windows, where there is no `/bin/sh`, Floci also runs:
+
+- `.ps1` with PowerShell (`powershell -NoProfile -ExecutionPolicy Bypass -File`)
+- `.cmd` and `.bat` with `cmd /c`
+- `.py` with `python` rather than `python3`
+
+`.sh` scripts are skipped on Windows, with a warning naming the file, unless `FLOCI_INIT_HOOKS_SHELL_EXECUTABLE`
+points at a shell such as Git Bash. On Linux and macOS, `.ps1`, `.cmd` and `.bat` files are ignored.
 
 Files with any other extension are ignored.
 
@@ -166,6 +179,7 @@ aws ssm delete-parameter --name /app/bootstrapped
 
 | Variable | Default | Description |
 |---|---|---|
+| `FLOCI_INIT_HOOKS_DIR` | `/etc/floci/init` | Root of the Floci hook directories (`boot.d`, `start.d`, `ready.d`, `stop.d`, `shutdown.d`) |
 | `FLOCI_INIT_HOOKS_SHELL_EXECUTABLE` | `/bin/sh` | Shell used to run `.sh` scripts |
 | `FLOCI_INIT_HOOKS_TIMEOUT_SECONDS` | `30` | Maximum runtime per script before it is killed and treated as a failure |
 | `FLOCI_INIT_HOOKS_SHUTDOWN_GRACE_PERIOD_SECONDS` | `2` | Extra wait after terminating a timed-out script |

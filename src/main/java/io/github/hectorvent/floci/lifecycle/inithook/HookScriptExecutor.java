@@ -18,10 +18,16 @@ public class HookScriptExecutor {
 
     private static final Logger LOG = Logger.getLogger(HookScriptExecutor.class);
     private final EmulatorConfig.InitHooksConfig initHooksConfig;
+    private final boolean windows;
 
     @Inject
     public HookScriptExecutor(final EmulatorConfig emulatorConfig) {
+        this(emulatorConfig, System.getProperty("os.name", ""));
+    }
+
+    HookScriptExecutor(final EmulatorConfig emulatorConfig, final String osName) {
         this.initHooksConfig = emulatorConfig.initHooks();
+        this.windows = HookScripts.isWindows(osName);
     }
 
     public void run(final File scriptFile) throws IOException, InterruptedException {
@@ -29,11 +35,11 @@ public class HookScriptExecutor {
     }
 
     public void run(final File hookDirectory, final String scriptFileName) throws IOException, InterruptedException {
-        final String command = scriptFileName.endsWith(".py") ? "python3" : initHooksConfig.shellExecutable();
-        LOG.debugv("Executing hook script {0} via {1}", scriptFileName, command);
+        final List<String> command = HookScripts.command(scriptFileName, windows, initHooksConfig.shellExecutable());
+        LOG.debugv("Executing hook script {0} via {1}", scriptFileName, command.getFirst());
 
         // Inherit parent I/O so script output is streamed directly and does not block on unconsumed buffers.
-        final Process process = new ProcessBuilder(command, scriptFileName).directory(hookDirectory).inheritIO().start();
+        final Process process = new ProcessBuilder(command).directory(hookDirectory).inheritIO().start();
         run(process, scriptFileName);
     }
 

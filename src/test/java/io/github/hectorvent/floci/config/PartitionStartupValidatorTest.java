@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Optional;
 
@@ -61,4 +62,13 @@ class PartitionStartupValidatorTest {
     void aBlankPartitionIdMeansUnset() {
         assertEquals("aws-us-gov", PartitionStartupValidator.validate("us-gov-west-1", Optional.of("  ")).id());
     }
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1:222222222222", "custom::region"})
+    void aDefaultRegionCannotContainAnArnDelimiter(String region) {
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> PartitionStartupValidator.validate(region, Optional.empty()));
+        assertTrue(error.getMessage().contains("floci.default-region"));
+        assertTrue(error.getMessage().contains(region));
+    }
+
 }

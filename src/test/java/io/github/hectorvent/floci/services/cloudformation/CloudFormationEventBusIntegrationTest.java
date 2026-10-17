@@ -424,7 +424,7 @@ class CloudFormationEventBusIntegrationTest {
         createStack(stackName, originalTemplate);
         assertStackStatus(stackName, "CREATE_COMPLETE");
 
-        updateStack(stackName, originalTemplate);
+        updateStack(stackName, CfnUpdates.forceUpdate(originalTemplate));
         assertStackStatus(stackName, "UPDATE_COMPLETE");
 
         updateStack(stackName, eventBusAndNamedRuleTemplate(busName, "after"));
@@ -621,7 +621,7 @@ class CloudFormationEventBusIntegrationTest {
         createStack(stackName, originalTemplate);
         assertStackStatus(stackName, "CREATE_COMPLETE");
 
-        updateStack(stackName, originalTemplate);
+        updateStack(stackName, CfnUpdates.forceUpdate(originalTemplate));
         assertStackStatus(stackName, "UPDATE_COMPLETE");
 
         updateStack(stackName, eventBusWithPolicyTemplate(busName, "After"));

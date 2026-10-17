@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -36,6 +38,34 @@ class CloudWatchLogsServiceTest {
                 10000,
                 new RegionResolver("us-east-1", "000000000000")
         );
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TagLogGroup", "UntagLogGroup"})
+    void tagMutationCannotBorrowHistoricalGroupThroughRegionAlias(String action) {
+        String historical = "x::victim";
+        String aliasRegion = REGION + "::x";
+        service.createLogGroup(historical, null, Map.of("team", "blue"), REGION);
+        assertThrows(AwsException.class, () -> service.listTagsLogGroup("victim", aliasRegion));
+        assertAll("the shared tag mutator preserves the stored group identity",
+                () -> {
+                    AwsException error = assertThrows(AwsException.class, () -> {
+                        if (action.equals("TagLogGroup")) {
+                            service.tagLogGroup("victim", Map.of("team", "red"), aliasRegion);
+                        } else {
+                            service.untagLogGroup("victim", List.of("team"), aliasRegion);
+                        }
+                    });
+                    assertEquals("ResourceNotFoundException", error.getErrorCode());
+                },
+                () -> assertEquals(Map.of("team", "blue"), service.listTagsLogGroup(historical, REGION)));
+        if (action.equals("TagLogGroup")) {
+            service.tagLogGroup(historical, Map.of("team", "red"), REGION);
+            assertEquals(Map.of("team", "red"), service.listTagsLogGroup(historical, REGION));
+        } else {
+            service.untagLogGroup(historical, List.of("team"), REGION);
+            assertEquals(Map.of(), service.listTagsLogGroup(historical, REGION));
+        }
     }
 
     // ──────────────────────────── Log Groups ────────────────────────────

@@ -93,8 +93,8 @@ class BackupVaultCfnIntegrationTest {
         cloudFormation("DeleteStack", Map.of());
         CfnStackWaits.awaitStackDeleted(STACK);
 
-        describeVault(NAMED).statusCode(404);
-        describeVault(unnamed).statusCode(404);
+        describeVault(NAMED).statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+        describeVault(unnamed).statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     private static void cloudFormation(String action, Map<String, String> parameters) {

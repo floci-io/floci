@@ -190,6 +190,10 @@ class S3BlockPublicAccessIntegrationTest {
     private static String createBucket() {
         String bucket = "bpa-" + UUID.randomUUID();
         given().when().put("/" + bucket).then().statusCode(200);
+        // These cases exercise ACL policy rather than the default ACL-disabled ownership mode.
+        given().body("<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>")
+                .when().put("/" + bucket + "?ownershipControls")
+                .then().statusCode(200);
         return bucket;
     }
 

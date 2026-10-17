@@ -515,13 +515,23 @@ class SwfIntegrationTest {
                 {"taskToken": "%s", "decisions": []}
                 """.formatted(first.path("taskToken").toString())).then().statusCode(200);
 
-        call("PollForDecisionTask", """
+        Response deferred = call("PollForDecisionTask", """
                 {"domain": "%s", "taskList": {"name": "floci-tl"}, "identity": "d4"}
-                """.formatted(domain))
-                .then()
+                """.formatted(domain));
+        deferred.then()
                 .statusCode(200)
                 .body("taskToken", org.hamcrest.Matchers.not(equalTo("")))
                 .body("events.eventType", hasItem("WorkflowExecutionSignaled"));
+
+        call("RespondDecisionTaskCompleted", """
+                {"taskToken": "%s", "decisions": []}
+                """.formatted(deferred.path("taskToken").toString())).then().statusCode(200);
+        call("CountPendingDecisionTasks", """
+                {"domain": "%s", "taskList": {"name": "floci-tl"}}
+                """.formatted(domain)).then().statusCode(200).body("count", equalTo(0));
+        call("PollForDecisionTask", """
+                {"domain": "%s", "taskList": {"name": "floci-tl"}, "identity": "d5"}
+                """.formatted(domain)).then().statusCode(200).body("taskToken", equalTo(""));
     }
 
     @Test

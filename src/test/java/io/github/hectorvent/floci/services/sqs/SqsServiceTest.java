@@ -163,6 +163,51 @@ class SqsServiceTest {
     }
 
     @Test
+    void createQueue_conflictsOnADerivedAttributeThatIsNeverStored() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("derived-conflict-queue", null, region);
+
+        // SqsManagedSseEnabled reads back as "true" but is not in the stored map, so a
+        // re-create asking for "false" must still see the difference.
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.createQueue("derived-conflict-queue",
+                        Map.of("SqsManagedSseEnabled", "false"), region));
+        assertEquals("QueueAlreadyExists", ex.getErrorCode());
+
+        Queue same = sqsService.createQueue("derived-conflict-queue",
+                Map.of("SqsManagedSseEnabled", "true", "VisibilityTimeout", "30"), region);
+        assertEquals(queue.getQueueUrl(), same.getQueueUrl());
+        assertEquals("true", sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("SqsManagedSseEnabled"), region).get("SqsManagedSseEnabled"));
+    }
+
+    @Test
+    void createQueue_recreateWithSameNonCanonicalMaximumMessageSizeIsNotAConflict() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("padded-size-queue", Map.of("MaximumMessageSize", "01024"), region);
+
+        Queue same = sqsService.createQueue("padded-size-queue", Map.of("MaximumMessageSize", "01024"), region);
+        assertEquals(queue.getQueueUrl(), same.getQueueUrl());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.createQueue("padded-size-queue", Map.of("MaximumMessageSize", "2048"), region));
+        assertEquals("QueueAlreadyExists", ex.getErrorCode());
+    }
+
+    @Test
+    void createQueue_recreateWithSameEmptyMaximumMessageSizeIsNotAConflict() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("empty-size-queue", Map.of("MaximumMessageSize", ""), region);
+
+        Queue same = sqsService.createQueue("empty-size-queue", Map.of("MaximumMessageSize", ""), region);
+        assertEquals(queue.getQueueUrl(), same.getQueueUrl());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.createQueue("empty-size-queue", Map.of("MaximumMessageSize", "2048"), region));
+        assertEquals("QueueAlreadyExists", ex.getErrorCode());
+    }
+
+    @Test
     void createQueue_rejectsMaximumMessageSizeOutsideAwsRange() {
         for (String invalid : List.of("1048577", "1023", "0", "-1", "abc")) {
             AwsException ex = assertThrows(AwsException.class,

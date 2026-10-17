@@ -45,9 +45,13 @@ public class PartitionStartupValidator {
      * The partition the deployment serves.
      *
      * @throws IllegalStateException when {@code configuredPartition} names no published partition,
-     *                               or disagrees with a default region the catalog recognises
+     *                               or disagrees with a default region the catalog recognises,
+     *                               or the default region contains an ARN field delimiter
      */
     static AwsPartition validate(String defaultRegion, Optional<String> configuredPartition) {
+        if (RegionResolver.containsArnDelimiter(defaultRegion)) {
+            throw new IllegalStateException("floci.default-region must not contain ':': " + defaultRegion);
+        }
         String effective = RegionResolver.effectivePartition(defaultRegion, configuredPartition);
         AwsPartition partition = AwsPartitions.find(effective).orElseThrow(() -> new IllegalStateException(
                 "floci.partitions.id names no AWS partition: '" + effective + "'. Published partitions: "

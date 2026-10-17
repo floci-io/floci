@@ -39,7 +39,7 @@ class BackupVaultCfnProvisionerTest {
     private static final String ARN = "arn:aws:backup:us-east-1:000000000000:backup-vault:my-vault";
     private static final String KMS = "arn:aws:kms:us-east-1:000000000000:key/abc";
     private static final AwsException NOT_FOUND =
-            new AwsException("ResourceNotFoundException", "Backup vault not found: my-vault", 404);
+            new AwsException("ResourceNotFoundException", "Backup vault not found: my-vault", 400);
 
     private final BackupService backup = mock(BackupService.class);
     private final BackupVaultCfnProvisioner provisioner = new BackupVaultCfnProvisioner(backup);

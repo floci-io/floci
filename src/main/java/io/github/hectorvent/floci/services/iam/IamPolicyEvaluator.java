@@ -908,7 +908,7 @@ public class IamPolicyEvaluator {
             return false;
         }
         return matchesAction(stmt, action)
-                && matchesResource(stmt, resource, ctx)
+                && matchesResource(stmt, action, resource, ctx)
                 && matchesConditions(stmt.getConditions(), ctx, policyVariables(stmt));
     }
 
@@ -944,7 +944,7 @@ public class IamPolicyEvaluator {
         PrincipalMatch match = principalMatch(stmt, principal);
         if (match == PrincipalMatch.NONE
                 || !matchesAction(stmt, action)
-                || !matchesResource(stmt, resource, ctx)
+                || !matchesResource(stmt, action, resource, ctx)
                 || !matchesConditions(stmt.getConditions(), ctx, policyVariables(stmt))) {
             return PrincipalMatch.NONE;
         }
@@ -1121,7 +1121,7 @@ public class IamPolicyEvaluator {
     private boolean matchesStatement(PolicyStatement stmt, String action, String resource,
                                       Map<String, List<String>> ctx) {
         return matchesAction(stmt, action)
-                && matchesResource(stmt, resource, ctx)
+                && matchesResource(stmt, action, resource, ctx)
                 && matchesConditions(stmt.getConditions(), ctx, policyVariables(stmt));
     }
 
@@ -1142,15 +1142,44 @@ public class IamPolicyEvaluator {
     }
 
     /** Resource: matches if any Resource pattern matches; NotResource: matches if NO pattern matches. */
-    private boolean matchesResource(PolicyStatement stmt, String resource,
+    private boolean matchesResource(PolicyStatement stmt, String action, String resource,
                                      Map<String, List<String>> ctx) {
-        if (stmt.getResources() != null) {
-            return matchesAnyResource(stmt.getResources(), resource, ctx, policyVariables(stmt));
+        List<String> patterns = stmt.getResources() != null ? stmt.getResources() : stmt.getNotResources();
+        if (patterns == null) {
+            return false;
         }
-        if (stmt.getNotResources() != null) {
-            return !matchesAnyResource(stmt.getNotResources(), resource, ctx, policyVariables(stmt));
+        String alias = logGroupResourceAlias(action, resource);
+        boolean matched = matchesAnyResource(patterns, resource, ctx, policyVariables(stmt))
+                || alias != null && matchesAnyResource(patterns, alias, ctx, policyVariables(stmt));
+        return stmt.getResources() != null ? matched : !matched;
+    }
+
+    /**
+     * Group-management policies accept both documented bare group ARNs and legacy :* ARNs.
+     * Match them inside each statement so explicit denies, NotResource and caller ceilings
+     * retain their normal precedence. Stream actions and the three ARN tag APIs stay distinct.
+     */
+    private static String logGroupResourceAlias(String action, String resource) {
+        if (action == null || !switch (action) {
+            case "logs:createloggroup", "logs:deleteloggroup", "logs:putretentionpolicy",
+                    "logs:deleteretentionpolicy", "logs:tagloggroup" -> true;
+            default -> false;
+        } || !AwsArnUtils.isArnFor(resource, "logs")) {
+            return null;
         }
-        return false;
+        String target = AwsArnUtils.parse(resource).resource();
+        if (!target.startsWith("log-group:")) {
+            return null;
+        }
+        String name = target.substring("log-group:".length());
+        boolean suffixed = name.endsWith(":*");
+        if (suffixed) {
+            name = name.substring(0, name.length() - 2);
+        }
+        if (name.isEmpty() || name.indexOf(':') >= 0 || name.indexOf('*') >= 0 || name.indexOf('?') >= 0) {
+            return null;
+        }
+        return suffixed ? resource.substring(0, resource.length() - 2) : resource + ":*";
     }
 
     /**

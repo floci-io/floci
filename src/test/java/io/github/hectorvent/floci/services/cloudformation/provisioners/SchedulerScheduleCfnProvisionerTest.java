@@ -342,7 +342,10 @@ class SchedulerScheduleCfnProvisionerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]"})
+    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]",
+            "{\"physicalId\":\"/victim\"}", "{\"physicalId\":\"default/\"}",
+            "{\"physicalId\":\"default/victim/extra\"}", "{\"physicalId\":123}",
+            "{\"physicalId\":\"default/victim\",\"cleanupAttempts\":\"zero\"}"})
     void malformedCleanupEntryRejectsCreateBeforeAnyServiceCall(String entry) throws Exception {
         StackResource resource = resource();
         appendMalformedCleanupEntry(resource, entry);
@@ -351,7 +354,10 @@ class SchedulerScheduleCfnProvisionerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]"})
+    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]",
+            "{\"physicalId\":\"/victim\"}", "{\"physicalId\":\"default/\"}",
+            "{\"physicalId\":\"default/victim/extra\"}", "{\"physicalId\":123}",
+            "{\"physicalId\":\"default/victim\",\"cleanupAttempts\":\"zero\"}"})
     void malformedCleanupEntryRejectsReplacementBeforeAnyServiceCall(String entry) throws Exception {
         StackResource resource = resource();
         provisioner.provision(resource, properties("current", "default"), context(null));
@@ -361,7 +367,10 @@ class SchedulerScheduleCfnProvisionerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]"})
+    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]",
+            "{\"physicalId\":\"/victim\"}", "{\"physicalId\":\"default/\"}",
+            "{\"physicalId\":\"default/victim/extra\"}", "{\"physicalId\":123}",
+            "{\"physicalId\":\"default/victim\",\"cleanupAttempts\":\"zero\"}"})
     void malformedCleanupEntryRejectsInPlaceUpdateBeforeAnyServiceCall(String entry) throws Exception {
         StackResource resource = resource();
         provisioner.provision(resource, properties("current", "default"), context(null));
@@ -372,7 +381,10 @@ class SchedulerScheduleCfnProvisionerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]"})
+    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]",
+            "{\"physicalId\":\"/victim\"}", "{\"physicalId\":\"default/\"}",
+            "{\"physicalId\":\"default/victim/extra\"}", "{\"physicalId\":123}",
+            "{\"physicalId\":\"default/victim\",\"cleanupAttempts\":\"zero\"}"})
     void malformedCleanupEntryPreservesPendingRollbackBeforeAnotherUpdate(String entry) throws Exception {
         StackResource resource = resource();
         provisioner.provision(resource, properties("current", "default"), context(null));
@@ -387,7 +399,10 @@ class SchedulerScheduleCfnProvisionerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]"})
+    @ValueSource(strings = {"1", "true", "null", "\"invalid\"", "[]",
+            "{\"physicalId\":\"/victim\"}", "{\"physicalId\":\"default/\"}",
+            "{\"physicalId\":\"default/victim/extra\"}", "{\"physicalId\":123}",
+            "{\"physicalId\":\"default/victim\",\"cleanupAttempts\":\"zero\"}"})
     void malformedCleanupEntryRejectsMergeWithoutChangingExistingDebt(String entry) throws Exception {
         StackResource previous = resource();
         provisioner.provision(previous, properties("current", "default"), context(null));
@@ -429,6 +444,166 @@ class SchedulerScheduleCfnProvisionerTest {
                 () -> assertEquals(physicalIdBefore, resource.getPhysicalId()),
                 () -> assertEquals(before, resource.getAttributes()),
                 () -> verifyNoInteractions(scheduler));
+    }
+
+    @Test
+    void malformedCleanupAddressCannotDeleteAnotherSchedule() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "default"), context(null));
+        appendMalformedCleanupEntry(resource, "{\"physicalId\":\"/victim\"}");
+        Map<String, String> before = Map.copyOf(resource.getAttributes());
+        clearInvocations(scheduler);
+
+        assertAll(
+                () -> assertThrows(IllegalStateException.class,
+                        () -> provisioner.completeDeleteCleanup(resource)),
+                () -> assertThrows(IllegalStateException.class,
+                        () -> provisioner.delete(resource, REGION)),
+                () -> assertThrows(IllegalStateException.class,
+                        () -> provisioner.completeUpdate(resource)),
+                () -> assertEquals(before, resource.getAttributes()),
+                () -> verifyNoInteractions(scheduler));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"priorPhysicalId\":\"/victim\",\"priorAttributes\":{}}",
+            "{\"priorPhysicalId\":\"a/victim\",\"priorAttributes\":{\"FlociSchedulerGroupName\":\"default\"}}",
+            "{\"priorPhysicalId\":\"a/victim\",\"priorAttributes\":{}}",
+            "{\"priorPhysicalId\":\"default/victim\",\"priorAttributes\":{\"FlociSchedulerGroupName\":\"a\"}}",
+            "{\"priorPhysicalId\":\"default/victim\",\"priorAttributes\":{\"FlociSchedulerGroupName\":42}}",
+            "{\"priorPhysicalId\":\"default/victim\",\"priorAttributes\":[]}",
+            "{\"priorPhysicalId\":\"default/victim\",\"priorAttributes\":{\"Arn\":42}}",
+            "{\"priorPhysicalId\":\"default/victim\",\"priorAttributes\":{\"__FlociReplacementCleanup\":\"x\"}}",
+            "{\"priorPhysicalId\":\"default/victim\"}",
+            "{\"priorAttributes\":{}}",
+            "{\"priorPhysicalId\":42,\"priorAttributes\":{}}"})
+    void malformedPriorCleanupRejectsEveryMutationEntryPoint(String cleanup) throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("current", "default"), context(null));
+        resource.getAttributes().put("__FlociReplacementCleanup", cleanup);
+        Map<String, String> before = Map.copyOf(resource.getAttributes());
+        String physicalIdBefore = resource.getPhysicalId();
+        clearInvocations(scheduler);
+
+        assertAll(
+                () -> assertThrows(IllegalStateException.class, () -> provisioner.provision(resource,
+                        properties("new", "default"), context("current"))),
+                () -> assertThrows(IllegalStateException.class, () -> provisioner.rollbackUpdate(resource)),
+                () -> assertThrows(IllegalStateException.class, () -> provisioner.delete(resource, REGION)),
+                () -> assertThrows(IllegalStateException.class, () -> provisioner.completeUpdate(resource)),
+                () -> assertThrows(IllegalStateException.class, () -> provisioner.completeDeleteCleanup(resource)),
+                () -> assertEquals(physicalIdBefore, resource.getPhysicalId()),
+                () -> assertEquals(before, resource.getAttributes()),
+                () -> verifyNoInteractions(scheduler));
+    }
+
+    @Test
+    void priorDefaultGroupCanBeOmittedFromStoredCleanup() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("old", "default"), context(null));
+        provisioner.provision(resource, properties("new", "default"), context("old"));
+        ObjectNode cleanup = (ObjectNode) mapper.readTree(resource.getAttributes().get("__FlociReplacementCleanup"));
+        ((ObjectNode) cleanup.path("priorAttributes")).remove("FlociSchedulerGroupName");
+        resource.getAttributes().put("__FlociReplacementCleanup", cleanup.toString());
+
+        assertTrue(provisioner.rollbackUpdate(resource));
+
+        assertEquals("old", resource.getPhysicalId());
+        verify(scheduler).deleteSchedule("new", "default", REGION);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {5, 56})
+    void stubMigrationDoesNotScheduleTheStubForDeletion(int logicalIdLength) throws Exception {
+        StackResource resource = stubResource(logicalIdLength);
+        String stubId = resource.getPhysicalId();
+
+        provisioner.provision(resource, properties("new", "default"), context(stubId));
+
+        assertFalse(provisioner.hasReplacementUpdate(resource));
+        assertNull(provisioner.updateCleanupPhysicalId(resource));
+        assertTrue(provisioner.completeUpdate(resource).complete());
+        verify(scheduler, never()).deleteSchedule(any(), any(), eq(REGION));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {5, 56})
+    void stubMigrationRollbackRestoresTheStubWithoutDeletingIt(int logicalIdLength) throws Exception {
+        StackResource resource = stubResource(logicalIdLength);
+        String stubId = resource.getPhysicalId();
+        String stubArn = resource.getAttributes().get("Arn");
+        provisioner.provision(resource, properties("new", "default"), context(stubId));
+
+        assertTrue(provisioner.rollbackUpdate(resource));
+        assertEquals(stubId, resource.getPhysicalId());
+        assertEquals(stubArn, resource.getAttributes().get("Arn"));
+        verify(scheduler).deleteSchedule("new", "default", REGION);
+
+        clearInvocations(scheduler);
+        provisioner.delete(resource, REGION);
+        verifyNoInteractions(scheduler);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {5, 56})
+    void persistedStubMigrationDoesNotDeleteAnUnownedSchedule(int logicalIdLength) throws Exception {
+        StackResource resource = stubResource(logicalIdLength);
+        String stubId = resource.getPhysicalId();
+        provisioner.provision(resource, properties("new", "default"), context(stubId));
+        restoreLegacyStubCleanup(resource, stubId);
+        clearInvocations(scheduler);
+
+        assertFalse(provisioner.hasReplacementUpdate(resource));
+        assertTrue(provisioner.completeUpdate(resource).complete());
+        verifyNoInteractions(scheduler);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {5, 56})
+    void persistedStubMigrationCanRollbackWithoutDeletingTheStub(int logicalIdLength) throws Exception {
+        StackResource resource = stubResource(logicalIdLength);
+        String stubId = resource.getPhysicalId();
+        provisioner.provision(resource, properties("new", "default"), context(stubId));
+        restoreLegacyStubCleanup(resource, stubId);
+        clearInvocations(scheduler);
+
+        assertTrue(provisioner.rollbackUpdate(resource));
+        assertEquals(stubId, resource.getPhysicalId());
+        verify(scheduler).deleteSchedule("new", "default", REGION);
+        clearInvocations(scheduler);
+        provisioner.delete(resource, REGION);
+        verifyNoInteractions(scheduler);
+    }
+
+    @Test
+    void malformedPersistedStubCleanupIsNotPartiallyRewritten() throws Exception {
+        StackResource resource = stubResource(5);
+        String stubId = resource.getPhysicalId();
+        provisioner.provision(resource, properties("new", "default"), context(stubId));
+        restoreLegacyStubCleanup(resource, stubId);
+        ObjectNode cleanup = (ObjectNode) mapper.readTree(resource.getAttributes().get("__FlociReplacementCleanup"));
+        cleanup.withArray("displaced").addObject().put("physicalId", "/victim");
+        resource.getAttributes().put("__FlociReplacementCleanup", cleanup.toString());
+        Map<String, String> before = Map.copyOf(resource.getAttributes());
+        clearInvocations(scheduler);
+
+        assertThrows(IllegalStateException.class, () -> provisioner.completeUpdate(resource));
+        assertEquals(before, resource.getAttributes());
+        verifyNoInteractions(scheduler);
+    }
+
+    private void restoreLegacyStubCleanup(StackResource resource, String stubId) throws Exception {
+        ObjectNode cleanup = (ObjectNode) mapper.readTree(resource.getAttributes().get("__FlociReplacementCleanup"));
+        String oldAddress = "default/" + stubId;
+        cleanup.put("priorPhysicalId", oldAddress);
+        cleanup.withArray("displaced").addObject()
+                .put("physicalId", oldAddress)
+                .put("resourceType", "AWS::Scheduler::Schedule")
+                .put("region", REGION)
+                .put("retainable", true)
+                .put("cleanupAttempts", 0);
+        resource.getAttributes().put("__FlociReplacementCleanup", cleanup.toString());
     }
 
     @Test
@@ -1025,6 +1200,15 @@ class SchedulerScheduleCfnProvisionerTest {
         resource.setLogicalId("Schedule");
         resource.setResourceType("AWS::Scheduler::Schedule");
         resource.setAttributes(new HashMap<>());
+        return resource;
+    }
+
+    private static StackResource stubResource(int logicalIdLength) {
+        StackResource resource = resource();
+        String logicalId = "S".repeat(logicalIdLength);
+        resource.setLogicalId(logicalId);
+        resource.setPhysicalId(logicalId + "-01234567");
+        resource.getAttributes().put("Arn", CfnResourceDispatcher.STUB_ARN_PREFIX + logicalId);
         return resource;
     }
 

@@ -39,13 +39,9 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.stringArrayOrAbsent;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
  * REST JSON controller for the three SES V2 send endpoints:
@@ -96,13 +92,14 @@ public class SesSendController {
 
             JsonNode request = objectMapper.readTree(body);
             requireJsonObject(request);
+            SesV2RequestShapes.check("SendEmail", request);
 
             // FromEmailAddress is optional per the AWS v2 contract. Each content type below
             // enforces the sender requirement the way AWS does: Raw can take its From from the
             // MIME message, while Simple and Templated require FromEmailAddress.
             String fromEmailAddress = request.path("FromEmailAddress").asText(null);
 
-            JsonNode destination = requireObjectOrAbsent(request, "Destination");
+            JsonNode destination = request.path("Destination");
             List<String> toAddresses = addressList(destination, "ToAddresses");
             List<String> ccAddresses = addressList(destination, "CcAddresses");
             List<String> bccAddresses = addressList(destination, "BccAddresses");
@@ -113,7 +110,7 @@ public class SesSendController {
             // and X-SES-FROM-ARN headers", so it stands for both ARNs of a raw send.
             String fromIdentityArn = request.path("FromEmailAddressIdentityArn").asText(null);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
-            String tenantName = stringMemberOrAbsent(request, "TenantName");
+            String tenantName = request.path("TenantName").asText(null);
             List<MessageTag> emailTags = parseEmailTagsArray(request.path("EmailTags"), "EmailTags");
             ListManagementOptions listManagement =
                     parseListManagementOptions(request.path("ListManagementOptions"));
@@ -142,6 +139,7 @@ public class SesSendController {
                     throw new AwsException("BadRequestException",
                             "Content.Raw.Data is required.", 400);
                 }
+                requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                 SendEmailRequest rawRequest = sendRequest.content(new EmailContent.Raw(rawData, true)).build();
                 sesService.checkTenantRawSendAccess(tenantName, fromEmailAddress, rawData,
                         rawRequest.hasRecipients(), configurationSetName, regionResolver.getAccountId(), region);
@@ -159,6 +157,7 @@ public class SesSendController {
                         parseHeadersArray(simple.path("Headers"), "content.simple.headers");
                 List<MessageAttachment> attachments =
                         parseAttachmentsArray(simple.path("Attachments"), "content.simple.attachments");
+                requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                 sesService.checkTenantSendAccess(tenantName, fromEmailAddress, configurationSetName,
                         null, regionResolver.getAccountId(), region);
                 messageId = sesService.sendEmail(sendRequest
@@ -192,6 +191,7 @@ public class SesSendController {
                     String resolvedName = hasName
                             ? templateName
                             : SesTemplateService.templateNameFromArn(templateArn);
+                    requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, resolvedName, regionResolver.getAccountId(), region);
                     messageId = sesService.sendEmail(sendRequest
@@ -206,6 +206,7 @@ public class SesSendController {
                     // inline content is not a stored template resource, so only the identity and
                     // configuration set pass through the gate.
                     SesService.requireInlineTemplateContent(subject, text, html);
+                    requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                     sesService.checkTenantSendAccess(tenantName, fromEmailAddress,
                             configurationSetName, null, regionResolver.getAccountId(), region);
                     messageId = sesService.sendEmail(sendRequest
@@ -243,6 +244,7 @@ public class SesSendController {
 
             JsonNode request = objectMapper.readTree(body);
             requireJsonObject(request);
+            SesV2RequestShapes.check("SendBulkEmail", request);
             String fromEmailAddress = request.path("FromEmailAddress").asText(null);
             if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                 throw new AwsException("BadRequestException",
@@ -254,7 +256,7 @@ public class SesSendController {
                     request.path("FeedbackForwardingEmailAddress").asText(null);
             SesAddressSyntax.requireBulkAddress(feedbackForwardingAddress);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
-            String tenantName = stringMemberOrAbsent(request, "TenantName");
+            String tenantName = request.path("TenantName").asText(null);
 
             JsonNode template = request.path("DefaultContent").path("Template");
             if (template.isMissingNode() || template.isNull()) {
@@ -319,12 +321,11 @@ public class SesSendController {
                     throw new AwsException("BadRequestException",
                             "BulkEmailEntries elements must be JSON objects.", 400);
                 }
-                JsonNode dest = requireObjectOrAbsent(node, "Destination");
+                JsonNode dest = node.path("Destination");
                 List<String> to = addressList(dest, "ToAddresses");
                 List<String> cc = addressList(dest, "CcAddresses");
                 List<String> bcc = addressList(dest, "BccAddresses");
-                JsonNode replacementContent = requireObjectOrAbsent(node, "ReplacementEmailContent");
-                JsonNode replacementTemplate = requireObjectOrAbsent(replacementContent, "ReplacementTemplate");
+                JsonNode replacementTemplate = node.path("ReplacementEmailContent").path("ReplacementTemplate");
                 JsonNode replacementData = parseTemplateData(replacementTemplate, "ReplacementTemplateData");
                 List<MessageTag> replacementTags = parseEmailTagsArray(node.path("ReplacementTags"), "ReplacementTags");
                 List<MessageHeader> entryReplacementHeaders = parseHeadersArray(node.path("ReplacementHeaders"),
@@ -389,6 +390,7 @@ public class SesSendController {
             }
             JsonNode request = objectMapper.readTree(body);
             requireJsonObject(request);
+            SesV2RequestShapes.check("SendCustomVerificationEmail", request);
             templateName = request.path("TemplateName").asText(null);
             String messageId = sesService.sendCustomVerificationEmail(
                     request.path("EmailAddress").asText(null), templateName,
@@ -411,29 +413,29 @@ public class SesSendController {
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    // A present address list of the wrong JSON type, or with a non-string element, is rejected
-    // rather than read as empty or coerced.
+    // A null element passes deserialization on AWS and is kept: it fails later as an invalid
+    // address, after the content and sender checks (probe-confirmed).
     private static List<String> addressList(JsonNode parent, String field) {
-        return Objects.requireNonNullElse(stringArrayOrAbsent(parent, field), List.of());
+        List<String> addresses = new ArrayList<>();
+        for (JsonNode item : parent.path(field)) {
+            addresses.add(item.isNull() ? null : item.textValue());
+        }
+        return addresses;
+    }
+
+    // On SendEmail a null address is reported after the content and sender checks and before the
+    // tenant lookup (probe-confirmed).
+    @SafeVarargs
+    private static void requireNoNullAddress(List<String>... lists) {
+        for (List<String> addresses : lists) {
+            if (addresses.contains(null)) {
+                throw new AwsException("BadRequestException", "Invalid email address null.", 400);
+            }
+        }
     }
 
     private JsonNode parseTemplateData(JsonNode parent, String fieldName) {
-        if (parent == null || parent.isMissingNode() || parent.isNull()) {
-            return objectMapper.createObjectNode();
-        }
-        if (!parent.isObject()) {
-            throw new AwsException("BadRequestException",
-                    "Parent of " + fieldName + " must be a JSON object.", 400);
-        }
-        JsonNode field = parent.path(fieldName);
-        if (field.isMissingNode() || field.isNull()) {
-            return objectMapper.createObjectNode();
-        }
-        if (!field.isTextual()) {
-            throw new AwsException("BadRequestException",
-                    fieldName + " must be a JSON-encoded string.", 400);
-        }
-        return parseTemplateData(field.asText(""));
+        return parseTemplateData(parent.path(fieldName).asText(null));
     }
 
     private JsonNode parseTemplateData(String raw) {
@@ -463,12 +465,6 @@ public class SesSendController {
      * {@code content.simple.headers}) and the offending 1-based index.
      */
     private List<MessageHeader> parseHeadersArray(JsonNode headersNode, String location) {
-        if (headersNode.isMissingNode() || headersNode.isNull()) {
-            return List.of();
-        }
-        if (!headersNode.isArray()) {
-            throw new AwsException("BadRequestException", "Headers must be an array.", 400);
-        }
         List<MessageHeader> out = new ArrayList<>();
         int index = 1;
         for (JsonNode h : headersNode) {
@@ -502,12 +498,6 @@ public class SesSendController {
      * message anchored at {@code location} and the offending 1-based index, as for headers.
      */
     private List<MessageAttachment> parseAttachmentsArray(JsonNode attachmentsNode, String location) {
-        if (attachmentsNode.isMissingNode() || attachmentsNode.isNull()) {
-            return List.of();
-        }
-        if (!attachmentsNode.isArray()) {
-            throw new AwsException("BadRequestException", "Attachments must be an array.", 400);
-        }
         List<MessageAttachment> out = new ArrayList<>();
         int index = 1;
         for (JsonNode node : attachmentsNode) {
@@ -523,10 +513,6 @@ public class SesSendController {
             JsonNode rawNode = node.get("RawContent");
             if (rawNode == null || rawNode.isNull()) {
                 throw constraintViolation(null, memberPrefix + "rawContent", "Member must not be null");
-            }
-            if (!rawNode.isTextual()) {
-                throw new AwsException("BadRequestException",
-                        "RawContent must be a base64-encoded string.", 400);
             }
             byte[] rawContent;
             try {
@@ -555,9 +541,6 @@ public class SesSendController {
         JsonNode value = node.get(member);
         if (value == null || value.isNull()) {
             return null;
-        }
-        if (!value.isTextual()) {
-            throw new AwsException("BadRequestException", member + " must be a string.", 400);
         }
         String text = value.textValue();
         if (text.length() < min) {
@@ -610,27 +593,15 @@ public class SesSendController {
     }
 
     private static ListManagementOptions parseListManagementOptions(JsonNode node) {
-        if (node == null || node.isMissingNode() || node.isNull()) {
+        if (node.isMissingNode() || node.isNull()) {
             return null;
-        }
-        if (!node.isObject()) {
-            throw new AwsException("BadRequestException", "ListManagementOptions must be an object.", 400);
         }
         JsonNode listNode = node.path("ContactListName");
         if (!listNode.isTextual() || listNode.textValue().isBlank()) {
             throw new AwsException("BadRequestException",
                     "ListManagementOptions.ContactListName is required.", 400);
         }
-        JsonNode topicNode = node.path("TopicName");
-        String topicName = null;
-        if (!topicNode.isMissingNode() && !topicNode.isNull()) {
-            if (!topicNode.isTextual()) {
-                throw new AwsException("BadRequestException",
-                        "ListManagementOptions.TopicName must be a string.", 400);
-            }
-            topicName = topicNode.textValue();
-        }
-        return new ListManagementOptions(listNode.textValue(), topicName);
+        return new ListManagementOptions(listNode.textValue(), node.path("TopicName").asText(null));
     }
 
     /**
@@ -640,16 +611,10 @@ public class SesSendController {
      * the per-entry name is {@code ReplacementTags} on the wire: only the top-level field
      * carries the {@code EmailTags} suffix. Returns an empty list when the node is absent so
      * callers can pass it through unconditionally.
-     * The {@code fieldName} parameter is reported in the error message when the node is
-     * present but not an array.
+     * The {@code fieldName} parameter is reported in the error message when an element is
+     * null.
      */
     private List<MessageTag> parseEmailTagsArray(JsonNode tagsNode, String fieldName) {
-        if (tagsNode.isMissingNode() || tagsNode.isNull()) {
-            return List.of();
-        }
-        if (!tagsNode.isArray()) {
-            throw new AwsException("BadRequestException", fieldName + " must be an array.", 400);
-        }
         List<MessageTag> out = new ArrayList<>();
         for (JsonNode t : tagsNode) {
             if (!t.isObject()) {

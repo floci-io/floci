@@ -6,11 +6,11 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sns.model.SentSms;
 import io.github.hectorvent.floci.services.sns.model.SmsSandboxPhoneNumber;
 import io.github.hectorvent.floci.services.sns.model.Topic;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -234,40 +234,6 @@ class SnsPolicyAndSandboxEditsTest {
         Matcher code = Pattern.compile("[0-9]{6}").matcher(sent.get(0).getMessage());
         assertTrue(code.find(), "no code in " + sent);
         return code.group();
-    }
-
-    /** A store whose next read, once armed, parks after reading until released. */
-    private static final class ParkingStore<V> extends InMemoryStorage<String, V> {
-
-        private final AtomicBoolean parkNext = new AtomicBoolean();
-        private final CountDownLatch parked = new CountDownLatch(1);
-        private final CountDownLatch released = new CountDownLatch(1);
-
-        void parkNextRead() {
-            parkNext.set(true);
-        }
-
-        boolean awaitParked() throws InterruptedException {
-            return parked.await(2, TimeUnit.SECONDS);
-        }
-
-        void release() {
-            released.countDown();
-        }
-
-        @Override
-        public Optional<V> get(String key) {
-            Optional<V> value = super.get(key);
-            if (parkNext.getAndSet(false)) {
-                parked.countDown();
-                try {
-                    released.await();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-            return value;
-        }
     }
 
     /** Where SNS records the SMS it sends, made to fail on demand. */

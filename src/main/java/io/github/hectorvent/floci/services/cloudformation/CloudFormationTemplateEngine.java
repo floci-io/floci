@@ -342,6 +342,8 @@ public class CloudFormationTemplateEngine {
             case "AWS::StackId" -> stackId;
             case "AWS::Partition" -> AwsRegions.partitionFor(region);
             case "AWS::URLSuffix" -> AwsRegions.dnsSuffixFor(region);
+            // Floci keeps no notification ARNs for a stack, so the list is empty.
+            case "AWS::NotificationARNs" -> "";
             case "AWS::NoValue" -> "";
             default -> {
                 if (physicalIds.containsKey(name)) {

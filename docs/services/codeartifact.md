@@ -7,10 +7,11 @@
 Floci supports the CodeArtifact control plane: domains, repositories, resource policies, tags,
 and public upstream (external) connections. Package publish/fetch through the CodeArtifact API
 itself is implemented for the `generic` format only, matching AWS's own restriction that
-`PublishPackageVersion` accepts only `generic`. The `maven`, `npm`, and `pypi` formats are each
+`PublishPackageVersion` accepts only `generic`. The `maven`, `npm`, `pypi`, and `nuget` formats are each
 served through their own real package-manager-protocol proxy (`mvn`/Gradle, `npm`/`yarn`/`pnpm`,
-and `pip`/`twine` publish and resolve all work against the URL `GetRepositoryEndpoint` returns);
-the remaining formats (NuGet, etc.) have no real proxy behind them yet.
+`pip`/`twine`, and `nuget`/`dotnet` publish and resolve all work against the URL
+`GetRepositoryEndpoint` returns); the remaining formats (Ruby, Swift, Cargo) have no real proxy
+behind them yet.
 
 ## Supported Actions
 
@@ -19,9 +20,9 @@ the remaining formats (NuGet, etc.) have no real proxy behind them yet.
 | --- | --- |
 | `CreateDomain` | Creates a domain (max 10 per account per Region), optionally with a KMS encryption key and initial tags. |
 | `DeleteDomain` | Deletes a domain; fails with `ConflictException` while it still contains repositories, and with `ResourceNotFoundException` for a missing domain (as AWS does, although the API reference does not list it). |
-| `DescribeDomain` | Returns a domain's full description, including its repository count and the total size of its assets (generic, Maven, npm, and pypi; see Known limitations). |
+| `DescribeDomain` | Returns a domain's full description, including its repository count and the total size of its assets (generic, Maven, npm, pypi, and NuGet; see Known limitations). |
 | `ListDomains` | Lists domain summaries for the account and Region, paginated. |
-| `GetAuthorizationToken` | Issues a bearer token scoped to a domain, valid for 0 (12 hours) or 900-43200 seconds, required by the `maven` and `npm` repository endpoints. |
+| `GetAuthorizationToken` | Issues a bearer token scoped to a domain, valid for 0 (12 hours) or 900-43200 seconds, required by the `maven`, `npm`, `pypi`, and `nuget` repository endpoints. |
 | `PutDomainPermissionsPolicy` | Attaches or replaces a domain's resource policy, versioned by `policyRevision`. |
 | `GetDomainPermissionsPolicy` | Returns a domain's current resource policy and revision. |
 | `DeleteDomainPermissionsPolicy` | Removes a domain's resource policy, optionally checked against `policyRevision`. |
@@ -184,6 +185,43 @@ response is never a spurious conflict), and only a name collision with genuinely
 gets rejected with 409. One config knob, `FLOCI_SERVICES_CODEARTIFACT_PYPI_IMAGE`, pins the image
 version.
 
+## The nuget repository endpoint
+
+`GetRepositoryEndpoint` for `format=nuget` returns `http://localhost:4566/codeartifact/nuget/<domain>/<repository>/`.
+Real `nuget`/`dotnet` clients can publish to and resolve from that URL once `v3/index.json` is
+appended to it, AWS's own documented requirement ("The source URL must end in /v3/index.json");
+Floci authors that index itself rather than proxying one from the backing
+[BaGetter](https://github.com/bagetter/bagetter) container, advertising only the `PackageBaseAddress/
+3.0.0` (install) and `PackagePublish/2.0.0` (push) resources BaGetter's own flat container and
+publish endpoints implement. Every request needs a token from `GetAuthorizationToken` scoped to
+the domain being accessed, sent as HTTP Basic with the token as the password (any username),
+the way AWS's own NuGet CLI configuration doc has the client authenticate
+([configure the nuget or dotnet CLI](https://docs.aws.amazon.com/codeartifact/latest/ug/nuget-cli.html)),
+the same Basic convention Maven's HTTP wagon and pip/twine use; a Bearer token is also accepted,
+matching npm. A missing, invalid, expired, or wrong-domain token gets a 401 challenging `Basic`.
+
+Like Verdaccio and pypiserver, BaGetter has no native concept of multiple named feeds inside one
+instance, so each CodeArtifact repository gets its own BaGetter container instead of sharing one,
+started lazily on first use and identified internally by a fresh id generated at
+`CreateRepository` time, so a repository deleted and recreated under the same name never inherits
+the previous one's packages. `DeleteRepository` stops and removes that repository's container
+immediately, the same as npm and pypi.
+
+A `nuget push`/`dotnet nuget push` has no separate `name`/`version` form field the way twine's
+upload does; Floci reads both from the uploaded `.nupkg`'s own embedded `.nuspec` manifest (a
+`.nupkg` is a plain ZIP, parsed with the JDK's own `java.util.zip`, matching the same no-new-
+dependency approach already used elsewhere here). BaGetter's own `AllowPackageOverwrites: false`
+default rejects even a byte-identical re-push, so Floci's proxy applies the same idempotent-retry
+check as the pypi proxy: a re-push with content identical to what BaGetter already holds succeeds
+without forwarding anything, and only a genuine content mismatch is rejected with `409`. One
+config knob, `FLOCI_SERVICES_CODEARTIFACT_NUGET_IMAGE`, pins the image version.
+
+`GetPackageVersionReadme` for `nuget` is answered live against the BaGetter container rather than
+from a captured record: BaGetter keeps every version's own embedded readme file (if its nuspec
+declared one with `<readme>`) addressable by exact version for as long as that version exists,
+falling back to the nuspec's own `<description>` field when no readme file was embedded, matching
+AWS's documented "the readme file or descriptive text" wording for this action exactly.
+
 ## AWS-compatible failures
 
 Domain and repository names, tags, pagination, duplicate names, missing upstreams, policy-revision
@@ -218,16 +256,16 @@ state.
   `DisposePackageVersions`, and `UpdatePackageVersionsStatus` don't exist yet; the only way to
   move a version from `Unfinished` to `Published` today is a follow-up `PublishPackageVersion`
   call that omits the `unfinished` flag.
-- **The 5 GB asset size quota is nominal.** `PublishPackageVersion` and the Maven and pypi
-  repository endpoints all receive the request body as a single byte array before Floci ever
+- **The 5 GB asset size quota is nominal.** `PublishPackageVersion` and the Maven, pypi, and
+  nuget repository endpoints all receive the request body as a single byte array before Floci ever
   checks its length, so a request already large enough to exhaust available heap fails before the
   quota check runs. The rejection (`ServiceQuotaExceededException` from `PublishPackageVersion`,
-  HTTP 413 from the Maven and pypi endpoints) is correct for anything that does fit in memory; it
-  is not itself a streaming size limit.
-- **Maven artifacts, npm packages, and pypi packages do not survive a Floci restart, even under
-  persistent storage.** The Reposilite instance and every per-repository Verdaccio and pypiserver
-  container have no volume attached and are removed on shutdown along with everything published to
-  them. CodeArtifact repository/domain metadata (including each format's stored sidecar container
+  HTTP 413 from the Maven, pypi, and nuget endpoints) is correct for anything that does fit in
+  memory; it is not itself a streaming size limit.
+- **Maven artifacts, npm packages, pypi packages, and NuGet packages do not survive a Floci
+  restart, even under persistent storage.** The Reposilite instance and every per-repository
+  Verdaccio, pypiserver, and BaGetter container have no volume attached and are removed on shutdown
+  along with everything published to them. CodeArtifact repository/domain metadata (including each format's stored sidecar container
   id) survives a restart the same way any other Floci state does under persistent storage mode; the
   artifacts and packages themselves do not, so the first request after a restart re-provisions
   empty storage and returns 404 for anything published before the restart.
@@ -235,27 +273,30 @@ state.
   CodeArtifact tokens are scoped to the calling principal's permissions; Floci's are scoped only to
   the domain named in the request; anyone who obtains one keeps the same domain-scoped access for
   its full lifetime.
-- **The Maven, npm, and pypi sidecar containers have no authentication of their own, and anything
-  else sharing their Docker network can reach them directly on their container port.** Real
-  CodeArtifact's token check happens once, at Floci's own proxy layer (`CodeArtifactMavenController`/
-  the npm data plane/`CodeArtifactPypiController`), before a request ever reaches Reposilite,
-  Verdaccio, or pypiserver; those containers' own auth is deliberately disabled since the proxy is
-  meant to be the only path in. Binding the published host port to loopback only keeps an outside
-  host off that port; it does not stop another container already on the same configured Docker
-  network (for example a Lambda, Batch, or ECS workload container) from reaching the sidecar on its
+- **The Maven, npm, pypi, and nuget sidecar containers have no authentication of their own, and
+  anything else sharing their Docker network can reach them directly on their container port.**
+  Real CodeArtifact's token check happens once, at Floci's own proxy layer
+  (`CodeArtifactMavenController`/the npm data plane/`CodeArtifactPypiController`/
+  `CodeArtifactNuGetController`), before a request ever reaches Reposilite, Verdaccio, pypiserver,
+  or BaGetter; those containers' own auth is deliberately disabled since the proxy is meant to be the
+  only path in. Binding the published host port to loopback only keeps an outside host off that
+  port; it does not stop another container already on the same configured Docker network (for
+  example a Lambda, Batch, or ECS workload container) from reaching the sidecar on its
   container-internal address, bypassing the proxy's token check entirely. Closing this for real
   would mean isolating each sidecar on its own Docker network reachable only from Floci's own
-  process, a change that would need to apply uniformly across all three sidecar-backed formats, not
+  process, a change that would need to apply uniformly across all four sidecar-backed formats, not
   a one-off fix to any single proxy.
-- **Neither the Maven, npm, nor pypi repository endpoint resolves through upstream repositories or
-  external connections.** On real CodeArtifact, a repository with another repository configured as
-  an upstream (`UpdateRepository`'s `upstreams`) or with an `AssociateExternalConnection` to a
-  public repository (`public:maven-central`, `public:npmjs`, `public:pypi`, etc.) serves packages
-  from those sources too, not just its own. Floci's proxies only ever look up the repository's own
-  backing storage: a package that exists solely in an upstream, or only through an external
-  connection, returns 404 through a repository that has it configured as one; the pypi proxy's
-  pypiserver container is also started with `--disable-fallback` specifically so it never silently
-  redirects a missing package to the real, public PyPI.
+- **None of the Maven, npm, pypi, or nuget repository endpoints resolve through upstream
+  repositories or external connections.** On real CodeArtifact, a repository with another
+  repository configured as an upstream (`UpdateRepository`'s `upstreams`) or with an
+  `AssociateExternalConnection` to a public repository (`public:maven-central`, `public:npmjs`,
+  `public:pypi`, `public:nuget-org`, etc.) serves packages from those sources too, not just its
+  own. Floci's proxies only ever look up the repository's own backing storage: a package that
+  exists solely in an upstream, or only through an external connection, returns 404 through a
+  repository that has it configured as one; the pypi proxy's pypiserver container is started with
+  `--disable-fallback`, and the nuget proxy's BaGetter container with `Mirror__Enabled=false`,
+  specifically so neither ever silently redirects a missing package to the real, public PyPI or
+  nuget.org.
 - **The npm repository endpoint does not enforce the 5 GB asset size quota.** Unlike
   `PublishPackageVersion` and the Maven endpoint, it streams the request straight through to the
   backing Verdaccio container rather than buffering it first, so there is nowhere in the request
@@ -268,44 +309,52 @@ state.
   itself has no JSON index support to pass through. Low practical risk in itself, since PEP 691
   requires clients to accept HTML as a fallback and pip/uv both do, but it is a real gap against
   AWS's documented surface, not just a quirk of the sidecar.
-- **`DescribePackageVersion` can't see Maven-, npm-, or pypi-uploaded package versions.** Those
-  three formats' repository endpoints are deliberately metadata-free passthroughs straight to
-  their sidecar container (Reposilite/Verdaccio/pypiserver) and never create the generic-format
-  package-version record this action depends on (`CodeArtifactService.describePackageVersion`
-  only ever looks up `packageVersions.getForAccount`, the record only the `generic` format's
-  `PublishPackageVersion` flow creates). `GetPackageVersionAsset` no longer has this gap: it
-  bridges to each format's own sidecar (via a new `RepositorySidecarManager.fetchPackageVersionAsset`
-  method each sidecar client implements) when there's no generic-format record, so it now works
-  uniformly across formats the way real CodeArtifact's does. `DescribePackageVersion` is a harder
-  problem for the same bridge: it describes every asset and the status of a whole version, not one
-  named file, and none of these sidecars expose that shape cheaply (Reposilite has no per-GAV
-  metadata beyond file listings; Verdaccio's own registry API could answer it for npm but Maven and
-  pypi have nothing equivalent), so it remains unbridged and still 404s for these three formats.
+- **`DescribePackageVersion` reports only format/namespace/packageName/version/revision/status/origin
+  for Maven, npm, pypi, and nuget, same as it does for generic.** Real CodeArtifact's `PackageVersionDescription`
+  can also carry `displayName`, `summary`, `homePage`, `sourceCodeRepository`, `licenses`, and
+  `publishedTime`, extracted from the package's own metadata; none of those are populated for any
+  format today, container-backed or generic. For all four, the version's existence is
+  confirmed directly against its sidecar (`RepositorySidecarManager.packageVersionExists`) rather
+  than through the generic-format-only `packageVersions` record `GetPackageVersionAsset`'s own
+  bridge also moved past, and the revision is synthesized the same deterministic way
+  `GetPackageVersionAsset`'s bridge already does, so describing a version and then fetching one of
+  its assets see the same revision. Every sidecar-backed version reports `Published`: none of
+  these four formats' native publish paths (`mvn deploy`, `npm publish`, `twine upload`, `nuget
+  push`) can leave a version in any other status the way a generic publish deliberately can with
+  `unfinished=true`.
+- **The nuget repository endpoint advertises no `RegistrationsBaseUrl` or `SearchQueryService`
+  resource.** `nuget install`/`dotnet add package`/`dotnet restore` resolve a package's versions
+  and dependencies from `PackageBaseAddress` alone (each version's own `.nuspec`, fetched directly,
+  carries its dependency groups), which is what Floci implements, so this doesn't affect the
+  install/restore path; it does mean `nuget list` has no resource to work against, which matches
+  AWS's own documented restriction that only NuGet's V3 protocol works against CodeArtifact at all
+  and that `nuget list` specifically isn't supported.
 - **`DescribePackage`'s origin controls default to `publish: ALLOW`/`upstream: BLOCK`** (the
   default for a package whose first version was published directly, since Floci never ingests
   packages from an upstream source) **until a caller sets them explicitly with
-  `PutPackageOriginConfiguration`.** For Maven, npm, and pypi, `DescribePackage` asks the
+  `PutPackageOriginConfiguration`.** For Maven, npm, pypi, and nuget, `DescribePackage` asks the
   repository's sidecar whether the package exists, which starts that sidecar if it is not already
   running; a package that exists only because `PutPackageOriginConfiguration` created it (no
   versions yet) is found without touching any sidecar.
 - **`PutPackageOriginConfiguration`'s `publish: BLOCK` is only enforced for the `generic`
   format.** `PublishPackageVersion`, the one path it actually gates, accepts only `generic` to
-  begin with; Maven, npm, and pypi publishes go through their own native wire protocol (`mvn
-  deploy`, `npm publish`, `twine upload`) directly against the repository endpoint, which does not
-  yet check this setting. `upstream` is stored and reported faithfully for every format but is
+  begin with; Maven, npm, pypi, and nuget publishes go through their own native wire protocol (`mvn
+  deploy`, `npm publish`, `twine upload`, `nuget push`) directly against the repository endpoint,
+  which does not yet check this setting. `upstream` is stored and reported faithfully for every format but is
   never enforced for any of them, since Floci has no upstream ingestion path to block in the first
   place.
 - **`DescribeDomain`'s `assetSizeBytes` only counts what was published after this field started
   being computed.** Generic-format bytes are summed live from the still-existing
-  `PublishPackageVersion` records, so they're always current. Maven, npm, and pypi have no such
-  record to sum (the same gap `DescribePackageVersion` has), so each proxy reports its own
-  successfully-written byte count directly; a package published through one of those three formats
+  `PublishPackageVersion` records, so they're always current. Maven, npm, pypi, and nuget have no
+  such record to sum (the same absent generic-format record `DescribePackageVersion`'s own bridge works
+  around by asking the sidecar directly instead), so each proxy reports its own successfully-written
+  byte count directly; a package published through one of those four formats
   before this accounting existed was never reported and is not retroactively counted. A genuine
-  conflict or an idempotent no-op retry (any of the three formats' own duplicate-publish
-  protection) correctly adds nothing either way. Both `DeleteRepository` and `DeletePackage` clean
+  conflict or an idempotent no-op retry (any of the four formats' own duplicate-publish protection)
+  correctly adds nothing either way. Both `DeleteRepository` and `DeletePackage` clean
   up every format's own records and byte counts (and, for `DeleteRepository`, the per-version
   asset content underneath them), so a repository or package recreated under the same name never
-  inherits a predecessor's bytes. Maven/npm/pypi byte counts live only in memory, the same as the
+  inherits a predecessor's bytes. Maven/npm/pypi/nuget byte counts live only in memory, the same as the
   sidecar content they describe (see the restart limitation below), not through `StorageFactory`
   like every durable store here: the content these bytes count does not survive a restart either,
   so neither does the count.
@@ -337,3 +386,4 @@ See the [CodeArtifact API Reference](https://docs.aws.amazon.com/codeartifact/la
 | `FLOCI_SERVICES_CODEARTIFACT_MAVEN_TOKEN` | unset | `name:secret` access token for a pre-configured `MAVEN_URL` |
 | `FLOCI_SERVICES_CODEARTIFACT_NPM_IMAGE` | `verdaccio/verdaccio:6.10.4` | Verdaccio image used to serve the `npm` format |
 | `FLOCI_SERVICES_CODEARTIFACT_PYPI_IMAGE` | `pypiserver/pypiserver:v2.4.2` | pypiserver image used to serve the `pypi` format |
+| `FLOCI_SERVICES_CODEARTIFACT_NUGET_IMAGE` | `bagetter/bagetter:1.6.5` | BaGetter image used to serve the `nuget` format |

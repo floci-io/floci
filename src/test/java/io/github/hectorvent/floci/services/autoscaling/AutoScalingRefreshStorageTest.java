@@ -393,6 +393,19 @@ class AutoScalingRefreshStorageTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void terminatedInstanceDropsOutOfActiveRefresh(String mode) throws IOException {
+        setUp(mode);
+        service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());
+        service.terminateInstanceInAutoScalingGroup(REGION, "i-original", true);
+        restart(mode);
+        AutoScalingGroup restored = service.describeAutoScalingGroups(REGION, List.of("suspended-group")).getFirst();
+        InstanceRefresh refresh = service.activeInstanceRefresh(restored);
+        assertNotNull(refresh);
+        assertTrue(refresh.getReplacements().isEmpty(), "terminated instance must leave the refresh");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
     void explicitTerminationOfSelectedOriginalIsNotPaused(String mode) throws IOException {
         setUp(mode);
         service.startInstanceRefresh(REGION, "suspended-group", new InstanceRefresh());

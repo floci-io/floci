@@ -28,6 +28,7 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 | `DescribeAutoScalingGroups` | Filtered by name list; returns all if no filter; includes current instance list with lifecycle state and mixed instances policy shape when configured |
 | `UpdateAutoScalingGroup` | Updates capacity bounds, cooldown, launch source, AZs |
 | `DeleteAutoScalingGroup` | `ForceDelete=true` terminates all instances before deletion |
+| `DescribeTags` | Group tags; filters `auto-scaling-group`, `key`, `value`, `propagate-at-launch` (values ORed, filters ANDed); `MaxRecords`/`NextToken` paging |
 | `EnableMetricsCollection` | Records the named group metrics, or all 20 when none are named, as `EnabledMetrics` on `DescribeAutoScalingGroups`. `Granularity` is required and must be `1Minute`; an unknown metric name raises `ValidationError`. No metrics are published to CloudWatch |
 | `DisableMetricsCollection` | Removes the named metrics from `EnabledMetrics`, or all of them when none are named |
 

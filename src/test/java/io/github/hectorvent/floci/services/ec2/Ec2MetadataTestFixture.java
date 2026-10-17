@@ -4,9 +4,9 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.MutableClock;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.vertx.core.Vertx;
 
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -46,10 +46,7 @@ final class Ec2MetadataTestFixture implements AutoCloseable {
 
     private void start(EmulatorConfig config, IamService iam, Instance registeredInstance,
                        Clock serverClock) throws Exception {
-        int port;
-        try (ServerSocket socket = new ServerSocket(0)) {
-            port = socket.getLocalPort();
-        }
+        int port = FreePorts.anyInterfacePort();
         when(config.services().ec2().imdsPort()).thenReturn(port);
         vertx = Vertx.vertx();
         server = new Ec2MetadataServer(vertx, config, iam, serverClock);

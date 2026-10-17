@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccoun
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.SimulationDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider.ResourcePolicy;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
@@ -135,8 +136,14 @@ public class LambdaTaskAuthorizer {
                 Map.of("aws:PrincipalArn", List.of(callerRoleArn), "sts:ExternalId", List.of(stateMachineArn)),
                 targetRoleArn, AwsArnUtils.parse(stateMachineArn).region(), callerId.accountId(), roleAccount);
 
-        TrustDecision trust = trustEvaluator.decide(target.get().getAssumeRolePolicyDocument(),
-                sessionArn(callerRoleArn), callerRoleArn, callerId.accountId(), context);
+        // Step Functions assumes the execution role on the state machine's behalf, so the caller
+        // is a session of it and carries AssumedRole as its aws:PrincipalType. That path mints no
+        // session name, and a session's aws:userid is role-id:session-name, so it and aws:username
+        // stay absent, which is what makes a condition on either of them not match.
+        CallerArns trustCaller = new CallerArns(sessionArn(callerRoleArn), callerRoleArn,
+                CallerArns.TYPE_ASSUMED_ROLE, null, null);
+        TrustDecision trust = trustEvaluator.decide(target.get().getAssumeRolePolicyDocument(), trustCaller,
+                callerId.accountId(), context);
         ResourceAccountRelationship relationship = relationship(callerId.accountId(), roleAccount);
         // A grant to the execution role's account delegates to that account, so within it the
         // role's own policies have to allow the call too, as they do across accounts anyway.

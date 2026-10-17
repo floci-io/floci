@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigateway;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.testutil.ExecuteApiRequestSigner;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
@@ -15,7 +16,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -69,9 +69,7 @@ class ApiGatewayHttpProxyIntegrationTest {
         backendServer.start();
         backendPort = backendServer.getAddress().getPort();
 
-        try (ServerSocket probe = new ServerSocket(0)) {
-            deadPort = probe.getLocalPort();
-        }
+        deadPort = FreePorts.anyInterfacePort();
     }
 
     @AfterAll

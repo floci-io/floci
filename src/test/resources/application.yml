@@ -108,6 +108,7 @@ floci:
     allow-private-jwt-targets: true
 
   init-hooks:
+    dir: /etc/floci/init
     shell-executable: /bin/sh
     timeout-seconds: 5
     shutdown-grace-period-seconds: 2
@@ -138,6 +139,8 @@ floci:
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      lifecycle-sweep-enabled: false   # tests run the sweep themselves, so no bucket's rules apply behind another test's back
+      lifecycle-sweep-interval-seconds: 60
     dynamodb:
       enabled: true
       vector-index-allocation-seconds: 0
@@ -219,6 +222,7 @@ floci:
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
+      database-resuming-exception-enabled: false
     redshift-data:
       enabled: true
       result-ttl-hours: 24

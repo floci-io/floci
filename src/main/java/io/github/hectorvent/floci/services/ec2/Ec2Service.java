@@ -25,6 +25,8 @@ import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.CapacityReservation;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
+import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGateway;
+import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGatewayListResult;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Host;
 import io.github.hectorvent.floci.services.ec2.model.IamInstanceProfileAssociation;
@@ -278,6 +280,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private final StorageBackend<String, List<Tag>> tags;
     private final StorageBackend<String, CapacityReservation> capacityReservations;
     private final StorageBackend<String, Host> hosts;
+    private final StorageBackend<String, EgressOnlyInternetGateway> egressOnlyInternetGateways;
     // Serialises a launch onto a host against ModifyHosts/ReleaseHosts, so a host cannot be
     // released between the launch's availability check and the store of its instance.
     private final Object hostLock = new Object();
@@ -520,7 +523,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 requestContextInstance, iamService, volumeBlockDeviceManager,
                 storageFactory.create("ec2", "ec2-hosts.json", new TypeReference<Map<String, Host>>() {}),
                 storageFactory.create("ec2", "ec2-transit-gateway-peering-attachments.json",
-                        new TypeReference<Map<String, TransitGatewayPeeringAttachment>>() {}));
+                        new TypeReference<Map<String, TransitGatewayPeeringAttachment>>() {}),
+                storageFactory.create("ec2", "ec2-egress-only-internet-gateways.json",
+                        new TypeReference<Map<String, EgressOnlyInternetGateway>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -728,11 +733,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections,
                 networkInterfaces, capacityReservations, volumeModifications,
                 requestContextInstance, iamService, volumeBlockDeviceManager, new InMemoryStorage<>(),
-                new InMemoryStorage<>());
+                new InMemoryStorage<>(), new InMemoryStorage<>());
     }
 
-    // The terminal constructor. Dedicated Hosts and transit gateway peering attachments ride on
-    // their own parameters so the shorter overloads above keep their arity for existing fixtures.
+    // The terminal constructor. Dedicated Hosts, transit gateway peering attachments and egress-only
+    // internet gateways ride on their own parameters so the shorter overloads above keep their
+    // arity for existing fixtures.
     Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                Ec2PortForwardManager portForwardManager,
                AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
@@ -769,8 +775,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                IamService iamService,
                Ec2VolumeBlockDeviceManager volumeBlockDeviceManager,
                StorageBackend<String, Host> hosts,
-               StorageBackend<String, TransitGatewayPeeringAttachment> transitGatewayPeeringAttachments) {
+               StorageBackend<String, TransitGatewayPeeringAttachment> transitGatewayPeeringAttachments,
+               StorageBackend<String, EgressOnlyInternetGateway> egressOnlyInternetGateways) {
         this.hosts = hosts;
+        this.egressOnlyInternetGateways = egressOnlyInternetGateways;
         this.transitGatewayPeeringAttachments = transitGatewayPeeringAttachments;
         this.iamService = iamService;
         this.volumeBlockDeviceManager = volumeBlockDeviceManager;
@@ -817,7 +825,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (portForwardManager != null) {
             portForwardManager.setPersister(inst -> {
                 if (inst != null && inst.getRegion() != null && inst.getInstanceId() != null) {
-                    instances.put(key(inst.getRegion(), inst.getInstanceId()), inst);
+                    putInstanceForOwner(key(inst.getRegion(), inst.getInstanceId()), inst);
                 }
             });
         }
@@ -828,27 +836,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         restoreVpcNetworks();
 
         int restored = 0;
-        for (String key : instances.keys()) {
-            Instance instance = instances.get(key).orElse(null);
-            if (!needsMetadataRegistration(instance)) {
-                continue;
-            }
-            try {
-                restoreInstanceFirewall(instance);
-            } catch (Exception e) {
-                LOG.warnv("Could not restore EC2 firewall for {0}: {1}", instance.getInstanceId(), e.getMessage());
-                containerManager.stopForShutdown(instance);
-                instance.setState(InstanceState.stopped());
-                instances.put(key, instance);
-                continue;
-            }
-            if (containerManager.restoreMetadataRegistration(instance)) {
-                instances.put(key, instance);
+        for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
+            if (needsMetadataRegistration(entry.value())
+                    && RequestScopes.callAs(entry.accountId(), entry.value().getRegion(), () -> restoreInstance(entry))) {
                 restored++;
-                // Container is running: re-reserve host ports and recreate any missing socat sidecars.
-                if (portForwardManager != null) {
-                    portForwardManager.restore(instance);
-                }
             }
         }
         if (restored > 0) {
@@ -861,6 +852,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // Runs after the restore loop, so anything legitimately revived above is already
         // accounted for and only genuine leftovers are left to collect.
         containerManager.reconcileOrphanedContainers(this::instanceContainerStillWanted);
+    }
+
+    /**
+     * Runs as the instance's own account, so the security groups, prefix lists and port-forward
+     * writes it resolves along the way come from that account rather than the default one.
+     */
+    private boolean restoreInstance(AccountAwareStorageBackend.AccountEntry<Instance> entry) {
+        Instance instance = entry.value();
+        try {
+            restoreInstanceFirewall(instance);
+        } catch (Exception e) {
+            LOG.warnv("Could not restore EC2 firewall for {0}: {1}", instance.getInstanceId(), e.getMessage());
+            containerManager.stopForShutdown(instance);
+            instance.setState(InstanceState.stopped());
+            putForOwner(instances, entry, instance);
+            return false;
+        }
+        if (!containerManager.restoreMetadataRegistration(instance)) {
+            return false;
+        }
+        putForOwner(instances, entry, instance);
+        // Container is running: re-reserve host ports and recreate any missing socat sidecars.
+        if (portForwardManager != null) {
+            portForwardManager.restore(instance);
+        }
+        return true;
     }
 
     private void restoreAttachedVolumesOnStartup() {
@@ -958,14 +975,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (vpcNetworkManager == null || !vpcNetworkManager.enabled()) {
             return;
         }
-        vpcNetworkManager.reconcileOrphans((region, vpcId) -> vpcs.get(key(region, vpcId)).isPresent());
-        for (String storageKey : vpcs.keys()) {
-            vpcs.get(storageKey).ifPresent(vpc ->
-                    vpcNetworkManager.declareVpc(vpc.getRegion(), vpc.getVpcId(), vpc.getCidrBlock()));
+        vpcNetworkManager.reconcileOrphans((region, vpcId) -> findAnyVpcEntry(region, vpcId).isPresent());
+        // declareVpc is first-wins on overlapping CIDRs, so declare in a stable order, default account first.
+        List<AccountAwareStorageBackend.AccountEntry<Vpc>> restoredVpcs = new ArrayList<>(entriesOfEveryAccount(vpcs));
+        restoredVpcs.sort(Comparator
+                .comparing((AccountAwareStorageBackend.AccountEntry<Vpc> entry) -> !defaultAccountId.equals(entry.accountId()))
+                .thenComparing(entry -> String.valueOf(entry.accountId()))
+                .thenComparing(AccountAwareStorageBackend.AccountEntry::key));
+        for (AccountAwareStorageBackend.AccountEntry<Vpc> entry : restoredVpcs) {
+            Vpc vpc = entry.value();
+            vpcNetworkManager.declareVpc(vpc.getRegion(), vpc.getVpcId(), vpc.getCidrBlock());
         }
-        for (String storageKey : subnets.keys()) {
-            subnets.get(storageKey).ifPresent(subnet -> vpcNetworkManager.declareSubnet(
-                    subnet.getRegion(), subnet.getVpcId(), subnet.getSubnetId(), subnet.getCidrBlock()));
+        for (AccountAwareStorageBackend.AccountEntry<Subnet> entry : entriesOfEveryAccount(subnets)) {
+            Subnet subnet = entry.value();
+            vpcNetworkManager.declareSubnet(
+                    subnet.getRegion(), subnet.getVpcId(), subnet.getSubnetId(), subnet.getCidrBlock());
         }
         reserveRestoredPrivateIps();
     }
@@ -985,8 +1009,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private void reserveRestoredPrivateIps() {
         int reserved = 0;
         int skipped = 0;
-        for (String storageKey : instances.keys()) {
-            Instance instance = instances.get(storageKey).orElse(null);
+        for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
+            Instance instance = entry.value();
             if (instance == null || instance.getSubnetId() == null
                     || instance.getPrivateIpAddress() == null
                     || instance.getState() == null
@@ -1005,6 +1029,59 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             LOG.debugv("Re-reserved {0} private address(es) held by restored instances; {1} could not be "
                     + "reserved", String.valueOf(reserved), String.valueOf(skipped));
         }
+    }
+
+    /**
+     * Every stored entry, whichever account owns it. Startup restore and shutdown run outside
+     * any request, where an account-aware {@code keys()} sees only the default account.
+     * A pre-multi-account key is migrated to the default account it is reported under, so it is
+     * listed once and later writes and deletes reach the only copy. The migration is a write on
+     * read, on purpose: it is idempotent, so the restore and shutdown paths can each call this.
+     */
+    private static <T> List<AccountAwareStorageBackend.AccountEntry<T>> entriesOfEveryAccount(
+            StorageBackend<String, T> store) {
+        if (store instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<T> accountAware = (AccountAwareStorageBackend<T>) rawAccountAware;
+            Map<String, AccountAwareStorageBackend.AccountEntry<T>> unique = new LinkedHashMap<>();
+            Set<String> legacy = new HashSet<>();
+            for (AccountAwareStorageBackend.AccountEntry<T> scanned : accountAware.scanAllAccountEntries(key -> true)) {
+                String owned = scanned.accountId() + "/" + scanned.key();
+                if (unique.putIfAbsent(owned, scanned) != null
+                        || accountAware.getForAccount(scanned.accountId(), scanned.key()).isEmpty()) {
+                    legacy.add(owned);
+                }
+            }
+            List<AccountAwareStorageBackend.AccountEntry<T>> entries = new ArrayList<>();
+            for (Map.Entry<String, AccountAwareStorageBackend.AccountEntry<T>> listed : unique.entrySet()) {
+                AccountAwareStorageBackend.AccountEntry<T> scanned = listed.getValue();
+                if (!legacy.contains(listed.getKey())) {
+                    entries.add(scanned);
+                    continue;
+                }
+                // Moves the legacy copy under its account, or drops it when a scoped twin already exists.
+                accountAware.getForAccountMigratingLegacyKeys(scanned.accountId(), scanned.key(), List.of(), value -> true)
+                        .ifPresent(value -> entries.add(
+                                new AccountAwareStorageBackend.AccountEntry<>(scanned.accountId(), scanned.key(), value)));
+            }
+            return entries;
+        }
+        List<AccountAwareStorageBackend.AccountEntry<T>> entries = new ArrayList<>();
+        for (String key : store.keys()) {
+            store.get(key).ifPresent(value -> entries.add(new AccountAwareStorageBackend.AccountEntry<>(null, key, value)));
+        }
+        return entries;
+    }
+
+    private static <T> void putForOwner(StorageBackend<String, T> store,
+            AccountAwareStorageBackend.AccountEntry<T> entry, T value) {
+        if (store instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<T> accountAware = (AccountAwareStorageBackend<T>) rawAccountAware;
+            accountAware.putForAccount(entry.accountId(), entry.key(), value);
+            return;
+        }
+        store.put(entry.key(), value);
     }
 
     private void declareVpcNetwork(String region, String vpcId, String cidrBlock) {
@@ -3391,12 +3468,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         validateArchitectureCompatibility(region, imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
         String architecture = architectureFor(region, imageId, effectiveInstanceType);
-        if (blockDeviceMappings != null) {
-            blockDeviceMappings.stream()
-                    .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null)
-                    .forEach(m -> requireValidVolumeType(m.getEbs().getVolumeType()));
-        }
-        String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId), blockDeviceMappings);
+        // An entry with NoDevice set removes its device whatever else it names, as on AWS.
+        List<LaunchTemplateData.BlockDeviceMapping> mappedDevices = blockDeviceMappings == null ? List.of()
+                : blockDeviceMappings.stream().filter(m -> m.getNoDevice() == null).toList();
+        mappedDevices.stream()
+                .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null)
+                .forEach(m -> requireValidVolumeType(m.getEbs().getVolumeType()));
+        String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId), mappedDevices);
         List<Instance> launched = new ArrayList<>();
         // Resolving the AMI, building the instances that depend on it and publishing them is one
         // step. A DeregisterImage releases the captured layer only when no live instance resolves
@@ -4045,8 +4123,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (config.services().ec2().mock()) {
             return;
         }
-        for (String storeKey : Set.copyOf(instances.keys())) {
-            Instance inst = instances.get(storeKey).orElse(null);
+        for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
+            Instance inst = entry.value();
             if (inst == null || inst.getDockerContainerId() == null
                     || inst.getState() == null || !"running".equals(inst.getState().getName())) {
                 continue;
@@ -4054,7 +4132,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             try {
                 containerManager.stopForShutdown(inst);
                 inst.setState(InstanceState.stopped());
-                instances.put(storeKey, inst);
+                putForOwner(instances, entry, inst);
             } catch (Exception e) {
                 LOG.warnv("Failed to stop EC2 instance container {0} on shutdown: {1}",
                         inst.getDockerContainerId(), e.getMessage());
@@ -4750,11 +4828,120 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return List.of();
     }
 
+    // ─── Egress-only Internet Gateways ─────────────────────────────────────────
+
+    // Created already attached: AWS has no attach/detach call for this gateway, the VPC is fixed at creation.
+    // ClientToken replays return the gateway the first call made, unchanged; a reused token with
+    // another VpcId or other creation tags fails with IdempotentParameterMismatch, as the EC2
+    // idempotency guide documents. Tags are applied here, with the gateway, so a replay never re-tags.
+    public EgressOnlyInternetGateway createEgressOnlyInternetGateway(String region, String vpcId,
+                                                                     String clientToken, List<Tag> tagList) {
+        ensureDefaultResources(region);
+        if (vpcId == null || vpcId.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter vpcId", 400);
+        }
+        String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
+        synchronized (attachmentTopologyLock(region)) {
+            if (token != null) {
+                for (EgressOnlyInternetGateway existing : egressOnlyInternetGateways.scan(
+                        k -> k.startsWith(region + "::"))) {
+                    if (token.equals(existing.getClientToken())) {
+                        if (!vpcId.equals(existing.getAttachments().get(0).getVpcId())
+                                || !tagMap(tagList).equals(tagMap(existing.getCreationTags()))) {
+                            throw new AwsException("IdempotentParameterMismatch",
+                                    "The client token '" + token + "' was already used with different parameters", 400);
+                        }
+                        return existing;
+                    }
+                }
+            }
+            getRequiredVpc(region, vpcId);
+            EgressOnlyInternetGateway eigw = new EgressOnlyInternetGateway();
+            eigw.setEgressOnlyInternetGatewayId("eigw-" + randomHex(17));
+            eigw.setRegion(region);
+            eigw.setClientToken(token);
+            eigw.getAttachments().add(new InternetGatewayAttachment(vpcId, "attached"));
+            eigw.setCreationTags(new ArrayList<>(tagList));
+            eigw.setTags(new ArrayList<>(tagList));
+            if (!tagList.isEmpty()) {
+                tags.put(eigw.getEgressOnlyInternetGatewayId(), new ArrayList<>(tagList));
+            }
+            egressOnlyInternetGateways.put(key(region, eigw.getEgressOnlyInternetGatewayId()), eigw);
+            return eigw;
+        }
+    }
+
     // AWS answers an unknown egress-only gateway ID with an empty set, not an error; callers such as
     // the Terraform provider treat the empty result as "not found".
-    public List<String> describeEgressOnlyInternetGatewayIds(Map<String, List<String>> filters) {
+    public List<EgressOnlyInternetGateway> describeEgressOnlyInternetGateways(String region, List<String> ids,
+                                                                             Map<String, List<String>> filters) {
         requireSupportedFilters(filters.keySet(), EGRESS_ONLY_INTERNET_GATEWAY_FILTERS);
-        return List.of();
+        return egressOnlyInternetGateways.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(eigw -> ids.isEmpty() || ids.contains(eigw.getEgressOnlyInternetGatewayId()))
+                .filter(eigw -> matchesFilters(eigw, filters, region))
+                .sorted(Comparator.comparing(EgressOnlyInternetGateway::getEgressOnlyInternetGatewayId))
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * The paginated form. MaxResults is 5 to 255 in the EC2 model; null means the request left it
+     * out and gets every match in one page.
+     */
+    public EgressOnlyInternetGatewayListResult describeEgressOnlyInternetGateways(
+            String region, List<String> ids, Map<String, List<String>> filters, Integer maxResults,
+            String nextToken) {
+        if (maxResults != null && (maxResults < 5 || maxResults > 255)) {
+            throw new AwsException("InvalidMaxResults",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 5 and 255.", 400);
+        }
+        int offset = decodeToken(nextToken);
+        List<EgressOnlyInternetGateway> all = describeEgressOnlyInternetGateways(region, ids, filters);
+        int total = all.size();
+        int toIndex = maxResults != null ? Math.min(offset + maxResults, total) : total;
+        List<EgressOnlyInternetGateway> page = offset < total
+                ? new ArrayList<>(all.subList(offset, toIndex))
+                : new ArrayList<>();
+        return new EgressOnlyInternetGatewayListResult(page, toIndex < total ? encodeToken(toIndex) : null);
+    }
+
+    private static Map<String, String> tagMap(List<Tag> tagList) {
+        Map<String, String> map = new HashMap<>();
+        for (Tag tag : tagList == null ? List.<Tag>of() : tagList) {
+            map.put(tag.getKey(), tag.getValue());
+        }
+        return map;
+    }
+
+    // Under the gateway's resource lock, the one createSystemTags takes, so a concurrent tag write
+    // cannot put the gateway back after it is gone. A route that targeted the gateway stays in its
+    // table as a blackhole: AWS documents that state for a route whose target is no longer available.
+    public void deleteEgressOnlyInternetGateway(String region, String eigwId) {
+        synchronized (lockFor(key(region, eigwId))) {
+            if (egressOnlyInternetGateways.get(key(region, eigwId)).isEmpty()) {
+                throw new AwsException("InvalidGatewayID.NotFound",
+                        "The eigw ID '" + eigwId + "' does not exist", 400);
+            }
+            egressOnlyInternetGateways.delete(key(region, eigwId));
+            tags.delete(eigwId);
+        }
+        for (RouteTable table : routeTables.scan(k -> k.startsWith(region + "::"))) {
+            if (table.getRoutes().stream().noneMatch(r -> eigwId.equals(r.getEgressOnlyInternetGatewayId()))) {
+                continue;
+            }
+            synchronized (lockFor(key(region, table.getRouteTableId()))) {
+                RouteTable current = routeTables.get(key(region, table.getRouteTableId())).orElse(null);
+                if (current == null) {
+                    continue;
+                }
+                current.getRoutes().stream()
+                        .filter(r -> eigwId.equals(r.getEgressOnlyInternetGatewayId()))
+                        .forEach(r -> r.setState("blackhole"));
+                routeTables.put(key(region, current.getRouteTableId()), current);
+                notifyRouteTableUpdated(region, current);
+            }
+        }
     }
 
     private void requireSupportedFilters(Collection<String> filterNames, Set<String> supportedFilters) {
@@ -4810,6 +4997,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         .anyMatch(acl -> vpcId.equals(acl.getVpcId()) && !acl.isDefault())
                 || internetGateways.scan(k -> k.startsWith(region + "::")).stream()
                         .anyMatch(igw -> igw.getAttachments().stream()
+                                .anyMatch(attachment -> vpcId.equals(attachment.getVpcId())))
+                || egressOnlyInternetGateways.scan(k -> k.startsWith(region + "::")).stream()
+                        .anyMatch(eigw -> eigw.getAttachments().stream()
                                 .anyMatch(attachment -> vpcId.equals(attachment.getVpcId())))
                 || vpcEndpoints.scan(k -> k.startsWith(region + "::")).stream()
                         .anyMatch(endpoint -> vpcId.equals(endpoint.getVpcId()));
@@ -8069,6 +8259,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (sgRule != null) { sgRule.setTags(new ArrayList<>(tagList)); securityGroupRules.put(storeKey, sgRule); return; }
         InternetGateway igw = internetGateways.get(storeKey).orElse(null);
         if (igw != null) { igw.setTags(new ArrayList<>(tagList)); internetGateways.put(storeKey, igw); return; }
+        EgressOnlyInternetGateway eigw = egressOnlyInternetGateways.get(storeKey).orElse(null);
+        if (eigw != null) {
+            eigw.setTags(new ArrayList<>(tagList));
+            egressOnlyInternetGateways.put(storeKey, eigw);
+            return;
+        }
         RouteTable rt = routeTables.get(storeKey).orElse(null);
         if (rt != null) { rt.setTags(new ArrayList<>(tagList)); routeTables.put(storeKey, rt); return; }
         KeyPair kp = keyPairs.get(storeKey).orElse(null);
@@ -8209,6 +8405,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         if (resourceId.startsWith("igw-")) {
             return "internet-gateway";
+        }
+        if (resourceId.startsWith("eigw-")) {
+            return "egress-only-internet-gateway";
         }
         if (resourceId.startsWith("rtb-")) {
             return "route-table";
@@ -9195,6 +9394,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return accountAware.findAnyAccount(storageKey);
         }
         return instances.get(storageKey);
+    }
+
+    /**
+     * The port-forward persister also runs on container executor threads, outside any request,
+     * where a plain put would copy another account's instance into the default account.
+     */
+    private void putInstanceForOwner(String storageKey, Instance instance) {
+        if (instances instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Instance> accountAware = (AccountAwareStorageBackend<Instance>) rawAccountAware;
+            Optional<AccountAwareStorageBackend.OwnedEntry<Instance>> owner = accountAware.findAnyAccountEntry(storageKey);
+            // No owner means the instance was terminated and deleted meanwhile; writing it would
+            // leave a copy in the default account.
+            owner.ifPresent(found -> accountAware.putForAccount(found.account(), storageKey, instance));
+            return;
+        }
+        instances.put(storageKey, instance);
     }
 
     private Optional<AccountAwareStorageBackend.OwnedEntry<Vpc>> findAnyVpcEntry(String region, String vpcId) {
@@ -10243,6 +10459,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 default -> true;
             };
         }
+        if (resource instanceof EgressOnlyInternetGateway eigw) {
+            return switch (filterName) {
+                case "egress-only-internet-gateway-id" -> matchesValue(values, eigw.getEgressOnlyInternetGatewayId());
+                case "attachment.vpc-id" -> eigw.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getVpcId()));
+                case "attachment.state" -> eigw.getAttachments().stream()
+                        .anyMatch(a -> matchesValue(values, a.getState()));
+                default -> true;
+            };
+        }
         if (resource instanceof RouteTable rt) {
             return switch (filterName) {
                 case "route-table-id" -> matchesValue(values, rt.getRouteTableId());
@@ -10432,6 +10658,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (resource instanceof Subnet subnet) return subnet.getTags();
         if (resource instanceof SecurityGroup sg) return sg.getTags();
         if (resource instanceof InternetGateway igw) return igw.getTags();
+        if (resource instanceof EgressOnlyInternetGateway eigw) return eigw.getTags();
         if (resource instanceof RouteTable rt) return rt.getTags();
         if (resource instanceof KeyPair kp) return kp.getTags();
         if (resource instanceof Address addr) return addr.getTags();

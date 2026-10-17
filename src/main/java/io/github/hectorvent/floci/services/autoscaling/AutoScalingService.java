@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.autoscaling;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
@@ -21,6 +23,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -115,7 +118,7 @@ public class AutoScalingService {
 
     // region :: name → resource
     private Map<String, LaunchConfiguration> launchConfigs = new ConcurrentHashMap<>();
-    private Map<String, AutoScalingGroup> groups = new ConcurrentHashMap<>();
+    Map<String, AutoScalingGroup> groups = new ConcurrentHashMap<>();
     private final Map<String, Object> groupLocks = new ConcurrentHashMap<>();
     private AccountAwareStorageBackend<AutoScalingGroup> groupsStore;
     private Map<String, LifecycleHook> hooks = new ConcurrentHashMap<>();
@@ -486,7 +489,9 @@ public class AutoScalingService {
                     .filter(Objects::nonNull)
                     .collect(Collectors.toList());
         }
+        // StorageBackedMap reads each value lazily, so a group deleted mid-iteration shows up as null.
         return groups.values().stream()
+                .filter(Objects::nonNull)
                 .filter(g -> region == null || region.equals(g.getRegion()))
                 .collect(Collectors.toList());
     }
@@ -555,6 +560,44 @@ public class AutoScalingService {
         groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
     }
 
+    // AWS: values inside one filter are ORed, separate filters are ANDed; only these four
+    // filter names exist. Ordered by (group, key); NextToken is the last pair returned, so tags
+    // added or removed between pages neither skip nor repeat an entry. Values match exactly
+    // (the Filter model says they are case-sensitive).
+    public PaginatedResult<TagDescription> describeTags(String region, List<Map.Entry<String, List<String>>> filters,
+                                                         Integer maxRecords, String nextToken) {
+        for (Map.Entry<String, List<String>> filter : filters) {
+            if (!Set.of("auto-scaling-group", "key", "value", "propagate-at-launch").contains(filter.getKey())) {
+                throw new AwsException("ValidationError", "Filter name '" + filter.getKey() + "' is not valid.", 400);
+            }
+        }
+        int limit = maxRecords != null ? Math.min(Math.max(maxRecords, 1), 100) : 50;
+        List<TagDescription> matches = groups.values().stream()
+                .filter(Objects::nonNull) // group deleted between key snapshot and value read
+                .filter(g -> region.equals(g.getRegion()))
+                .flatMap(g -> g.getTags().entrySet().stream()
+                        .map(t -> new TagDescription(g.getAutoScalingGroupName(), t.getKey(), t.getValue(),
+                                g.getTagPropagateAtLaunch().getOrDefault(t.getKey(), false))))
+                .filter(t -> matchesFilter(filters, "auto-scaling-group", t.resourceId())
+                        && matchesFilter(filters, "key", t.key())
+                        && matchesFilter(filters, "value", t.value())
+                        && matchesFilter(filters, "propagate-at-launch", String.valueOf(t.propagateAtLaunch())))
+                .collect(Collectors.toList());
+        // "\0" sorts below every other character, so the cursor orders as the (group, key) pair.
+        return Pagination.paginate(matches,
+                t -> t.resourceId() + "\0" + t.key(), limit, nextToken, "autoscaling-tags",
+                token -> new AwsException("InvalidNextToken", "The NextToken value is not valid.", 400));
+    }
+
+    // Every filter of this name must match (a repeated name is a second filter, ANDed).
+    private static boolean matchesFilter(List<Map.Entry<String, List<String>>> filters, String name, String actual) {
+        return filters.stream()
+                .filter(f -> f.getKey().equals(name) && !f.getValue().isEmpty())
+                .allMatch(f -> f.getValue().contains(actual));
+    }
+
+    public record TagDescription(String resourceId, String key, String value, boolean propagateAtLaunch) {}
+
     private AutoScalingGroup requireTaggableGroup(String region, String resourceId, String resourceType) {
         if (!"auto-scaling-group".equals(resourceType)) {
             throw new AwsException("ValidationError",
@@ -601,6 +644,7 @@ public class AutoScalingService {
 
     public List<AsgInstance> describeAutoScalingInstances(String region, List<String> instanceIds) {
         List<AsgInstance> all = groups.values().stream()
+                .filter(Objects::nonNull)
                 .filter(g -> region.equals(g.getRegion()))
                 .flatMap(g -> g.getInstances().stream())
                 .collect(Collectors.toList());
@@ -647,18 +691,39 @@ public class AutoScalingService {
             throw new AwsException("ValidationError",
                     "HealthStatus must be Healthy or Unhealthy.", 400);
         }
-        AutoScalingGroup asg = groups.values().stream()
-                .filter(group -> region.equals(group.getRegion()))
-                .filter(group -> group.getInstances().stream()
-                        .anyMatch(instance -> instanceId != null && instanceId.equals(instance.getInstanceId())))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("ValidationError",
-                        "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
-        asg.getInstances().stream()
+        updateGroupOfInstance(region, instanceId, asg -> asg.getInstances().stream()
                 .filter(instance -> instanceId.equals(instance.getInstanceId()))
                 .findFirst()
-                .ifPresent(instance -> instance.setHealthStatus(healthStatus));
-        groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
+                .ifPresent(instance -> instance.setHealthStatus(healthStatus)));
+    }
+
+    /** Applies {@code update} to the group holding {@code instanceId}, under that group's lock. */
+    private void updateGroupOfInstance(String region, String instanceId, Consumer<AutoScalingGroup> update) {
+        String name = groups.values().stream()
+                .filter(Objects::nonNull)
+                .filter(g -> region.equals(g.getRegion()) && containsInstance(g, instanceId))
+                .map(AutoScalingGroup::getAutoScalingGroupName)
+                .findFirst()
+                .orElseThrow(() -> instanceNotFound(instanceId));
+        String key = asgKey(region, name);
+        synchronized (lockFor(key)) {
+            // Re-read under the lock: the group may have been deleted or replaced since the scan.
+            AutoScalingGroup asg = groups.get(key);
+            if (asg == null || !containsInstance(asg, instanceId)) {
+                throw instanceNotFound(instanceId);
+            }
+            update.accept(asg);
+            groups.put(key, asg);
+        }
+    }
+
+    private static AwsException instanceNotFound(String instanceId) {
+        return new AwsException("ValidationError",
+                "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400);
+    }
+
+    private static boolean containsInstance(AutoScalingGroup asg, String instanceId) {
+        return instanceId != null && asg.getInstances().stream().anyMatch(i -> instanceId.equals(i.getInstanceId()));
     }
 
     public void attachInstances(String region, String name, List<String> instanceIds) {
@@ -701,30 +766,17 @@ public class AutoScalingService {
 
     public void terminateInstanceInAutoScalingGroup(String region, String instanceId,
                                                      boolean decrementDesiredCapacity) {
-        AutoScalingGroup asg = groups.values().stream()
-                .filter(g -> region.equals(g.getRegion()))
-                .filter(g -> g.getInstances().stream().anyMatch(i -> instanceId.equals(i.getInstanceId())))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("ValidationError",
-                        "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
-        String key = asgKey(region, asg.getAutoScalingGroupName());
-        synchronized (lockFor(key)) {
-            if (groups.get(key) != asg) {
-                throw new AwsException("ValidationError",
-                        "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400);
-            }
-            AsgInstance instance = asg.getInstances().stream()
-                    .filter(i -> instanceId.equals(i.getInstanceId())).findFirst()
-                    .orElseThrow(() -> new AwsException("ValidationError",
-                            "Instance '" + instanceId + "' not found in any Auto Scaling group.", 400));
+        updateGroupOfInstance(region, instanceId, asg -> {
             releaseRefreshOwnership(asg, List.of(instanceId));
-            instance.setLifecycleState("Terminating");
+            asg.getInstances().stream()
+                    .filter(i -> instanceId.equals(i.getInstanceId()))
+                    .findFirst()
+                    .ifPresent(i -> i.setLifecycleState("Terminating"));
             if (decrementDesiredCapacity) {
                 int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - 1);
                 asg.setDesiredCapacity(newDesired);
             }
-            groups.put(key, asg);
-        }
+        });
     }
 
     private void releaseRefreshOwnership(AutoScalingGroup asg, List<String> instanceIds) {

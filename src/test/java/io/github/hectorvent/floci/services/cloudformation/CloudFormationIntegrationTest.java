@@ -870,7 +870,7 @@ class CloudFormationIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(template))
         .when()
             .post("/")
         .then()
@@ -2765,8 +2765,10 @@ class CloudFormationIntegrationTest {
         return xml.substring(xml.lastIndexOf("<member>", idAt), xml.indexOf("</member>", idAt));
     }
 
+    // Measured against CloudFormation (eu-west-1, 2026-10-04): a change set the stack does not
+    // have, on a stack in REVIEW_IN_PROGRESS as on one in CREATE_COMPLETE, is deleted with success.
     @Test
-    void deleteChangeSet_nonExistentChangeSet_returnsError() {
+    void deleteChangeSet_nonExistentChangeSet_succeeds() {
         String template = """
             {
               "Resources": {
@@ -2793,7 +2795,6 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Attempt to delete a changeset that does not exist
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DeleteChangeSet")
@@ -2802,8 +2803,18 @@ class CloudFormationIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(400)
-            .body(containsString("ChangeSetNotFoundException"));
+            .statusCode(200)
+            .body(containsString("<DeleteChangeSetResult/>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", "cs-error-stack")
+            .formParam("ChangeSetName", "existing-changeset")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test
@@ -2930,7 +2941,7 @@ class CloudFormationIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(template))
         .when()
             .post("/")
         .then()
@@ -8397,13 +8408,14 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body("Items.findAll { it.ApiId == '" + apiId + "' }.Name", hasItem("cfn-apigwv2-api-v2"));
 
-        // Idempotent re-deploy with no changes is a no-op (criterion #3): counts/ids unchanged
+        // Re-deploying the same resources is a no-op for them (criterion #3): counts/ids unchanged.
+        // An identical template is refused outright, so a new output forces the update.
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody",
-                    template.formatted("cfn-apigwv2-api-v2", "https://example.com/v2", "GET /things", "true"))
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(
+                    template.formatted("cfn-apigwv2-api-v2", "https://example.com/v2", "GET /things", "true")))
         .when()
             .post("/")
         .then()
@@ -10002,10 +10014,10 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
-    void updateStack_unsupportedResourceRollbackRemainsExplicitlyFailed() {
+    void updateStack_ssmRollbackRestoresTheValueAndTemplate() {
         String suffix = Long.toString(System.nanoTime(), 36);
-        String stackName = "unsupported-update-rollback-" + suffix;
-        String parameterName = "/cfn/unsupported-update-rollback/" + suffix;
+        String stackName = "ssm-update-rollback-" + suffix;
+        String parameterName = "/cfn/ssm-update-rollback/" + suffix;
         String template = """
             {
               "Resources": {
@@ -10031,7 +10043,7 @@ class CloudFormationIntegrationTest {
                   "Type": "AWS::SecretsManager::Secret",
                   "DependsOn": "Parameter",
                   "Properties": {
-                    "Name": "unsupported-update-rollback-secret-%s",
+                    "Name": "ssm-update-rollback-secret-%s",
                     "SecretString": "explicit",
                     "GenerateSecretString": {"PasswordLength": 32}
                   }
@@ -10066,8 +10078,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<StackStatus>UPDATE_ROLLBACK_FAILED</StackStatus>"))
-            .body(containsString("Parameter"));
+            .body(containsString("<StackStatus>UPDATE_ROLLBACK_COMPLETE</StackStatus>"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10078,7 +10089,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<LogicalResourceId>Parameter</LogicalResourceId>"))
-            .body(containsString("<ResourceStatus>UPDATE_FAILED</ResourceStatus>"))
+            .body(not(containsString("<ResourceStatus>UPDATE_FAILED</ResourceStatus>")))
             .body(not(containsString("<LogicalResourceId>BadSecret</LogicalResourceId>")));
 
         given()
@@ -10089,7 +10100,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Parameter.Value", equalTo("updated"));
+            .body("Parameter.Value", equalTo("initial"));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10099,7 +10110,8 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("updated"));
+            .body(containsString("initial"))
+            .body(not(containsString("BadSecret")));
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10766,7 +10778,7 @@ class CloudFormationIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
             .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(template))
         .when()
             .post("/")
         .then()

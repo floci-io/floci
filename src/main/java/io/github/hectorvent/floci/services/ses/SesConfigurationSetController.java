@@ -40,13 +40,13 @@ import java.util.List;
 import java.util.Map;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrFalse;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.expectedNullError;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseOptionString;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseSuppressedReasons;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMapMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
@@ -85,7 +85,8 @@ public class SesConfigurationSetController {
     public Response createConfigurationSet(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = objectMapper.readTree(body);
+            JsonNode request = readOptionBody(objectMapper, body);
+            SesV2RequestShapes.check("CreateConfigurationSet", request);
             String name = request.path("ConfigurationSetName").asText(null);
             SesConfigurationSetService.validateName(name);
             ConfigurationSet cs = new ConfigurationSet(name);
@@ -95,9 +96,6 @@ public class SesConfigurationSetController {
             }
             JsonNode suppressionNode = request.path("SuppressionOptions");
             if (!suppressionNode.isMissingNode() && !suppressionNode.isNull()) {
-                if (!suppressionNode.isObject()) {
-                    throw new AwsException("SerializationException", "Expected null", 400);
-                }
                 JsonNode reasonsNode = suppressionNode.path("SuppressedReasons");
                 if (reasonsNode.isMissingNode() || reasonsNode.isNull()) {
                     throw new AwsException("InternalFailure",
@@ -109,14 +107,10 @@ public class SesConfigurationSetController {
             }
             JsonNode sendingNode = request.path("SendingOptions");
             if (!sendingNode.isMissingNode() && !sendingNode.isNull()) {
-                if (!sendingNode.isObject()) {
-                    throw new AwsException("SerializationException", "Expected null", 400);
-                }
                 cs.setSendingEnabled(coerceBooleanOrFalse(sendingNode.path("SendingEnabled")));
             }
             JsonNode reputationNode = request.path("ReputationOptions");
             if (!reputationNode.isMissingNode() && !reputationNode.isNull()) {
-                requireOptionObject(reputationNode);
                 cs.setReputationMetricsEnabled(
                         coerceBooleanOrFalse(reputationNode.path("ReputationMetricsEnabled")));
             }
@@ -253,18 +247,14 @@ public class SesConfigurationSetController {
                                                           String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
+            SesV2RequestShapes.check("PutConfigurationSetSuppressionOptions", request);
             List<String> reasons = parseSuppressedReasons(request.path("SuppressedReasons"));
             configSetService.putSuppressionOptions(name, reasons, region);
             LOG.infov("SES V2 PutConfigurationSetSuppressionOptions: {0} on {1}", reasons, name);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -361,6 +351,7 @@ public class SesConfigurationSetController {
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode request = readOptionBody(objectMapper, body);
+            SesV2RequestShapes.check("PutConfigurationSetVdmOptions", request);
             JsonNode vdmNode = request.path("VdmOptions");
             VdmOptions options = (vdmNode.isMissingNode() || vdmNode.isNull())
                     ? null : parseVdmOptions(vdmNode);
@@ -378,7 +369,8 @@ public class SesConfigurationSetController {
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode request = readOptionBody(objectMapper, body);
-            String name = stringMemberOrAbsent(request, "ConfigurationSetName");
+            SesV2RequestShapes.check("UpdateConfigurationSet", request);
+            String name = request.path("ConfigurationSetName").textValue();
             if (name == null || name.isBlank()) {
                 throw new AwsException("BadRequestException", "ConfigurationSetName is required.", 400);
             }
@@ -396,7 +388,7 @@ public class SesConfigurationSetController {
     /** Reject a non-object option block, mirroring the AWS deserialization layer. */
     private static void requireOptionObject(JsonNode node) {
         if (!node.isObject()) {
-            throw new AwsException("SerializationException", "Expected null", 400);
+            throw expectedNullError();
         }
     }
 
@@ -460,22 +452,15 @@ public class SesConfigurationSetController {
     // empty union to DefaultScheme, lets SmimeScheme win when both members are sent, and stores a
     // missing SignatureFormat as DETACHED. Returns null for "no change".
     private static MessageSecurityOptions parseMessageSecurityOptions(JsonNode node) {
-        requireOptionObject(node);
         JsonNode schemeNode = node.path("SigningScheme");
         if (schemeNode.isMissingNode() || schemeNode.isNull()) {
             return null;
-        }
-        requireOptionObject(schemeNode);
-        JsonNode defaultNode = schemeNode.path("DefaultScheme");
-        if (!defaultNode.isMissingNode() && !defaultNode.isNull()) {
-            requireOptionObject(defaultNode);
         }
         JsonNode smimeNode = schemeNode.path("SmimeScheme");
         if (smimeNode.isMissingNode() || smimeNode.isNull()) {
             return new MessageSecurityOptions(SigningScheme.defaultScheme());
         }
-        requireOptionObject(smimeNode);
-        String format = stringMemberOrAbsent(smimeNode, "SignatureFormat");
+        String format = smimeNode.path("SignatureFormat").textValue();
         if (format == null) {
             format = SIGNATURE_FORMAT_DETACHED;
         } else if (!SIGNATURE_FORMAT_DETACHED.equals(format)) {
@@ -488,12 +473,10 @@ public class SesConfigurationSetController {
     }
 
     private static VdmOptions parseVdmOptions(JsonNode node) {
-        requireOptionObject(node);
         VdmOptions v = new VdmOptions();
         JsonNode dashboard = node.path("DashboardOptions");
         if (!dashboard.isMissingNode() && !dashboard.isNull()) {
-            requireOptionObject(dashboard);
-            String engagementMetrics = parseOptionString(dashboard.path("EngagementMetrics"), "EngagementMetrics");
+            String engagementMetrics = dashboard.path("EngagementMetrics").textValue();
             if (engagementMetrics != null) {
                 DashboardOptions d = new DashboardOptions();
                 d.setEngagementMetrics(engagementMetrics);
@@ -502,8 +485,7 @@ public class SesConfigurationSetController {
         }
         JsonNode guardian = node.path("GuardianOptions");
         if (!guardian.isMissingNode() && !guardian.isNull()) {
-            requireOptionObject(guardian);
-            String optimized = parseOptionString(guardian.path("OptimizedSharedDelivery"), "OptimizedSharedDelivery");
+            String optimized = guardian.path("OptimizedSharedDelivery").textValue();
             if (optimized != null) {
                 GuardianOptions g = new GuardianOptions();
                 g.setOptimizedSharedDelivery(optimized);
@@ -539,13 +521,14 @@ public class SesConfigurationSetController {
                                                            String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = objectMapper.readTree(body);
+            JsonNode request = readOptionBody(objectMapper, body);
+            SesV2RequestShapes.check("CreateConfigurationSetEventDestination", request);
             String edName = request.path("EventDestinationName").asText(null);
             if (edName == null || edName.isBlank()) {
                 throw new AwsException("BadRequestException", "EventDestinationName is required.", 400);
             }
             JsonNode edNode = request.path("EventDestination");
-            if (!edNode.isObject()) {
+            if (edNode.isMissingNode() || edNode.isNull()) {
                 throw new AwsException("BadRequestException", "EventDestination is required.", 400);
             }
             EventDestination dest = parseEventDestination(edNode);
@@ -587,9 +570,10 @@ public class SesConfigurationSetController {
                                                            String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = objectMapper.readTree(body);
+            JsonNode request = readOptionBody(objectMapper, body);
+            SesV2RequestShapes.check("UpdateConfigurationSetEventDestination", request);
             JsonNode edNode = request.path("EventDestination");
-            if (!edNode.isObject()) {
+            if (edNode.isMissingNode() || edNode.isNull()) {
                 throw new AwsException("BadRequestException", "EventDestination is required.", 400);
             }
             EventDestination dest = parseEventDestination(edNode);

@@ -574,6 +574,22 @@
     "ProvisionedConcurrencyConfig",
     "RuntimePolicy"
   ],
+  "AWS::Lambda::WebFunction": [
+    "FunctionName"
+  ],
+  "AWS::Lambda::WebFunctionEndpoint": [
+    "FunctionName",
+    "EndpointName",
+    "EndpointType",
+    "Regions"
+  ],
+  "AWS::Lambda::WebFunctionRevision": [
+    "FunctionName",
+    "Description",
+    "KmsKeyArn",
+    "BuildConfig",
+    "ServiceConfig"
+  ],
   "AWS::Logs::LogGroup": [
     "LogGroupName"
   ],

@@ -11,8 +11,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * that lifecycle logic (map of running containers, per-key start lock so concurrent first-use of
  * two different keys never blocks on each other, health poll, restart-on-unhealthy, stop-all on
  * shutdown) has nothing Verdaccio-specific in it; only how to actually build and start a container
- * for a given key does. A future per-repository sidecar (pypiserver, BaGet) can reuse this
- * directly instead of re-deriving the same map/lock/poll skeleton.
+ * for a given key does. {@code PypiserverSidecarManager} and {@code BagetterSidecarManager}
+ * already reuse this directly instead of re-deriving the same map/lock/poll skeleton; a future
+ * per-repository sidecar for a new format can do the same.
  *
  * <p>Callers own the health-check path and the actual container creation (image, config, env),
  * supplied per call since those are exactly the format-specific parts.

@@ -9,6 +9,9 @@ import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -33,7 +36,7 @@ class CodeBuildRunnerTest {
         int chunkCount = 320;
         String lastLine = "error: build step failed\n";
         DockerClient dockerClient = dockerClientStreaming(chunk, chunkCount, lastLine, 2L);
-        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, null, null, null, null, null, null, null, null, null);
+        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, null, null, null, null, null, null, null, null, null, null);
 
         CodeBuildRunner.PhaseResult result = runner.runPhase("container-1", "/src", List.of(),
                 List.of("./build.sh"), 60, new AtomicBoolean(false));
@@ -46,12 +49,26 @@ class CodeBuildRunnerTest {
     @Test
     void failureMessageIgnoresLongTrailingWhitespace() {
         DockerClient dockerClient = dockerClientStreaming(new byte[0], 0, "tests failed" + "\n".repeat(10_000), 1L);
-        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, null, null, null, null, null, null, null, null, null);
+        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, null, null, null, null, null, null, null, null, null, null);
 
         CodeBuildRunner.PhaseResult result = runner.runPhase("container-1", "/src", List.of(),
                 List.of("./test.sh"), 60, new AtomicBoolean(false));
 
         assertEquals("Exit code 1: tests failed", result.errorMessage());
+    }
+
+    @Test
+    void endpointUrlUsesListenPortNotFlociPort() {
+        // QUARKUS_HTTP_PORT=4811 with floci.port left at 4566: the server listens on 4811.
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.tls()).thenReturn(mock(EmulatorConfig.TlsConfig.class));
+        when(config.port()).thenReturn(4566);
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        ContainerReachableEndpoint endpoint = new ContainerReachableEndpoint(config, null, null, 4811);
+        CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null,
+                config, containerDetector, null, endpoint);
+
+        assertEquals("http://host.docker.internal:4811", runner.resolveEndpointUrl());
     }
 
     private static DockerClient dockerClientStreaming(byte[] chunk, int chunkCount, String lastLine, long exitCode) {

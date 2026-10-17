@@ -4,11 +4,14 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
 
 @QuarkusTest
@@ -60,6 +63,90 @@ class CloudFormationResourceConditionIntegrationTest {
             .post("/")
         .then()
             .statusCode(400);
+    }
+
+    /**
+     * Fn::FindInMap inside Fn::Equals resolves through the template's mappings. Read as an empty
+     * string, a mapped "false" made UseCode true, and the bucket was named after the mapped value.
+     */
+    @ParameterizedTest
+    @CsvSource({"false,us-east-1", "iad,iad"})
+    void mappedConditionSelectsTheBucketName(String mappedValue, String expectedLocation) {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-mapped-condition-" + suffix;
+        String prefix = "mapped-condition-" + suffix + "-";
+        createStack(stackName, """
+                {
+                  "Mappings": {"Locations": {"us-east-1": {"Code": "%s"}}},
+                  "Conditions": {
+                    "UseCode": {"Fn::Not": [{"Fn::Equals": [
+                      {"Fn::FindInMap": ["Locations", {"Ref": "AWS::Region"}, "Code"]}, "false"
+                    ]}]}
+                  },
+                  "Resources": {
+                    "Bucket": {
+                      "Type": "AWS::S3::Bucket",
+                      "Properties": {"BucketName": {"Fn::Join": ["", ["%s",
+                        {"Fn::If": ["UseCode",
+                          {"Fn::FindInMap": ["Locations", {"Ref": "AWS::Region"}, "Code"]},
+                          {"Ref": "AWS::Region"}]}
+                      ]]}}
+                    }
+                  }
+                }
+                """.formatted(mappedValue, prefix));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            given().when().head("/" + prefix + expectedLocation).then().statusCode(200);
+            given().when().head("/" + prefix + "false").then().statusCode(404);
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+        given().when().head("/" + prefix + expectedLocation).then().statusCode(404);
+    }
+
+    /**
+     * The update's change-set preview and its execution evaluate the mapped condition as the
+     * create does, so a mapping edit that flips it reaches the property chosen by its Fn::If.
+     */
+    @Test
+    void mappedConditionIsEvaluatedAgainOnUpdate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-mapped-update-" + suffix;
+        String queueName = "mapped-update-" + suffix;
+        String template = """
+                {
+                  "Mappings": {"Locations": {"us-east-1": {"Code": "%s"}}},
+                  "Conditions": {
+                    "UseCode": {"Fn::Not": [{"Fn::Equals": [
+                      {"Fn::FindInMap": ["Locations", {"Ref": "AWS::Region"}, "Code"]}, "false"
+                    ]}]}
+                  },
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {"QueueName": "%s", "VisibilityTimeout": {"Fn::If": ["UseCode", 60, 30]}}
+                    }
+                  }
+                }
+                """;
+        createStack(stackName, template.formatted("false", queueName));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals("30", visibilityTimeout(queueName));
+
+            updateStack(stackName, template.formatted("iad", queueName));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals("60", visibilityTimeout(queueName));
+
+            updateStack(stackName, template.formatted("false", queueName));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals("30", visibilityTimeout(queueName));
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
     }
 
     @Test
@@ -579,6 +666,340 @@ class CloudFormationResourceConditionIntegrationTest {
             .formParam("QueueName", queueName)
         .when()
             .post("/");
+    }
+
+    /**
+     * A create's dependency preflight evaluates {@code AWS::StackId} as the id the stack is given,
+     * so it agrees with the execution: a dependency on a resource the stack id excludes is refused
+     * up front, and one on a resource it includes deploys.
+     */
+    @Test
+    void aCreatesPreflightSeesTheStackIdItWillGet() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String template = """
+                {
+                  "Conditions": {
+                    "NoId": {"Fn::Equals": [{"Ref": "AWS::StackId"}, ""]},
+                    "HasId": {"Fn::Not": [{"Condition": "NoId"}]}
+                  },
+                  "Resources": {
+                    "Dependency": {"Type": "AWS::SQS::Queue", "Condition": "%s",
+                      "Properties": {"QueueName": "%s-dependency"}},
+                    "Dependent": {"Type": "AWS::SQS::Queue", "DependsOn": "Dependency",
+                      "Properties": {"QueueName": "%s-dependent"}}
+                  }
+                }
+                """;
+        String excluded = "cfn-stackid-excluded-" + suffix;
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", excluded)
+            .formParam("TemplateBody", template.formatted("NoId", excluded, excluded))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Message", containsString("Unresolved resource dependencies"));
+
+        String included = "cfn-stackid-included-" + suffix;
+        createStack(included, template.formatted("HasId", included, included));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(included).status());
+            getQueueUrl(included + "-dependency").then().statusCode(200);
+            getQueueUrl(included + "-dependent").then().statusCode(200);
+        } finally {
+            deleteStack(included);
+            CfnStackWaits.awaitStackDeleted(included);
+        }
+    }
+
+    /**
+     * A create over a name in use is checked as the new stack it asks for, not as the stack that
+     * holds the name, so a template that is valid for a new stack gets AlreadyExistsException.
+     */
+    @Test
+    void aCreateOverATakenNameIsCheckedAsTheNewStack() {
+        String stackName = "cfn-stackid-taken-" + Long.toString(System.nanoTime(), 36);
+        createStack(stackName, """
+                {"Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "%s"}}}}
+                """.formatted(stackName));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            String takenId = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath().getString("**.find { it.name() == 'StackId' }");
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", """
+                        {
+                          "Conditions": {"NotTheTakenStack": {"Fn::Not": [{"Fn::Equals": [
+                            {"Ref": "AWS::StackId"}, "%s"]}]}},
+                          "Resources": {
+                            "Dependency": {"Type": "AWS::SQS::Queue", "Condition": "NotTheTakenStack"},
+                            "Dependent": {"Type": "AWS::SQS::Queue", "DependsOn": "Dependency"}
+                          }
+                        }
+                        """.formatted(takenId))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("AlreadyExistsException"));
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    /**
+     * The change-set preview, the preflight and the execution all evaluate {@code AWS::StackName}
+     * against the stack. Read as an empty string, the condition was false and the stack held no
+     * resources; with only the preview reading it so, the update would skip the queue's edit.
+     */
+    @Test
+    void stackNameConditionHoldsAcrossAnUpdateThatEditsItsResource() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-stackname-condition-" + suffix;
+        String queueName = "stackname-condition-" + suffix;
+        String template = """
+                {
+                  "Conditions": {"IsThisStack": {"Fn::Equals": [{"Ref": "AWS::StackName"}, "%s"]}},
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue", "Condition": "IsThisStack",
+                      "Properties": {"QueueName": "%s", "VisibilityTimeout": %d}
+                    }
+                  }
+                }
+                """;
+        createStack(stackName, template.formatted(stackName, queueName, 30));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals("30", visibilityTimeout(queueName));
+
+            updateStack(stackName, template.formatted(stackName, queueName, 60));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals("60", visibilityTimeout(queueName));
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    /**
+     * CloudFormation allows only Ref, Fn::FindInMap and the condition functions inside a
+     * condition, so a template that uses Fn::ImportValue there is refused, even though the
+     * exporting stack has the export.
+     */
+    @Test
+    void importValueInAConditionIsRejectedAsUnsupported() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String exporter = "cfn-cond-exporter-" + suffix;
+        String exportName = "cfn-cond-export-" + suffix;
+        String importer = "cfn-cond-importer-" + suffix;
+        createStack(exporter, """
+                {"Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "%s"}}},
+                 "Outputs": {"Flag": {"Value": "on", "Export": {"Name": "%s"}}}}
+                """.formatted("cond-export-queue-" + suffix, exportName));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(exporter).status());
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", importer)
+                .formParam("TemplateBody", """
+                        {"Conditions": {"IsOn": {"Fn::Equals": [{"Fn::ImportValue": "%s"}, "on"]}},
+                         "Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Condition": "IsOn"}}}
+                        """.formatted(exportName))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo("Template error: Cannot use Fn::ImportValue in Conditions."));
+        } finally {
+            deleteStack(importer);
+            deleteStack(exporter);
+            CfnStackWaits.awaitStackDeleted(exporter);
+        }
+    }
+
+    /** An import in an Fn::Or operand that evaluation never reaches is still a template error. */
+    @Test
+    void importValueInAConditionOperandEvaluationSkipsIsStillRejected() {
+        String stackName = "cfn-cond-or-import-" + Long.toString(System.nanoTime(), 36);
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", """
+                        {"Conditions": {"IsOn": {"Fn::Or": [{"Fn::Equals": ["a", "a"]},
+                           {"Fn::Equals": [{"Fn::ImportValue": "never-resolved"}, "on"]}]}},
+                         "Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Condition": "IsOn"}}}
+                        """)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo("Template error: Cannot use Fn::ImportValue in Conditions."));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    /**
+     * A SAM template's conditions are checked after the transform, so an import there fails the
+     * change set with the template error, as a non-string condition reference does.
+     */
+    @Test
+    void importValueInASamTemplateConditionFailsTheChangeSet() {
+        String stackName = "cfn-cond-sam-import-" + Long.toString(System.nanoTime(), 36);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "deploy")
+            .formParam("ChangeSetType", "CREATE")
+            .formParam("TemplateBody", """
+                    {"Transform": "AWS::Serverless-2016-10-31",
+                     "Conditions": {"IsOn": {"Fn::Equals": [{"Fn::ImportValue": "never-resolved"}, "on"]}},
+                     "Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Condition": "IsOn"}}}
+                    """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeChangeSet")
+                .formParam("StackName", stackName)
+                .formParam("ChangeSetName", "deploy")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeChangeSetResponse.DescribeChangeSetResult.Status", equalTo("FAILED"))
+                .body("DescribeChangeSetResponse.DescribeChangeSetResult.StatusReason",
+                        equalTo("Template error: Cannot use Fn::ImportValue in Conditions."));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    /**
+     * {@code AWS::NotificationARNs} is the empty list, in a condition and in an output: Floci keeps
+     * no notification ARNs, and the template engine would otherwise answer the Ref with its name.
+     */
+    @Test
+    void notificationArnsAreAnEmptyList() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-notification-arns-" + suffix;
+        String queueName = "notification-arns-" + suffix;
+        createStack(stackName, """
+                {
+                  "Conditions": {
+                    "HasNotifications": {"Fn::Not": [{"Fn::Equals": [
+                      {"Fn::Join": [",", {"Ref": "AWS::NotificationARNs"}]}, ""]}]}
+                  },
+                  "Resources": {
+                    "Notified": {"Type": "AWS::SQS::Queue", "Condition": "HasNotifications",
+                      "Properties": {"QueueName": "%s-notified"}},
+                    "Always": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "%s-always"}}
+                  },
+                  "Outputs": {"Arns": {"Value": {"Fn::Join": [",", ["arns", {"Fn::Join": [",",
+                    {"Ref": "AWS::NotificationARNs"}]}]]}}}
+                }
+                """.formatted(queueName, queueName));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            getQueueUrl(queueName + "-always").then().statusCode(200);
+            getQueueUrl(queueName + "-notified").then().statusCode(400);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("**.find { it.OutputKey == 'Arns' }.OutputValue", equalTo("arns,"));
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    /**
+     * A condition operand the template engine cannot resolve, here an Fn::Sub whose template is not
+     * a string, compares as an empty string, as it did before conditions went through the engine:
+     * the stack deploys, and the dependency checks still run, rather than the request failing with
+     * a 500 or the stack with the engine's exception.
+     */
+    @Test
+    void aConditionOperandTheEngineCannotResolveComparesAsEmpty() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-cond-malformed-sub-" + suffix;
+        String queueName = "cond-malformed-sub-" + suffix;
+        String condition = """
+                "Conditions": {"IsBlank": {"Fn::Equals": [{"Fn::Sub": [{"Ref": "AWS::Region"}, {}]}, ""]}}""";
+        createStack(stackName, """
+                {%s,
+                 "Resources": {"Queue": {"Type": "AWS::SQS::Queue", "Condition": "IsBlank",
+                   "Properties": {"QueueName": "%s"}}}}
+                """.formatted(condition, queueName));
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            getQueueUrl(queueName).then().statusCode(200);
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName + "-cycle")
+            .formParam("TemplateBody", """
+                    {%s,
+                     "Resources": {
+                       "A": {"Type": "AWS::SQS::Queue", "DependsOn": "B"},
+                       "B": {"Type": "AWS::SQS::Queue", "DependsOn": "A"}}}
+                    """.formatted(condition))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Message", containsString("Circular dependency between resources"));
+    }
+
+    private static String visibilityTimeout(String queueName) {
+        String queueUrl = getQueueUrl(queueName).then().statusCode(200).extract().xmlPath()
+                .getString("GetQueueUrlResponse.GetQueueUrlResult.QueueUrl");
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("AttributeName.1", "VisibilityTimeout")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath()
+            .getString("**.find { it.Name == 'VisibilityTimeout' }.Value");
     }
 
     @Test

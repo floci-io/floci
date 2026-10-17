@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.lifecycle;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.FlociVersion;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -57,7 +58,7 @@ class EmulatorInfoControllerIntegrationTest {
         JsonNode tree = MAPPER.readTree(body);
         assertEquals("community", tree.get("edition").asText());
         assertEquals("floci-always-free", tree.get("original_edition").asText());
-        assertEquals("dev", tree.get("version").asText());
+        assertEquals(FlociVersion.current(), tree.get("version").asText());
 
         JsonNode services = tree.get("services");
         assertNotNull(services, "services field must be present");
@@ -94,7 +95,7 @@ class EmulatorInfoControllerIntegrationTest {
                 .statusCode(200)
                 .contentType("application/json")
                 .body("edition", equalTo("community"))
-                .body("version", notNullValue())
+                .body("version", allOf(equalTo(FlociVersion.current()), not(equalTo("dev"))))
                 .body("dynamodb_backend", equalTo("native"));
     }
 

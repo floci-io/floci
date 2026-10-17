@@ -610,6 +610,62 @@ class GlueServiceTest {
     }
 
     @Test
+    void stringStatisticsWithoutAverageLengthReadBackWithZero() {
+        Table table = new Table();
+        table.setName("nulls");
+        glueService.createTable("db1", table);
+        Map<String, Object> statistics = Map.of(
+                "ColumnName", "a",
+                "ColumnType", "string",
+                "AnalyzedTime", Instant.EPOCH,
+                "StatisticsData", Map.of(
+                        "Type", "STRING",
+                        "StringColumnStatisticsData", Map.of("NumberOfNulls", 1, "NumberOfDistinctValues", 0)));
+
+        glueService.updateColumnStatisticsForTable("db1", "nulls", List.of(statistics));
+        Map<String, Object> stored = glueService.getColumnStatisticsForTable("db1", "nulls", List.of("a"))
+                .columnStatisticsList().get(0);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) ((Map<String, Object>) stored.get("StatisticsData"))
+                .get("StringColumnStatisticsData");
+        assertEquals(0, data.get("AverageLength"));
+        assertEquals(0, data.get("MaximumLength"));
+        assertEquals(1, data.get("NumberOfNulls"));
+        Map<String, Object> raw = columnStatisticsStore.scan(key -> true).get(0);
+        assertFalse(((Map<?, ?>) ((Map<?, ?>) raw.get("StatisticsData")).get("StringColumnStatisticsData"))
+                .containsKey("AverageLength"));
+    }
+
+    @Test
+    void partitionBinaryStatisticsWithoutLengthsReadBackWithZero() {
+        Table table = new Table();
+        table.setName("blobs");
+        glueService.createTable("db1", table);
+        Partition partition = new Partition();
+        partition.setValues(List.of("1"));
+        glueService.createPartition("db1", "blobs", partition);
+        Map<String, Object> statistics = Map.of(
+                "ColumnName", "payload",
+                "ColumnType", "binary",
+                "AnalyzedTime", Instant.EPOCH,
+                "StatisticsData", Map.of(
+                        "Type", "BINARY",
+                        "BinaryColumnStatisticsData", Map.of("NumberOfNulls", 2)));
+
+        glueService.updateColumnStatisticsForPartition("db1", "blobs", List.of("1"), List.of(statistics));
+        Map<String, Object> stored = glueService.getColumnStatisticsForPartition(
+                "db1", "blobs", List.of("1"), List.of("payload")).columnStatisticsList().get(0);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) ((Map<String, Object>) stored.get("StatisticsData"))
+                .get("BinaryColumnStatisticsData");
+        assertEquals(0, data.get("MaximumLength"));
+        assertEquals(0, data.get("AverageLength"));
+        assertEquals(2, data.get("NumberOfNulls"));
+    }
+
+    @Test
     void partitionColumnStatisticsCanBeUpdatedFetchedAndDeleted() {
         Table table = new Table();
         table.setName("plain");

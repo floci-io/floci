@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -57,10 +58,10 @@ public class SsmCommandService implements Resettable {
     private final SsmDirectCommandExecutor directCommandExecutor;
     private final ExecutorService directExecutionExecutor;
 
-    // In-memory queues: instanceId → pending messages. Not persisted — lost on restart.
-    private final ConcurrentHashMap<String, Queue<PendingMessage>> messageQueues = new ConcurrentHashMap<>();
-    // messageId → (commandId, instanceId) for correlating SendReply back to an invocation
-    private final ConcurrentHashMap<String, String[]> messageIndex = new ConcurrentHashMap<>();
+    // In-memory queues are owned by the issuing account, region and instance. Lost on restart.
+    private final ConcurrentHashMap<MessageOwner, Queue<PendingMessage>> messageQueues = new ConcurrentHashMap<>();
+    // Message correlations retain the same owner through every agent operation.
+    private final ConcurrentHashMap<String, MessageCorrelation> messageIndex = new ConcurrentHashMap<>();
 
     @Inject
     public SsmCommandService(
@@ -295,7 +296,7 @@ public class SsmCommandService implements Resettable {
                     }
                 }
                 // Remove any queued (not-yet-polled) messages for this instance
-                Queue<PendingMessage> q = messageQueues.get(instanceId);
+                Queue<PendingMessage> q = messageQueues.get(messageOwner(region, instanceId));
                 if (q != null) {
                     q.removeIf(m -> m.commandId().equals(commandId));
                 }
@@ -344,16 +345,15 @@ public class SsmCommandService implements Resettable {
         }
 
         for (String instanceId : instanceIds) {
-            Queue<PendingMessage> queue = messageQueues.remove(instanceId);
+            Queue<PendingMessage> queue = messageQueues.remove(messageOwner(region, instanceId));
             if (queue != null) {
                 queue.clear();
             }
         }
         messageIndex.entrySet().removeIf(entry -> {
-            String[] meta = entry.getValue();
-            return meta.length == 3
-                    && instanceIds.contains(meta[1])
-                    && region.equals(meta[2]);
+            MessageOwner owner = entry.getValue().owner();
+            return instanceIds.contains(owner.instanceId())
+                    && owner.equals(messageOwner(region, owner.instanceId()));
         });
         commandIds.forEach(commandId -> updateCommandStatus(commandId, region));
         return failed;
@@ -362,7 +362,8 @@ public class SsmCommandService implements Resettable {
     // ── ec2messages agent protocol ──────────────────────────────────────────
 
     public List<Map<String, Object>> getMessages(String instanceId, String messagesRequestId, int visibilityTimeout) {
-        Queue<PendingMessage> queue = messageQueues.get(instanceId);
+        MessageOwner owner = messageOwner(regionResolver.getRegion(), instanceId);
+        Queue<PendingMessage> queue = messageQueues.get(owner);
         List<Map<String, Object>> result = new ArrayList<>();
         if (queue == null || queue.isEmpty()) {
             return result;
@@ -374,7 +375,7 @@ public class SsmCommandService implements Resettable {
         }
 
         // Track for AcknowledgeMessage / SendReply correlation
-        messageIndex.put(msg.messageId(), new String[]{msg.commandId(), instanceId, msg.region()});
+        messageIndex.put(msg.messageId(), new MessageCorrelation(owner, msg.commandId()));
 
         result.add(Map.of(
                 "MessageId", msg.messageId(),
@@ -390,13 +391,13 @@ public class SsmCommandService implements Resettable {
 
     public void acknowledgeMessage(String messageId) {
         // Message was already removed from queue on GetMessages. Just update invocation to InProgress.
-        String[] meta = messageIndex.get(messageId);
+        MessageCorrelation meta = ownedCorrelation(messageId, false);
         if (meta == null) {
             return;
         }
-        String commandId = meta[0];
-        String instanceId = meta[1];
-        String region = meta[2];
+        String commandId = meta.commandId();
+        String instanceId = meta.owner().instanceId();
+        String region = meta.owner().region();
 
         String invKey = invocationKey(region, commandId, instanceId);
         invocationStore.get(invKey).ifPresent(inv -> {
@@ -413,14 +414,14 @@ public class SsmCommandService implements Resettable {
     }
 
     public void sendReply(String messageId, String payloadBase64) {
-        String[] meta = messageIndex.remove(messageId);
+        MessageCorrelation meta = ownedCorrelation(messageId, true);
         if (meta == null) {
             LOG.warnv("SendReply: unknown messageId={0}", messageId);
             return;
         }
-        String commandId = meta[0];
-        String instanceId = meta[1];
-        String region = meta[2];
+        String commandId = meta.commandId();
+        String instanceId = meta.owner().instanceId();
+        String region = meta.owner().region();
 
         try {
             byte[] decoded = Base64.getDecoder().decode(payloadBase64);
@@ -477,13 +478,13 @@ public class SsmCommandService implements Resettable {
     }
 
     public void failMessage(String messageId, String failureType) {
-        String[] meta = messageIndex.remove(messageId);
+        MessageCorrelation meta = ownedCorrelation(messageId, true);
         if (meta == null) {
             return;
         }
-        String commandId = meta[0];
-        String instanceId = meta[1];
-        String region = meta[2];
+        String commandId = meta.commandId();
+        String instanceId = meta.owner().instanceId();
+        String region = meta.owner().region();
 
         String invKey = invocationKey(region, commandId, instanceId);
         invocationStore.get(invKey).ifPresent(inv -> {
@@ -499,7 +500,20 @@ public class SsmCommandService implements Resettable {
     }
 
     public void deleteMessage(String messageId) {
-        messageIndex.remove(messageId);
+        ownedCorrelation(messageId, true);
+    }
+
+    private MessageOwner messageOwner(String region, String instanceId) {
+        return new MessageOwner(regionResolver.getAccountId(), region, instanceId);
+    }
+
+    private MessageCorrelation ownedCorrelation(String messageId, boolean remove) {
+        MessageCorrelation correlation = messageIndex.get(messageId);
+        if (correlation == null || !correlation.owner().equals(
+                messageOwner(regionResolver.getRegion(), correlation.owner().instanceId()))) {
+            return null;
+        }
+        return !remove || messageIndex.remove(messageId, correlation) ? correlation : null;
     }
 
     // ── CodeDeploy integration helpers ─────────────────────────────────────
@@ -560,7 +574,7 @@ public class SsmCommandService implements Resettable {
             Map<String, List<String>> parameters,
             int timeoutSeconds,
             String region) {
-        CompletableFuture.runAsync(() -> {
+        CompletableFuture.runAsync(() -> RequestScopes.runAs(accountId, region, () -> {
             String invKey = invocationKey(region, commandId, instanceId);
             CommandInvocation invocation = invocationStore.get(invKey).orElse(null);
             if (invocation == null || "Cancelled".equals(invocation.getStatus())) {
@@ -591,7 +605,7 @@ public class SsmCommandService implements Resettable {
                 invocationStore.put(invKey, invocation);
             }
             updateCommandStatus(commandId, region);
-        }, directExecutionExecutor);
+        }), directExecutionExecutor);
     }
 
     private void applyDirectResult(CommandInvocation invocation, SsmDirectCommandExecutor.ExecutionResult result) {
@@ -619,7 +633,7 @@ public class SsmCommandService implements Resettable {
         String messageId = UUID.randomUUID().toString();
         String payload = buildCommandPayload(commandId, documentName, documentVersion(parameters), parameters, timeoutSeconds, region);
         PendingMessage msg = new PendingMessage(messageId, commandId, region, Instant.now(), payload);
-        messageQueues.computeIfAbsent(instanceId, k -> new ConcurrentLinkedQueue<>()).add(msg);
+        messageQueues.computeIfAbsent(messageOwner(region, instanceId), k -> new ConcurrentLinkedQueue<>()).add(msg);
     }
 
     private String buildCommandPayload(String commandId, String documentName, String docVersion,
@@ -845,6 +859,9 @@ public class SsmCommandService implements Resettable {
     private static String invocationKey(String region, String commandId, String instanceId) {
         return region + "::" + commandId + "::" + instanceId;
     }
+
+    private record MessageOwner(String accountId, String region, String instanceId) {}
+    private record MessageCorrelation(MessageOwner owner, String commandId) {}
 
     record PendingMessage(String messageId, String commandId, String region, Instant createdDate, String payload) {}
 }

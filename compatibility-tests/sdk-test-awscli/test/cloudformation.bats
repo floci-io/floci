@@ -315,3 +315,56 @@ EOF
     run aws_cmd s3api head-bucket --bucket "$bucket"
     assert_failure
 }
+
+# ── SAM AutoPublishAlias (regression: issue #5676) ────────────────────────────
+#
+# The alias AutoPublishAlias generates must point at the version the stack
+# published, not at $LATEST, and a template code change must publish the next
+# version and move the alias to it, as AWS SAM does.
+# https://github.com/floci-io/floci/issues/5676
+
+sam_alias_template() {
+    cat << EOF
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Fn:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: $1
+      Runtime: nodejs20.x
+      Handler: index.handler
+      AutoPublishAlias: live
+      InlineCode: "exports.handler = async () => ({ release: '$2' });"
+EOF
+}
+
+@test "CloudFormation: SAM AutoPublishAlias points the alias at the published version (issue #5676)" {
+    local fn
+    fn=$(unique_name bats-sam-alias)
+    sam_alias_template "$fn" first > "$TEMPLATE_FILE"
+    run aws_cmd cloudformation deploy \
+        --stack-name "$STACK_NAME" \
+        --template-file "$TEMPLATE_FILE" \
+        --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
+    assert_success
+
+    run aws_cmd lambda get-alias --function-name "$fn" --name live
+    assert_success
+    [ "$(json_get "$output" '.FunctionVersion')" = "1" ]
+
+    # A code change publishes the next version and the alias moves to it.
+    sam_alias_template "$fn" second > "$TEMPLATE_FILE"
+    run aws_cmd cloudformation deploy \
+        --stack-name "$STACK_NAME" \
+        --template-file "$TEMPLATE_FILE" \
+        --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
+    assert_success
+
+    run aws_cmd lambda get-alias --function-name "$fn" --name live
+    assert_success
+    [ "$(json_get "$output" '.FunctionVersion')" = "2" ]
+
+    run aws_cmd lambda list-versions-by-function --function-name "$fn"
+    assert_success
+    [ "$(json_get "$output" '[.Versions[].Version] | join(",")')" = '$LATEST,1,2' ]
+}

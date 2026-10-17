@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.codebuild.BuildspecParser.ParsedArtifacts;
@@ -73,6 +74,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     private final EmulatorConfig config;
     private final ContainerDetector containerDetector;
     private final RegionResolver regionResolver;
+    private final ContainerReachableEndpoint containerEndpoint;
 
     private final ConcurrentHashMap<String, String> runningContainers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
@@ -87,7 +89,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                            SecretsManagerService secretsManagerService,
                            EmulatorConfig config,
                            ContainerDetector containerDetector,
-                           RegionResolver regionResolver) {
+                           RegionResolver regionResolver,
+                           ContainerReachableEndpoint containerEndpoint) {
         this.dockerClient = dockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
@@ -98,6 +101,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         this.config = config;
         this.containerDetector = containerDetector;
         this.regionResolver = regionResolver;
+        this.containerEndpoint = containerEndpoint;
     }
 
     /**
@@ -485,12 +489,12 @@ public class CodeBuildRunner implements ContainerTeardown {
         return result;
     }
 
-    private String resolveEndpointUrl() {
+    String resolveEndpointUrl() {
         if (containerDetector.isRunningInContainer()) {
             String suffix = config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX);
-            return "http://" + suffix + ":" + config.port();
+            return "http://" + suffix + ":" + containerEndpoint.port();
         } else {
-            return "http://host.docker.internal:" + config.port();
+            return "http://host.docker.internal:" + containerEndpoint.port();
         }
     }
 

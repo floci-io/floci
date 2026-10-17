@@ -628,7 +628,8 @@ public class EcrRegistryManager {
     private void adoptExisting(Container existing) {
         this.containerId = existing.getId();
         try {
-            ContainerInfo info = lifecycleManager.adopt(containerId, List.of(CONTAINER_INTERNAL_PORT));
+            ContainerInfo info = lifecycleManager.adopt(containerId, List.of(CONTAINER_INTERNAL_PORT),
+                    containerBuilder.resolveDockerNetwork(resolveRegistryDockerNetwork()));
             // The control plane reaches the backing registry through this published loopback
             // binding when Floci runs on the host. In Docker, httpClient() uses container DNS.
             OptionalInt published = info.publishedHostPort(CONTAINER_INTERNAL_PORT);

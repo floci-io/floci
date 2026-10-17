@@ -21,10 +21,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -88,6 +90,139 @@ class AutoPauseControllerTest {
         lease.close();
         scheduler.advance(IDLE);
         assertEquals(State.PAUSED, controller.state(), "idle again after the connection closed");
+    }
+
+    @Test
+    void nonBlockingAcquisitionStartsOneBackgroundResumeWithoutTakingALease() throws Exception {
+        AutoPauseController controller = pausedController(Duration.ofSeconds(15));
+
+        assertTimeoutPreemptively(Duration.ofSeconds(2),
+                () -> assertThrows(RdsBackendGate.ResumingException.class, () -> controller.acquire(false)));
+        assertThrows(RdsBackendGate.ResumingException.class, () -> controller.acquire(false));
+        assertEquals(0, controller.leaseCount());
+        assertEquals(0, freezer.unpauses.get(), "Docker resume must not block the Data API request");
+
+        scheduler.advance(Duration.ZERO);
+        assertEquals(State.RESUMING, controller.state());
+        assertThrows(RdsBackendGate.ResumingException.class, () -> controller.acquire(false));
+        assertEquals(1, freezer.unpauses.get());
+
+        scheduler.advance(Duration.ofSeconds(15));
+        try (RdsBackendGate.Lease lease = controller.acquire(false)) {
+            assertEquals(1, controller.leaseCount());
+            assertFalse(freezer.paused);
+        }
+        assertEquals(0, controller.leaseCount());
+    }
+
+    @Test
+    void closingBeforeTheQueuedResumeThawsTheContainerOnce() throws Exception {
+        AutoPauseController controller = pausedController(Duration.ofSeconds(15));
+        assertThrows(RdsBackendGate.ResumingException.class, () -> controller.acquire(false));
+
+        controller.close();
+        scheduler.advance(Duration.ofDays(1));
+
+        assertFalse(freezer.paused);
+        assertEquals(1, freezer.unpauses.get());
+        assertSame(RdsBackendGate.Lease.NONE, controller.acquire(false));
+    }
+
+    @Test
+    void nonBlockingArrivalDuringPauseCancelsItWithoutAcquiringALease() throws Exception {
+        AutoPauseController controller = controller(Duration.ZERO);
+        controller.configure(300, listener);
+        freezer.blockPause();
+        Thread pausing = Thread.ofVirtual().start(() -> scheduler.advance(IDLE));
+        freezer.awaitPauseEntered();
+        try {
+            assertThrows(RdsBackendGate.ResumingException.class, () -> controller.acquire(false));
+            assertEquals(0, controller.leaseCount());
+        } finally {
+            freezer.releasePause();
+            pausing.join(5000);
+        }
+        assertEquals(State.RUNNING, controller.state());
+        assertFalse(freezer.paused);
+    }
+
+    @Test
+    void leaseReleaseStillSucceedsAfterTheTimerStops() throws Exception {
+        AutoPauseController controller = controller(Duration.ZERO);
+        controller.configure(300, listener);
+        RdsBackendGate.Lease lease = controller.acquire();
+        scheduler.reject = true;
+
+        assertDoesNotThrow(lease::close);
+        assertEquals(0, controller.leaseCount());
+        assertEquals(State.RUNNING, controller.state());
+    }
+
+    @Test
+    void pausedReportingIsBestEffortButResumeSchedulingMustSucceed() throws Exception {
+        AutoPauseController controller = controller(Duration.ZERO);
+        controller.configure(300, listener);
+        scheduler.reject = true;
+
+        assertTrue(assertDoesNotThrow(controller::pauseIfIdle));
+        assertEquals(State.PAUSED, controller.state());
+        assertThrows(IllegalStateException.class, () -> controller.acquire(false));
+        scheduler.reject = false;
+        assertThrows(RdsBackendGate.ResumingException.class, () -> controller.acquire(false));
+        scheduler.advance(Duration.ZERO);
+        assertEquals(State.RUNNING, controller.state());
+    }
+
+    @Test
+    void rejectedBackgroundResumeCanBeRetried() throws Exception {
+        AutoPauseController controller = pausedController(Duration.ZERO);
+        scheduler.reject = true;
+        assertThrows(IllegalStateException.class, () -> controller.acquire(false));
+        assertEquals(State.PAUSED, controller.state());
+        assertEquals(0, controller.leaseCount());
+
+        scheduler.reject = false;
+        assertThrows(RdsBackendGate.ResumingException.class, () -> controller.acquire(false));
+        scheduler.advance(Duration.ZERO);
+        assertEquals(State.RUNNING, controller.state());
+        assertEquals(1, freezer.unpauses.get());
+    }
+
+    @Test
+    void rejectedResumeDelayReleasesBlockingWaitersAfterDockerThaws() throws Exception {
+        AutoPauseController controller = pausedController(Duration.ofSeconds(15));
+        freezer.blockUnpause();
+        Acquirer first = new Acquirer(controller, freezer);
+        freezer.awaitUnpauseEntered();
+        Acquirer second = new Acquirer(controller, freezer);
+        second.awaitWaiting();
+        scheduler.reject = true;
+        freezer.releaseUnpause();
+
+        assertThrows(Exception.class, first::lease);
+        scheduler.reject = false;
+        second.lease().close();
+        assertEquals(State.RUNNING, controller.state());
+        assertEquals(0, controller.leaseCount());
+    }
+
+    @Test
+    void failedBackgroundResumeCanBeRetriedWithoutLeakingALease() throws Exception {
+        AutoPauseController controller = pausedController(Duration.ZERO);
+        freezer.unpauseFailure = new IllegalStateException("daemon unavailable");
+        assertThrows(RdsBackendGate.ResumingException.class, () -> controller.acquire(false));
+        scheduler.advance(Duration.ZERO);
+        assertEquals(State.PAUSED, controller.state());
+        assertEquals(0, controller.leaseCount());
+
+        freezer.unpauseFailure = null;
+        assertThrows(RdsBackendGate.ResumingException.class, () -> controller.acquire(false));
+        scheduler.advance(Duration.ZERO);
+        try (RdsBackendGate.Lease lease = controller.acquire(false)) {
+            assertFalse(freezer.paused);
+        }
+        assertEquals(0, controller.leaseCount());
+        assertEquals(2, freezer.unpauses.get());
     }
 
     @Test
@@ -375,9 +510,13 @@ class AutoPauseControllerTest {
         private Instant now = Instant.parse("2026-01-01T00:00:00Z");
         private long sequence;
         private final List<Scheduled> tasks = new ArrayList<>();
+        private volatile boolean reject;
 
         @Override
         public synchronized Future<?> schedule(Runnable task, Duration delay) {
+            if (reject) {
+                throw new IllegalStateException("scheduler stopped");
+            }
             FutureTask<Void> future = new FutureTask<>(task, null);
             tasks.add(new Scheduled(now.plus(delay), sequence++, future));
             return future;

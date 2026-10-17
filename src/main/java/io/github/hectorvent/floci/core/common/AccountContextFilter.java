@@ -77,6 +77,9 @@ public class AccountContextFilter implements ContainerRequestFilter {
         }
         String sessionToken = extractSessionToken(ctx);
         String auth = ctx.getHeaderString("Authorization");
+        if (rejectAmbiguousRegion(ctx, auth)) {
+            return;
+        }
         String akid = auth != null && !auth.isEmpty() ? accountResolver.extractAccessKeyId(auth) : null;
         if (akid != null) {
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
@@ -84,7 +87,9 @@ public class AccountContextFilter implements ContainerRequestFilter {
             requestContext.setSessionToken(sessionToken);
             String region = regionResolver.resolveRegionFromAuth(auth);
             applyRegion(region);
-            rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth));
+            if (rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth))) {
+                return;
+            }
             rejectPartitionAbsentService(ctx, SigV4CredentialScope.serviceName(auth).orElse(null));
         } else {
             // A present Authorization header wins, as in IamEnforcementFilter: an unrecognised one
@@ -101,7 +106,9 @@ public class AccountContextFilter implements ContainerRequestFilter {
                 requestContext.setSessionToken(sessionToken);
                 String region = regionResolver.resolveRegionFromPresignedCredential(credential);
                 applyRegion(region);
-                rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential));
+                if (rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential))) {
+                    return;
+                }
                 rejectPartitionAbsentService(ctx,
                         SigV4CredentialScope.serviceNameFromCredential(credential).orElse(null));
             } else {
@@ -135,6 +142,25 @@ public class AccountContextFilter implements ContainerRequestFilter {
         requestContext.setPartition(regionResolver.partitionForRegion(region));
     }
 
+    /** Refuses delimiters in region interpretations used by request context or downstream dispatch. */
+    private boolean rejectAmbiguousRegion(ContainerRequestContext ctx, String authorization) {
+        String queryCredential = authorization == null || authorization.isBlank()
+                ? ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential") : null;
+        String parsedAuthorization = queryCredential == null ? authorization
+                : IamEnforcementFilter.requestAuthorization(null, ctx.getUriInfo().getQueryParameters());
+        // Some Query routes synthesize this header even without X-Amz-Algorithm. Inspect the
+        // same region they use, in addition to the split credential used by request context.
+        String region = regionResolver.resolveRegionFromAuthOrNull(parsedAuthorization);
+        if (!RegionResolver.containsArnDelimiter(region) && queryCredential != null) {
+            region = regionResolver.resolveRegionFromPresignedCredential(queryCredential);
+        }
+        if (!RegionResolver.containsArnDelimiter(region)) {
+            return false;
+        }
+        applyRegion(region);
+        return rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(parsedAuthorization));
+    }
+
     /**
      * A scope region no partition publishes or admits by its region pattern is refused, as moto
      * and LocalStack refuse it by default: on AWS such a label never resolves a host, and served
@@ -142,28 +168,45 @@ public class AccountContextFilter implements ContainerRequestFilter {
      * region and partition stay on the request context so the error mappers see them. S3
      * clients get S3's own XML {@code AuthorizationHeaderMalformed} (the wording S3 and minio use
      * for a wrong scope region). Everyone else gets {@code InvalidSignatureException}, as a Query
-     * {@code <ErrorResponse>} for a form-encoded request and as JSON otherwise: this filter runs
-     * before the protocol claim, and a Query SDK cannot parse a JSON error body.
+     * {@code <ErrorResponse>} for a claimed Query or form-encoded request, CBOR for a claimed
+     * CBOR request, and JSON otherwise. The pre-matching protocol claim is already available.
      */
-    private void rejectUnknownRegion(ContainerRequestContext ctx, String region, Optional<String> signingName) {
-        if (RegionResolver.isKnownRegion(region) || configProvider.get().partitions().allowUnknownRegions()) {
-            return;
+    private boolean rejectUnknownRegion(ContainerRequestContext ctx, String region, Optional<String> signingName) {
+        boolean ambiguous = RegionResolver.containsArnDelimiter(region);
+        if (!ambiguous && (RegionResolver.isKnownRegion(region)
+                || configProvider.get().partitions().allowUnknownRegions())) {
+            return false;
         }
         LOG.debugv("Refusing request signed for unknown region {0} (service {1}): {2} {3}",
                 region, signingName.orElse("?"), ctx.getMethod(), ctx.getUriInfo().getPath());
         if (signingName.isPresent() && S3_SIGNING_NAMES.contains(signingName.get())) {
             ctx.abortWith(PreSignedUrlFilter.errorResponse(400, "AuthorizationHeaderMalformed",
-                    "The authorization header is malformed; the region '" + region
+                    ambiguous ? "The authorization header is malformed; the region '" + region
+                            + "' must not contain ':'."
+                            : "The authorization header is malformed; the region '" + region
                             + "' is wrong; expecting a region AWS publishes."));
-            return;
+            return true;
         }
-        String message = "Region '" + region + "' is not a region in any AWS partition. Sign the request "
+        String message = ambiguous ? "Region '" + region + "' must not contain ':' because it separates ARN fields."
+                : "Region '" + region + "' is not a region in any AWS partition. Sign the request "
                 + "for a published region, or set floci.partitions.allow-unknown-regions=true.";
-        if (isFormEncoded(ctx.getMediaType())) {
+        WireProtocol protocol = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                ? claim.protocol() : WireProtocol.REST;
+        if (protocol == WireProtocol.RPCV2_CBOR || protocol == WireProtocol.AWS_CBOR_TARGET) {
+            String contentType = ctx.getHeaderString(AwsCborContentTypeFilter.ORIGINAL_CONTENT_TYPE_HEADER);
+            if (contentType == null) {
+                contentType = ctx.getHeaderString("Content-Type");
+            }
+            ctx.abortWith(CborErrorResponses.of(new AwsException("InvalidSignatureException", message, 400),
+                    CborErrorResponses.mediaTypeFor(contentType)));
+            return true;
+        }
+        if (protocol == WireProtocol.AWS_QUERY || isFormEncoded(ctx.getMediaType())) {
             ctx.abortWith(AwsQueryResponse.error("InvalidSignatureException", message, null, 400));
-            return;
+            return true;
         }
         ctx.abortWith(AwsProtocolClaimFilter.errorResponse(400, "InvalidSignatureException", message));
+        return true;
     }
 
     private static boolean isFormEncoded(MediaType mediaType) {

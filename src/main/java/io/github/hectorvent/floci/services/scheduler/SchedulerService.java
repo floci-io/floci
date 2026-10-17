@@ -325,11 +325,15 @@ public class SchedulerService {
 
     // ──────────────────────────── Helpers ────────────────────────────
 
+    public static boolean isValidName(String name) {
+        return name != null && NAME_PATTERN.matcher(name).matches();
+    }
+
     private void validateName(String name) {
         if (name == null || name.isBlank()) {
             throw new AwsException("ValidationException", "Name is required.", 400);
         }
-        if (!NAME_PATTERN.matcher(name).matches()) {
+        if (!isValidName(name)) {
             throw new AwsException("ValidationException",
                     "Name must match pattern [0-9a-zA-Z-_.]{1,64}: " + name, 400);
         }

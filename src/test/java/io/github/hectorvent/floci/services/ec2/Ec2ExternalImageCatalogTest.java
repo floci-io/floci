@@ -36,6 +36,23 @@ class Ec2ExternalImageCatalogTest {
     }
 
     @Test
+    void i386CatalogImageLaunchesOnTheLinux386Platform() throws Exception {
+        Path catalog = directory.resolve("i386.yaml");
+        Files.writeString(catalog, """
+                defaultDockerImage: example/base:1
+                images:
+                  - imageId: ami-local-i386
+                    dockerImage: i386/alpine:3
+                    name: local-i386
+                    description: local i386
+                    architecture: i386
+                    creationDate: 2025-11-05T00:00:00.000Z
+                """);
+        AmiImageResolver resolver = new AmiImageResolver(new Ec2ImageCatalog(catalog));
+        assertEquals("linux/386", resolver.resolveImage("ami-local-i386").dockerPlatform());
+    }
+
+    @Test
     void missingOrInvalidFileFailsInsteadOfSilentlyUsingBundledImages() throws Exception {
         assertThrows(IllegalStateException.class,
                 () -> new Ec2ImageCatalog(directory.resolve("missing.yaml")).images());

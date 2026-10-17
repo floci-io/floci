@@ -249,6 +249,8 @@ class S3GlobalBucketNamespaceTest {
 
         caller.set(ACCOUNT_A);
         globalNs.createBucket("shared-metadata-bucket", "us-east-1");
+        globalNs.putBucketOwnershipControls("shared-metadata-bucket", "<OwnershipControls><Rule>"
+                + "<ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>");
         globalNs.putBucketVersioning("shared-metadata-bucket", "Enabled");
         S3Object created = globalNs.putObject(
                 "shared-metadata-bucket", "object.txt", "payload".getBytes(UTF_8),

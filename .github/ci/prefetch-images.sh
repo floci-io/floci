@@ -87,6 +87,7 @@ starts EcsContainerManagerFirelensDockerIntegrationTest && [ -n "$FLUENT_BIT_IMA
 # shard reaches it; the two Python runtimes each have one Docker-backed class; nodejs:18 was
 # pulled by every shard and started by none. A class missed here pulls inline, as before.
 grep -qE '/apigateway/|/apigatewayv2/|/lambda/' "$SHARD_FILE" && ecr public.ecr.aws/lambda/nodejs:20
+grep -qE '/lambdaweb/' "$SHARD_FILE" && ecr public.ecr.aws/lambda/nodejs:24
 starts SwfLambdaIntegrationTest && ecr public.ecr.aws/lambda/python:3.12
 starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/python:3.14
 

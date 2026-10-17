@@ -222,7 +222,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 |--------|-------------|
 | CreateVpc | Creates a VPC with the requested CIDR block. `InstanceTenancy` accepts `default` or `dedicated`; `host` is rejected with `InvalidParameterValue`, as on AWS. |
 | DescribeVpcs | Lists or returns stored VPCs. |
-| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway, a transit gateway attachment, an Application or Network Load Balancer, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
+| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway or egress-only internet gateway, a transit gateway attachment, an Application or Network Load Balancer, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
@@ -231,15 +231,12 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, sets or resets the endpoint policy, and updates stored `IpAddressType` metadata. Omitting the type preserves its current value; malformed types are rejected before changes are applied. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` is accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
 | DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
-| DescribeEgressOnlyInternetGateways | Validates filters and pagination parameters and returns an empty set, including for explicit IDs, as AWS does. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
 | DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
 
-The two describe-only network actions above provide discovery compatibility when no
-resources exist. Egress-only gateway discovery validates its pagination parameters before
-returning an empty page. Neither models virtual private gateway or egress-only internet
-gateway lifecycles.
+`DescribeVpnGateways` provides discovery compatibility when no resources exist; virtual
+private gateway lifecycles are not modelled.
 
 ### Subnets
 
@@ -317,6 +314,9 @@ Nested launch-template tags follow AWS's case-sensitive check: `aws:` is rejecte
 | DeleteInternetGateway | Deletes an internet gateway. |
 | AttachInternetGateway | Attaches an internet gateway to a VPC. |
 | DetachInternetGateway | Detaches an internet gateway from a VPC. |
+| CreateEgressOnlyInternetGateway | Creates an egress-only internet gateway attached to an existing VPC (`InvalidVpcID.NotFound` otherwise). Tags are validated before the gateway is created, so a rejected tag leaves nothing behind. A retry with the same `ClientToken` returns the gateway the first call created, unchanged; the same token with a different `VpcId` or different `TagSpecification` tags fails with `IdempotentParameterMismatch`. |
+| DescribeEgressOnlyInternetGateways | Lists stored egress-only internet gateways, filtered by ID and by the `egress-only-internet-gateway-id`, `attachment.vpc-id`, `attachment.state` and tag filters. An unknown ID returns an empty set, as AWS does. `MaxResults` (5 to 255) pages the results, ordered by ID, with `NextToken`. |
+| DeleteEgressOnlyInternetGateway | Deletes an egress-only internet gateway; an unknown ID fails with `InvalidGatewayID.NotFound`. Routes that targeted it stay in their route tables with state `blackhole`. |
 
 ### Route Tables
 
@@ -683,7 +683,8 @@ members it sets, and the rest keep the template's values; devices only one side 
 given. An Auto Scaling group launching from a template gets the template's mappings the same
 way. The root volume's type comes from the mapping for the AMI's root device, else from the
 AMI's own root mapping, else `gp3`, and `CreateImage` records that type on the new AMI's root
-mapping. A mapping naming a `VolumeType` outside the service model's enum fails with
+mapping. A mapping with `NoDevice` set removes its device whatever else it names, so it sets no
+type and its `VolumeType` is not checked. A mapping naming a `VolumeType` outside the service model's enum fails with
 `InvalidParameterValue`, as `ModifyVolume` does. Template versions are not checked when they are
 stored, so a template naming an unknown `VolumeType` is accepted by `CreateLaunchTemplate` and
 fails at launch.

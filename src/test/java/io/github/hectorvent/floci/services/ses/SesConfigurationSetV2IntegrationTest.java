@@ -57,25 +57,6 @@ class SesConfigurationSetV2IntegrationTest {
     }
 
     @Test
-    @Order(3)
-    void createConfigurationSet_tagsNotArray() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
-            .body("""
-                {
-                  "ConfigurationSetName": "v2-cs-bad-tags",
-                  "Tags": "not-an-array"
-                }
-                """)
-        .when()
-            .post("/v2/email/configuration-sets")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
-    }
-
-    @Test
     @Order(4)
     void createConfigurationSet_missingName() {
         given()

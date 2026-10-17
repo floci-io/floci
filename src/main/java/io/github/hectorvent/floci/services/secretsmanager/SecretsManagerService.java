@@ -37,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -417,6 +418,39 @@ public class SecretsManagerService implements ResourceProvider {
     }
 
     /**
+     * The full ARN of the secret {@code secretId} names in the given account, or empty when there is
+     * none, resolved in the order the operations resolve it: a name in {@code region}, or an ARN,
+     * matched exactly before it is read as a partial ARN without the random suffix. An ARN that
+     * matches neither way in this account is empty, and the caller authorizes the ARN as given, which
+     * is the secret the operations then look for in the account the ARN names. IAM enforcement reads
+     * it before the request runs: AWS authorizes a request against the secret's ARN, random suffix
+     * included, however the request names the secret.
+     */
+    public Optional<String> findArn(String accountId, String secretId, String region) {
+        if (!secretId.startsWith("arn:")) {
+            return findArnByName(accountId, secretId, region);
+        }
+        AwsArnUtils.Arn arn = parseOrNull(secretId);
+        String nameFromArn = secretNameOrNull(arn);
+        if (nameFromArn == null) {
+            return Optional.empty();
+        }
+        if (findByArnInAccount(accountId, secretId, arn) != null) {
+            return Optional.of(secretId);
+        }
+        return findArnByName(accountId, nameFromArn, arn.region());
+    }
+
+    /** The full ARN of the secret with this name in the given account and region, or empty when there is none. */
+    Optional<String> findArnByName(String accountId, String name, String region) {
+        String key = regionKey(region, name);
+        Optional<Secret> secret = store instanceof AccountAwareStorageBackend<Secret> aware
+                ? aware.getForAccount(accountId, key).or(() -> aware.getLegacyForAccount(accountId, key))
+                : store.get(key);
+        return secret.map(Secret::getArn);
+    }
+
+    /**
      * Marks the secret with this ARN as owned by an AWS service, so that it rotates the way a
      * service-managed secret does. Ownership is normally set when the owning service creates the
      * secret; this backfills secrets persisted before floci tracked it. A secret that is already
@@ -457,9 +491,14 @@ public class SecretsManagerService implements ResourceProvider {
 
     /** Finds a secret by full ARN within the account and region that ARN names. */
     private Secret findByArnInAccount(String secretArn, AwsArnUtils.Arn arn) {
+        return findByArnInAccount(arn.accountId(), secretArn, arn);
+    }
+
+    /** Finds a secret by full ARN within the given account and the region that ARN names. */
+    private Secret findByArnInAccount(String accountId, String secretArn, AwsArnUtils.Arn arn) {
         Predicate<String> inRegion = key -> key.startsWith(arn.region() + "::");
         List<Secret> candidates = store instanceof AccountAwareStorageBackend<Secret> aware
-                ? aware.scanForAccount(arn.accountId(), inRegion)
+                ? aware.scanForAccount(accountId, inRegion)
                 : store.scan(inRegion);
         return candidates.stream()
                 .filter(s -> secretArn.equals(s.getArn()))
@@ -1773,16 +1812,11 @@ public class SecretsManagerService implements ResourceProvider {
             //    ARN format: arn:<partition>:secretsmanager:<region>:<account>:secret:<name>
             //    Parsed rather than matched against a literal prefix, because the ARN carries the
             //    region's own partition and a pinned "arn:aws:" refused a GovCloud or China
-            //    secret its own ARN. The name comes off the parsed resource without a second
-            //    split: a secret name may itself contain colons.
+            //    secret its own ARN.
             AwsArnUtils.Arn parsedArn = parseOrNull(secretId);
-            String secretResourcePrefix = "secret:";
-            if (parsedArn != null
-                    && "secretsmanager".equals(parsedArn.service())
-                    && parsedArn.resource().startsWith(secretResourcePrefix)) {
-                String arnRegion = parsedArn.region();
-                String nameFromArn = parsedArn.resource().substring(secretResourcePrefix.length());
-                Secret byName = store.get(regionKey(arnRegion, nameFromArn)).orElse(null);
+            String nameFromArn = secretNameOrNull(parsedArn);
+            if (nameFromArn != null) {
+                Secret byName = store.get(regionKey(parsedArn.region(), nameFromArn)).orElse(null);
                 if (byName != null) {
                     return byName;
                 }
@@ -1832,6 +1866,19 @@ public class SecretsManagerService implements ResourceProvider {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    /**
+     * The secret name a Secrets Manager secret ARN carries, taken off the parsed resource without a
+     * second split because a name may itself contain colons, or {@code null} for any other ARN.
+     */
+    private static String secretNameOrNull(AwsArnUtils.Arn arn) {
+        String secretResourcePrefix = "secret:";
+        if (arn == null || !"secretsmanager".equals(arn.service())
+                || !arn.resource().startsWith(secretResourcePrefix)) {
+            return null;
+        }
+        return arn.resource().substring(secretResourcePrefix.length());
     }
 
     private static String regionKey(String region, String name) {

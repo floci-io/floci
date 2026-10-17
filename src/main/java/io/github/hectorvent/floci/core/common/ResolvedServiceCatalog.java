@@ -82,6 +82,7 @@ import io.github.hectorvent.floci.services.ses.SesTemplateController;
 import io.github.hectorvent.floci.services.ses.SesTenantController;
 import io.github.hectorvent.floci.services.ssooidc.SsoOidcController;
 import io.github.hectorvent.floci.services.ssoportal.SsoPortalController;
+import io.github.hectorvent.floci.services.swf.model.SwfConstants;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -294,8 +295,9 @@ public class ResolvedServiceCatalog {
                         Set.of("AWSStepFunctions."), Set.of("states"), Set.of("SFN"), Set.of()),
                 descriptor("swf", "swf", config.services().swf().enabled(), true,
                         "swf", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
-                        protocols(ServiceProtocol.JSON),
-                        Set.of("SimpleWorkflowService."), Set.of("swf"), Set.of(), Set.of()),
+                        protocols(ServiceProtocol.JSON, ServiceProtocol.PLAIN_JSON),
+                        Set.of(SwfConstants.TARGET_PREFIX, SwfConstants.LEGACY_TARGET_PREFIX),
+                        Set.of("swf"), Set.of(), Set.of()),
                 descriptor("cloudformation", "cloudformation", config.services().cloudformation().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
@@ -791,6 +793,10 @@ public class ResolvedServiceCatalog {
 
     public Optional<ServiceCatalog.TargetMatch> matchTarget(String target) {
         return catalog.matchTarget(target);
+    }
+
+    public Optional<ServiceCatalog.TargetMatch> matchPlainJsonTarget(String target) {
+        return catalog.matchPlainJsonTarget(target);
     }
 
     public Optional<ServiceDescriptor> byCredentialScope(String credentialScope) {

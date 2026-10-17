@@ -181,6 +181,36 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
         return path.toString();
     }
 
+    /**
+     * Reposilite has no per-GAV metadata beyond a directory listing, so this asks its own details
+     * API (the same one {@link #isRepositoryServable} already relies on to distinguish "repository
+     * not provisioned yet" from "path genuinely not there") for the version directory itself,
+     * rather than any one file inside it: a clean 200 there, directory listing or not, is enough to
+     * confirm the version exists, since Reposilite only serves a directory's details for a path it
+     * actually has.
+     */
+    @Override
+    public boolean packageVersionExists(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
+        String baseUrl = manager.ensureReady();
+        String path = "/api/maven/details" + packageDirectoryPath(repositoryContainerId, namespace, packageName)
+                + SidecarUriUtils.encodeSegment(version);
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), path))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        int status = send(request, BodyHandlers.discarding()).statusCode();
+        if (status == 404) {
+            return false;
+        }
+        if (status != 200) {
+            throw new IllegalStateException("Could not look up " + packageName + " " + version + " on the "
+                    + "Reposilite sidecar: upstream returned " + status);
+        }
+        return true;
+    }
+
     /** Ensures a Reposilite repository named {@code repoId} exists, creating it if not. */
     public void ensureRepository(String repoId) {
         String baseUrl = manager.ensureReady();

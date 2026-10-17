@@ -53,7 +53,7 @@ public class NetworkExposureGuard {
      * mode. {@link TlsConfigSource} pins {@code quarkus.http.host} to loopback for the internal
      * backends, so when the effective value is that pin the configured host is the next source's.
      */
-    static String publicHost(Config config) {
+    public static String publicHost(Config config) {
         ConfigValue effective = config.getConfigValue(HTTP_HOST);
         if (effective.getValue() != null && !TlsConfigSource.NAME.equals(effective.getSourceName())) {
             return effective.getValue();
@@ -82,7 +82,7 @@ public class NetworkExposureGuard {
     }
 
     /** True for 127.0.0.0/8, ::1 and localhost. Only IP literals are parsed; no name is resolved. */
-    static boolean isLoopback(String host) {
+    public static boolean isLoopback(String host) {
         String literal = host.strip();
         if (literal.startsWith("[") && literal.endsWith("]")) {
             literal = literal.substring(1, literal.length() - 1);

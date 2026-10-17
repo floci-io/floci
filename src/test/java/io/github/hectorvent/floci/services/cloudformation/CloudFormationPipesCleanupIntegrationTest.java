@@ -410,7 +410,9 @@ class CloudFormationPipesCleanupIntegrationTest {
         assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
         Mockito.doCallRealMethod().when(pipesService).deletePipe(eq(replacementName), anyString());
-        updateStack(stackName, renameRollbackTemplate(priorName, ""));
+        // The rollback left the stack on this very template, which AWS refuses to update to with
+        // "No updates are to be performed.": a new output makes it an update.
+        updateStack(stackName, CfnUpdates.forceUpdate(renameRollbackTemplate(priorName, "")));
 
         given()
             .contentType("application/json")

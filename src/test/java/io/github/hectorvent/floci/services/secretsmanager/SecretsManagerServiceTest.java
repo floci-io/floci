@@ -529,6 +529,99 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void findArnByNameReturnsTheStoredArnWithItsSuffix() {
+        Secret created = service.createSecret("app/core", "value", null, null, null, null, REGION);
+
+        assertEquals(created.getArn(), service.findArnByName("000000000000", "app/core", REGION).orElseThrow());
+        assertTrue(service.findArnByName("000000000000", "app/missing", REGION).isEmpty());
+    }
+
+    @Test
+    void findArnByNameReadsOnlyTheNamedAccount() {
+        AccountAwareStorageBackend<Secret> accountAware =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        SecretsManagerService svc = new SecretsManagerService(accountAware, 30);
+        Secret otherAccount = new Secret();
+        otherAccount.setName("app/core");
+        otherAccount.setArn("arn:aws:secretsmanager:" + REGION + ":111122223333:secret:app/core-AbCdEf");
+        accountAware.putForAccount("111122223333", REGION + "::app/core", otherAccount);
+
+        assertEquals(otherAccount.getArn(), svc.findArnByName("111122223333", "app/core", REGION).orElseThrow());
+        assertTrue(svc.findArnByName("000000000000", "app/core", REGION).isEmpty());
+    }
+
+    @Test
+    void findArnResolvesANameOrAnArnTheWayTheOperationsDo() {
+        Secret core = service.createSecret("app/core", "value", null, null, null, null, REGION);
+        String partialArn = core.getArn().substring(0, core.getArn().length() - "-AbCdEf".length());
+
+        assertEquals(core.getArn(), service.findArn("000000000000", "app/core", REGION).orElseThrow());
+        assertEquals(core.getArn(), service.findArn("000000000000", core.getArn(), REGION).orElseThrow());
+        assertEquals(core.getArn(), service.findArn("000000000000", partialArn, "eu-west-1").orElseThrow());
+        assertFindArnNamesTheSecretTheOperationActsOn(service, "app/core", REGION);
+        assertFindArnNamesTheSecretTheOperationActsOn(service, core.getArn(), REGION);
+        assertFindArnNamesTheSecretTheOperationActsOn(service, partialArn, "eu-west-1");
+        assertTrue(service.findArn("000000000000", partialArn.replace("app/core", "app/missing"), REGION).isEmpty());
+        assertTrue(service.findArn("000000000000", "arn:aws:s3:::app/core", REGION).isEmpty());
+    }
+
+    @Test
+    void findArnPrefersTheCallersAccountToTheOneTheArnNamesAsTheOperationsDo() {
+        AccountAwareStorageBackend<Secret> accountAware =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        SecretsManagerService svc = new SecretsManagerService(accountAware, 30);
+        Secret otherAccount = new Secret();
+        otherAccount.setName("app/core");
+        otherAccount.setArn("arn:aws:secretsmanager:" + REGION + ":111122223333:secret:app/core-AbCdEf");
+        accountAware.putForAccount("111122223333", REGION + "::app/core", otherAccount);
+
+        // Only the account the ARN names holds it: the caller authorizes the ARN as given, and the
+        // operation finds that secret there.
+        assertTrue(svc.findArn("000000000000", otherAccount.getArn(), REGION).isEmpty());
+        assertFindArnNamesTheSecretTheOperationActsOn(svc, otherAccount.getArn(), REGION);
+
+        // A secret of the caller's own named like the ARN's resource is the one the operation reads
+        // the ARN as, before it looks in the account the ARN names.
+        Secret callers = svc.createSecret("app/core-AbCdEf", "value", null, null, null, null, REGION);
+        assertEquals(callers.getArn(), svc.findArn("000000000000", otherAccount.getArn(), REGION).orElseThrow());
+        assertFindArnNamesTheSecretTheOperationActsOn(svc, otherAccount.getArn(), REGION);
+    }
+
+    /**
+     * IAM authorizes {@code findArn}'s answer, or an ARN as given when it has none, so it has to name
+     * the secret the operation then acts on.
+     */
+    private static void assertFindArnNamesTheSecretTheOperationActsOn(SecretsManagerService svc,
+                                                                      String secretId, String region) {
+        assertEquals(svc.describeSecret(secretId, region).getArn(),
+                svc.findArn("000000000000", secretId, region).orElse(secretId));
+    }
+
+    @Test
+    void findArnMatchesAFullArnExactlyBeforeReadingItAsAPartialOne() {
+        Secret core = service.createSecret("app/core", "value", null, null, null, null, REGION);
+        String suffixed = core.getArn().substring(core.getArn().indexOf("app/core"));
+        Secret namedLikeTheArn = service.createSecret(suffixed, "other", null, null, null, null, REGION);
+
+        assertEquals(core.getArn(), service.findArn("000000000000", core.getArn(), REGION).orElseThrow());
+        assertEquals(namedLikeTheArn.getArn(), service.findArn("000000000000", suffixed, REGION).orElseThrow());
+    }
+
+    @Test
+    void findArnByNameReadsALegacyEntryOnlyForTheDefaultAccount() {
+        InMemoryStorage<String, Secret> raw = new InMemoryStorage<>();
+        SecretsManagerService svc = new SecretsManagerService(
+                new AccountAwareStorageBackend<>(raw, null, "000000000000"), 30);
+        Secret legacy = new Secret();
+        legacy.setName("app/legacy");
+        legacy.setArn("arn:aws:secretsmanager:" + REGION + ":000000000000:secret:app/legacy-AbCdEf");
+        raw.put(REGION + "::app/legacy", legacy);
+
+        assertEquals(legacy.getArn(), svc.findArnByName("000000000000", "app/legacy", REGION).orElseThrow());
+        assertTrue(svc.findArnByName("111122223333", "app/legacy", REGION).isEmpty());
+    }
+
+    @Test
     void ordinarySecretNamedLikeAnRdsSecretStillNeedsALambdaArn() {
         // Ownership is a property of the secret, not of its name: anyone may create a secret
         // called rds!something, and that must not grant it service-managed rotation.

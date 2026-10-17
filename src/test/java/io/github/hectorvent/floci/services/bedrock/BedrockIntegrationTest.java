@@ -541,6 +541,46 @@ class BedrockIntegrationTest {
             .body("resourceName", equalTo(arn));
     }
 
+    @Test
+    @Order(23)
+    void updateRejectingTheKmsKeyLeavesTheGuardrailUnchanged() {
+        String id = given()
+            .contentType("application/json")
+            .body("{\"name\": \"kms-update-rejected\","
+                + " \"blockedInputMessaging\": \"in\","
+                + " \"blockedOutputsMessaging\": \"out\"}")
+        .when()
+            .post("/guardrails")
+        .then()
+            .statusCode(202)
+            .extract().path("guardrailId");
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "kms-update-renamed",
+                  "blockedInputMessaging": "in v2",
+                  "blockedOutputsMessaging": "out v2",
+                  "kmsKeyId": "alias/does-not-exist"
+                }
+                """)
+        .when()
+            .put("/guardrails/" + id)
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        given()
+        .when()
+            .get("/guardrails/" + id)
+        .then()
+            .statusCode(200)
+            .body("name", equalTo("kms-update-rejected"))
+            .body("blockedInputMessaging", equalTo("in"))
+            .body("blockedOutputsMessaging", equalTo("out"));
+    }
+
     private static String tagListJson(String prefix, int count) {
         StringBuilder json = new StringBuilder("[");
         for (int i = 0; i < count; i++) {

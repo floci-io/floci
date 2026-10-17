@@ -241,7 +241,8 @@ public class CostAnomalyService implements Resettable {
         String token = present(request, "NextPageToken") ? text(request, "NextPageToken", 8192) : null;
         int pageSize = Math.min(maxResults, Math.max(definitions.size(), 1));
         PaginatedResult<ObjectNode> page = Pagination.paginate(definitions,
-                value -> value.path(arnKey).asText(), pageSize, token, Integer.MAX_VALUE, "InvalidNextTokenException");
+                value -> value.path(arnKey).asText(), pageSize, token, Integer.MAX_VALUE, Integer.MAX_VALUE,
+                "InvalidNextTokenException", "NextPageToken");
         ObjectNode response = mapper.createObjectNode();
         response.putArray(responseKey).addAll(page.items());
         if (page.nextToken() != null) {

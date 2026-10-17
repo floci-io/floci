@@ -50,6 +50,8 @@ public class Route53ResolverJsonHandler {
                 case "GetResolverEndpoint" -> resolverEndpointResponse(
                         service.getResolverEndpoint(text(request, "ResolverEndpointId")));
                 case "ListResolverEndpoints" -> handleListResolverEndpoints();
+                case "ListResolverEndpointIpAddresses" -> handleListResolverEndpointIpAddresses(
+                        text(request, "ResolverEndpointId"));
                 case "UpdateResolverEndpoint" -> resolverEndpointResponse(
                         service.updateResolverEndpoint(text(request, "ResolverEndpointId"), request));
 
@@ -141,6 +143,12 @@ public class Route53ResolverJsonHandler {
         for (ObjectNode endpoint : service.listResolverEndpoints()) {
             endpoints.add(endpoint);
         }
+        return Response.ok(result).build();
+    }
+
+    private Response handleListResolverEndpointIpAddresses(String endpointId) {
+        ObjectNode result = objectMapper.createObjectNode();
+        result.putArray("IpAddresses").addAll(service.listResolverEndpointIpAddresses(endpointId));
         return Response.ok(result).build();
     }
 

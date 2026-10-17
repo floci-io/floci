@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.mwaa.proxy;
 
 import io.github.hectorvent.floci.core.common.docker.ContainerExec;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.buffer.Buffer;
@@ -12,7 +13,6 @@ import io.vertx.core.json.JsonObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
-import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -67,10 +67,7 @@ class MwaaWebProxyCliOffloadTest {
 
         MwaaWebProxy proxy = new MwaaWebProxy("env1", vertx, "127.0.0.1", backend.actualPort(),
                 (environmentName, token) -> true, slowExecutor);
-        int proxyPort;
-        try (ServerSocket freePort = new ServerSocket(0)) {
-            proxyPort = freePort.getLocalPort();
-        }
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy.start(proxyPort);
 
         try {
@@ -142,10 +139,7 @@ class MwaaWebProxyCliOffloadTest {
         };
         MwaaWebProxy proxy = new MwaaWebProxy("env1", vertx, "127.0.0.1", 1,
                 (environmentName, token) -> true, slowExecutor);
-        int proxyPort;
-        try (ServerSocket freePort = new ServerSocket(0)) {
-            proxyPort = freePort.getLocalPort();
-        }
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy.start(proxyPort);
 
         try {
@@ -192,10 +186,7 @@ class MwaaWebProxyCliOffloadTest {
         };
         MwaaWebProxy proxy = new MwaaWebProxy("env1", vertx, "127.0.0.1", 1,
                 (environmentName, token) -> true, failingExecutor);
-        int proxyPort;
-        try (ServerSocket freePort = new ServerSocket(0)) {
-            proxyPort = freePort.getLocalPort();
-        }
+        int proxyPort = FreePorts.anyInterfacePort();
         proxy.start(proxyPort);
 
         try {

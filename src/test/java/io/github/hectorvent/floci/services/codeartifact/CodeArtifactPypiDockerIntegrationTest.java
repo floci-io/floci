@@ -374,6 +374,29 @@ class CodeArtifactPypiDockerIntegrationTest {
     }
 
     /**
+     * The real-world gap this closes: {@code DescribePackageVersion} used to 404 for every
+     * pypi-uploaded version the same reason {@code GetPackageVersionAsset} did. Confirms the
+     * bridge reads the real pypiserver container's own per-project JSON listing (not a mock) to
+     * confirm the version exists, and 404s for one that was never uploaded.
+     */
+    @Test
+    @Order(12)
+    void describePackageVersionBridgesToTheRealPypiserverSidecar() {
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + PACKAGE_NAME + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("packageVersion.status", equalTo("Published"))
+                .body("packageVersion.packageName", equalTo(PACKAGE_NAME))
+                .body("packageVersion.version", equalTo("1.0.0"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + PACKAGE_NAME + "&version=9.9.9")
+                .then().statusCode(404);
+    }
+
+    /**
      * pypiserver has no single whole-package delete route the way Verdaccio and Reposilite do, but
      * its own management endpoint ({@code POST /} with {@code :action=remove_pkg}) does delete a
      * named version for real, confirmed live: {@code DeletePackage} lists every version through

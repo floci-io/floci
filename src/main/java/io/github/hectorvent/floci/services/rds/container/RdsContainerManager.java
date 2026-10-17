@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.rds.container;
 
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -37,7 +40,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -486,12 +488,17 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
 
     @Override
     public Lease enter(String host, int port) throws InterruptedException {
+        return enter(host, port, true);
+    }
+
+    @Override
+    public Lease enter(String host, int port, boolean waitForResume) throws InterruptedException {
         if (host == null) {
             return Lease.NONE;
         }
         for (AutoPauseController controller : autoPauses.values()) {
             if (controller.serves(host, port)) {
-                return controller.acquire();
+                return controller.acquire(waitForResume);
             }
         }
         return Lease.NONE;
@@ -577,8 +584,7 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
                     () -> Thread.ofVirtual().name("rds-auto-pause").start(task),
                     delay.toMillis(), TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException e) {
-            LOG.debugv("RDS auto-pause timer is shut down; not scheduling: {0}", e.getMessage());
-            return CompletableFuture.completedFuture(null);
+            throw new IllegalStateException("RDS auto-pause timer is shut down", e);
         }
     }
 
@@ -880,6 +886,57 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
             }
         }
         throw new IllegalStateException("Timed out initializing " + description + " in " + containerName + ": " + lastOutput);
+    }
+
+    /** The most recent lines {@link #readLog} reads, so one call never holds an unbounded history. */
+    public static final int MAX_LOG_LINES = 100_000;
+
+    /**
+     * The container's log as Docker keeps it, stdout and stderr, at most the last
+     * {@link #MAX_LOG_LINES} lines, each with Docker's RFC 3339 timestamp in front. Null when Docker
+     * no longer knows the container, so the caller can tell a missing backend from an empty log. A
+     * read that does not finish in time fails rather than returning part of the log.
+     */
+    public List<String> readLog(String containerId) {
+        return readLog(containerId, Duration.ofSeconds(10));
+    }
+
+    List<String> readLog(String containerId, Duration timeout) {
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
+            @Override
+            public void onNext(Frame frame) {
+                synchronized (raw) {
+                    raw.writeBytes(frame.getPayload());
+                }
+            }
+        };
+        try (callback) {
+            boolean completed = lifecycleManager.getDockerClient().logContainerCmd(containerId)
+                    .withStdOut(true).withStdErr(true).withTimestamps(true).withTail(MAX_LOG_LINES)
+                    .exec(callback)
+                    .awaitCompletion(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            if (!completed) {
+                // Closing the callback (try-with-resources) stops the stream, so nothing writes into
+                // the buffer after this read gives up.
+                throw new IllegalStateException("Timed out reading the log of container " + containerId);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while reading the log of container " + containerId, e);
+        } catch (NotFoundException e) {
+            return null;
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not close the log stream of container " + containerId, e);
+        }
+        String text;
+        synchronized (raw) {
+            text = raw.toString(StandardCharsets.UTF_8);
+        }
+        if (text.isEmpty()) {
+            return List.of();
+        }
+        return List.of(text.split("\r?\n"));
     }
 
     public String createPostgresSnapshot(String containerId, String masterUsername) {

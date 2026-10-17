@@ -49,6 +49,11 @@ those subnets actually have. No data is migrated: the resources are control-plan
 - `SubnetGroupStatus` is immediately `Complete`, every subnet reports `Active`,
   `SupportedNetworkTypes` is `["IPV4"]`, and `IsReadOnly` is always `false`: a read-only
   group is one DMS manages for a zero-ETL integration, which Floci does not emulate.
+- The `default` group is synthesised from the region's default-VPC subnets, and only
+  exists once `CreateReplicationInstance` has put an instance in it (an instance created
+  without `ReplicationSubnetGroupIdentifier`), as AWS creates it the first time it is needed.
+  Until then it is neither listed nor found by the filter. Unlike AWS, it disappears again
+  once no instance in the region uses it.
 - `DescribeReplicationSubnetGroups` supports the `replication-subnet-group-id` filter.
   A filter naming a group that does not exist returns `ResourceNotFoundFault`, which is
   how Terraform detects a group deleted outside its state.

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -21,6 +22,9 @@ class S3EventBridgeIntegrationTest {
 
     private static String ruleArn;
     private static String queueUrl;
+
+    @Inject
+    S3LifecycleSweeper lifecycleSweeper;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -315,6 +319,55 @@ class S3EventBridgeIntegrationTest {
                 containsString("Object Deleted"),
                 containsString("\"version-id\":\"" + markerVersionId + "\""),
                 containsString("\"deletion-type\":\"Delete Marker Created\"")));
+    }
+
+    @Test
+    @Order(11)
+    void lifecycleExpiration_eventBridgeDetailSaysLifecycleExpirationFromS3Itself() {
+        given().contentType("text/plain").body("short-lived").when().put("/" + VERSIONED_BUCKET + "/expiring.txt")
+            .then().statusCode(200);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", containsString("Object Created"));
+        given()
+            .contentType("application/xml")
+            .body("<LifecycleConfiguration><Rule><ID>past</ID><Filter><Prefix>expiring</Prefix></Filter>"
+                    + "<Status>Enabled</Status><Expiration><Date>2020-01-01T00:00:00Z</Date></Expiration>"
+                    + "</Rule></LifecycleConfiguration>")
+        .when()
+            .put("/" + VERSIONED_BUCKET + "?lifecycle")
+        .then()
+            .statusCode(200);
+
+        lifecycleSweeper.sweep();
+
+        // The user guide's lifecycle event: reason "Lifecycle Expiration", requester s3.amazonaws.com,
+        // and no source-ip-address, which is "Only present for events triggered by an S3 request".
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", allOf(
+                containsString("expiring.txt"),
+                containsString("\"reason\":\"Lifecycle Expiration\""),
+                containsString("\"deletion-type\":\"Delete Marker Created\""),
+                containsString("\"requester\":\"s3.amazonaws.com\""),
+                not(containsString("source-ip-address"))));
+        given().when().delete("/" + VERSIONED_BUCKET + "?lifecycle").then().statusCode(204);
     }
 
     @Test

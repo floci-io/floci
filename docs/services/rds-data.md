@@ -47,7 +47,7 @@ The deprecated `ExecuteSql` operation is recognized at `POST /ExecuteSql` and re
 - SQL errors are returned as `DatabaseErrorException` so AWS SDK callers can handle database failures with normal AWS error decoding.
 - If `secretArn` points to a local Secrets Manager secret with JSON credentials (`username` or `user`, plus `password`), those credentials are used. A missing or unavailable secret returns `SecretsErrorException`; malformed or incomplete credentials return `InvalidSecretException`. Floci does not fall back to the resolved RDS resource's master credentials when a secret ARN was supplied.
 - `formatRecordsAs=JSON`, `formattedRecords`, and `resultSetOptions` are not implemented yet, and `ExecuteStatement` requests asking for those result modes return `BadRequestException`. They are `ExecuteStatement`-only fields in the AWS API, so `BatchExecuteStatement` — whose input is limited to `resourceArn`, `secretArn`, `sql`, `database`, `schema`, `parameterSets`, and `transactionId` — ignores them as AWS does rather than rejecting them.
-- RDS `HttpEndpointEnabled` control-plane gating is not modeled locally; availability is controlled by `FLOCI_SERVICES_RDS_DATA_ENABLED` and whether the target local RDS resource is running.
+- RDS records a cluster's `HttpEndpointEnabled` (`EnableHttpEndpoint` / `DisableHttpEndpoint`, see [RDS](rds.md#data-api-endpoint)), but the Data API does not check it: availability is controlled by `FLOCI_SERVICES_RDS_DATA_ENABLED` and whether the target local RDS resource is running.
 
 ## Configuration
 
@@ -55,8 +55,16 @@ The deprecated `ExecuteSql` operation is recognized at `POST /ExecuteSql` and re
 |---|---|---|
 | `FLOCI_SERVICES_RDS_DATA_ENABLED` | `true` | Enable or disable the RDS Data API service |
 | `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS` | `180` | Idle timeout, in seconds, before leaked Data API transactions expire |
+| `FLOCI_SERVICES_RDS_DATA_DATABASE_RESUMING_EXCEPTION_ENABLED` | `false` | Return `DatabaseResumingException` (HTTP 400) while an auto-paused Aurora backend resumes, instead of waiting for it |
 
 The RDS Data API also requires the RDS service itself to be enabled because it resolves `resourceArn` values to local RDS containers.
+
+With `database-resuming-exception-enabled=true`, `ExecuteStatement`, `BatchExecuteStatement`,
+and `BeginTransaction` initiate resume in the background and return the retryable error before
+opening a database connection. Calls made while resume is in progress return the same error;
+retry after a few seconds. Once ready, requests run normally. Existing transactions keep their
+backend awake until commit, rollback, or expiry. The default remains blocking resume for local
+compatibility; TCP database connections and internal RDS commands always wait for resume.
 
 ## Example
 

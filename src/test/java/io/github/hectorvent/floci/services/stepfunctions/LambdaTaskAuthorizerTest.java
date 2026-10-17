@@ -334,6 +334,31 @@ class LambdaTaskAuthorizerTest {
     }
 
     @Test
+    void theTrustPolicyCanRequireAnAssumedRoleCaller() {
+        roleWithPolicies(ASSUME_ANY_ROLE);
+        taskRole(TASK_ROLE, """
+                {"Version":"2012-10-17","Statement":[{
+                  "Effect":"Allow","Principal":{"AWS":"%s"},"Action":"sts:AssumeRole",
+                  "Condition":{"StringEquals":{"aws:PrincipalType":"AssumedRole"}}}]}""".formatted(ROLE));
+
+        assertEquals(Optional.empty(), authorizer.assumeRefusal(ROLE, TASK_ROLE, STATE_MACHINE));
+    }
+
+    @Test
+    void theTrustPolicyCannotMatchTheSessionsOwnIdOnThisPath() {
+        roleWithPolicies(ASSUME_ANY_ROLE);
+        taskRole(TASK_ROLE, """
+                {"Version":"2012-10-17","Statement":[{
+                  "Effect":"Allow","Principal":{"AWS":"%s"},"Action":"sts:AssumeRole",
+                  "Condition":{"StringLike":{"aws:userid":"*"}}}]}""".formatted(ROLE));
+
+        // Step Functions mints the session without a name, and a session's aws:userid is
+        // role-id:session-name, so the key is absent and a condition on it matches nothing.
+        assertEquals(assumeDenied(TASK_ROLE, "because no role trust policy allows the sts:AssumeRole action"),
+                authorizer.assumeRefusal(ROLE, TASK_ROLE, STATE_MACHINE));
+    }
+
+    @Test
     void aRoleThatDoesNotExistCannotBeAssumedAndNoPolicyIsNamed() {
         roleWithPolicies(ASSUME_ANY_ROLE);
         when(iamService.findRole(FUNCTION_ACCOUNT, "LambdaRole")).thenReturn(Optional.empty());

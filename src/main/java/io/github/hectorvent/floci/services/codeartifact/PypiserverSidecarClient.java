@@ -123,6 +123,20 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
     }
 
     /**
+     * Reuses the same per-project JSON listing {@link #deletePackage} already reads (grouped by
+     * release the same way the real PyPI JSON API is), rather than the simple index: the simple
+     * index has no per-file version field of its own to group by, only filenames that would need
+     * the same version-boundary parsing {@link #filenameEmbedsVersion} does for a known asset name,
+     * which isn't available here.
+     */
+    @Override
+    public boolean packageVersionExists(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        return packageFiles(baseUrl, packageName).stream().anyMatch(file -> file.version().equals(version));
+    }
+
+    /**
      * Removes a whole package, every version at once, confirmed against a live container: the pinned
      * image's management endpoint ({@code POST /} with {@code :action=remove_pkg}) deletes one exact
      * {@code name}/{@code version} pair per call rather than a whole package or project at once, so

@@ -1,106 +1,21 @@
 package com.floci.test;
 
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Assumptions;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.cloudwatchlogs.model.CloudWatchLogsException;
 import software.amazon.awssdk.services.cloudwatchlogs.model.InvalidParameterException;
-import software.amazon.awssdk.services.iam.IamClient;
-import software.amazon.awssdk.services.iam.model.AccessKey;
 
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertAll;
 
 @DisplayName("CloudWatch Logs stream resource permissions")
-class CloudWatchLogsStreamAuthorizationTest {
+class CloudWatchLogsStreamAuthorizationTest extends CloudWatchLogsAuthorizationFixture {
 
-    private IamClient iam;
-    private CloudWatchLogsClient root;
-    private CloudWatchLogsClient caller;
-    private String user;
-    private AccessKey key;
-    private String protectedGroup;
-    private String otherGroup;
-    private boolean policyCreated;
-
-    @BeforeEach
-    void setUp() {
-        Assumptions.assumeFalse(TestFixtures.isRealAws(), "Uses emulator account-root credentials");
-        iam = TestFixtures.iamClient("000000000000");
-        root = client("000000000000", "test");
-        String name = TestFixtures.uniqueName("logs-stream-permissions");
-        iam.createUser(r -> r.userName(name));
-        user = name;
-        key = iam.createAccessKey(r -> r.userName(user)).accessKey();
-        caller = client(key.accessKeyId(), key.secretAccessKey());
-        boolean enforced = false;
-        try {
-            caller.describeLogGroups();
-        } catch (CloudWatchLogsException error) {
-            assertDenied(error);
-            enforced = true;
-        }
-        Assumptions.assumeTrue(enforced, "Requires floci.services.iam.enforcement-enabled=true");
-        String group = name + "-protected";
-        root.createLogGroup(r -> r.logGroupName(group).tags(Map.of("protected", "true")));
-        protectedGroup = group;
-        String other = name + "-other";
-        root.createLogGroup(r -> r.logGroupName(other).tags(Map.of("protected", "false")));
-        otherGroup = other;
-    }
-
-    @AfterEach
-    void cleanUp() {
-        assertAll("remove Logs and IAM fixtures and close every client",
-                () -> {
-                    if (protectedGroup != null) {
-                        root.deleteLogGroup(r -> r.logGroupName(protectedGroup));
-                    }
-                },
-                () -> {
-                    if (otherGroup != null) {
-                        root.deleteLogGroup(r -> r.logGroupName(otherGroup));
-                    }
-                },
-                () -> {
-                    if (policyCreated) {
-                        iam.deleteUserPolicy(r -> r.userName(user).policyName("streams"));
-                    }
-                },
-                () -> {
-                    if (key != null) {
-                        iam.deleteAccessKey(r -> r.userName(user).accessKeyId(key.accessKeyId()));
-                    }
-                },
-                () -> {
-                    if (user != null) {
-                        iam.deleteUser(r -> r.userName(user));
-                    }
-                },
-                () -> {
-                    if (caller != null) {
-                        caller.close();
-                    }
-                },
-                () -> {
-                    if (root != null) {
-                        root.close();
-                    }
-                },
-                () -> {
-                    if (iam != null) {
-                        iam.close();
-                    }
-                });
+    CloudWatchLogsStreamAuthorizationTest() {
+        super("logs-stream-permissions", "streams");
     }
 
     @ParameterizedTest
@@ -163,12 +78,6 @@ class CloudWatchLogsStreamAuthorizationTest {
         }
     }
 
-    private void policy(String statements) {
-        iam.putUserPolicy(r -> r.userName(user).policyName("streams")
-                .policyDocument("{\"Version\":\"2012-10-17\",\"Statement\":[" + statements + "]}"));
-        policyCreated = true;
-    }
-
     private void invoke(boolean delete, String group) {
         invoke(delete, group, "selected");
     }
@@ -184,16 +93,5 @@ class CloudWatchLogsStreamAuthorizationTest {
     private void assertPresent(String group, boolean expected) {
         assertThat(root.describeLogStreams(r -> r.logGroupName(group)).logStreams().stream()
                 .anyMatch(stream -> "selected".equals(stream.logStreamName()))).isEqualTo(expected);
-    }
-
-    private void assertDenied(CloudWatchLogsException error) {
-        assertThat(error.statusCode()).isEqualTo(400);
-        assertThat(error.awsErrorDetails().errorCode()).contains("AccessDenied");
-    }
-
-    private static CloudWatchLogsClient client(String accessKey, String secret) {
-        return CloudWatchLogsClient.builder().endpointOverride(TestFixtures.endpoint()).region(TestFixtures.region())
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accessKey, secret)))
-                .build();
     }
 }

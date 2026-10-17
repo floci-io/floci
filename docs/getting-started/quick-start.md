@@ -201,6 +201,12 @@ sudo ufw allow in on docker0 to any port 12000:12499 proto tcp comment 'floci la
 sudo ufw allow in on docker0 to any port 4566 proto tcp comment 'floci ecr data plane'
 ```
 
+Floci itself keeps listening on `127.0.0.1`. Containers reach it through the bridge gateway
+(`172.17.0.1` by default): at startup Floci opens a relay on that address, which belongs to the host
+but is not reachable from the network, and logs `Containers reach Floci through 172.17.0.1:4566`.
+There is no need to listen on `0.0.0.0` for SDK calls made from inside a Lambda function, ECS task or
+CodeBuild build.
+
 **Docker Desktop** (macOS / Windows / Linux) does not need this — it routes container → host through the Docker VM, which Floci's `DockerHostResolver` detects automatically.
 
 **Floci-in-Docker** (running the published Floci image inside a container) does not need this either — Lambda containers and Floci share the same docker network and reach each other via container IPs.

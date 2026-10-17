@@ -47,6 +47,13 @@ public class AccountController {
         return Response.ok(response).build();
     }
 
+    @POST
+    @Path("/deleteAlternateContact")
+    public Response deleteAlternateContact(String body) {
+        accountService.deleteAlternateContact(requestContext.getAccountId(), readTree(body));
+        return Response.ok().build();
+    }
+
     private JsonNode readTree(String body) {
         try {
             return objectMapper.reader()

@@ -127,6 +127,11 @@ public class RegionResolver {
         return AwsPartitions.forRegion(region).isPresent();
     }
 
+    /** A colon separates ARN fields and cannot be part of a request's region label. */
+    public static boolean containsArnDelimiter(String region) {
+        return region != null && region.indexOf(':') >= 0;
+    }
+
     /**
      * Resolves the region from an X-Amz-Credential value found in
      * presigned URL query parameters.

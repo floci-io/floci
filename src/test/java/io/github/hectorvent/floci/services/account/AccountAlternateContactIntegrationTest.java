@@ -44,6 +44,18 @@ class AccountAlternateContactIntegrationTest {
                 .post("/getAlternateContact").then().statusCode(400).body("__type", equalTo("SerializationException"));
     }
 
+    @Test
+    void putThenDeleteThenGetReturnsResourceNotFound() {
+        put("security@example.com").statusCode(200);
+        delete().statusCode(200).body(equalTo(""));
+        get().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void deleteUnsetContactReturnsResourceNotFound() {
+        delete().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
     private static io.restassured.response.ValidatableResponse put(String email) {
         return given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"AlternateContactType\":\"SECURITY\",\"Name\":\"Security\",\"Title\":\"Owner\",\"EmailAddress\":\"" + email + "\",\"PhoneNumber\":\"+12025550123\"}")
@@ -54,5 +66,11 @@ class AccountAlternateContactIntegrationTest {
         return given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"AlternateContactType\":\"SECURITY\"}")
                 .post("/getAlternateContact").then();
+    }
+
+    private static io.restassured.response.ValidatableResponse delete() {
+        return given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"AlternateContactType\":\"SECURITY\"}")
+                .post("/deleteAlternateContact").then();
     }
 }

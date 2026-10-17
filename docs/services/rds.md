@@ -71,6 +71,10 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBClusterEndpoints` | List a cluster's built-in writer and reader endpoints and its custom endpoints, with the four documented filters |
 | `ModifyDBClusterEndpoint` | Change a custom endpoint's type or member list |
 | `DeleteDBClusterEndpoint` | Delete a custom endpoint |
+| `EnableHttpEndpoint` | Turn on an Aurora cluster's Data API endpoint by ARN; see [Data API endpoint](#data-api-endpoint) |
+| `DisableHttpEndpoint` | Turn off a cluster's Data API endpoint by ARN |
+| `DescribeDBLogFiles` | List an instance's log files, read from its database container; see [Log files](#log-files) |
+| `DownloadDBLogFilePortion` | Read a block of a log file, from the start or the most recent lines |
 | `AddRoleToDBCluster` | Associate an IAM role with a cluster, optionally for a feature; see [IAM role associations](#iam-role-associations) |
 | `RemoveRoleFromDBCluster` | Remove a role from a cluster |
 | `AddRoleToDBInstance` | Associate an IAM role with an instance for a feature |
@@ -130,6 +134,9 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `RestoreDBClusterToPointInTime` | Create a cluster from a source cluster at a time in its restorable window; see [Point in time restore](#point-in-time-restore) |
 | `DescribeDBClusterSnapshotAttributes` | Return the `restore` attribute of a cluster snapshot |
 | `ModifyDBClusterSnapshotAttribute` | Add or remove `restore` values (account ids or `all`) on a cluster snapshot |
+| `StartExportTask` | Start an export task for a DB snapshot or DB cluster snapshot; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
+| `DescribeExportTasks` | List export tasks, by `ExportTaskIdentifier`, `SourceArn`, `SourceType` and the `export-task-identifier`, `s3-bucket`, `source-arn` and `status` filters |
+| `CancelExportTask` | Cancel a running export task; what it already wrote stays in the bucket |
 | `DescribeGlobalClusters` | List the account's global clusters with their primary and secondary members; see [Global clusters](#global-clusters) |
 | `CreateGlobalCluster` | Create an Aurora global database, empty or with an existing Aurora cluster as its primary |
 | `ModifyGlobalCluster` | Rename a global cluster, set deletion protection, or upgrade its engine version (members follow) |
@@ -616,6 +623,39 @@ Custom endpoints are modelled, not routed: a custom endpoint reports the cluster
 reachable, but connections through it go where the cluster endpoint sends them rather than being
 spread across the chosen members.
 
+## Data API endpoint
+
+`EnableHttpEndpoint` and `DisableHttpEndpoint` turn a cluster's Data API endpoint on and off by the
+cluster's ARN, and `DescribeDBClusters` reports it as `HttpEndpointEnabled`. `CreateDBCluster` and
+`ModifyDBCluster` take `EnableHttpEndpoint` too, as does the `AWS::RDS::DBCluster` CloudFormation
+property, so Terraform's `enable_http_endpoint` and CDK's `enableDataApi` read back what they set.
+
+The Data API is offered for Aurora PostgreSQL and Aurora MySQL clusters, so turning it on for any
+other engine is `InvalidParameterCombination` (a create checks before the cluster exists); turning
+it off is always accepted. An ARN that names no cluster in the caller's account and Region is
+`ResourceNotFoundFault`, and a cluster that is not available is `InvalidResourceStateFault`. The flag
+is recorded and reported only: the Data API (`rds-data`) does not refuse a cluster with it off.
+
+## Log files
+
+`DescribeDBLogFiles` and `DownloadDBLogFilePortion` read an instance's log from its database
+container (`docker logs`, the most recent 100,000 lines), cut into files the way RDS names them: PostgreSQL rotates hourly into
+`error/postgresql.log.YYYY-MM-DD-HH` (UTC), MySQL and MariaDB keep `error/mysql-error.log`, and SQL
+Server keeps `log/ERROR`. An Aurora member reads its cluster's container. `LastWritten` is the time
+Docker recorded for the file's last line, and `Size` the bytes of its lines.
+
+`DescribeDBLogFiles` takes `FilenameContains`, `FileLastWritten` (files written at or after it) and
+`FileSize` (files larger than it), and pages by `MaxRecords` / `Marker`. `DownloadDBLogFilePortion`
+follows the API reference: without a `Marker` it returns the most recent `NumberOfLines` lines (the
+whole file, up to 10000 lines, without either), `Marker` `0` starts at the first line, and the
+returned `Marker` continues until `AdditionalDataPending` is false. A block stops at 1 MB, and a
+single line longer than that is cut at 1 MB, as the API reference says the block is truncated.
+Control characters XML cannot carry (a terminal colour code) come back as U+FFFD.
+
+An instance that is not available, or whose database container cannot be found or started, is
+`DBInstanceNotReady`, and an unknown file name `DBLogFileNotFoundFault`. Negative `FileSize`,
+`FileLastWritten` or `Marker` values are `InvalidParameterValue`. In mock RDS mode there is no container, so an instance has no log files.
+
 ## IAM role associations
 
 `AddRoleToDBCluster` and `AddRoleToDBInstance` associate an IAM role with an available cluster or
@@ -683,6 +723,40 @@ target is seeded from a `pg_dumpall` of the source taken when the request arrive
 replicas use, so the restored data is the source's latest state whatever time in the window is
 asked for; this is also why `LatestRestorableTime` is always the current time. As with
 `CreateDBSnapshot`, only PostgreSQL sources are accepted.
+
+## Exporting snapshots to Amazon S3
+
+`StartExportTask`, `DescribeExportTasks` and `CancelExportTask` manage RDS snapshot export tasks.
+`ExportTaskIdentifier`, `SourceArn`, `S3BucketName`, `IamRoleArn` and `KmsKeyId` are required,
+`S3Prefix` and `ExportOnly` are optional.
+
+A task reports `STARTING`, then `IN_PROGRESS` with a `PercentProgress` while its tables are written,
+then `COMPLETE` or `FAILED` with a `FailureCause`. `CancelExportTask` moves a running task to
+`CANCELING`; it stops before its next table and becomes `CANCELED`, and the data it already wrote
+stays in the bucket, as on RDS. A table the export skips is named in `WarningMessage`. A task still
+running when Floci stops is `FAILED` as soon as Floci starts again, or `CANCELED` if it was being
+canceled. A `StartExportTask` that arrives while Floci is resetting waits for the reset to finish,
+and is refused with `Throttling` if it lasts more than 30 seconds.
+
+Floci does not write snapshot data to S3 yet. In [mock mode](#mock-mode-ci-tests) a task completes
+without writing anything, unless its bucket is in another region (see below). Outside mock mode a task is accepted and then ends `FAILED` with the
+`FailureCause` `Floci does not write snapshot data to S3 yet: export tasks complete only in mock
+mode (FLOCI_SERVICES_RDS_MOCK=true)`.
+
+`ExportOnly` takes `database`, `database.schema` or `database.schema.table` entries made of
+letters, digits, `$` and `_`, and refuses anything else with `InvalidExportOnly`, since RDS supports
+a partial export only for such names.
+
+What differs from RDS:
+
+- The IAM role is not assumed and the KMS key encrypts nothing: both are recorded and reported back
+  as given. The bucket must exist, or the request fails with `InvalidS3BucketFault`. A bucket in
+  another region than the snapshot's is accepted and the task then ends `FAILED`, as on RDS.
+- Only PostgreSQL snapshots can be exported, since Floci's snapshots hold PostgreSQL data only.
+  Any other source is refused with `InvalidExportSourceState`, and so is a snapshot that is not
+  `available`.
+- `SourceArn` must name a snapshot: exporting a live DB cluster (`SourceType` `CLUSTER`) is not
+  supported.
 
 ## Global clusters
 
@@ -808,31 +882,45 @@ password in cleartext, MySQL sends a scramble, so the proxy would have to drive 
 
 ## TLS / SSL
 
-The RDS auth proxy terminates TLS itself (the backend container stays plaintext) using a
-self-signed CA whose Subject Alternative Names cover every advertised host Floci has handed
-out for a DB instance, cluster, or RDS Proxy — the Docker bridge IP, `host.docker.internal`,
-`localhost`, or whatever `rds.endpointHost` resolves to. The CA is persisted at
-`{storage.persistent-path}/tls/rds-ca.crt` and grows its SAN list as new hosts appear, so the
-same root survives restarts and works for every local database, not just the one that
-generated it.
+The RDS auth proxy terminates TLS itself (the backend container stays plaintext). It presents
+a non-CA server certificate followed by Floci's shared root CA, so strict TLS
+clients can validate an end-entity certificate rather than being asked to accept a CA as a server.
+The server certificate's Subject Alternative Names cover every advertised DB instance, cluster,
+or RDS Proxy host: the Docker bridge IP, `host.docker.internal`, `localhost`, or whatever
+`rds.endpointHost` resolves to.
 
-Floci logs the certificate path (and the `PGSSLROOTCERT` hint) the first time it generates or
-loads it:
+The shared CA is the same one used by ACM, IoT, and EKS. It is persisted at
+`{storage.persistent-path}/tls/floci-root-ca.crt`, with its owner-only private key in
+`floci-root-ca.key`. The server certificate is issued in memory on startup and when a new host
+appears, and renewed before expiry during TLS use; its SAN list is recorded in `rds-ca.metadata.json`.
+Renewal preserves the CA and SANs. If the CA itself expires, the proxy refuses new TLS use
+rather than silently changing client trust; restart to regenerate the unusable CA and trust its replacement.
+The shared CA certificate and key do not change during SAN growth or restarts. Missing or
+corrupt SAN metadata is rebuilt without replacing a valid
+CA. An invalid or unusable CA/key pair is replaced with a warning; only then must clients trust
+the replacement CA again.
+
+The proxy also writes the shared root certificate to `tls/rds-ca.crt`, preserving existing
+`PGSSLROOTCERT` and MySQL `--ssl-ca` paths. This compatibility copy is refreshed when the proxy
+initializes, even if the old RDS certificate is expired or corrupt. The unused `rds-ca.key`
+is removed; the shared CA key and existing `rds-ca.metadata.json` SAN list are retained.
+The shared certificate is also available from `GET /_floci/ca.pem`.
+
+The proxy logs the shared certificate path when it first issues a server certificate:
 
 ```
-RDS proxy TLS: CA cert at ./data/tls/rds-ca.crt
-RDS proxy TLS: for sslmode=verify-full set PGSSLROOTCERT=./data/tls/rds-ca.crt
+RDS proxy TLS: for sslmode=verify-full set PGSSLROOTCERT=./data/tls/floci-root-ca.crt
 ```
 
 Because the SAN matches the address you actually connect to, `verify-full` (the same level
-Aurora enforces in AWS) works locally too — no need to fall back to `sslmode=disable` just to
+Aurora enforces in AWS) works locally too, without falling back to `sslmode=disable` just to
 exercise the same connection-string settings you use in production:
 
 ```bash
 # PostgreSQL
-PGSSLROOTCERT=./data/tls/rds-ca.crt psql "host=localhost port=7001 user=admin sslmode=verify-full"
+PGSSLROOTCERT=./data/tls/floci-root-ca.crt psql "host=localhost port=7001 user=admin sslmode=verify-full"
 
 # MySQL / MariaDB
 mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
-  --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/rds-ca.crt
+  --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/floci-root-ca.crt
 ```

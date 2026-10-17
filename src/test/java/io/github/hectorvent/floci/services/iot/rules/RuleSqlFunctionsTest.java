@@ -64,7 +64,7 @@ class RuleSqlFunctionsTest {
     @Test
     void clientidIsTheMqttClientOrNaWhenTheMessageDidNotComeOverMqtt() {
         assertEquals("{\"client\":\"sensor-7\"}", text(evaluate("SELECT clientid() AS client FROM 'a/b'", MQTT, "{}")));
-        assertEquals("{\"client\":\"n/a\"}", text(evaluate("SELECT clientid() AS client FROM 'a/b'", HTTP, "{}")));
+        assertEquals("{\"client\":\"N/A\"}", text(evaluate("SELECT clientid() AS client FROM 'a/b'", HTTP, "{}")));
         assertTrue(evaluate("SELECT * FROM 'a/b' WHERE startswith(clientid(), 'sensor-')", MQTT, "{}").isPresent());
         assertFalse(evaluate("SELECT * FROM 'a/b' WHERE startswith(clientid(), 'sensor-')", HTTP, "{}").isPresent());
     }

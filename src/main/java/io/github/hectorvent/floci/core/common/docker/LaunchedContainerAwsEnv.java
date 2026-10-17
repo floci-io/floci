@@ -69,7 +69,12 @@ public class LaunchedContainerAwsEnv {
      * the container reaches Floci.
      */
     public String flociEndpoint() {
-        return reachableEndpoint.baseUrl();
+        return flociEndpoint(true);
+    }
+
+    /** Selects an endpoint compatible with the container's DNS configuration. */
+    public String flociEndpoint(boolean useEmbeddedDns) {
+        return reachableEndpoint.baseUrl(useEmbeddedDns);
     }
 
     /**

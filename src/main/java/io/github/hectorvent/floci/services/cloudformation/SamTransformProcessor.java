@@ -1,9 +1,13 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.json.JsonWriteFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.cfg.JsonNodeFeature;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
@@ -36,6 +40,9 @@ class SamTransformProcessor {
      */
     private static final Pattern S3_DEFINITION_URI = Pattern.compile(
             "^s3://(?<bucket>[^/?]+)/(?<key>.+?)(?:\\?versionId=(?<version>.+))?$");
+
+    /** A {@code ${Name}} reference in an {@code Fn::Sub} string, as SAM matches one. */
+    private static final Pattern SUB_REFERENCE = Pattern.compile("\\$\\{([A-Za-z0-9.]+|AWS::[A-Z][A-Za-z]*)}");
 
     private final ObjectMapper objectMapper;
 
@@ -943,7 +950,8 @@ class SamTransformProcessor {
         ObjectNode lambdaResource = createLambdaFunction(logicalId, roleLogicalId, properties, hasExplicitRole);
         resources.set(logicalId, lambdaResource);
 
-        String aliasLogicalId = expandAutoPublishAlias(logicalId, properties, passthrough, resources);
+        String aliasLogicalId = expandAutoPublishAlias(logicalId, properties,
+                lambdaResource.path("Properties"), passthrough, template, parameterValues, resources);
         List<ObjectNode> eventInvokePolicies = expandEventInvokeConfig(
                 logicalId, properties, aliasLogicalId, passthrough, template, resources, parameterValues);
 
@@ -975,27 +983,35 @@ class SamTransformProcessor {
      * template engine resolves it at provision time; only the generated logical id needs a
      * literal, and it drops the suffix when the value isn't textual.
      *
-     * <p>The {@code Ref}s on {@code FunctionName} give {@code topologicalSort} the edges it needs
-     * — function → version and function → alias — so no explicit {@code DependsOn} is needed.
-     * There is no version → alias edge while {@code FunctionVersion} is the literal
-     * {@code $LATEST}; none is required, since the alias does not reference the version. It
-     * returns with the {@code Fn::GetAtt} form once #1987 lands.
+     * <p>The function reference and version attribute establish function → version → alias
+     * dependencies, so the alias selects the immutable version published by this stack. The
+     * version's logical id carries a hash of what a new version publishes (see
+     * {@link #versionLogicalId}), so an update that changes the code names a new version resource,
+     * which publishes, and the alias follows it.
      */
-    private String expandAutoPublishAlias(String functionLogicalId, JsonNode properties, ObjectNode passthrough,
-                                          ObjectNode resources) {
+    private String expandAutoPublishAlias(String functionLogicalId, JsonNode properties, JsonNode functionProperties,
+                                          ObjectNode passthrough, JsonNode template,
+                                          Map<String, String> parameterValues, ObjectNode resources) {
         JsonNode aliasName = properties.path("AutoPublishAlias");
         if (aliasName.isMissingNode() || aliasName.isNull()
                 || (aliasName.isTextual() && aliasName.asText().isBlank())) {
             return null;
         }
 
-        String versionId = uniqueId(functionLogicalId + "Version", resources);
+        String versionId = uniqueId(
+                versionLogicalId(functionLogicalId, properties, functionProperties, template, parameterValues),
+                resources);
         ObjectNode versionDef = objectMapper.createObjectNode();
         versionDef.put("Type", "AWS::Lambda::Version");
         ObjectNode versionProps = objectMapper.createObjectNode();
         versionProps.set("FunctionName", ref(functionLogicalId));
         versionDef.set("Properties", versionProps);
         versionDef.setAll(passthrough.deepCopy());
+        // The version a new hash replaces leaves the template on that update; like SAM, keep it
+        // published unless the template says otherwise, so the update reports it DELETE_SKIPPED.
+        if (!versionDef.has("DeletionPolicy")) {
+            versionDef.put("DeletionPolicy", "Retain");
+        }
         resources.set(versionId, versionDef);
 
         // Alias names may legally contain '-' and '_', neither of which is valid in a
@@ -1008,18 +1024,116 @@ class SamTransformProcessor {
         ObjectNode aliasProps = objectMapper.createObjectNode();
         aliasProps.set("FunctionName", ref(functionLogicalId));
         aliasProps.set("Name", aliasName.deepCopy());
-        // Real SAM points the alias at the published version (Fn::GetAtt <Version>.Version).
-        // Floci cannot invoke a published version: the snapshot carries no code path, so a
-        // version-qualified invoke times out on a cold start (#1987) and silently runs $LATEST's
-        // code when a warm container happens to exist (#1988). Aiming the alias there would break
-        // the alias-qualified invoke this expansion exists to enable, so point it at $LATEST — the
-        // alias resolves and runs the function's code, which is the behavior callers depend on.
-        // Switch to the GetAtt form once #1987 lands.
-        aliasProps.put("FunctionVersion", "$LATEST");
+        aliasProps.set("FunctionVersion", getAtt(versionId, "Version"));
         aliasDef.set("Properties", aliasProps);
         aliasDef.setAll(passthrough.deepCopy());
         resources.set(aliasId, aliasDef);
         return aliasId;
+    }
+
+    /**
+     * The logical id SAM gives the version it publishes: {@code <Function>Version} and the first ten
+     * hex digits of the SHA-1 of the function's {@code Code}, with references to template parameters
+     * resolved, merged with its {@code Environment}, its {@code MemorySize} and a {@code SnapStart}
+     * that applies, as sorted compact JSON with characters outside printable ASCII as lowercase hex
+     * escapes, apart from JSON's short escapes such as a newline's. A change to the hashed input is a new logical id: the update publishes a new version and the alias moves
+     * to it. Unchanged, the id and the version it published stay, since the version provisioner never
+     * republishes under the same id.
+     */
+    private String versionLogicalId(String functionLogicalId, JsonNode samProperties, JsonNode functionProperties,
+                                    JsonNode template, Map<String, String> parameterValues) {
+        JsonNode code = resolveParameterRefs(functionProperties.path("Code"), template, parameterValues);
+        ObjectNode hashed = objectMapper.createObjectNode();
+        if (code.isObject()) {
+            hashed.setAll((ObjectNode) code);
+        }
+        JsonNode environment = functionProperties.path("Environment");
+        if (environment.isObject()) {
+            hashed.setAll((ObjectNode) environment.deepCopy());
+        }
+        if (functionProperties.has("MemorySize")) {
+            hashed.set("MemorySize", functionProperties.get("MemorySize").deepCopy());
+        }
+        // SAM hashes a SnapStart that applies, so the id matches the one SAM gives. A missing
+        // ApplyOn means None; a null one does not.
+        JsonNode snapStart = samProperties.path("SnapStart");
+        JsonNode applyOn = snapStart.path("ApplyOn");
+        if (snapStart.isObject() && !applyOn.isMissingNode() && !"None".equals(applyOn.asText(null))) {
+            hashed.set("SnapStart", snapStart.deepCopy());
+        }
+        String hashInput;
+        try {
+            hashInput = objectMapper.writer()
+                    .with(JsonNodeFeature.WRITE_PROPERTIES_SORTED)
+                    .with(JsonWriteFeature.ESCAPE_NON_ASCII)
+                    .without(JsonWriteFeature.WRITE_HEX_UPPER_CASE)
+                    .writeValueAsString(hashed)
+                    // ESCAPE_NON_ASCII leaves DEL as it is; SAM's hash input escapes DEL as well.
+                    .replace("\u007f", "\\u007f");
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot serialize the version hash input of " + functionLogicalId, e);
+        }
+        return functionLogicalId + "Version" + Digests.sha1Hex(hashInput).substring(0, 10);
+    }
+
+    /**
+     * {@code node} with each reference to a template parameter replaced by the stack's value for it,
+     * or else its {@code Default}, as SAM resolves the code before hashing it: a {@code Ref}, and a
+     * {@code ${Name}} in the string of an {@code Fn::Sub}. Any other reference is left as written.
+     */
+    private JsonNode resolveParameterRefs(JsonNode node, JsonNode template, Map<String, String> parameterValues) {
+        if (node.isObject() && node.size() == 1 && node.path("Ref").isTextual()) {
+            String value = parameterValue(node.path("Ref").asText(), template, parameterValues);
+            return value == null ? node : TextNode.valueOf(value);
+        }
+        if (node.isObject() && node.size() == 1 && node.has("Fn::Sub")) {
+            JsonNode sub = node.get("Fn::Sub");
+            ObjectNode resolved = objectMapper.createObjectNode();
+            if (sub.isTextual()) {
+                resolved.put("Fn::Sub", substituteParameters(sub.asText(), template, parameterValues));
+            } else if (sub.isArray() && !sub.isEmpty() && sub.get(0).isTextual()) {
+                ArrayNode arguments = (ArrayNode) resolveParameterRefs(sub, template, parameterValues);
+                arguments.set(0, TextNode.valueOf(substituteParameters(sub.get(0).asText(), template,
+                        parameterValues)));
+                resolved.set("Fn::Sub", arguments);
+            } else {
+                resolved.set("Fn::Sub", resolveParameterRefs(sub, template, parameterValues));
+            }
+            return resolved;
+        }
+        if (node.isObject()) {
+            ObjectNode resolved = objectMapper.createObjectNode();
+            node.properties().forEach(entry ->
+                    resolved.set(entry.getKey(), resolveParameterRefs(entry.getValue(), template, parameterValues)));
+            return resolved;
+        }
+        if (node.isArray()) {
+            ArrayNode resolved = objectMapper.createArrayNode();
+            node.forEach(element -> resolved.add(resolveParameterRefs(element, template, parameterValues)));
+            return resolved;
+        }
+        return node;
+    }
+
+    /** {@code text} with each {@code ${Name}} naming a template parameter replaced by its value. */
+    private static String substituteParameters(String text, JsonNode template, Map<String, String> parameterValues) {
+        Matcher matcher = SUB_REFERENCE.matcher(text);
+        StringBuilder substituted = new StringBuilder();
+        while (matcher.find()) {
+            String value = parameterValue(matcher.group(1), template, parameterValues);
+            matcher.appendReplacement(substituted, Matcher.quoteReplacement(value == null ? matcher.group() : value));
+        }
+        matcher.appendTail(substituted);
+        return substituted.toString();
+    }
+
+    /** The stack's value for a template parameter, else its {@code Default}, or null for any other name. */
+    private static String parameterValue(String name, JsonNode template, Map<String, String> parameterValues) {
+        if (parameterValues.containsKey(name)) {
+            return parameterValues.get(name);
+        }
+        JsonNode defaultValue = template.path("Parameters").path(name).path("Default");
+        return defaultValue.isValueNode() ? defaultValue.asText() : null;
     }
 
     private static final List<String> EVENT_INVOKE_DESTINATION_TYPES =
@@ -1204,13 +1318,7 @@ class SamTransformProcessor {
     private static String destinationType(JsonNode type, JsonNode template, Map<String, String> parameterValues) {
         String value = type.isTextual() ? type.asText() : null;
         if (type.isObject() && type.size() == 1 && type.path("Ref").isTextual()) {
-            String parameter = type.path("Ref").asText();
-            JsonNode defaultValue = template.path("Parameters").path(parameter).path("Default");
-            if (parameterValues.containsKey(parameter)) {
-                value = parameterValues.get(parameter);
-            } else if (defaultValue.isTextual()) {
-                value = defaultValue.asText();
-            }
+            value = parameterValue(type.path("Ref").asText(), template, parameterValues);
         }
         return value != null && EVENT_INVOKE_DESTINATION_TYPES.contains(value) ? value : null;
     }

@@ -18,6 +18,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -363,6 +364,108 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void s3PostOperationsResolveToTheActionsAwsChecks() {
+        assertEquals("s3:PutObject", s3Action("POST", "/bucket/key", "uploads"));
+        assertEquals("s3:PutObject", s3Action("POST", "/bucket/key", "uploadId=u1"));
+        assertEquals("s3:RestoreObject", s3Action("POST", "/bucket/key", "restore"));
+        assertEquals("s3:GetObject", s3Action("POST", "/bucket/key", "select", "select-type=2"));
+        // No bucket-level multipart POST is checked: S3VirtualHostFilter moves a virtual-hosted
+        // upload's bucket into the path before IAM sees it, so the upload reaches the object rules.
+        assertNull(s3Action("POST", "/key", "uploads"));
+        assertNull(s3Action("POST", "/key", "uploadId=u1"));
+        // DeleteObjects and a browser-form PostObject are checked per key in S3Controller.
+        assertNull(s3Action("POST", "/bucket", "delete"));
+        assertNull(s3Action("POST", "/bucket"));
+    }
+
+    @Test
+    void s3MultipartUploadOperationsResolveToTheirOwnActions() {
+        assertEquals("s3:ListMultipartUploadParts", s3Action("GET", "/bucket/key", "uploadId=u1"));
+        assertEquals("s3:AbortMultipartUpload", s3Action("DELETE", "/bucket/key", "uploadId=u1"));
+        assertEquals("s3:PutObject", s3Action("PUT", "/bucket/key", "uploadId=u1", "partNumber=1"));
+        assertEquals("s3:ListBucketMultipartUploads", s3Action("GET", "/bucket", "uploads"));
+    }
+
+    @Test
+    void s3ObjectLockAndAnnotationSubresourcesResolveToTheirOwnActions() {
+        assertEquals("s3:GetObjectRetention", s3Action("GET", "/bucket/key", "retention"));
+        assertEquals("s3:PutObjectRetention", s3Action("PUT", "/bucket/key", "retention"));
+        assertEquals("s3:GetObjectLegalHold", s3Action("GET", "/bucket/key", "legal-hold"));
+        assertEquals("s3:PutObjectLegalHold", s3Action("PUT", "/bucket/key", "legal-hold"));
+        assertEquals("s3:GetObjectAnnotation", s3Action("GET", "/bucket/key", "annotation", "annotationName=n"));
+        assertEquals("s3:ListObjectAnnotations", s3Action("GET", "/bucket/key", "annotation"));
+        assertEquals("s3:ListObjectAnnotations", s3Action("GET", "/bucket/key", "annotation", "annotationName="));
+        assertEquals("s3:GetObjectAnnotation", s3Action("HEAD", "/bucket/key", "annotation", "annotationName=n"));
+        assertEquals("s3:PutObjectAnnotation", s3Action("PUT", "/bucket/key", "annotation"));
+        assertEquals("s3:DeleteObjectAnnotation", s3Action("DELETE", "/bucket/key", "annotation"));
+    }
+
+    @Test
+    void s3ObjectSubresourcesFollowTheOrderTheControllerDispatchesThem() {
+        assertEquals("s3:GetObjectTagging", s3Action("GET", "/bucket/key", "acl", "tagging"));
+        assertEquals("s3:PutObjectTagging", s3Action("PUT", "/bucket/key", "acl", "tagging"));
+        assertEquals("s3:ListMultipartUploadParts", s3Action("GET", "/bucket/key", "acl", "uploadId=u1"));
+        assertEquals("s3:GetObjectRetention", s3Action("GET", "/bucket/key", "acl", "retention"));
+        assertEquals("s3:DeleteObjectTagging", s3Action("DELETE", "/bucket/key", "acl", "tagging"));
+        assertEquals("s3:DeleteObjectAnnotation", s3Action("DELETE", "/bucket/key", "annotation", "uploadId=u1"));
+        assertEquals("s3:PutObject", s3Action("POST", "/bucket/key", "uploads", "restore"));
+        assertEquals("s3:RestoreObject", s3Action("POST", "/bucket/key", "restore", "uploadId=u1"));
+        assertEquals("s3:GetObject", s3Action("POST", "/bucket/key", "select", "uploadId=u1"));
+    }
+
+    @Test
+    void s3VersionedObjectRequestsResolveToTheVersionActions() {
+        assertEquals("s3:GetObjectVersion", s3Action("GET", "/bucket/key", "versionId=v1"));
+        assertEquals("s3:GetObjectVersion", s3Action("HEAD", "/bucket/key", "versionId=v1"));
+        assertEquals("s3:DeleteObjectVersion", s3Action("DELETE", "/bucket/key", "versionId=v1"));
+        assertEquals("s3:GetObjectVersionAcl", s3Action("GET", "/bucket/key", "acl", "versionId=v1"));
+        assertEquals("s3:PutObjectVersionAcl", s3Action("PUT", "/bucket/key", "acl", "versionId=v1"));
+        assertEquals("s3:GetObjectVersionTagging", s3Action("GET", "/bucket/key", "tagging", "versionId=v1"));
+        assertEquals("s3:PutObjectVersionTagging", s3Action("PUT", "/bucket/key", "tagging", "versionId=v1"));
+        assertEquals("s3:DeleteObjectVersionTagging",
+                s3Action("DELETE", "/bucket/key", "tagging", "versionId=v1"));
+        // "null" names the null version, which is a version as any other.
+        assertEquals("s3:GetObjectVersionTagging", s3Action("GET", "/bucket/key", "tagging", "versionId=null"));
+        assertEquals("s3:GetObjectVersionAnnotation",
+                s3Action("GET", "/bucket/key", "annotation", "annotationName=n", "versionId=v1"));
+        assertEquals("s3:GetObjectVersionAnnotation",
+                s3Action("HEAD", "/bucket/key", "annotation", "annotationName=n", "versionId=v1"));
+        assertEquals("s3:ListObjectVersionAnnotations",
+                s3Action("GET", "/bucket/key", "annotation", "versionId=v1"));
+        assertEquals("s3:PutObjectVersionAnnotation",
+                s3Action("PUT", "/bucket/key", "annotation", "annotationName=n", "versionId=v1"));
+        assertEquals("s3:DeleteObjectVersionAnnotation",
+                s3Action("DELETE", "/bucket/key", "annotation", "annotationName=n", "versionId=v1"));
+        // GetObjectAttributes of a version is checked as the read of that version.
+        assertEquals("s3:GetObjectVersion", s3Action("GET", "/bucket/key", "attributes", "versionId=v1"));
+        // S3Controller selects from the version a versionId names.
+        assertEquals("s3:GetObjectVersion", s3Action("POST", "/bucket/key", "select", "versionId=v1"));
+        // Retention and legal hold have no version action; the upload operations take no version.
+        assertEquals("s3:GetObjectRetention", s3Action("GET", "/bucket/key", "retention", "versionId=v1"));
+        assertEquals("s3:PutObjectLegalHold", s3Action("PUT", "/bucket/key", "legal-hold", "versionId=v1"));
+        assertEquals("s3:RestoreObject", s3Action("POST", "/bucket/key", "restore", "versionId=v1"));
+        assertEquals("s3:GetObject", s3Action("GET", "/bucket/key"));
+    }
+
+    @Test
+    void s3BucketConfigurationsResolveToTheirOwnActions() {
+        for (String config : List.of("analytics", "inventory", "intelligent-tiering")) {
+            String name = switch (config) {
+                case "analytics" -> "Analytics";
+                case "inventory" -> "Inventory";
+                default -> "IntelligentTiering";
+            };
+            assertEquals("s3:Get" + name + "Configuration", s3Action("GET", "/bucket", config, "id=c1"));
+            assertEquals("s3:Get" + name + "Configuration", s3Action("GET", "/bucket", config));
+            assertEquals("s3:Put" + name + "Configuration", s3Action("PUT", "/bucket", config, "id=c1"));
+            // AWS checks removing a configuration as the Put action that sets it.
+            assertEquals("s3:Put" + name + "Configuration", s3Action("DELETE", "/bucket", config, "id=c1"));
+        }
+        // s3:DeleteBucketTagging is not an IAM action; AWS checks DeleteBucketTagging as PutBucketTagging.
+        assertEquals("s3:PutBucketTagging", s3Action("DELETE", "/bucket", "tagging"));
+    }
+
+    @Test
     void s3AccelerateYieldsToSubresourcesDispatchedFirst() {
         MultivaluedMap<String, String> withRequestPayment = new MultivaluedHashMap<>();
         withRequestPayment.add("requestPayment", "");
@@ -474,7 +577,7 @@ class IamActionRegistryTest {
         MultivaluedMap<String, String> withTagging = new MultivaluedHashMap<>();
         withTagging.add("replication", "");
         withTagging.add("tagging", "");
-        assertEquals("s3:DeleteBucketTagging",
+        assertEquals("s3:PutBucketTagging",
                 registry.resolve("s3", mockCtx("DELETE", "/bucket", withTagging, null, "")));
     }
 
@@ -555,6 +658,16 @@ class IamActionRegistryTest {
     }
 
     // -------------------------------------------------------------------------
+
+    /** The action of an S3 request whose query names {@code params}, each {@code name} or {@code name=value}. */
+    private String s3Action(String method, String path, String... params) {
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        for (String param : params) {
+            int eq = param.indexOf('=');
+            query.add(eq < 0 ? param : param.substring(0, eq), eq < 0 ? "" : param.substring(eq + 1));
+        }
+        return registry.resolve("s3", mockCtx(method, path, query, null, ""));
+    }
 
     private static ContainerRequestContext mockCtx(String method, String path,
                                                    MultivaluedMap<String, String> queryParams,

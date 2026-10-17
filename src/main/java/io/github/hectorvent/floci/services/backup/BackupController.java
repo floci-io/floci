@@ -65,7 +65,7 @@ public class BackupController {
     public Response describeBackupVault(@Context HttpHeaders headers,
                                          @PathParam("backupVaultName") String vaultName) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(service.describeBackupVault(vaultName, region)).build();
+        return Response.ok(vaultJson(service.describeBackupVault(vaultName, region))).build();
     }
 
     @DELETE
@@ -84,8 +84,15 @@ public class BackupController {
         List<BackupVault> vaults = service.listBackupVaults(region);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode list = out.putArray("BackupVaultList");
-        vaults.forEach(list::addPOJO);
+        vaults.forEach(v -> list.add(vaultJson(v)));
         return Response.ok(out).build();
+    }
+
+    /** The vault as AWS reports it: its stored form minus Floci's internal incarnation id. */
+    private ObjectNode vaultJson(BackupVault vault) {
+        ObjectNode node = objectMapper.valueToTree(vault);
+        node.remove(BackupVault.VAULT_ID_FIELD);
+        return node;
     }
 
     // ── Vault access policy ────────────────────────────────────────────────────

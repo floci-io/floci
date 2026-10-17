@@ -11,7 +11,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -39,6 +41,33 @@ class ServiceQuotasServiceTest {
                 assertTrue(response.path("Quota").path("Value").asDouble() >= 60.0);
             }
         }
+    }
+
+    @Test
+    void ec2StandardQuotaRetainsCanonicalMetadataWhenListingAndReading() {
+        String code = "L-1216C47A";
+        String name = "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances";
+        JsonNode quota = assertDoesNotThrow(() ->
+                service.getServiceQuota("ec2", code, "us-east-1", ACCOUNT_ID)).path("Quota");
+        assertEquals(code, quota.path("QuotaCode").asText());
+        assertEquals(name, quota.path("QuotaName").asText());
+        assertEquals(5.0, quota.path("Value").asDouble());
+        assertTrue(quota.path("Adjustable").asBoolean());
+        assertTrue(quota.path("GlobalQuota").isBoolean());
+        assertFalse(quota.path("GlobalQuota").asBoolean());
+        assertEquals("ACCOUNT", quota.path("QuotaAppliedAtLevel").asText());
+        assertEquals("arn:aws:servicequotas:us-east-1:" + ACCOUNT_ID + ":ec2/" + code,
+                quota.path("QuotaArn").asText());
+        JsonNode listed = service.listServiceQuotas("ec2", null, null, 100, "us-east-1", ACCOUNT_ID).path("Quotas");
+        assertEquals(4, listed.size());
+        int matching = 0;
+        for (JsonNode entry : listed) {
+            if (code.equals(entry.path("QuotaCode").asText())) {
+                assertEquals(quota, entry);
+                matching++;
+            }
+        }
+        assertEquals(1, matching);
     }
 
     @Test

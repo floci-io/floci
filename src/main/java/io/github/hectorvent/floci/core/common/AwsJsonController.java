@@ -93,6 +93,28 @@ public class AwsJsonController {
         this.timestreamInfluxDbJsonHandler = timestreamInfluxDbJsonHandler;
     }
 
+    /**
+     * Accept plain JSON only for catalog descriptors declaring that format.
+     * Keep the wire headers intact and delegate to the same JSON handler.
+     */
+    @POST
+    @Consumes("application/json")
+    @Produces("application/json")
+    public Response handlePlainJsonRequest(
+            @HeaderParam("X-Amz-Target") String target,
+            @Context HttpHeaders httpHeaders,
+            String body) {
+        if (target == null) {
+            return JsonErrorResponseUtils.createMissingTargetErrorResponse();
+        }
+        if (catalog.matchPlainJsonTarget(target).isEmpty()) {
+            return JsonErrorResponseUtils.createUnknownOperationErrorResponse(target);
+        }
+        return Response.fromResponse(handleJsonRequest(target, httpHeaders, body))
+                .type("application/json")
+                .build();
+    }
+
     @POST
     @Consumes(CONTENT_TYPE_AWS_JSON_1_0)
     @Produces(CONTENT_TYPE_AWS_JSON_1_0)

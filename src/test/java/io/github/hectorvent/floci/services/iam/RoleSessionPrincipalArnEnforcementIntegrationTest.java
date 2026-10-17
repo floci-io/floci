@@ -1,15 +1,22 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.EnforcementFixtures.Session;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.net.URI;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -24,8 +31,11 @@ class RoleSessionPrincipalArnEnforcementIntegrationTest {
 
     private static final String ACCOUNT = "111111111111";
 
-    private record Session(String accessKeyId, String sessionToken) {
-    }
+    @TestHTTPResource
+    URI baseUri;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -46,7 +56,7 @@ class RoleSessionPrincipalArnEnforcementIntegrationTest {
                   {"Effect":"Allow","Action":"iam:ListGroups","Resource":"*"},
                   {"Effect":"Deny","Action":"iam:ListGroups","Resource":"*",
                    "Condition":{"ArnEquals":{"aws:PrincipalArn":"%1$s"}}}]}""".formatted(roleArn, sessionArn));
-        Session session = assumeRole(roleArn);
+        Session session = EnforcementFixtures.assumeRole(baseUri.getPort(), ACCOUNT, roleArn);
 
         // A condition on the role's own ARN matches the session.
         iamCall(session, "ListUsers").then().statusCode(200);
@@ -73,7 +83,7 @@ class RoleSessionPrincipalArnEnforcementIntegrationTest {
                   {"Effect":"Allow","Action":"ssm:GetParameter","Resource":"*"},
                   {"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"*",
                    "Condition":{"ArnEquals":{"aws:PrincipalArn":"%s"}}}]}""".formatted(roleArn));
-        Session session = assumeRole(roleArn);
+        Session session = EnforcementFixtures.assumeRole(baseUri.getPort(), ACCOUNT, roleArn);
 
         given().header("Authorization", auth(session.accessKeyId(), "ssm"))
                 .header("X-Amz-Security-Token", session.sessionToken())
@@ -86,24 +96,8 @@ class RoleSessionPrincipalArnEnforcementIntegrationTest {
     }
 
     /** A role under /team/ that its own account may assume, with {@code policy} inline. */
-    private static void createRole(String role, String policy) {
-        given().formParam("Action", "CreateRole").formParam("RoleName", role).formParam("Path", "/team/")
-                .formParam("AssumeRolePolicyDocument", """
-                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-                          "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole"}]}""".formatted(ACCOUNT))
-                .header("Authorization", auth(ACCOUNT, "iam")).when().post("/").then().statusCode(200);
-        given().formParam("Action", "PutRolePolicy").formParam("RoleName", role).formParam("PolicyName", "p")
-                .formParam("PolicyDocument", policy)
-                .header("Authorization", auth(ACCOUNT, "iam")).when().post("/").then().statusCode(200);
-    }
-
-    private static Session assumeRole(String roleArn) {
-        Response response = given().formParam("Action", "AssumeRole").formParam("RoleArn", roleArn)
-                .formParam("RoleSessionName", "s")
-                .header("Authorization", auth(ACCOUNT, "sts")).when().post("/");
-        response.then().statusCode(200);
-        return new Session(response.path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId"),
-                response.path("AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken"));
+    private void createRole(String role, String policy) {
+        EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/team/", role, policy);
     }
 
     private static Response iamCall(Session session, String action) {
@@ -111,10 +105,5 @@ class RoleSessionPrincipalArnEnforcementIntegrationTest {
                 .header("Authorization", auth(session.accessKeyId(), "iam"))
                 .header("X-Amz-Security-Token", session.sessionToken())
                 .when().post("/");
-    }
-
-    private static String auth(String accessKeyId, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20261001/us-east-1/" + service
-                + "/aws4_request, SignedHeaders=host, Signature=abc";
     }
 }

@@ -92,6 +92,20 @@ class ContainerBuilderTest {
     }
 
     @Test
+    void withEmbeddedDns_preservesExplicitResolversWithoutAddingFallbacks() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.4"));
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withDnsServer("172.18.0.8")
+                .withDnsServer("172.18.0.9")
+                .withEmbeddedDns()
+                .build();
+
+        assertEquals(List.of("172.18.0.8", "172.18.0.9"), spec.dnsServers());
+    }
+
+    @Test
     void withCgroupnsModeRecordsDockerNamespaceMode() {
         TestFixture fixture = new TestFixture();
 

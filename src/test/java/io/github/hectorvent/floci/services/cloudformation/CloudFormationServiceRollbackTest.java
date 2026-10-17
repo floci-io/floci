@@ -31,6 +31,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -57,8 +59,9 @@ import static org.mockito.Mockito.when;
 /**
  * Covers rollback cleanup when another actor removes a resource after its create succeeded, which
  * resources a stack delete walks after a failed operation left them in a failed status, what a
- * failed update rollback keeps so ContinueUpdateRollback can retry it, and that a stack which
- * finished deleting is no longer updatable.
+ * failed update rollback keeps so ContinueUpdateRollback can retry it, that a stack which
+ * finished deleting is no longer updatable, and that a stack being deleted is neither deleted a
+ * second time nor updated by a change set.
  */
 class CloudFormationServiceRollbackTest {
 
@@ -216,6 +219,46 @@ class CloudFormationServiceRollbackTest {
                     : "Stack with id " + nameOrId + " does not exist", error.getMessage());
         }
         assertEquals(Set.of("create"), stack.getChangeSets().keySet());
+    }
+
+    @Test
+    void deleteStack_retriedWhileDeleting_deletesEachResourceOnce() throws Exception {
+        Stack stack = liveStack("retried-delete");
+        StackResource queue = resource("Queue", "queue-url", "AWS::SQS::Queue", "CREATE_COMPLETE");
+        stack.getResources().put(queue.getLogicalId(), queue);
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        CountDownLatch deleting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            deleting.countDown();
+            release.await(30, TimeUnit.SECONDS);
+            return null;
+        }).when(provisioner).delete(eq(queue), eq(REGION));
+
+        Future<?> first = service.deleteStack("retried-delete", REGION, ACCOUNT);
+        assertTrue(deleting.await(10, TimeUnit.SECONDS));
+        // The retry starts no deletion of its own, so it never waits on the held resource delete.
+        service.deleteStack("retried-delete", REGION, ACCOUNT).get(5, TimeUnit.SECONDS);
+        release.countDown();
+        first.get(10, TimeUnit.SECONDS);
+
+        verify(provisioner, times(1)).delete(queue, REGION);
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
+    }
+
+    @Test
+    void executeChangeSet_onStackBeingDeleted_isRefused() {
+        Stack stack = liveStack("executed-while-deleting");
+        service.createChangeSet("executed-while-deleting", "update", "UPDATE",
+                "{\"Resources\":{\"Topic\":{\"Type\":\"AWS::SNS::Topic\"}}}", null,
+                Map.of(), List.of(), Map.of(), REGION, ACCOUNT);
+        stack.setStatus("DELETE_IN_PROGRESS");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.executeChangeSet("executed-while-deleting", "update", REGION, ACCOUNT));
+
+        assertEquals("InvalidChangeSetStatus", error.getErrorCode());
+        assertEquals("DELETE_IN_PROGRESS", stack.getStatus());
     }
 
     @Test
@@ -993,6 +1036,17 @@ class CloudFormationServiceRollbackTest {
         assertEquals("v", stack.getOutputs().get("Out"));
         assertNull(stack.getUpdateRollbackSnapshot());
         assertNull(stack.getUpdateRollbackResourceIds());
+    }
+
+    /** A stack whose create finished, created through the service so it is in the live map. */
+    private Stack liveStack(String stackName) {
+        service.createChangeSet(stackName, "create", "CREATE",
+                "{\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}", null,
+                Map.of(), List.of(), Map.of(), REGION, ACCOUNT);
+        Stack stack = service.describeStacks(stackName, REGION, ACCOUNT).getFirst();
+        stack.getChangeSets().clear();
+        stack.setStatus("CREATE_COMPLETE");
+        return stack;
     }
 
     private static StackResource resource(String logicalId, String physicalId, String resourceType, String status) {

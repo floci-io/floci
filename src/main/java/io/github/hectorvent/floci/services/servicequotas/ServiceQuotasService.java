@@ -29,9 +29,9 @@ import java.util.zip.CRC32;
  * quota codes where tooling depends on them (CodeBuild's {@code L-2DC20C30}
  * "Concurrently running builds", Lambda's {@code L-B99A9384} "Concurrent
  * executions"), plus a deterministic generic set for any other service code.
- * All values are deliberately generous so local pipelines that gate on quota
- * headroom (for example Landing Zone Accelerator) never stall on a limit the
- * emulator does not enforce. Applied and default quotas return the same data.
+ * Unmodeled values are deliberately generous so local pipelines that gate on
+ * quota headroom never stall on a limit the emulator does not enforce.
+ * Applied and default quotas return the same data.
  *
  * @see <a href="https://docs.aws.amazon.com/servicequotas/2019-06-24/apireference/Welcome.html">Service Quotas API</a>
  */
@@ -66,6 +66,9 @@ public class ServiceQuotasService {
                     new QuotaDefinition("L-B99A9384", "Concurrent executions", GENERIC_QUOTA_VALUE, false)),
             "organizations", List.of(
                     new QuotaDefinition("L-E619E033", "Maximum number of accounts", 50.0, true)),
+            "ec2", List.of(
+                    new QuotaDefinition("L-1216C47A",
+                            "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances", 5.0, false)),
             // AWS default values: tooling such as Terraform's aws_servicequotas_service_quota
             // compares its desired value against these before requesting an increase.
             "vpc", List.of(

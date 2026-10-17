@@ -1822,11 +1822,29 @@ public class SnsService implements Resettable, ResourceProvider {
         if (rule.has("prefix")) {
             return stringValue != null && stringValue.startsWith(rule.get("prefix").asText());
         }
+        if (rule.has("suffix")) {
+            return matchesStringOperator("suffix", rule.get("suffix"), stringValue);
+        }
+        if (rule.has("equals-ignore-case")) {
+            return matchesStringOperator("equals-ignore-case", rule.get("equals-ignore-case"), stringValue);
+        }
+        if (rule.has("wildcard")) {
+            return matchesStringOperator("wildcard", rule.get("wildcard"), stringValue);
+        }
+        if (rule.has("cidr")) {
+            return matchesStringOperator("cidr", rule.get("cidr"), stringValue);
+        }
         if (rule.has("anything-but")) {
-            return matchesAnythingButForNode(rule.get("anything-but"), actual, stringValue, present);
+            JsonNode anythingBut = rule.get("anything-but");
+            if (anythingBut.isObject()) {
+                // A missing or JSON-null property does not match, even when the nested operator
+                // would also reject it. A present value matches only when that operator does not.
+                return present && excludesNestedOperator(anythingBut, actual, stringValue, false);
+            }
+            return matchesAnythingButForNode(anythingBut, actual, stringValue, present);
         }
         if (rule.has("numeric") && present && actual.isNumber()) {
-            return evaluateNumericCondition(actual.decimalValue(), rule.get("numeric"));
+            return evaluateNumericCondition(actual.decimalValue(), rule.get("numeric")).orElse(false);
         }
         return false;
     }
@@ -2032,8 +2050,8 @@ public class SnsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * Evaluates a single object-type filter rule (exists, prefix, anything-but, numeric)
-     * against the actual attribute value.
+     * Evaluates a single object-type filter rule (exists, prefix, suffix, equals-ignore-case,
+     * wildcard, cidr, anything-but, numeric) against the actual attribute value.
      */
     private boolean matchesObjectRule(JsonNode rule, String actualValue) {
         if (rule.has("exists")) {
@@ -2043,16 +2061,294 @@ public class SnsService implements Resettable, ResourceProvider {
         if (rule.has("prefix") && actualValue != null) {
             return actualValue.startsWith(rule.get("prefix").asText());
         }
+        if (rule.has("suffix")) {
+            return matchesStringOperator("suffix", rule.get("suffix"), actualValue);
+        }
+        if (rule.has("equals-ignore-case")) {
+            return matchesStringOperator("equals-ignore-case", rule.get("equals-ignore-case"), actualValue);
+        }
+        if (rule.has("wildcard")) {
+            return matchesStringOperator("wildcard", rule.get("wildcard"), actualValue);
+        }
+        if (rule.has("cidr")) {
+            return matchesStringOperator("cidr", rule.get("cidr"), actualValue);
+        }
         if (rule.has("anything-but") && actualValue != null) {
-            return !containsValue(rule.get("anything-but"), actualValue);
+            JsonNode anythingBut = rule.get("anything-but");
+            if (anythingBut.isObject()) {
+                return excludesNestedOperator(anythingBut, null, actualValue, true);
+            }
+            return !containsValue(anythingBut, actualValue);
         }
         if (rule.has("numeric") && actualValue != null) {
             try {
-                return evaluateNumericCondition(new BigDecimal(actualValue), rule.get("numeric"));
+                return evaluateNumericCondition(new BigDecimal(actualValue), rule.get("numeric")).orElse(false);
             } catch (NumberFormatException ignored) {
             }
         }
         return false;
+    }
+
+    /**
+     * suffix, equals-ignore-case, wildcard, and cidr apply to a string the way prefix does.
+     * The operand must be textual; numbers and objects are not coerced with {@code asText()}.
+     * A null value does not match.
+     */
+    private static boolean matchesStringOperator(String operator, JsonNode operand, String value) {
+        if (value == null || operand == null || !operand.isTextual()) {
+            return false;
+        }
+        String expected = operand.asText();
+        return switch (operator) {
+            case "prefix" -> value.startsWith(expected);
+            case "suffix" -> value.endsWith(expected);
+            case "equals-ignore-case" -> value.equalsIgnoreCase(expected);
+            case "wildcard" -> wildcardMatches(expected, value);
+            case "cidr" -> cidrContains(expected, value);
+            default -> false;
+        };
+    }
+
+    /**
+     * {@code anything-but} of exactly one nested positive operator. A present value matches only
+     * when that operator does not. An empty object, an unknown key, more than one key, or a
+     * malformed operand fails closed. Does not recurse into {@code anything-but} or {@code exists}.
+     *
+     * @param attributeValue when true, {@code stringValue} is the attribute and {@code numeric}
+     *                       parses it; otherwise {@code numeric} matches only a JSON number
+     */
+    private boolean excludesNestedOperator(JsonNode operator, JsonNode actual, String stringValue,
+                                           boolean attributeValue) {
+        if (operator.size() != 1) {
+            return false;
+        }
+        String name = operator.fieldNames().next();
+        JsonNode operand = operator.get(name);
+        if ("prefix".equals(name) || "suffix".equals(name) || "equals-ignore-case".equals(name)
+                || "wildcard".equals(name) || "cidr".equals(name)) {
+            if (operand == null || !operand.isTextual()) {
+                return false;
+            }
+            return !matchesStringOperator(name, operand, stringValue);
+        }
+        if (!"numeric".equals(name)) {
+            return false;
+        }
+        BigDecimal number = null;
+        try {
+            if (attributeValue) {
+                if (stringValue != null) {
+                    number = new BigDecimal(stringValue);
+                }
+            } else if (actual != null && actual.isNumber()) {
+                number = actual.decimalValue();
+            }
+        } catch (NumberFormatException ignored) {
+        }
+        Optional<Boolean> matched = evaluateNumericCondition(number, operand);
+        return matched.isPresent() && !matched.get();
+    }
+
+    /**
+     * Anchored, case-sensitive glob. Each {@code *} matches any run of characters, including an
+     * empty one, and every other character matches only itself. This is a scan, not a regular
+     * expression, so {@code .} and other metacharacters stay literal.
+     */
+    private static boolean wildcardMatches(String pattern, String value) {
+        int patternIndex = 0;
+        int valueIndex = 0;
+        int starPattern = -1;
+        int starValue = -1;
+        while (valueIndex < value.length()) {
+            if (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
+                starPattern = patternIndex++;
+                starValue = valueIndex;
+            } else if (patternIndex < pattern.length()
+                    && pattern.charAt(patternIndex) == value.charAt(valueIndex)) {
+                patternIndex++;
+                valueIndex++;
+            } else if (starPattern >= 0) {
+                patternIndex = starPattern + 1;
+                valueIndex = ++starValue;
+            } else {
+                return false;
+            }
+        }
+        while (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
+            patternIndex++;
+        }
+        return patternIndex == pattern.length();
+    }
+
+    /**
+     * True when {@code value} is a literal IP in the same address family as {@code cidr} and the
+     * two share the prefix bits. Host bits in the CIDR address are masked off. A zone id, a prefix
+     * outside the address width, a family mismatch, or any non-address returns false. The value is
+     * never name-resolved.
+     */
+    private static boolean cidrContains(String cidr, String value) {
+        if (cidr == null || value == null) {
+            return false;
+        }
+        int slash = cidr.indexOf('/');
+        if (slash <= 0 || slash != cidr.lastIndexOf('/')) {
+            return false;
+        }
+        String prefixText = cidr.substring(slash + 1);
+        if (!isDecimalPrefix(prefixText)) {
+            return false;
+        }
+        byte[] network = parseIpLiteral(cidr.substring(0, slash));
+        byte[] address = parseIpLiteral(value);
+        if (network == null || address == null || network.length != address.length) {
+            return false;
+        }
+        int prefix = Integer.parseInt(prefixText);
+        if (prefix > network.length * 8) {
+            return false;
+        }
+        return sameNetwork(network, address, prefix);
+    }
+
+    private static boolean isDecimalPrefix(String text) {
+        if (text.isEmpty() || text.length() > 3) {
+            return false;
+        }
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** A literal IPv4 or IPv6 address, or null when {@code text} is not one. */
+    private static byte[] parseIpLiteral(String text) {
+        if (text.indexOf(':') >= 0) {
+            return parseIpv6Literal(text);
+        }
+        return parseIpv4Literal(text);
+    }
+
+    private static byte[] parseIpv4Literal(String text) {
+        if (text.isEmpty() || text.indexOf('%') >= 0 || text.indexOf('/') >= 0) {
+            return null;
+        }
+        String[] parts = text.split("\\.", -1);
+        if (parts.length != 4) {
+            return null;
+        }
+        byte[] address = new byte[4];
+        for (int i = 0; i < 4; i++) {
+            String part = parts[i];
+            if (part.isEmpty() || part.length() > 3 || (part.length() > 1 && part.charAt(0) == '0')) {
+                return null;
+            }
+            int octet = 0;
+            for (int c = 0; c < part.length(); c++) {
+                char ch = part.charAt(c);
+                if (ch < '0' || ch > '9') {
+                    return null;
+                }
+                octet = octet * 10 + (ch - '0');
+            }
+            if (octet > 255) {
+                return null;
+            }
+            address[i] = (byte) octet;
+        }
+        return address;
+    }
+
+    private static byte[] parseIpv6Literal(String text) {
+        if (text.isEmpty() || text.indexOf('%') >= 0 || text.indexOf('/') >= 0) {
+            return null;
+        }
+        String address = text;
+        if (text.indexOf('.') >= 0) {
+            int lastColon = text.lastIndexOf(':');
+            if (lastColon < 0) {
+                return null;
+            }
+            byte[] v4 = parseIpv4Literal(text.substring(lastColon + 1));
+            if (v4 == null) {
+                return null;
+            }
+            String high = Integer.toHexString(((v4[0] & 0xff) << 8) | (v4[1] & 0xff));
+            String low = Integer.toHexString(((v4[2] & 0xff) << 8) | (v4[3] & 0xff));
+            address = text.substring(0, lastColon + 1) + high + ":" + low;
+        }
+        int compress = address.indexOf("::");
+        if (compress != address.lastIndexOf("::")) {
+            return null;
+        }
+        String left = compress < 0 ? address : address.substring(0, compress);
+        String right = compress < 0 ? null : address.substring(compress + 2);
+        int[] leftGroups = parseHextets(left);
+        int[] rightGroups = right == null ? null : parseHextets(right);
+        if (leftGroups == null || (right != null && rightGroups == null)) {
+            return null;
+        }
+        int rightCount = rightGroups == null ? 0 : rightGroups.length;
+        int total = leftGroups.length + rightCount;
+        if (rightGroups == null ? total != 8 : total > 7) {
+            return null;
+        }
+        byte[] out = new byte[16];
+        int index = writeHextets(out, 0, leftGroups);
+        if (rightGroups != null) {
+            writeHextets(out, index + (8 - total) * 2, rightGroups);
+        }
+        return out;
+    }
+
+    /** Hextets of a colon-separated piece, or null when a group is empty or not 1-4 hex digits. */
+    private static int[] parseHextets(String part) {
+        if (part.isEmpty()) {
+            return new int[0];
+        }
+        String[] groups = part.split(":", -1);
+        int[] values = new int[groups.length];
+        for (int i = 0; i < groups.length; i++) {
+            String group = groups[i];
+            if (group.isEmpty() || group.length() > 4) {
+                return null;
+            }
+            int value = 0;
+            for (int c = 0; c < group.length(); c++) {
+                int digit = Character.digit(group.charAt(c), 16);
+                if (digit < 0) {
+                    return null;
+                }
+                value = (value << 4) | digit;
+            }
+            values[i] = value;
+        }
+        return values;
+    }
+
+    private static int writeHextets(byte[] out, int index, int[] groups) {
+        for (int group : groups) {
+            out[index++] = (byte) (group >> 8);
+            out[index++] = (byte) group;
+        }
+        return index;
+    }
+
+    private static boolean sameNetwork(byte[] network, byte[] address, int prefixBits) {
+        int fullBytes = prefixBits / 8;
+        int remainder = prefixBits % 8;
+        for (int i = 0; i < fullBytes; i++) {
+            if (network[i] != address[i]) {
+                return false;
+            }
+        }
+        if (remainder == 0) {
+            return true;
+        }
+        int mask = (0xff << (8 - remainder)) & 0xff;
+        return (network[fullBytes] & mask) == (address[fullBytes] & mask);
     }
 
     private boolean containsValue(JsonNode node, String value) {
@@ -2069,27 +2365,38 @@ public class SnsService implements Resettable, ResourceProvider {
     /**
      * Evaluates a numeric condition array against a value.
      * The conditions array contains alternating operator-target pairs (e.g. [">=", 100, "<", 200]).
-     * All pairs must match for the condition to pass (AND logic).
+     * All pairs must match for the condition to pass (AND logic). Empty when the operand is not
+     * comparator/number pairs, so a caller does not negate a malformed condition. A null value
+     * misses a well-formed condition.
      */
-    private boolean evaluateNumericCondition(BigDecimal value, JsonNode conditions) {
-        if (!conditions.isArray() || conditions.size() % 2 != 0) {
-            return false;
+    private Optional<Boolean> evaluateNumericCondition(BigDecimal value, JsonNode conditions) {
+        if (conditions == null || !conditions.isArray() || conditions.size() % 2 != 0) {
+            return Optional.empty();
         }
+        boolean missed = value == null;
         for (int i = 0; i < conditions.size(); i += 2) {
-            String op = conditions.get(i).asText();
-            BigDecimal target = conditions.get(i + 1).decimalValue();
-            int cmp = value.compareTo(target);
-            boolean matches = switch (op) {
+            JsonNode op = conditions.get(i);
+            JsonNode target = conditions.get(i + 1);
+            if (!op.isTextual() || !target.isNumber()) {
+                return Optional.empty();
+            }
+            int cmp = value == null ? 0 : value.compareTo(target.decimalValue());
+            Boolean matches = switch (op.asText()) {
                 case "=" -> cmp == 0;
                 case ">" -> cmp > 0;
                 case ">=" -> cmp >= 0;
                 case "<" -> cmp < 0;
                 case "<=" -> cmp <= 0;
-                default -> false;
+                default -> null;
             };
-            if (!matches) return false;
+            if (matches == null) {
+                return Optional.empty();
+            }
+            if (!matches) {
+                missed = true;
+            }
         }
-        return true;
+        return Optional.of(!missed);
     }
 
     /**

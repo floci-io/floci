@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
@@ -37,8 +37,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class MySqlProtocolHandlerTest {
 
@@ -696,11 +694,8 @@ class MySqlProtocolHandlerTest {
     }
 
     private RdsProxyTlsCertificates testTlsCertificates() {
-        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
-        when(storage.persistentPath()).thenReturn(tempDir.toString());
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        when(config.storage()).thenReturn(storage);
-        return new RdsProxyTlsCertificates(config, new CertificateGenerator());
+        return new RdsProxyTlsCertificates(FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls")),
+                new CertificateGenerator());
     }
 
     private static RdsSigV4Validator testSigV4Validator() {

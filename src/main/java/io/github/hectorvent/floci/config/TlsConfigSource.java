@@ -111,7 +111,7 @@ public class TlsConfigSource implements ConfigSource {
         String certPath = resolveProperty("floci.tls.cert-path", "");
         String keyPath = resolveProperty("floci.tls.key-path", "");
         String selfSigned = resolveProperty("floci.tls.self-signed", "true");
-        String persistentPath = resolveProperty("floci.storage.persistent-path", "./data");
+        String persistentPath = resolveProperty("floci.storage.persistent-path", HostDataDir.persistentPathDefault());
         Path tlsDir = Path.of(persistentPath, TLS_DIR);
         resolvedTlsDir = tlsDir;
 
@@ -533,7 +533,7 @@ public class TlsConfigSource implements ConfigSource {
     private void persistMetadata(Path tlsDir, List<String> hostnames, List<String> learnedHostnames) {
         Path metadataFile = tlsDir.resolve(SERVER_METADATA_NAME);
         try {
-            String version = resolveFlociVersion();
+            String version = FlociVersion.current();
             CertificateMetadata metadata = CertificateMetadata.create(hostnames, version);
             metadata.setLearnedHostnames(learnedHostnames);
 
@@ -545,19 +545,6 @@ public class TlsConfigSource implements ConfigSource {
             // Log warning but don't fail startup - metadata is for optimization, not critical
             LOG.warnv("TLS: failed to write certificate metadata (will regenerate on next restart): {0}", e.getMessage());
         }
-    }
-
-    /**
-     * Resolves the Floci version from environment variable or defaults to "dev".
-     * 
-     * @return Floci version string
-     */
-    private static String resolveFlociVersion() {
-        String env = System.getenv("FLOCI_VERSION");
-        if (env != null && !env.isBlank()) {
-            return env;
-        }
-        return "dev";
     }
 
     /**

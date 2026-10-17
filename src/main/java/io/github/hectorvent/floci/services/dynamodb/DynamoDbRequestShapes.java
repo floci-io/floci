@@ -1,14 +1,11 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestShapeModel;
+import io.github.hectorvent.floci.core.common.RequestShapeModel.Shape;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.util.HashMap;
 import java.util.Iterator;
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -24,21 +21,13 @@ public final class DynamoDbRequestShapes {
 
     static final String RESOURCE_NAME = "aws/dynamodb-request-shapes.json";
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-
     private static final String OBJECT_NOT_EXPECTED = "Start of structure or map found where not expected";
     private static final String UNKNOWN_ERROR = "UnknownError";
     private static final String UNEXPECTED_FIELD_TYPE = "Unexpected field type";
     private static final String UNEXPECTED_VALUE_TYPE = "Unexpected value type in payload";
 
-    record Shape(String type, Map<String, String> members, String element) {
-    }
-
-    record Model(Map<String, String> operations, Map<String, Shape> shapes) {
-    }
-
     private static final class Holder {
-        static final Model MODEL = load();
+        static final RequestShapeModel MODEL = RequestShapeModel.load(RESOURCE_NAME, "DynamoDB request shapes");
     }
 
     private DynamoDbRequestShapes() {
@@ -49,14 +38,14 @@ public final class DynamoDbRequestShapes {
         check(Holder.MODEL, action, request);
     }
 
-    static void check(Model model, String action, JsonNode request) {
+    static void check(RequestShapeModel model, String action, JsonNode request) {
         String input = model.operations().get(action);
         if (input != null) {
             checkValue(model, model.shapes().get(input), request, true);
         }
     }
 
-    private static void checkValue(Model model, Shape shape, JsonNode value, boolean member) {
+    private static void checkValue(RequestShapeModel model, Shape shape, JsonNode value, boolean member) {
         if (value.isNull()) {
             return;
         }
@@ -68,7 +57,7 @@ public final class DynamoDbRequestShapes {
         }
     }
 
-    private static void checkStructure(Model model, Shape shape, JsonNode value, boolean member) {
+    private static void checkStructure(RequestShapeModel model, Shape shape, JsonNode value, boolean member) {
         if (value.isArray()) {
             throw serialization(UNKNOWN_ERROR);
         }
@@ -85,7 +74,7 @@ public final class DynamoDbRequestShapes {
         }
     }
 
-    private static void checkList(Model model, Shape shape, JsonNode value, boolean member) {
+    private static void checkList(RequestShapeModel model, Shape shape, JsonNode value, boolean member) {
         if (value.isObject()) {
             throw serialization(OBJECT_NOT_EXPECTED);
         }
@@ -98,7 +87,7 @@ public final class DynamoDbRequestShapes {
         }
     }
 
-    private static void checkMap(Model model, Shape shape, JsonNode value, boolean member) {
+    private static void checkMap(RequestShapeModel model, Shape shape, JsonNode value, boolean member) {
         if (value.isArray()) {
             throw serialization(UNKNOWN_ERROR);
         }
@@ -167,32 +156,5 @@ public final class DynamoDbRequestShapes {
 
     private static AwsException serialization(String message) {
         return new AwsException("SerializationException", message, 400);
-    }
-
-    private static Model load() {
-        try (InputStream in = Thread.currentThread().getContextClassLoader().getResourceAsStream(RESOURCE_NAME)) {
-            if (in == null) {
-                throw new IllegalStateException("DynamoDB request shape resource not found: " + RESOURCE_NAME);
-            }
-            return parse(MAPPER.readTree(in));
-        } catch (IOException e) {
-            throw new IllegalStateException("Failed to read the DynamoDB request shapes " + RESOURCE_NAME, e);
-        }
-    }
-
-    static Model parse(JsonNode root) {
-        Map<String, String> operations = new HashMap<>();
-        root.path("operations").fields().forEachRemaining(op -> operations.put(op.getKey(), op.getValue().asText()));
-        Map<String, Shape> shapes = new HashMap<>();
-        Iterator<Map.Entry<String, JsonNode>> entries = root.path("shapes").fields();
-        while (entries.hasNext()) {
-            Map.Entry<String, JsonNode> entry = entries.next();
-            JsonNode node = entry.getValue();
-            Map<String, String> members = new LinkedHashMap<>();
-            node.path("members").fields().forEachRemaining(m -> members.put(m.getKey(), m.getValue().asText()));
-            String element = node.hasNonNull("member") ? node.get("member").asText() : node.path("value").asText(null);
-            shapes.put(entry.getKey(), new Shape(node.path("type").asText(), members, element));
-        }
-        return new Model(operations, shapes);
     }
 }

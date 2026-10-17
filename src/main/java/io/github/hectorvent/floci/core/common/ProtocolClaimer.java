@@ -110,6 +110,9 @@ public class ProtocolClaimer {
                 if (CONTENT_TYPE_JSON_1_1.equals(mediaType)) {
                     return Optional.of(targetClaim(WireProtocol.AWS_JSON_1_1, target));
                 }
+                if ("application/json".equals(mediaType) && catalog.matchPlainJsonTarget(target).isPresent()) {
+                    return Optional.of(targetClaim(WireProtocol.AWS_JSON_1_0, target));
+                }
                 if (isCbor(mediaType)) {
                     return Optional.of(targetClaim(WireProtocol.AWS_CBOR_TARGET, target));
                 }

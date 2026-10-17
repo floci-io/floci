@@ -100,10 +100,8 @@ class SamEventInvokeConfigTransformTest {
         }
 
         // SAM passes the function's Condition, DeletionPolicy and UpdateReplacePolicy to the alias
-        // and version AutoPublishAlias generates as well. Only what the function declares is
-        // checked: SAM also retains every published version on its own (DeletionPolicy: Retain),
-        // which floci's AutoPublishAlias expansion has never done and this change does not touch.
-        JsonNode function = input.path("Resources").path("Fn");
+        // and version AutoPublishAlias generates as well, and retains the version
+        // (DeletionPolicy: Retain) when the function declares no DeletionPolicy.
         for (Map.Entry<String, JsonNode> byType : fixture.path("expectedAttributesByType").properties()) {
             JsonNode generatedResource = null;
             for (Map.Entry<String, JsonNode> resource : resources.properties()) {
@@ -112,10 +110,8 @@ class SamEventInvokeConfigTransformTest {
                 }
             }
             for (Map.Entry<String, JsonNode> attribute : byType.getValue().properties()) {
-                if (function.has(attribute.getKey())) {
-                    assertEquals(attribute.getValue(), generatedResource.path(attribute.getKey()),
-                            byType.getKey() + " " + attribute.getKey());
-                }
+                assertEquals(attribute.getValue(), generatedResource.path(attribute.getKey()),
+                        byType.getKey() + " " + attribute.getKey());
             }
         }
 

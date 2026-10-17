@@ -76,11 +76,18 @@ class S3AuthEnforcementIntegrationTest {
     private static final S3RequestSigner BAD_KEY_SIGNER = S3RequestSigner.signedAs("bad-key", "bad-secret");
     private static final S3RequestSigner ACCOUNT_SHAPED_SIGNER = S3RequestSigner.signedAs("123456789012", "test");
 
+    private static void enableLegacyAcls(String bucket) {
+        given().filter(LOCAL_SIGNER)
+                .body("<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>")
+                .when().put("/" + bucket + "?ownershipControls").then().statusCode(200);
+    }
+
     @Test
     @Order(1)
     void createBucketsAndObjects() {
         given().filter(LOCAL_SIGNER).when().put("/" + PUBLIC_BUCKET).then().statusCode(200);
         given().filter(LOCAL_SIGNER).when().put("/" + PRIVATE_BUCKET).then().statusCode(200);
+        enableLegacyAcls(PUBLIC_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -356,6 +363,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(14)
     void bucketAclPublicReadAllowsUnsignedList() {
         given().filter(LOCAL_SIGNER).when().put("/" + BUCKET_ACL_BUCKET).then().statusCode(200);
+        enableLegacyAcls(BUCKET_ACL_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -386,6 +394,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(15)
     void explicitBucketPolicyDenyOverridesPublicObjectAcl() {
         given().filter(LOCAL_SIGNER).when().put("/" + DENY_BUCKET).then().statusCode(200);
+        enableLegacyAcls(DENY_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -1137,6 +1146,7 @@ class S3AuthEnforcementIntegrationTest {
         // non-owners the ability to overwrite or delete existing objects" -- it only lets them
         // create new ones.
         given().filter(LOCAL_SIGNER).when().put("/" + PUBLIC_WRITE_ACL_BUCKET).then().statusCode(200);
+        enableLegacyAcls(PUBLIC_WRITE_ACL_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -1181,6 +1191,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(39)
     void explicitPolicyDenyOverridesPublicWriteAcl() {
         given().filter(LOCAL_SIGNER).when().put("/" + DENY_WRITE_ACL_BUCKET).then().statusCode(200);
+        enableLegacyAcls(DENY_WRITE_ACL_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -1366,6 +1377,7 @@ class S3AuthEnforcementIntegrationTest {
         // is treated as applying (fail closed) -- consistent with S3PublicAccessEvaluatorTest's
         // conditionalDenyFailsClosedAndOverridesAllow, this must also override the ACL fallback.
         given().filter(LOCAL_SIGNER).when().put("/" + CONDITIONAL_DENY_ACL_BUCKET).then().statusCode(200);
+        enableLegacyAcls(CONDITIONAL_DENY_ACL_BUCKET);
 
         given()
             .filter(LOCAL_SIGNER)
@@ -2401,6 +2413,55 @@ class S3AuthEnforcementIntegrationTest {
             .when().get("/" + bucket + "/data.txt")
             .then().statusCode(200)
             .body(equalTo("private data"));
+    }
+
+    @Test
+    @Order(58)
+    void enforcedOwnershipIgnoresExistingPublicAclsUntilReenabled() {
+        String bucket = "auth-enforced-acl-bucket";
+        String controls = """
+                <OwnershipControls xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <Rule><ObjectOwnership>BucketOwnerEnforced</ObjectOwnership></Rule>
+                </OwnershipControls>
+                """;
+        given().filter(LOCAL_SIGNER).when().put("/" + bucket).then().statusCode(200);
+        enableLegacyAcls(bucket);
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "public-read").body("public data")
+            .when().put("/" + bucket + "/data.txt")
+            .then().statusCode(200);
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "public-read")
+            .when().put("/" + bucket + "?acl")
+            .then().statusCode(200);
+        given().when().get("/" + bucket + "/data.txt").then().statusCode(200);
+        given().when().get("/" + bucket + "?list-type=2").then().statusCode(200);
+
+        given().filter(LOCAL_SIGNER).body(controls)
+            .when().put("/" + bucket + "?ownershipControls")
+            .then().statusCode(400).body(containsString("InvalidBucketAclWithObjectOwnership"));
+        given().filter(LOCAL_SIGNER).when().get("/" + bucket + "?ownershipControls")
+            .then().statusCode(200).body(containsString("<ObjectOwnership>ObjectWriter</ObjectOwnership>"));
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "private")
+            .when().put("/" + bucket + "?acl")
+            .then().statusCode(200);
+        given().filter(LOCAL_SIGNER).body(controls)
+            .when().put("/" + bucket + "?ownershipControls")
+            .then().statusCode(200);
+
+        given().when().get("/" + bucket + "/data.txt").then().statusCode(403);
+        given().when().get("/" + bucket + "?list-type=2").then().statusCode(403);
+        given().filter(LOCAL_SIGNER).when().get("/" + bucket + "?acl")
+            .then().statusCode(200).body(not(containsString("AllUsers")));
+        given().filter(LOCAL_SIGNER).when().get("/" + bucket + "/data.txt?acl")
+            .then().statusCode(200).body(not(containsString("AllUsers")));
+
+        given().filter(LOCAL_SIGNER).when().delete("/" + bucket + "?ownershipControls")
+            .then().statusCode(204);
+        given().when().get("/" + bucket + "/data.txt").then().statusCode(200);
+        given().when().get("/" + bucket + "?list-type=2").then().statusCode(403);
+        given().filter(LOCAL_SIGNER).header("x-amz-acl", "public-read")
+            .when().put("/" + bucket + "?acl")
+            .then().statusCode(200);
+        given().when().get("/" + bucket + "?list-type=2").then().statusCode(200);
     }
 
     private static String publicObjectActionPolicy(String bucket, String action) {

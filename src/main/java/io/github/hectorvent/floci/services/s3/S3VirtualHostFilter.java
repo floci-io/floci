@@ -59,6 +59,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
     private static final Set<String> NON_S3_SERVICE_LABELS = Set.of(
             "execute-api",      // ApiGatewayExecuteApiHostFilter: <api-id>.execute-api[.<region>].<host>
             "lambda-url",       // LambdaUrlRoutingFilter: <url-id>.lambda-url.<region>.<host>
+            "lambda-web",       // LambdaWebDataPlane: <id>.<shard>.lambda-web.<region>.<host>, <id>.lambda-web.global.<host>
             "emr-serverless",   // EmrServerlessRouteFilter: emr-serverless.<host>
             "cloudfront");      // CloudFrontDistributionFilter: <dist-id>.cloudfront.net
 

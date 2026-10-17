@@ -1,16 +1,23 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
+import io.github.hectorvent.floci.testing.EnforcementFixtures.Session;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.net.URI;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.matchesPattern;
 
@@ -32,8 +39,11 @@ class PrincipalContextKeysEnforcementIntegrationTest {
 
     private static final String ACCOUNT = "111111111111";
 
-    private record Session(String accessKeyId, String sessionToken) {
-    }
+    @TestHTTPResource
+    URI baseUri;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -68,8 +78,7 @@ class PrincipalContextKeysEnforcementIntegrationTest {
     @Test
     void aRoleSessionCarriesNoUserNameAndIsTypedAsAnAssumedRole() {
         String role = "principal-keys-" + UUID.randomUUID().toString().substring(0, 8);
-        String roleArn = "arn:aws:iam::" + ACCOUNT + ":role/" + role;
-        createRole(role, """
+        String roleArn = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/", role, """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"iam:ListUsers","Resource":"*",
                    "Condition":{"StringEquals":{"aws:PrincipalType":"AssumedRole"}}},
@@ -77,7 +86,7 @@ class PrincipalContextKeysEnforcementIntegrationTest {
                    "Condition":{"StringEquals":{"aws:username":"%s"}}},
                   {"Effect":"Allow","Action":"iam:ListGroups","Resource":"*",
                    "Condition":{"StringLike":{"aws:userid":"AROA*:s"}}}]}""".formatted(role));
-        Session session = assumeRole(roleArn);
+        Session session = EnforcementFixtures.assumeRole(baseUri.getPort(), ACCOUNT, roleArn);
 
         iamCall(session.accessKeyId(), session.sessionToken(), "ListUsers").then().statusCode(200);
         // The guide lists aws:username as not present for a role, so a statement that matches on
@@ -110,28 +119,6 @@ class PrincipalContextKeysEnforcementIntegrationTest {
                 "CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
     }
 
-    private static void createRole(String role, String policy) {
-        given().formParam("Action", "CreateRole").formParam("RoleName", role)
-                .formParam("AssumeRolePolicyDocument", """
-                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-                          "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole"}]}"""
-                        .formatted(ACCOUNT))
-                .header("Authorization", auth(ACCOUNT, "iam")).when().post("/").then().statusCode(200);
-        given().formParam("Action", "PutRolePolicy").formParam("RoleName", role)
-                .formParam("PolicyName", "p").formParam("PolicyDocument", policy)
-                .header("Authorization", auth(ACCOUNT, "iam")).when().post("/").then().statusCode(200);
-    }
-
-    private static Session assumeRole(String roleArn) {
-        Response response = given().formParam("Action", "AssumeRole").formParam("RoleArn", roleArn)
-                .formParam("RoleSessionName", "s")
-                .header("Authorization", auth(ACCOUNT, "sts")).when().post("/");
-        response.then().statusCode(200);
-        return new Session(
-                response.path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId"),
-                response.path("AssumeRoleResponse.AssumeRoleResult.Credentials.SessionToken"));
-    }
-
     private static Response iamCall(String accessKeyId, String sessionToken, String action) {
         RequestSpecification request = given().formParam("Action", action)
                 .header("Authorization", auth(accessKeyId, "iam"));
@@ -139,10 +126,5 @@ class PrincipalContextKeysEnforcementIntegrationTest {
             request = request.header("X-Amz-Security-Token", sessionToken);
         }
         return request.when().post("/");
-    }
-
-    private static String auth(String accessKeyId, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20261001/us-east-1/" + service
-                + "/aws4_request, SignedHeaders=host, Signature=abc";
     }
 }
