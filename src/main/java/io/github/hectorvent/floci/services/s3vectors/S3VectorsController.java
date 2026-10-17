@@ -19,7 +19,9 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Path("/")
@@ -43,7 +45,8 @@ public class S3VectorsController {
     @RegisterForReflection
     public record CreateVectorBucketRequest(
             String vectorBucketName,
-            Object encryptionConfiguration
+            Object encryptionConfiguration,
+            Map<String, String> tags
     ) {}
 
     @RegisterForReflection
@@ -67,6 +70,7 @@ public class S3VectorsController {
     public record VectorBucketRepresentation(
             String vectorBucketName,
             String vectorBucketArn,
+            double creationTime,
             Object encryptionConfiguration
     ) {}
 
@@ -98,9 +102,13 @@ public class S3VectorsController {
             String dataType,
             int dimension,
             String distanceMetric,
-            Object metadataConfiguration,
-            Object encryptionConfiguration
+            MetadataConfiguration metadataConfiguration,
+            Object encryptionConfiguration,
+            Map<String, String> tags
     ) {}
+
+    @RegisterForReflection
+    public record MetadataConfiguration(List<String> nonFilterableMetadataKeys) {}
 
     @RegisterForReflection
     public record CreateIndexResponse(
@@ -122,6 +130,7 @@ public class S3VectorsController {
     @RegisterForReflection
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record IndexRepresentation(
+            double creationTime,
             String vectorBucketName,
             String indexName,
             String indexArn,
@@ -256,7 +265,8 @@ public class S3VectorsController {
     @Path("/CreateVectorBucket")
     public Response createVectorBucket(@Context HttpHeaders headers, CreateVectorBucketRequest request) {
         String region = regionResolver.resolveRegion(headers);
-        VectorBucket bucket = service.createVectorBucket(request.vectorBucketName(), request.encryptionConfiguration(), region);
+        VectorBucket bucket = service.createVectorBucket(request.vectorBucketName(), request.encryptionConfiguration(),
+                request.tags() != null ? request.tags() : Map.of(), region);
         return Response.ok(new CreateVectorBucketResponse(bucket.getVectorBucketArn())).build();
     }
 
@@ -265,7 +275,8 @@ public class S3VectorsController {
     public Response getVectorBucket(@Context HttpHeaders headers, GetVectorBucketRequest request) {
         String region = regionResolver.resolveRegion(headers);
         VectorBucket bucket = service.getVectorBucket(request.vectorBucketName(), region);
-        VectorBucketRepresentation rep = new VectorBucketRepresentation(bucket.getVectorBucketName(), bucket.getVectorBucketArn(), bucket.getEncryptionConfiguration());
+        VectorBucketRepresentation rep = new VectorBucketRepresentation(bucket.getVectorBucketName(),
+                bucket.getVectorBucketArn(), bucket.getCreationTime().toEpochMilli() / 1000.0, bucket.getEncryptionConfiguration());
         return Response.ok(new GetVectorBucketResponse(rep)).build();
     }
 
@@ -275,7 +286,8 @@ public class S3VectorsController {
         String region = regionResolver.resolveRegion(headers);
         List<VectorBucket> buckets = service.listVectorBuckets(region);
         List<VectorBucketRepresentation> reps = buckets.stream()
-                .map(b -> new VectorBucketRepresentation(b.getVectorBucketName(), b.getVectorBucketArn(), b.getEncryptionConfiguration()))
+                .map(b -> new VectorBucketRepresentation(b.getVectorBucketName(), b.getVectorBucketArn(),
+                        b.getCreationTime().toEpochMilli() / 1000.0, b.getEncryptionConfiguration()))
                 .toList();
         return Response.ok(new ListVectorBucketsResponse(reps, null)).build();
     }
@@ -298,7 +310,10 @@ public class S3VectorsController {
                 request.dimension(),
                 request.dataType() != null ? request.dataType() : "float32",
                 request.distanceMetric() != null ? request.distanceMetric() : "cosine",
-                List.of(),
+                request.metadataConfiguration() != null && request.metadataConfiguration().nonFilterableMetadataKeys() != null
+                        ? request.metadataConfiguration().nonFilterableMetadataKeys() : List.of(),
+                request.encryptionConfiguration(),
+                request.tags() != null ? request.tags() : Map.of(),
                 region
         );
         return Response.ok(new CreateIndexResponse(index.getIndexArn())).build();
@@ -310,14 +325,15 @@ public class S3VectorsController {
         String region = regionResolver.resolveRegion(headers);
         VectorIndex index = service.getIndex(request.vectorBucketName(), request.indexName(), region);
         IndexRepresentation rep = new IndexRepresentation(
+                index.getCreationTime().toEpochMilli() / 1000.0,
                 index.getVectorBucketName(),
                 index.getIndexName(),
                 index.getIndexArn(),
                 index.getDataType(),
                 index.getDimension(),
                 index.getDistanceMetric(),
-                null,
-                null
+                new MetadataConfiguration(index.getNonFilterableMetadataKeys()),
+                index.getEncryptionConfiguration()
         );
         return Response.ok(new GetIndexResponse(rep)).build();
     }
@@ -329,14 +345,15 @@ public class S3VectorsController {
         List<VectorIndex> indexes = service.listIndexes(request.vectorBucketName(), region);
         List<IndexRepresentation> reps = indexes.stream()
                 .map(i -> new IndexRepresentation(
+                        i.getCreationTime().toEpochMilli() / 1000.0,
                         i.getVectorBucketName(),
                         i.getIndexName(),
                         i.getIndexArn(),
                         i.getDataType(),
                         i.getDimension(),
                         i.getDistanceMetric(),
-                        null,
-                        null
+                        new MetadataConfiguration(i.getNonFilterableMetadataKeys()),
+                        i.getEncryptionConfiguration()
                 ))
                 .toList();
         return Response.ok(new ListIndexesResponse(reps, null)).build();
