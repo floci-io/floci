@@ -141,3 +141,24 @@ All AWS parameter types are accepted: `String`, `StringList`, `SecureString`.
 
 !!! note
     `SecureString` parameters are stored as-is without actual KMS encryption in Floci. The type is preserved and returned correctly, but the value is not encrypted at rest.
+
+## Parameter Store Change events
+
+Like AWS, Floci publishes a `Parameter Store Change` event (`source: aws.ssm`) to the account's
+**default** EventBridge bus after a successful parameter write, so a rule matching `aws.ssm` fires
+from Parameter Store activity. `resources` holds the parameter ARN, and the event carries the
+account and region of the call.
+
+| Call | Events | `detail` |
+|---|---|---|
+| `PutParameter`, new name | one `Create` | `operation`, `name`, `type`, and `description` when set |
+| `PutParameter` overwriting an existing name | one `Update`, even when the value is unchanged | as for `Create` |
+| `DeleteParameter` | one `Delete` | as for `Create` |
+| `DeleteParameters` | one `Delete` per deleted name, none for a missing name | as for `Create` |
+| `LabelParameterVersion` | one `LabelParameterVersion` per valid label it attaches or moves | as for `Create`, from the labelled version, plus `label`, `fromVersion` (the version the label left as a string, `""` for a new label) and `toVersion` |
+| `UnlabelParameterVersion` | one `UnlabelParameterVersion` when it removes a label, none otherwise | as for `Create`, from the unlabelled version, plus `labels` (the labels removed), `fromVersion` (that version as a string) and `toVersion` (`""`) |
+
+Parameters a CloudFormation stack creates or deletes publish the same events. A call that fails,
+such as a `PutParameter` on an existing name without `Overwrite`, publishes nothing, and so do
+`AddTagsToResource`, a label already on the requested version and an invalid label. Publishing
+is best effort: a delivery failure is logged and never fails or undoes the write.
