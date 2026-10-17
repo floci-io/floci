@@ -60,7 +60,10 @@ that stall between tokens. The model server controls how it reacts to that signa
 
 Operational HTTP-error warnings retain the upstream status code and omit the
 backend response body. A connected caller receives `ModelErrorException` with a
-bounded backend error description. Streaming error-body reads are limited to 8 KiB.
+bounded backend error description. Error-body reads, for both `Converse` and
+`ConverseStream`, are limited to 8 KiB with a one-second collection deadline
+(`FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_ERROR_BODY_TIMEOUT_MILLIS`). If the body
+stalls, the proxy closes it and returns the known model error without body details.
 
 ## Examples
 

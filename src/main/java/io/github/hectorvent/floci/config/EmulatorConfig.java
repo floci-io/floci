@@ -2368,6 +2368,14 @@ public interface EmulatorConfig {
          */
         @WithDefault("60")
         int requestTimeoutSeconds();
+
+        /**
+         * How long to collect an upstream error response body before returning the
+         * known model error without its details. Bounds a backend that sends an error
+         * status and then stalls, since the request timeout stops at the headers.
+         */
+        @WithDefault("1000")
+        int errorBodyTimeoutMillis();
     }
 
     interface TextractServiceConfig {

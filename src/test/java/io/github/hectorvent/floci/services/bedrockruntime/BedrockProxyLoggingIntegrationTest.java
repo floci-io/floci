@@ -6,8 +6,8 @@ import io.github.hectorvent.floci.testutil.LogCapture;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
@@ -28,6 +28,7 @@ import java.util.logging.SimpleFormatter;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -77,8 +78,9 @@ class BedrockProxyLoggingIntegrationTest {
         }
     }
 
-    @Test
-    void streamingErrorBodyReadIsBoundedWithoutWaitingForEof() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"converse", "converse-stream"})
+    void errorBodyReadIsBoundedWithoutWaitingForEof(String operation) throws Exception {
         CountDownLatch release = new CountDownLatch(1);
         HttpServer backend = HttpServer.create(new InetSocketAddress("127.0.0.1", 18939), 0);
         backend.createContext("/v1/chat/completions", exchange -> {
@@ -96,7 +98,7 @@ class BedrockProxyLoggingIntegrationTest {
         });
         backend.start();
         try (HttpClient client = HttpClient.newHttpClient()) {
-            HttpRequest request = HttpRequest.newBuilder(base.resolve("/model/fixture/converse-stream"))
+            HttpRequest request = HttpRequest.newBuilder(base.resolve("/model/fixture/" + operation))
                     .timeout(Duration.ofSeconds(5))
                     .header("Content-Type", "application/json")
                     .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/bedrock/aws4_request")
@@ -111,6 +113,38 @@ class BedrockProxyLoggingIntegrationTest {
         } finally {
             release.countDown();
             backend.stop(0);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"converse, 0", "converse, 1", "converse, 50",
+            "converse-stream, 0", "converse-stream, 1", "converse-stream, 50"})
+    void stalledErrorBodyHasDeadlineAndClosesUpstream(String operation, int lines) throws Exception {
+        String marker = "synthetic-private-upstream-content";
+        String errorPrefix = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 32768\r\n\r\n"
+                + (marker + "\n").repeat(lines);
+        try (StallingUpstream upstream = new StallingUpstream(18939, errorPrefix);
+             HttpClient client = HttpClient.newHttpClient()) {
+            HttpRequest request = HttpRequest.newBuilder(base.resolve("/model/fixture/" + operation))
+                    .timeout(Duration.ofSeconds(5))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/bedrock/aws4_request")
+                    .POST(HttpRequest.BodyPublishers.ofString(
+                            "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"synthetic\"}]}]}"))
+                    .build();
+            List<LogRecord> records = LogCapture.capture(ProxyBackend.class, () -> {
+                HttpResponse<String> response = assertDoesNotThrow(
+                        () -> client.send(request, HttpResponse.BodyHandlers.ofString()));
+                assertEquals(424, response.statusCode());
+                assertTrue(response.body().contains("ModelErrorException"));
+                assertTrue(response.body().contains("HTTP 503"));
+                assertTrue(response.body().length() < 1024);
+                assertTrue(assertDoesNotThrow(() -> upstream.awaitClosed(1, TimeUnit.SECONDS)),
+                        "The proxy must close the stalled upstream body");
+            });
+            SimpleFormatter formatter = new SimpleFormatter();
+            assertFalse(records.stream().anyMatch(record -> formatter.format(record).contains(marker)));
+            assertTrue(records.stream().anyMatch(record -> formatter.format(record).contains("HTTP 503")));
         }
     }
 }
