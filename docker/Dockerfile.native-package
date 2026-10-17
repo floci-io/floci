@@ -14,7 +14,7 @@ RUN echo 'floci:x:1001:0:Floci:/app:/sbin/nologin' >> /etc/passwd \
 VOLUME /app/data
 
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-COPY --chmod=755 docker/localstack-parity.sh docker/healthcheck.sh /usr/local/bin/
+COPY --chmod=755 docker/healthcheck.sh /usr/local/bin/
 
 ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}

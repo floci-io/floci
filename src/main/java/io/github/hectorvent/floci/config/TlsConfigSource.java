@@ -207,6 +207,11 @@ public class TlsConfigSource implements ConfigSource {
         if (value != null && !value.isBlank())
             return value;
 
+        // 3. A LocalStack variable that means the same thing (USE_SSL, CUSTOM_SSL_CERT_PATH)
+        value = LocalStackParity.forCurrentEnvironment().get(key);
+        if (value != null && !value.isBlank())
+            return value;
+
         return defaultValue;
     }
 

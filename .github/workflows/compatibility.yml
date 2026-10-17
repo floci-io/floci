@@ -11,7 +11,6 @@ on:
       - 'docker/Dockerfile.native-package'
       - 'docker/Dockerfile.compat'
       - 'docker/entrypoint.sh'
-      - 'docker/localstack-parity.sh'
       - 'docker/healthcheck.sh'
       - 'docker/run-docker-tests.sh'
       - 'docker/test-run-docker-tests.sh'

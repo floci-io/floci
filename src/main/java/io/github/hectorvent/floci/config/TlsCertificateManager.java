@@ -250,7 +250,7 @@ public class TlsCertificateManager implements Resettable {
         } catch (RuntimeException e) {
             LOG.debugv("TLS: floci.base-url {0} has no usable host: {1}", config.baseUrl(), e.getMessage());
         }
-        config.dns().extraSuffixes().ifPresent(list -> list.forEach(s -> suffixes.add(s.toLowerCase(Locale.ROOT))));
+        LocalStackParity.withDnsSuffixes(config.dns().extraSuffixes()).ifPresent(list -> list.forEach(s -> suffixes.add(s.toLowerCase(Locale.ROOT))));
         String bare = name.startsWith("*.") ? name.substring(2) : name;
         for (String suffix : suffixes) {
             if (DomainNames.isWithin(bare, suffix)) {

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common.dns;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.LocalStackParity;
 import io.github.hectorvent.floci.config.TlsConfigSource;
 import io.github.hectorvent.floci.core.common.DomainNames;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -157,7 +158,7 @@ public class EmbeddedDnsServer {
 
             suffixes.addAll(BUILTIN_SUFFIXES);
             config.hostname().ifPresent(suffixes::add);
-            config.dns().extraSuffixes().ifPresent(suffixes::addAll);
+            LocalStackParity.withDnsSuffixes(config.dns().extraSuffixes()).ifPresent(suffixes::addAll);
             if (config.dns().spoofAwsEndpoints()) {
                 suffixes.addAll(TlsConfigSource.awsEndpointSuffixes());
                 if (shouldWarnSpoofInvisibleToTls(true, TlsConfigSource.tlsEnabledVisibleToTls(),

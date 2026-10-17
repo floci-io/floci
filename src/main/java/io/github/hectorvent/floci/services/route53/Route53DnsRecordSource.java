@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.route53;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.LocalStackParity;
 import io.github.hectorvent.floci.core.common.DomainNames;
 import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsLookupHelper;
@@ -60,7 +61,7 @@ public class Route53DnsRecordSource implements DnsRecordSource {
         if (config != null) {
             config.hostname().ifPresent(this.flociSuffixes::add);
             if (config.dns() != null) {
-                config.dns().extraSuffixes().ifPresent(this.flociSuffixes::addAll);
+                LocalStackParity.withDnsSuffixes(config.dns().extraSuffixes()).ifPresent(this.flociSuffixes::addAll);
             }
         }
     }

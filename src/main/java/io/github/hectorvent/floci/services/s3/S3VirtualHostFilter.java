@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.LocalStackParity;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RequestHost;
@@ -76,7 +77,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
                 .orElseGet(() -> containerDetector.isRunningInContainer()
                         ? EmbeddedDnsServer.DEFAULT_SUFFIX
                         : extractHostnameFromUrl(config.baseUrl()));
-        this.serviceHostSuffixes = buildServiceHostSuffixes(config.hostname(), config.dns().extraSuffixes());
+        this.serviceHostSuffixes = buildServiceHostSuffixes(config.hostname(), LocalStackParity.withDnsSuffixes(config.dns().extraSuffixes()));
         this.s3ServiceInstance = s3ServiceInstance;
     }
 

@@ -53,10 +53,6 @@ if [ "$(id -u)" = '0' ]; then
     fi
 fi
 
-if [ "${LOCALSTACK_PARITY:-true}" != "false" ]; then
-    . /usr/local/bin/localstack-parity.sh
-fi
-
 # Probe the state dir as the unprivileged user and warn loudly when it is not
 # writable (read-only or root-owned bind mounts the chown above could not fix).
 # The container still starts: with the default in-memory storage the dir is
