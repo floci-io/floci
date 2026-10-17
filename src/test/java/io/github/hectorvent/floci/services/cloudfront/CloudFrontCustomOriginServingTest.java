@@ -43,6 +43,7 @@ import java.util.Random;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -328,6 +329,58 @@ class CloudFrontCustomOriginServingTest {
             .statusCode(201);
         assertEquals("0", received.get().header("Content-Length"));
         assertEquals(5, hits.get());
+    }
+
+    @Test
+    void answers504AndStopsWaitingWhenTheOriginExceedsTheReadTimeout() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        startDelayedOrigin(3000, hits);
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(allMethodsBehavior(), null, 1, 1), Map.of());
+
+        long started = System.nanoTime();
+        given().header("Host", created.getDomainName()).when().get("/page")
+                .then().statusCode(504)
+                .body(equalTo(CloudFrontServingController.ORIGIN_TIMEOUT_MESSAGE));
+        long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+        assertEquals(1, hits.get());
+        assertTrue(elapsedMillis < 2800,
+                "expected the 1 s origin read timeout to fire before the 3 s delay, took "
+                        + elapsedMillis + " ms");
+    }
+
+    @Test
+    void retriesTheReadTimeoutForGetUpToConnectionAttempts() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        startDelayingOnlyTheFirstRequest(2000, hits);
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(allMethodsBehavior(), null, 1, 2), Map.of());
+
+        given().header("Host", created.getDomainName()).when().get("/page")
+                .then().statusCode(200)
+                .body(equalTo("origin-body"));
+
+        assertEquals(2, hits.get(), "a GET that timed out should be retried once");
+    }
+
+    @Test
+    void doesNotRetryTheReadTimeoutForPost() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        startDelayedOrigin(3000, hits);
+        Distribution created = cloudFrontService.createDistribution(
+                customOriginDistribution(allMethodsBehavior(), null, 1, 2), Map.of());
+
+        long started = System.nanoTime();
+        given().header("Host", created.getDomainName()).when().post("/page")
+                .then().statusCode(504)
+                .body(equalTo(CloudFrontServingController.ORIGIN_TIMEOUT_MESSAGE));
+        long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+        assertEquals(1, hits.get(), "a POST that timed out must not be retried");
+        assertTrue(elapsedMillis < 2800,
+                "expected the 1 s origin read timeout to fire before the 3 s delay, took "
+                        + elapsedMillis + " ms");
     }
 
     @Test
@@ -896,6 +949,62 @@ class CloudFrontCustomOriginServingTest {
         originServer.start();
     }
 
+    /**
+     * An origin that lets every request wait {@code delayMillis} before answering 200, counting the
+     * hits so a test can tell a retry from a single attempt.
+     */
+    private void startDelayedOrigin(int delayMillis, AtomicInteger hits) throws IOException {
+        originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        originServer.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        originServer.createContext("/", exchange -> {
+            hits.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            try {
+                Thread.sleep(delayMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            byte[] body = "origin-body".getBytes(StandardCharsets.UTF_8);
+            try {
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            } catch (IOException expected) {
+                // The viewer gave up on this attempt after the read timeout, which the test triggers.
+            } finally {
+                exchange.close();
+            }
+        });
+        originServer.start();
+    }
+
+    /** An origin that delays only its first request, then answers every later one immediately. */
+    private void startDelayingOnlyTheFirstRequest(int delayMillis, AtomicInteger hits)
+            throws IOException {
+        originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        originServer.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        originServer.createContext("/", exchange -> {
+            boolean first = hits.incrementAndGet() == 1;
+            exchange.getRequestBody().readAllBytes();
+            if (first) {
+                try {
+                    Thread.sleep(delayMillis);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            byte[] body = "origin-body".getBytes(StandardCharsets.UTF_8);
+            try {
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            } catch (IOException expected) {
+                // The viewer gave up on this attempt after the read timeout, which the test triggers.
+            } finally {
+                exchange.close();
+            }
+        });
+        originServer.start();
+    }
+
     /** An origin that answers every GET with {@code body}, with its length or chunked. */
     private void startServingOrigin(byte[] body, boolean withLength) throws IOException {
         originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -971,11 +1080,25 @@ class CloudFrontCustomOriginServingTest {
 
     private Distribution customOriginDistribution(DefaultCacheBehavior behavior,
                                                   List<Map<String, String>> customHeaders) {
+        return customOriginDistribution(behavior, customHeaders, null, null);
+    }
+
+    private Distribution customOriginDistribution(DefaultCacheBehavior behavior,
+                                                  List<Map<String, String>> customHeaders,
+                                                  Integer readTimeoutSeconds,
+                                                  Integer connectionAttempts) {
+        Map<String, Object> originConfig = customOriginConfig(originServer.getAddress().getPort());
+        if (readTimeoutSeconds != null) {
+            originConfig.put("OriginReadTimeout", readTimeoutSeconds);
+        }
         Origin customOrigin = new Origin();
         customOrigin.setId("custom-origin");
         customOrigin.setDomainName("127.0.0.1");
-        customOrigin.setCustomOriginConfig(customOriginConfig(originServer.getAddress().getPort()));
+        customOrigin.setCustomOriginConfig(originConfig);
         customOrigin.setCustomHeaders(customHeaders);
+        if (connectionAttempts != null) {
+            customOrigin.setConnectionAttempts(connectionAttempts);
+        }
         DistributionConfig config = new DistributionConfig();
         config.setEnabled(true);
         config.setOrigins(List.of(customOrigin));

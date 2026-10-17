@@ -32,6 +32,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.net.InetAddress;
+import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
@@ -39,6 +40,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -56,6 +58,8 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration RESPONSE_TIMEOUT = Duration.ofSeconds(30);
+    /** CloudFront retries only the methods it treats as idempotent when an origin times out. */
+    private static final Set<String> IDEMPOTENT_METHODS = Set.of("GET", "HEAD");
     static final int MAX_CONNECTIONS = 100;
 
     private final CloseableHttpClient client;
@@ -120,6 +124,14 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
     }
 
     /**
+     * The connection settings of a distribution's origin that one request must honor:
+     * {@code Origin.ConnectionAttempts}, {@code Origin.ConnectionTimeout} and the custom origin's
+     * {@code OriginReadTimeout}. Read per request, since the client and its pool are shared.
+     */
+    record OriginTimeouts(Duration connectTimeout, Duration responseTimeout, int connectionAttempts) {
+    }
+
+    /**
      * An origin response whose body has not been read. The caller reads {@code body} as it needs it
      * and closes it, which releases the connection. {@code contentLength} is the length the body
      * arrives with, {@code -1} when it comes chunked or with none.
@@ -139,12 +151,54 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                       List<CloudFrontOriginRequestBuilder.Header> forwardedHeaders,
                       Map<String, String> originHeaders, InputStream requestBody, long requestBodyLength)
             throws IOException, InterruptedException {
+        return open(request, forwardedHeaders, originHeaders, requestBody, requestBodyLength, null);
+    }
+
+    /**
+     * Sends {@code request}, honoring {@code timeouts}. A timeout before the origin answered is
+     * retried up to the configured connection attempts for an idempotent method (GET, HEAD), whose
+     * request has no body to replay; every other method is attempted once, as CloudFront does not
+     * retry it. When the last attempt times out, {@link CloudFrontOriginTimeoutException} is thrown
+     * so the viewer is answered 504 rather than 502. A non-timeout failure, such as a refused
+     * connection, propagates unchanged.
+     */
+    OpenResponse open(HttpRequest request,
+                      List<CloudFrontOriginRequestBuilder.Header> forwardedHeaders,
+                      Map<String, String> originHeaders, InputStream requestBody, long requestBodyLength,
+                      OriginTimeouts timeouts)
+            throws IOException, InterruptedException {
+        OriginTimeouts effective = timeouts != null
+                ? timeouts
+                : new OriginTimeouts(CONNECT_TIMEOUT, request.timeout().orElse(RESPONSE_TIMEOUT), 1);
+        int attempts = retryable(request.method()) ? Math.max(1, effective.connectionAttempts()) : 1;
+        SocketTimeoutException lastTimeout = null;
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                return send(request, forwardedHeaders, originHeaders, requestBody, requestBodyLength, effective);
+            } catch (SocketTimeoutException e) {
+                lastTimeout = e;
+                if (attempt < attempts) {
+                    LOG.debugv("CloudFront origin request timed out on attempt {0} of {1}; retrying",
+                            attempt, attempts);
+                }
+            }
+        }
+        throw new CloudFrontOriginTimeoutException(
+                "The origin didn't respond before the request expired.", lastTimeout);
+    }
+
+    private OpenResponse send(HttpRequest request,
+                              List<CloudFrontOriginRequestBuilder.Header> forwardedHeaders,
+                              Map<String, String> originHeaders, InputStream requestBody, long requestBodyLength,
+                              OriginTimeouts timeouts)
+            throws IOException, InterruptedException {
         // No entity content type: the caller's Content-Type request header is sent as is.
         HttpUriRequestBase originRequest = originRequest(request, forwardedHeaders, originHeaders,
                 requestBody != null ? new InputStreamEntity(requestBody, requestBodyLength, null) : null);
         ClassicHttpResponse response;
         try {
-            response = client.executeOpen(RoutingSupport.determineHost(originRequest), originRequest, context(request));
+            response = client.executeOpen(RoutingSupport.determineHost(originRequest), originRequest,
+                    context(timeouts));
         } catch (HttpException e) {
             throw new IOException("CloudFront origin request has no target host", e);
         } catch (InterruptedIOException e) {
@@ -167,6 +221,10 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
             closeAborted(response);
             throw e;
         }
+    }
+
+    private static boolean retryable(String method) {
+        return method != null && IDEMPOTENT_METHODS.contains(method.toUpperCase(Locale.ROOT));
     }
 
     /**
@@ -271,12 +329,14 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         return builder;
     }
 
-    private static HttpClientContext context(HttpRequest request) {
+    private static HttpClientContext context(OriginTimeouts timeouts) {
         HttpClientContext context = HttpClientContext.create();
-        Duration responseTimeout = request.timeout().orElse(RESPONSE_TIMEOUT);
         context.setRequestConfig(RequestConfig.custom()
+                .setConnectTimeout(Timeout.of(timeouts.connectTimeout()))
+                // Waiting for a free pooled connection is emulator-side backpressure, not an origin
+                // setting, so it keeps the fixed default rather than the origin's connect timeout.
                 .setConnectionRequestTimeout(Timeout.of(CONNECT_TIMEOUT))
-                .setResponseTimeout(Timeout.of(responseTimeout))
+                .setResponseTimeout(Timeout.of(timeouts.responseTimeout()))
                 .setRedirectsEnabled(false)
                 .setContentCompressionEnabled(false)
                 .setProtocolUpgradeEnabled(false)

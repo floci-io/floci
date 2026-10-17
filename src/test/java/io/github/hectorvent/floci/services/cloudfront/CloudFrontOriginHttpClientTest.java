@@ -36,6 +36,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -359,6 +360,126 @@ class CloudFrontOriginHttpClientTest {
         } finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void retriesAnIdempotentRequestUntilTheAttemptsAreExhausted() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        HttpServer server = delayedServer(1500, hits);
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                    new CloudFrontOriginHttpClient.OriginTimeouts(
+                            Duration.ofMillis(500), Duration.ofMillis(400), 3);
+            HttpRequest request = request("http://origin.invalid:" + server.getAddress().getPort() + "/");
+
+            long started = System.nanoTime();
+            assertThrows(CloudFrontOriginTimeoutException.class, () -> get(client, request, timeouts));
+            long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+            assertEquals(3, hits.get());
+            assertTrue(elapsedMillis < 1500,
+                    "expected the 400 ms read timeout to fire before the 1500 ms origin delay, took "
+                            + elapsedMillis + " ms");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void doesNotRetryAnIdempotentRequestWhenOnlyOneAttemptIsConfigured() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        HttpServer server = delayedServer(1500, hits);
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                    new CloudFrontOriginHttpClient.OriginTimeouts(
+                            Duration.ofMillis(500), Duration.ofMillis(400), 1);
+            HttpRequest request = request("http://origin.invalid:" + server.getAddress().getPort() + "/");
+
+            assertThrows(CloudFrontOriginTimeoutException.class, () -> get(client, request, timeouts));
+
+            assertEquals(1, hits.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void doesNotRetryANonIdempotentRequest() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        HttpServer server = delayedServer(1500, hits);
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                    new CloudFrontOriginHttpClient.OriginTimeouts(
+                            Duration.ofMillis(500), Duration.ofMillis(400), 3);
+            HttpRequest request = HttpRequest.newBuilder(URI.create(
+                            "http://origin.invalid:" + server.getAddress().getPort() + "/"))
+                    .method("POST", HttpRequest.BodyPublishers.noBody())
+                    .build();
+
+            assertThrows(CloudFrontOriginTimeoutException.class, () -> get(client, request, timeouts));
+
+            assertEquals(1, hits.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void honorsTheConfiguredReadTimeout() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        HttpServer server = delayedServer(1500, hits);
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                    new CloudFrontOriginHttpClient.OriginTimeouts(
+                            Duration.ofSeconds(1), Duration.ofMillis(400), 1);
+            HttpRequest request = request("http://origin.invalid:" + server.getAddress().getPort() + "/");
+
+            long started = System.nanoTime();
+            assertThrows(CloudFrontOriginTimeoutException.class, () -> get(client, request, timeouts));
+            long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+            assertTrue(elapsedMillis < 1500,
+                    "expected the 400 ms read timeout to fire before the 1500 ms origin delay, took "
+                            + elapsedMillis + " ms");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    private static CloudFrontOriginHttpClient.OpenResponse get(
+            CloudFrontOriginHttpClient client, HttpRequest request,
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts) throws Exception {
+        return client.open(request, List.of(), Map.of(), null, -1, timeouts);
+    }
+
+    /** An origin that answers {@code GET} with 200 only after {@code delayMillis}, counting the hits. */
+    private static HttpServer delayedServer(int delayMillis, AtomicInteger hits) throws IOException {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        server.createContext("/", exchange -> {
+            hits.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            try {
+                Thread.sleep(delayMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            byte[] body = "origin-ok".getBytes(StandardCharsets.UTF_8);
+            try {
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            } catch (IOException expected) {
+                // The client gave up on this attempt, which is what the test triggers.
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+        return server;
     }
 
     private static CloudFrontOriginHttpClient.OpenResponse get(CloudFrontOriginHttpClient client,

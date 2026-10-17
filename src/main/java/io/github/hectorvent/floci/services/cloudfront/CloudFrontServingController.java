@@ -101,6 +101,16 @@ public class CloudFrontServingController {
             java.util.Set.of("Expires", "Signature", "Key-Pair-Id", "Policy", "Hash-Algorithm");
     /** Viewer methods that can carry a request body and that CloudFront never caches. */
     private static final Set<String> BODY_METHODS = Set.of("POST", "PUT", "PATCH", "DELETE");
+    /** The 504 body CloudFront returns when the origin did not answer in time. */
+    static final String ORIGIN_TIMEOUT_MESSAGE = "The origin didn't respond before the request expired.";
+    private static final int DEFAULT_CONNECTION_TIMEOUT_SECONDS = 10;
+    private static final int MIN_CONNECTION_TIMEOUT_SECONDS = 1;
+    private static final int MAX_CONNECTION_TIMEOUT_SECONDS = 10;
+    private static final int DEFAULT_CONNECTION_ATTEMPTS = 3;
+    private static final int MAX_CONNECTION_ATTEMPTS = 3;
+    private static final int DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS = 30;
+    private static final int MIN_ORIGIN_READ_TIMEOUT_SECONDS = 1;
+    private static final int MAX_ORIGIN_READ_TIMEOUT_SECONDS = 120;
 
     private final CloudFrontService service;
     private final S3Service s3Service;
@@ -760,8 +770,7 @@ public class CloudFrontServingController {
             URI target = buildCustomOriginUri(
                     origin, viewerScheme, forwardUri, originRequest.rawQuery());
             HttpRequest.Builder rb = HttpRequest.newBuilder()
-                    .uri(target)
-                    .timeout(Duration.ofSeconds(30));
+                    .uri(target);
             // Origin custom headers: CloudFront adds these to every request it forwards to the origin
             // (overriding any same-named viewer header), which is how a distribution restricts an origin
             // to CloudFront-only traffic via a shared secret header.
@@ -782,7 +791,7 @@ public class CloudFrontServingController {
             ViewerBody requestBody = originRequestBody(method, viewerBody);
             CloudFrontOriginHttpClient.OpenResponse resp = httpClient.open(rb.build(), originRequest.headers(),
                     originHeaders, requestBody != null ? requestBody.stream() : null,
-                    requestBody != null ? requestBody.length() : -1);
+                    requestBody != null ? requestBody.length() : -1, originTimeouts(origin));
             String ct = resp.headers().firstValue("content-type").orElse(DEFAULT_CONTENT_TYPE);
             long contentLength = resp.contentLength();
             if (!includeBody) {
@@ -795,12 +804,40 @@ public class CloudFrontServingController {
             LOG.warnv("CloudFront custom origin fetch was interrupted for host {0}",
                     safeOriginName(origin));
             return OriginResponse.error(502, "Bad Gateway.");
+        } catch (CloudFrontOriginTimeoutException e) {
+            LOG.warnv("CloudFront custom origin timed out for host {0}", safeOriginName(origin));
+            return OriginResponse.error(504, ORIGIN_TIMEOUT_MESSAGE);
         } catch (Exception e) {
             // Do not log the target URI: forwarded query strings can contain credentials or tokens.
             LOG.warnv("CloudFront custom origin fetch failed for host {0}: {1}",
                     safeOriginName(origin), e.getClass().getSimpleName());
             return OriginResponse.error(502, "Bad Gateway.");
         }
+    }
+
+    /**
+     * The origin's connection settings for one request: {@code Origin.ConnectionTimeout},
+     * {@code CustomOriginConfig.OriginReadTimeout} and {@code Origin.ConnectionAttempts}. A value
+     * outside the range AWS accepts falls back to the AWS default, since the model can be built
+     * programmatically or loaded from persisted state without the API validation.
+     */
+    private static CloudFrontOriginHttpClient.OriginTimeouts originTimeouts(Origin origin) {
+        int connectSeconds = clampToDefault(origin.getConnectionTimeout(),
+                MIN_CONNECTION_TIMEOUT_SECONDS, MAX_CONNECTION_TIMEOUT_SECONDS,
+                DEFAULT_CONNECTION_TIMEOUT_SECONDS);
+        int readSeconds = clampToDefault(
+                intOrDefault(origin.getCustomOriginConfig(), "OriginReadTimeout",
+                        DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS),
+                MIN_ORIGIN_READ_TIMEOUT_SECONDS, MAX_ORIGIN_READ_TIMEOUT_SECONDS,
+                DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS);
+        int attempts = clampToDefault(origin.getConnectionAttempts(),
+                1, MAX_CONNECTION_ATTEMPTS, DEFAULT_CONNECTION_ATTEMPTS);
+        return new CloudFrontOriginHttpClient.OriginTimeouts(
+                Duration.ofSeconds(connectSeconds), Duration.ofSeconds(readSeconds), attempts);
+    }
+
+    private static int clampToDefault(int value, int min, int max, int fallback) {
+        return value < min || value > max ? fallback : value;
     }
 
     /**
