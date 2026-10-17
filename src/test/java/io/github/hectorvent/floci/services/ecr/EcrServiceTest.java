@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
 import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
+import io.github.hectorvent.floci.services.ecr.model.RegistrySettings;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
@@ -1311,4 +1312,131 @@ class EcrServiceTest {
         }
     }
 
+    // ------------------------------------------------------------
+    // Registry settings
+    // ------------------------------------------------------------
+
+    private static final String REGISTRY_POLICY = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+
+    private static RegistrySettings.ReplicationRule replicateTo(String region, String registryId, String prefix) {
+        return new RegistrySettings.ReplicationRule(
+                List.of(new RegistrySettings.ReplicationDestination(region, registryId)),
+                prefix == null ? null : List.of(new RegistrySettings.RepositoryFilter(prefix, "PREFIX_MATCH")));
+    }
+
+    private static RegistrySettings.ScanningRule scan(String frequency, String filter) {
+        return new RegistrySettings.ScanningRule(frequency,
+                List.of(new RegistrySettings.RepositoryFilter(filter, "WILDCARD")));
+    }
+
+    private static void assertInvalid(Runnable call) {
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class, call::run).getErrorCode());
+    }
+
+    @Test
+    void registryPolicy_roundTripsAndIsNotFoundOnceDeleted() {
+        AwsException missing = assertThrows(AwsException.class, () -> service.getRegistryPolicy(REGION));
+        assertEquals("RegistryPolicyNotFoundException", missing.getErrorCode());
+
+        service.putRegistryPolicy(REGISTRY_POLICY, REGION);
+        assertEquals(REGISTRY_POLICY, service.getRegistryPolicy(REGION));
+        assertEquals(REGISTRY_POLICY, service.deleteRegistryPolicy(REGION));
+
+        assertEquals("RegistryPolicyNotFoundException",
+                assertThrows(AwsException.class, () -> service.getRegistryPolicy(REGION)).getErrorCode());
+        assertEquals("RegistryPolicyNotFoundException",
+                assertThrows(AwsException.class, () -> service.deleteRegistryPolicy(REGION)).getErrorCode());
+    }
+
+    @Test
+    void registryPolicy_mustBeAJsonObject() {
+        assertInvalid(() -> service.putRegistryPolicy("not json", REGION));
+        assertInvalid(() -> service.putRegistryPolicy("[]", REGION));
+        assertInvalid(() -> service.putRegistryPolicy("", REGION));
+        assertInvalid(() -> service.putRegistryPolicy("{\"a\":\"" + "x".repeat(10240) + "\"}", REGION));
+    }
+
+    @Test
+    void replication_roundTripsAndAnEmptyListClearsIt() {
+        assertTrue(service.replicationRules(REGION).isEmpty());
+
+        List<RegistrySettings.ReplicationRule> rules = List.of(
+                replicateTo("us-west-2", ACCOUNT, "prod"),
+                replicateTo("eu-west-1", "111111111111", null));
+        assertEquals(rules, service.putReplicationConfiguration(rules, REGION));
+        assertEquals(rules, service.replicationRules(REGION));
+
+        assertTrue(service.putReplicationConfiguration(List.of(), REGION).isEmpty());
+        assertTrue(service.replicationRules(REGION).isEmpty());
+    }
+
+    @Test
+    void replication_checksDestinationsAndFilters() {
+        assertInvalid(() -> service.putReplicationConfiguration(null, REGION));
+        assertInvalid(() -> service.putReplicationConfiguration(
+                List.of(replicateTo("US_WEST", ACCOUNT, null)), REGION));
+        assertInvalid(() -> service.putReplicationConfiguration(
+                List.of(replicateTo("us-west-2", "12345", null)), REGION));
+        assertInvalid(() -> service.putReplicationConfiguration(
+                List.of(new RegistrySettings.ReplicationRule(null, null)), REGION));
+        assertInvalid(() -> service.putReplicationConfiguration(List.of(new RegistrySettings.ReplicationRule(
+                List.of(new RegistrySettings.ReplicationDestination("us-west-2", ACCOUNT)),
+                List.of(new RegistrySettings.RepositoryFilter("prod", "WILDCARD")))), REGION));
+        assertInvalid(() -> service.putReplicationConfiguration(
+                List.of(replicateTo("us-west-2", ACCOUNT, "Prod")), REGION));
+        assertInvalid(() -> service.putReplicationConfiguration(List.of(new RegistrySettings.ReplicationRule(
+                List.of(new RegistrySettings.ReplicationDestination("us-west-2", ACCOUNT)), List.of())), REGION));
+        assertInvalid(() -> service.putReplicationConfiguration(
+                Collections.nCopies(26, replicateTo("us-west-2", ACCOUNT, null)), REGION));
+        assertDoesNotThrow(() -> service.putReplicationConfiguration(
+                Collections.nCopies(25, replicateTo("us-west-2", ACCOUNT, null)), REGION));
+    }
+
+    @Test
+    void scanning_defaultsToBasicAndRoundTrips() {
+        RegistrySettings initial = service.registryScanningConfiguration(REGION);
+        assertEquals("BASIC", initial.getScanType());
+        assertTrue(initial.getScanningRules().isEmpty());
+
+        List<RegistrySettings.ScanningRule> rules = List.of(scan("CONTINUOUS_SCAN", "prod-*"), scan("SCAN_ON_PUSH", "*"));
+        RegistrySettings saved = service.putRegistryScanningConfiguration("ENHANCED", rules, REGION);
+        assertEquals("ENHANCED", saved.getScanType());
+        assertEquals(rules, service.registryScanningConfiguration(REGION).getScanningRules());
+    }
+
+    @Test
+    void scanning_refusesContinuousScanWithBasicAndUnknownValues() {
+        assertInvalid(() -> service.putRegistryScanningConfiguration(
+                "BASIC", List.of(scan("CONTINUOUS_SCAN", "*")), REGION));
+        assertInvalid(() -> service.putRegistryScanningConfiguration("FULL", List.of(), REGION));
+        assertInvalid(() -> service.putRegistryScanningConfiguration(
+                "ENHANCED", List.of(scan("HOURLY", "*")), REGION));
+        assertInvalid(() -> service.putRegistryScanningConfiguration("ENHANCED", List.of(
+                new RegistrySettings.ScanningRule("SCAN_ON_PUSH",
+                        List.of(new RegistrySettings.RepositoryFilter("*", "PREFIX_MATCH")))), REGION));
+        assertInvalid(() -> service.putRegistryScanningConfiguration(
+                "ENHANCED", List.of(scan("SCAN_ON_PUSH", "Bad Filter")), REGION));
+        assertInvalid(() -> service.putRegistryScanningConfiguration("ENHANCED", List.of(
+                new RegistrySettings.ScanningRule("SCAN_ON_PUSH", null)), REGION));
+        assertInvalid(() -> service.putRegistryScanningConfiguration("ENHANCED",
+                List.of(scan("SCAN_ON_PUSH", "a"), scan("SCAN_ON_PUSH", "b"), scan("CONTINUOUS_SCAN", "c")), REGION));
+        assertDoesNotThrow(() -> service.putRegistryScanningConfiguration(
+                "BASIC", List.of(scan("SCAN_ON_PUSH", "*")), REGION));
+    }
+
+    @Test
+    void registrySettings_areKeptPerAccountAndRegion() {
+        InMemoryStorage<String, RegistrySettings> store = new InMemoryStorage<>();
+        EcrService first = new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                store, registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+        EcrService other = new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                store, registryManager, Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, "111111111111"));
+
+        first.putRegistryPolicy(REGISTRY_POLICY, REGION);
+        assertEquals(REGISTRY_POLICY, first.getRegistryPolicy(REGION));
+        assertThrows(AwsException.class, () -> first.getRegistryPolicy("us-west-2"));
+        assertThrows(AwsException.class, () -> other.getRegistryPolicy(REGION));
+        assertEquals("111111111111", other.registryId());
+    }
 }

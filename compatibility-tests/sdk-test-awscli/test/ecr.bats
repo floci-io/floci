@@ -103,3 +103,33 @@ teardown() {
     assert_failure
     [[ "$output" == *"RepositoryNotFoundException"* ]]
 }
+
+@test "ECR: registry policy, replication and scanning configuration round-trip" {
+    policy='{"Version":"2012-10-17","Statement":[{"Sid":"Replicate","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111111111111:root"},"Action":["ecr:CreateRepository","ecr:ReplicateImage"],"Resource":"*"}]}'
+    run aws_cmd ecr put-registry-policy --policy-text "$policy"
+    assert_success
+    run aws_cmd ecr get-registry-policy
+    assert_success
+    [ "$(json_get "$output" '.policyText')" = "$policy" ]
+
+    run aws_cmd ecr put-replication-configuration --replication-configuration \
+        'rules=[{destinations=[{region=us-west-2,registryId=111111111111}],repositoryFilters=[{filter=prod,filterType=PREFIX_MATCH}]}]'
+    assert_success
+    run aws_cmd ecr describe-registry
+    assert_success
+    [ "$(json_get "$output" '.replicationConfiguration.rules[0].destinations[0].region')" = "us-west-2" ]
+
+    run aws_cmd ecr put-registry-scanning-configuration --scan-type ENHANCED \
+        --rules '[{"scanFrequency":"SCAN_ON_PUSH","repositoryFilters":[{"filter":"*","filterType":"WILDCARD"}]}]'
+    assert_success
+    run aws_cmd ecr get-registry-scanning-configuration
+    assert_success
+    [ "$(json_get "$output" '.scanningConfiguration.scanType')" = "ENHANCED" ]
+
+    aws_cmd ecr delete-registry-policy >/dev/null
+    aws_cmd ecr put-replication-configuration --replication-configuration 'rules=[]' >/dev/null
+    aws_cmd ecr put-registry-scanning-configuration --scan-type BASIC --rules '[]' >/dev/null
+    run aws_cmd ecr get-registry-policy
+    assert_failure
+    [[ "$output" == *"RegistryPolicyNotFoundException"* ]]
+}

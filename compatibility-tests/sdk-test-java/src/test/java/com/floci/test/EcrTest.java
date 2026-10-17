@@ -238,4 +238,54 @@ class EcrTest {
             }
         }
     }
+
+    @Test
+    @Order(14)
+    @DisplayName("Registry policy, replication and scanning configuration round-trip")
+    void registrySettingsRoundTrip() {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"Replicate\",\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:" + TestFixtures.partition() + ":iam::111111111111:root\"},"
+                + "\"Action\":[\"ecr:CreateRepository\",\"ecr:ReplicateImage\"],\"Resource\":\"*\"}]}";
+        try {
+            assertThatThrownBy(() -> ecr.getRegistryPolicy(b -> {}))
+                    .isInstanceOf(RegistryPolicyNotFoundException.class);
+            ecr.putRegistryPolicy(b -> b.policyText(policy));
+            assertThat(ecr.getRegistryPolicy(b -> {}).policyText()).isEqualTo(policy);
+
+            ecr.putReplicationConfiguration(b -> b.replicationConfiguration(c -> c.rules(ReplicationRule.builder()
+                    .destinations(ReplicationDestination.builder().region("us-west-2").registryId("111111111111").build())
+                    .repositoryFilters(RepositoryFilter.builder().filter("prod").filterType("PREFIX_MATCH").build())
+                    .build())));
+            DescribeRegistryResponse registry = ecr.describeRegistry(b -> {});
+            assertThat(registry.registryId()).matches("[0-9]{12}");
+            assertThat(registry.replicationConfiguration().rules()).hasSize(1);
+            assertThat(registry.replicationConfiguration().rules().get(0).destinations().get(0).region())
+                    .isEqualTo("us-west-2");
+
+            ecr.putRegistryScanningConfiguration(b -> b.scanType(ScanType.ENHANCED).rules(RegistryScanningRule.builder()
+                    .scanFrequency(ScanFrequency.CONTINUOUS_SCAN)
+                    .repositoryFilters(ScanningRepositoryFilter.builder().filter("prod-*")
+                            .filterType(ScanningRepositoryFilterType.WILDCARD).build())
+                    .build()));
+            GetRegistryScanningConfigurationResponse scanning = ecr.getRegistryScanningConfiguration(b -> {});
+            assertThat(scanning.scanningConfiguration().scanType()).isEqualTo(ScanType.ENHANCED);
+            assertThat(scanning.scanningConfiguration().rules().get(0).scanFrequency())
+                    .isEqualTo(ScanFrequency.CONTINUOUS_SCAN);
+            assertThatThrownBy(() -> ecr.putRegistryScanningConfiguration(b -> b.scanType(ScanType.BASIC)
+                    .rules(RegistryScanningRule.builder().scanFrequency(ScanFrequency.CONTINUOUS_SCAN)
+                            .repositoryFilters(ScanningRepositoryFilter.builder().filter("*")
+                                    .filterType(ScanningRepositoryFilterType.WILDCARD).build())
+                            .build())))
+                    .isInstanceOf(InvalidParameterException.class);
+        } finally {
+            // Registry settings are per account and Region, so put back what a fresh registry has.
+            try {
+                ecr.deleteRegistryPolicy(b -> {});
+            } catch (RegistryPolicyNotFoundException ignored) {
+                // Already absent.
+            }
+            ecr.putReplicationConfiguration(b -> b.replicationConfiguration(c -> c.rules(List.of())));
+            ecr.putRegistryScanningConfiguration(b -> b.scanType(ScanType.BASIC).rules(List.of()));
+        }
+    }
 }

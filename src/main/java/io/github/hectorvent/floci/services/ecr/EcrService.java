@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.ecr;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -12,6 +14,7 @@ import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
@@ -21,6 +24,7 @@ import io.github.hectorvent.floci.services.ecr.model.ImageFailure;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
 import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
+import io.github.hectorvent.floci.services.ecr.model.RegistrySettings;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
@@ -55,6 +59,14 @@ public class EcrService implements ResourceProvider {
             "(?:[a-z0-9]+(?:(?:\\.|_|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+"
                     + "(?:(?:\\.|_|__|-+)[a-z0-9]+)*)*/?|ROOT)");
     private static final Pattern REGISTRY_ID = Pattern.compile("[0-9]{12}");
+    private static final Pattern REPLICATION_REGION = Pattern.compile("[0-9a-z-]{2,25}");
+    private static final Pattern REPLICATION_FILTER = Pattern.compile(
+            "^(?:[a-z0-9]+(?:[._-][a-z0-9]*)*/)*[a-z0-9]*(?:[._-][a-z0-9]*)*$");
+    private static final Pattern SCANNING_FILTER = Pattern.compile("^[a-z0-9*](?:[._\\-/a-z0-9*]?[a-z0-9*]+)*$");
+    private static final Set<String> SCAN_TYPES = Set.of("BASIC", "ENHANCED");
+    private static final Set<String> SCAN_FREQUENCIES = Set.of("SCAN_ON_PUSH", "CONTINUOUS_SCAN", "MANUAL");
+    private static final int MAX_REGISTRY_POLICY_LENGTH = 10240;
+    private static final ObjectMapper POLICY_MAPPER = new ObjectMapper();
     private static final Pattern CREDENTIAL_ARN = Pattern.compile(
             "arn:" + AwsArnUtils.PARTITION_REGEX + ":secretsmanager:[a-zA-Z0-9-:]+:secret:ecr-pullthroughcache/"
                     + "[a-zA-Z0-9/_+=.@-]+");
@@ -68,6 +80,7 @@ public class EcrService implements ResourceProvider {
     private final StorageBackend<String, Repository> repoStore;
     private final StorageBackend<String, ImageMetadata> imageMetaStore;
     private final StorageBackend<String, PullThroughCacheRule> pullThroughCacheRuleStore;
+    private final StorageBackend<String, RegistrySettings> registrySettingsStore;
     private final EcrRegistryManager registryManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -83,6 +96,8 @@ public class EcrService implements ResourceProvider {
                         new TypeReference<Map<String, ImageMetadata>>() {}),
                 factory.create("ecr", "pull-through-cache-rules.json",
                         new TypeReference<Map<String, PullThroughCacheRule>>() {}),
+                factory.create("ecr", "registry-settings.json",
+                        new TypeReference<Map<String, RegistrySettings>>() {}),
                 registryManager, config, regionResolver);
     }
 
@@ -92,9 +107,21 @@ public class EcrService implements ResourceProvider {
                EcrRegistryManager registryManager,
                EmulatorConfig config,
                RegionResolver regionResolver) {
+        this(repoStore, imageMetaStore, pullThroughCacheRuleStore, new InMemoryStorage<>(),
+                registryManager, config, regionResolver);
+    }
+
+    EcrService(StorageBackend<String, Repository> repoStore,
+               StorageBackend<String, ImageMetadata> imageMetaStore,
+               StorageBackend<String, PullThroughCacheRule> pullThroughCacheRuleStore,
+               StorageBackend<String, RegistrySettings> registrySettingsStore,
+               EcrRegistryManager registryManager,
+               EmulatorConfig config,
+               RegionResolver regionResolver) {
         this.repoStore = repoStore;
         this.imageMetaStore = imageMetaStore;
         this.pullThroughCacheRuleStore = pullThroughCacheRuleStore;
+        this.registrySettingsStore = registrySettingsStore;
         this.registryManager = registryManager;
         this.config = config;
         this.regionResolver = regionResolver;
@@ -619,6 +646,182 @@ public class EcrService implements ResourceProvider {
             }
         }
         return new BatchDeleteImageResult(deleted, failures);
+    }
+
+    // ============================================================
+    // Registry settings (policy, replication, scanning)
+    // ============================================================
+
+    /** Stores the registry policy; text that is not a JSON object is refused. */
+    public String putRegistryPolicy(String policyText, String region) {
+        if (policyText == null || policyText.isBlank() || policyText.length() > MAX_REGISTRY_POLICY_LENGTH) {
+            throw new AwsException("InvalidParameterException",
+                    "policyText must be a JSON policy of at most " + MAX_REGISTRY_POLICY_LENGTH + " characters", 400);
+        }
+        JsonNode parsed;
+        try {
+            parsed = POLICY_MAPPER.readTree(policyText);
+        } catch (Exception e) {
+            parsed = null;
+        }
+        if (parsed == null || !parsed.isObject()) {
+            throw new AwsException("InvalidParameterException", "Invalid parameter at 'PolicyText' failed to satisfy "
+                    + "constraint: 'Invalid registry policy provided'", 400);
+        }
+        RegistrySettings settings = registrySettings(region);
+        settings.setPolicyText(policyText);
+        saveRegistrySettings(region, settings);
+        return policyText;
+    }
+
+    public String getRegistryPolicy(String region) {
+        String policy = registrySettings(region).getPolicyText();
+        if (policy == null) {
+            throw registryPolicyNotFound();
+        }
+        return policy;
+    }
+
+    /** Removes the registry policy and returns what it was. */
+    public String deleteRegistryPolicy(String region) {
+        RegistrySettings settings = registrySettings(region);
+        String policy = settings.getPolicyText();
+        if (policy == null) {
+            throw registryPolicyNotFound();
+        }
+        settings.setPolicyText(null);
+        saveRegistrySettings(region, settings);
+        return policy;
+    }
+
+    /** Stores the replication rules; an empty list clears them. Floci does not replicate images. */
+    public List<RegistrySettings.ReplicationRule> putReplicationConfiguration(
+            List<RegistrySettings.ReplicationRule> rules, String region) {
+        if (rules == null) {
+            throw new AwsException("InvalidParameterException", "replicationConfiguration.rules is required", 400);
+        }
+        if (rules.size() > 25) {
+            throw new AwsException("InvalidParameterException", "A replication configuration can have at most 25 rules", 400);
+        }
+        for (RegistrySettings.ReplicationRule rule : rules) {
+            if (rule.destinations() == null || rule.destinations().size() > 100) {
+                throw new AwsException("InvalidParameterException",
+                        "Each replication rule needs destinations, at most 100", 400);
+            }
+            for (RegistrySettings.ReplicationDestination destination : rule.destinations()) {
+                if (destination.region() == null || !REPLICATION_REGION.matcher(destination.region()).matches()) {
+                    throw new AwsException("InvalidParameterException",
+                            "Invalid replication destination region: " + destination.region(), 400);
+                }
+                if (destination.registryId() == null || !REGISTRY_ID.matcher(destination.registryId()).matches()) {
+                    throw new AwsException("InvalidParameterException",
+                            "Invalid replication destination registryId: " + destination.registryId(), 400);
+                }
+            }
+            List<RegistrySettings.RepositoryFilter> filters = rule.repositoryFilters();
+            if (filters != null) {
+                if (filters.isEmpty() || filters.size() > 100) {
+                    throw new AwsException("InvalidParameterException",
+                            "repositoryFilters must hold 1 to 100 filters", 400);
+                }
+                for (RegistrySettings.RepositoryFilter filter : filters) {
+                    if (!"PREFIX_MATCH".equals(filter.filterType())) {
+                        throw new AwsException("InvalidParameterException",
+                                "Invalid replication filterType: " + filter.filterType(), 400);
+                    }
+                    if (filter.filter() == null || filter.filter().length() < 2 || filter.filter().length() > 256
+                            || !REPLICATION_FILTER.matcher(filter.filter()).matches()) {
+                        throw new AwsException("InvalidParameterException",
+                                "Invalid replication filter: " + filter.filter(), 400);
+                    }
+                }
+            }
+        }
+        RegistrySettings settings = registrySettings(region);
+        settings.setReplicationRules(rules.isEmpty() ? null : List.copyOf(rules));
+        saveRegistrySettings(region, settings);
+        return replicationRules(region);
+    }
+
+    /** The stored replication rules, empty when none are set. */
+    public List<RegistrySettings.ReplicationRule> replicationRules(String region) {
+        List<RegistrySettings.ReplicationRule> rules = registrySettings(region).getReplicationRules();
+        return rules == null ? List.of() : rules;
+    }
+
+    /**
+     * Stores the scanning configuration. {@code CONTINUOUS_SCAN} is offered only with enhanced
+     * scanning, so it is refused with {@code BASIC}. Floci does not scan images.
+     */
+    public RegistrySettings putRegistryScanningConfiguration(String scanType, List<RegistrySettings.ScanningRule> rules,
+                                                             String region) {
+        String type = scanType == null ? "BASIC" : scanType;
+        if (!SCAN_TYPES.contains(type)) {
+            throw new AwsException("InvalidParameterException", "Invalid scanType: " + scanType, 400);
+        }
+        List<RegistrySettings.ScanningRule> given = rules == null ? List.of() : rules;
+        if (given.size() > 2) {
+            throw new AwsException("InvalidParameterException", "A scanning configuration can have at most 2 rules", 400);
+        }
+        for (RegistrySettings.ScanningRule rule : given) {
+            if (rule.scanFrequency() == null || !SCAN_FREQUENCIES.contains(rule.scanFrequency())) {
+                throw new AwsException("InvalidParameterException", "Invalid scanFrequency: " + rule.scanFrequency(), 400);
+            }
+            if ("BASIC".equals(type) && "CONTINUOUS_SCAN".equals(rule.scanFrequency())) {
+                throw new AwsException("InvalidParameterException",
+                        "CONTINUOUS_SCAN is supported only with the ENHANCED scan type", 400);
+            }
+            if (rule.repositoryFilters() == null || rule.repositoryFilters().size() > 100) {
+                throw new AwsException("InvalidParameterException",
+                        "Each scanning rule needs repositoryFilters, at most 100", 400);
+            }
+            for (RegistrySettings.RepositoryFilter filter : rule.repositoryFilters()) {
+                if (!"WILDCARD".equals(filter.filterType())) {
+                    throw new AwsException("InvalidParameterException",
+                            "Invalid scanning filterType: " + filter.filterType(), 400);
+                }
+                if (filter.filter() == null || filter.filter().isEmpty() || filter.filter().length() > 255
+                        || !SCANNING_FILTER.matcher(filter.filter()).matches()) {
+                    throw new AwsException("InvalidParameterException", "Invalid scanning filter: " + filter.filter(), 400);
+                }
+            }
+        }
+        RegistrySettings settings = registrySettings(region);
+        settings.setScanType(type);
+        settings.setScanningRules(List.copyOf(given));
+        saveRegistrySettings(region, settings);
+        return registryScanningConfiguration(region);
+    }
+
+    /** The scanning configuration, {@code BASIC} with no rules until one is put. */
+    public RegistrySettings registryScanningConfiguration(String region) {
+        RegistrySettings stored = registrySettings(region);
+        RegistrySettings view = new RegistrySettings();
+        view.setScanType(stored.getScanType() == null ? "BASIC" : stored.getScanType());
+        view.setScanningRules(stored.getScanningRules() == null ? List.of() : stored.getScanningRules());
+        return view;
+    }
+
+    /** The registry ID of the caller's account. */
+    public String registryId() {
+        return regionResolver.getAccountId();
+    }
+
+    private RegistrySettings registrySettings(String region) {
+        return registrySettingsStore.get(registrySettingsKey(region)).orElseGet(RegistrySettings::new);
+    }
+
+    private void saveRegistrySettings(String region, RegistrySettings settings) {
+        registrySettingsStore.put(registrySettingsKey(region), settings);
+    }
+
+    private String registrySettingsKey(String region) {
+        return region + "::" + regionResolver.getAccountId();
+    }
+
+    private AwsException registryPolicyNotFound() {
+        return new AwsException("RegistryPolicyNotFoundException",
+                "Registry policy does not exist in the registry with id '" + regionResolver.getAccountId() + "'", 400);
     }
 
     // ============================================================

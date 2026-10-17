@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageFailure;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
+import io.github.hectorvent.floci.services.ecr.model.RegistrySettings;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -69,6 +70,14 @@ public class EcrJsonHandler {
             case "SetRepositoryPolicy" -> handleSetRepositoryPolicy(request, region);
             case "GetRepositoryPolicy" -> handleGetRepositoryPolicy(request, region);
             case "DeleteRepositoryPolicy" -> handleDeleteRepositoryPolicy(request, region);
+            case "PutRegistryPolicy" -> registryPolicyResponse(
+                    service.putRegistryPolicy(request.path("policyText").asText(null), region));
+            case "GetRegistryPolicy" -> registryPolicyResponse(service.getRegistryPolicy(region));
+            case "DeleteRegistryPolicy" -> registryPolicyResponse(service.deleteRegistryPolicy(region));
+            case "PutReplicationConfiguration" -> handlePutReplicationConfiguration(request, region);
+            case "DescribeRegistry" -> handleDescribeRegistry(region);
+            case "PutRegistryScanningConfiguration" -> handlePutRegistryScanningConfiguration(request, region);
+            case "GetRegistryScanningConfiguration" -> handleGetRegistryScanningConfiguration(region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation",
                             "Operation " + action + " is not supported."))
@@ -500,6 +509,109 @@ public class EcrJsonHandler {
     // ============================================================
     // Builders / parsers
     // ============================================================
+
+    private Response registryPolicyResponse(String policyText) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("registryId", service.registryId());
+        response.put("policyText", policyText);
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutReplicationConfiguration(JsonNode request, String region) {
+        JsonNode config = request.path("replicationConfiguration");
+        if (!config.isObject() || !config.path("rules").isArray()) {
+            throw new AwsException("InvalidParameterException", "replicationConfiguration.rules is required", 400);
+        }
+        List<RegistrySettings.ReplicationRule> rules = new ArrayList<>();
+        for (JsonNode rule : config.path("rules")) {
+            List<RegistrySettings.ReplicationDestination> destinations = null;
+            if (rule.path("destinations").isArray()) {
+                destinations = new ArrayList<>();
+                for (JsonNode d : rule.path("destinations")) {
+                    destinations.add(new RegistrySettings.ReplicationDestination(
+                            d.path("region").asText(null), d.path("registryId").asText(null)));
+                }
+            }
+            rules.add(new RegistrySettings.ReplicationRule(destinations,
+                    rule.has("repositoryFilters") ? parseRepositoryFilters(rule.path("repositoryFilters")) : null));
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("replicationConfiguration",
+                buildReplicationConfiguration(service.putReplicationConfiguration(rules, region)));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeRegistry(String region) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("registryId", service.registryId());
+        response.set("replicationConfiguration", buildReplicationConfiguration(service.replicationRules(region)));
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutRegistryScanningConfiguration(JsonNode request, String region) {
+        List<RegistrySettings.ScanningRule> rules = new ArrayList<>();
+        for (JsonNode rule : request.path("rules")) {
+            rules.add(new RegistrySettings.ScanningRule(rule.path("scanFrequency").asText(null),
+                    rule.has("repositoryFilters") ? parseRepositoryFilters(rule.path("repositoryFilters")) : null));
+        }
+        RegistrySettings saved = service.putRegistryScanningConfiguration(
+                request.path("scanType").asText(null), rules, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("registryScanningConfiguration", buildScanningConfiguration(saved));
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetRegistryScanningConfiguration(String region) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("registryId", service.registryId());
+        response.set("scanningConfiguration", buildScanningConfiguration(service.registryScanningConfiguration(region)));
+        return Response.ok(response).build();
+    }
+
+    private static List<RegistrySettings.RepositoryFilter> parseRepositoryFilters(JsonNode node) {
+        List<RegistrySettings.RepositoryFilter> filters = new ArrayList<>();
+        for (JsonNode f : node) {
+            filters.add(new RegistrySettings.RepositoryFilter(
+                    f.path("filter").asText(null), f.path("filterType").asText(null)));
+        }
+        return filters;
+    }
+
+    private ObjectNode buildReplicationConfiguration(List<RegistrySettings.ReplicationRule> rules) {
+        ObjectNode config = objectMapper.createObjectNode();
+        ArrayNode out = config.putArray("rules");
+        for (RegistrySettings.ReplicationRule rule : rules) {
+            ObjectNode n = out.addObject();
+            ArrayNode destinations = n.putArray("destinations");
+            for (RegistrySettings.ReplicationDestination d : rule.destinations()) {
+                destinations.addObject().put("region", d.region()).put("registryId", d.registryId());
+            }
+            if (rule.repositoryFilters() != null) {
+                n.set("repositoryFilters", buildRepositoryFilters(rule.repositoryFilters()));
+            }
+        }
+        return config;
+    }
+
+    private ObjectNode buildScanningConfiguration(RegistrySettings settings) {
+        ObjectNode config = objectMapper.createObjectNode();
+        config.put("scanType", settings.getScanType());
+        ArrayNode out = config.putArray("rules");
+        for (RegistrySettings.ScanningRule rule : settings.getScanningRules()) {
+            ObjectNode n = out.addObject();
+            n.put("scanFrequency", rule.scanFrequency());
+            n.set("repositoryFilters", buildRepositoryFilters(rule.repositoryFilters()));
+        }
+        return config;
+    }
+
+    private ArrayNode buildRepositoryFilters(List<RegistrySettings.RepositoryFilter> filters) {
+        ArrayNode out = objectMapper.createArrayNode();
+        for (RegistrySettings.RepositoryFilter f : filters) {
+            out.addObject().put("filter", f.filter()).put("filterType", f.filterType());
+        }
+        return out;
+    }
 
     private ObjectNode buildImageIdentifier(ImageIdentifier id) {
         ObjectNode n = objectMapper.createObjectNode();
