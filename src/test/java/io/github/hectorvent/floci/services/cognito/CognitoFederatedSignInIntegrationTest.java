@@ -3,11 +3,14 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.common.QuarkusTestResource;
+import io.quarkus.test.common.QuarkusTestResourceLifecycleManager;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.net.http.HttpClient;
@@ -26,14 +29,114 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 @QuarkusTest
+@QuarkusTestResource(value = CognitoFederatedSignInIntegrationTest.GoogleProviderResource.class,
+        restrictToAnnotatedClass = true)
 class CognitoFederatedSignInIntegrationTest {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final String DOMAIN = "federated-" + System.nanoTime() + ".teos.localhost.floci.io";
+    private MockOidcProvider googleProvider;
+
+    public static class GoogleProviderResource implements QuarkusTestResourceLifecycleManager {
+        private MockOidcProvider provider;
+
+        @Override
+        public Map<String, String> start() {
+            try {
+                provider = new MockOidcProvider();
+                return Map.of("floci.services.cognito.google-issuer", provider.baseUrl());
+            } catch (IOException exception) {
+                throw new IllegalStateException("Cannot start the Google test provider", exception);
+            }
+        }
+
+        @Override
+        public void inject(TestInjector testInjector) {
+            testInjector.injectIntoFields(provider, new TestInjector.MatchesType(MockOidcProvider.class));
+        }
+
+        @Override
+        public void stop() {
+            if (provider != null) {
+                provider.close();
+            }
+        }
+    }
 
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    void googleProviderSignsInWithConfiguredIssuerAndPreservesAwsProviderDetails() throws Exception {
+        String domain = "google-" + System.nanoTime() + ".teos.localhost.floci.io";
+        String poolId = cognitoJson("CreateUserPool", "{\"PoolName\":\"GoogleFederationPool\"}")
+                .path("UserPool").path("Id").asText();
+        String clientId = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId":"%s","ClientName":"google-client","AllowedOAuthFlowsUserPoolClient":true,
+                 "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":["openid","email","profile"],
+                 "SupportedIdentityProviders":["Google"],"CallbackURLs":["https://client.example/callback"]}
+                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
+        cognitoJson("CreateIdentityProvider", """
+                {"UserPoolId":"%s","ProviderName":"Google","ProviderType":"Google",
+                 "ProviderDetails":{"client_id":"google-client","client_secret":"google-secret",
+                 "authorize_scopes":"openid email profile"},
+                 "AttributeMapping":{"email":"email","email_verified":"email_verified","name":"name",
+                 "given_name":"given_name","family_name":"family_name","picture":"picture"}}
+                """.formatted(poolId));
+        assertEquals(0, googleProvider.discoveryRequests());
+        cognitoJson("CreateUserPoolDomain", customDomain(domain, poolId, requestCertificate(domain)));
+
+        String firstUsername = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            String location = given().redirects().follow(false).header("Host", domain)
+                    .queryParam("client_id", clientId).queryParam("redirect_uri", "https://client.example/callback")
+                    .queryParam("response_type", "code").queryParam("scope", "openid")
+                    .queryParam("identity_provider", "Google").queryParam("state", "client-state")
+                    .when().get("/oauth2/authorize").then().statusCode(302).extract().header("Location");
+            assertEquals(googleProvider.baseUrl() + "/authorize", location.substring(0, location.indexOf('?')));
+            assertEquals("openid email profile", queryParameter(location, "scope"));
+            assertEquals("google-client", queryParameter(location, "client_id"));
+
+            String callback = given().redirects().follow(false).header("Host", domain)
+                    .queryParam("state", queryParameter(location, "state")).queryParam("code", "provider-code")
+                    .when().get("/oauth2/idpresponse").then().statusCode(302).extract().header("Location");
+            assertEquals("client-state", queryParameter(callback, "state"));
+            given().header("Host", domain).formParam("grant_type", "authorization_code")
+                    .formParam("client_id", clientId).formParam("code", queryParameter(callback, "code"))
+                    .formParam("redirect_uri", "https://client.example/callback")
+                    .when().post("/oauth2/token").then().statusCode(200).body("token_type", equalTo("Bearer"));
+
+            JsonNode users = cognitoJson("ListUsers", "{\"UserPoolId\":\"%s\"}".formatted(poolId)).path("Users");
+            assertEquals(1, users.size());
+            JsonNode user = users.get(0);
+            String username = user.path("Username").asText();
+            assertEquals("Google_provider-subject", username);
+            if (firstUsername != null) {
+                assertEquals(firstUsername, username);
+            }
+            firstUsername = username;
+            JsonNode attributes = user.path("Attributes");
+            assertEquals("federated@example.com", attributeValue(attributes, "email"));
+            assertEquals("true", attributeValue(attributes, "email_verified"));
+            assertEquals("Federated User", attributeValue(attributes, "name"));
+            assertEquals("Federated", attributeValue(attributes, "given_name"));
+            assertEquals("User", attributeValue(attributes, "family_name"));
+            assertEquals("https://picture.example/user", attributeValue(attributes, "picture"));
+            JsonNode identity = OBJECT_MAPPER.readTree(attributeValue(attributes, "identities")).get(0);
+            assertEquals("Google", identity.path("providerName").asText());
+            assertEquals("Google", identity.path("providerType").asText());
+            assertEquals("provider-subject", identity.path("userId").asText());
+        }
+        assertEquals("google-secret", formValue(googleProvider.tokenRequestBody(), "client_secret"));
+        assertEquals("Bearer provider-access-token", googleProvider.userInfoAuthorization());
+        JsonNode details = cognitoJson("DescribeIdentityProvider", """
+                {"UserPoolId":"%s","ProviderName":"Google"}
+                """.formatted(poolId)).path("IdentityProvider").path("ProviderDetails");
+        assertEquals(3, details.size());
+        assertFalse(details.has("authorize_url"));
+        assertFalse(details.has("oidc_issuer"));
     }
 
     @Test

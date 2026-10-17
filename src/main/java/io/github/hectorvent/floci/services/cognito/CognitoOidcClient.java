@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -24,18 +25,99 @@ public class CognitoOidcClient {
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
+    private static final String GOOGLE_ISSUER = "https://accounts.google.com";
 
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
+    private final String googleIssuer;
 
     @Inject
-    public CognitoOidcClient(ObjectMapper objectMapper) {
-        this(HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build(), objectMapper);
+    public CognitoOidcClient(ObjectMapper objectMapper, EmulatorConfig config) {
+        this(defaultHttpClient(), objectMapper, config.services().cognito().googleIssuer());
     }
 
-    CognitoOidcClient(HttpClient httpClient, ObjectMapper objectMapper) {
+    CognitoOidcClient(ObjectMapper objectMapper) {
+        this(defaultHttpClient(), objectMapper, GOOGLE_ISSUER);
+    }
+
+    CognitoOidcClient(ObjectMapper objectMapper, String googleIssuer) {
+        this(defaultHttpClient(), objectMapper, googleIssuer);
+    }
+
+    CognitoOidcClient(HttpClient httpClient, ObjectMapper objectMapper, String googleIssuer) {
         this.httpClient = httpClient;
         this.objectMapper = objectMapper;
+        this.googleIssuer = googleIssuer;
+    }
+
+    private static HttpClient defaultHttpClient() {
+        return HttpClient.newBuilder()
+                .connectTimeout(CONNECT_TIMEOUT)
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .build();
+    }
+
+    IdentityProvider googleProvider(IdentityProvider provider) {
+        Map<String, String> details = new LinkedHashMap<>(provider.getProviderDetails());
+        details.putAll(googleEndpoints(provider.getProviderName()));
+        IdentityProvider resolved = new IdentityProvider();
+        resolved.setUserPoolId(provider.getUserPoolId());
+        resolved.setProviderName(provider.getProviderName());
+        resolved.setProviderType(provider.getProviderType());
+        resolved.setProviderDetails(details);
+        resolved.setAttributeMapping(provider.getAttributeMapping());
+        resolved.setIdpIdentifiers(provider.getIdpIdentifiers());
+        resolved.setCreationDate(provider.getCreationDate());
+        resolved.setLastModifiedDate(provider.getLastModifiedDate());
+        return resolved;
+    }
+
+    private Map<String, String> googleEndpoints(String providerName) {
+        if (GOOGLE_ISSUER.equals(googleIssuer)) {
+            return Map.of("authorize_url", "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url", "https://oauth2.googleapis.com/token",
+                    "attributes_url", "https://openidconnect.googleapis.com/v1/userinfo",
+                    "oidc_issuer", GOOGLE_ISSUER);
+        }
+        validateGoogleIssuer(providerName);
+        String discoveryUrl = googleIssuer + (googleIssuer.endsWith("/") ? "" : "/")
+                + ".well-known/openid-configuration";
+        HttpRequest request = buildRequest(discoveryUrl, providerName, "discovery", builder -> builder
+                .header("Accept", "application/json").GET().build());
+        JsonNode discovery = send(request, "discovery request");
+        if (!googleIssuer.equals(discovery.path("issuer").asText())) {
+            throw new AwsException("InvalidParameterException", "Identity provider discovery issuer does not match "
+                    + "the configured Google issuer", 400);
+        }
+        Map<String, String> endpoints = new LinkedHashMap<>();
+        endpoints.put("authorize_url", discoveryEndpoint(discovery, "authorization_endpoint", providerName));
+        endpoints.put("token_url", discoveryEndpoint(discovery, "token_endpoint", providerName));
+        endpoints.put("attributes_url", discoveryEndpoint(discovery, "userinfo_endpoint", providerName));
+        endpoints.put("oidc_issuer", googleIssuer);
+        return endpoints;
+    }
+
+    private void validateGoogleIssuer(String providerName) {
+        try {
+            URI issuer = URI.create(googleIssuer);
+            if (issuer.getRawQuery() != null || issuer.getRawFragment() != null || issuer.getUserInfo() != null) {
+                throw new IllegalArgumentException("Issuer must not contain query, fragment or user info");
+            }
+            buildRequest(googleIssuer, providerName, "issuer", builder -> builder.GET().build());
+        } catch (IllegalArgumentException exception) {
+            throw new AwsException("InvalidParameterException", "Identity provider " + providerName
+                    + " has an invalid Google issuer configured", 400);
+        }
+    }
+
+    private String discoveryEndpoint(JsonNode discovery, String name, String providerName) {
+        JsonNode endpoint = discovery.get(name);
+        if (endpoint == null || !endpoint.isTextual() || endpoint.asText().isBlank()) {
+            throw new AwsException("InvalidParameterException", "Identity provider discovery is missing " + name, 400);
+        }
+        String value = endpoint.asText();
+        buildRequest(value, providerName, name, builder -> builder.GET().build());
+        return value;
     }
 
     public JsonNode exchangeCode(IdentityProvider provider, String code, String redirectUri) {

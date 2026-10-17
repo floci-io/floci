@@ -2880,42 +2880,68 @@ public class CognitoService implements ResourceProvider {
         describeUserPool(userPoolId);
         String prefix = userPoolId + "::";
         return userStore.scan(key -> key.startsWith(prefix)).stream()
-                .filter(user -> providerName.equals(user.getFederatedProviderName())
-                        && subject.equals(user.getFederatedSubject()))
+                .filter(user -> (providerName.equals(user.getFederatedProviderName())
+                                && subject.equals(user.getFederatedSubject()))
+                        || hasLinkedIdentity(user, providerName, subject))
                 .findFirst();
     }
 
     public CognitoUser provisionFederatedUser(String userPoolId, IdentityProvider provider, String subject,
                                                String issuer, Map<String, String> mappedAttributes) {
         describeUserPool(userPoolId);
-        synchronized (identityLinkLock) {
-            CognitoUser user = findFederatedUser(userPoolId, provider.getProviderName(), subject).orElse(null);
-            if (user == null) {
-                user = new CognitoUser();
-                user.setUsername(provider.getProviderName() + "_" + UUID.randomUUID());
-                user.setUserPoolId(userPoolId);
-                user.getAttributes().put("sub", UUID.randomUUID().toString());
+        while (true) {
+            String targetUsername = findFederatedUser(userPoolId, provider.getProviderName(), subject)
+                    .map(CognitoUser::getUsername)
+                    .orElseGet(() -> provider.getProviderName() + "_"
+                            + ("Google".equals(provider.getProviderType()) ? subject : UUID.randomUUID().toString()));
+            Object lock = userLock(userPoolId, targetUsername);
+            synchronized (lock) {
+                synchronized (identityLinkLock) {
+                    Optional<CognitoUser> existing = findFederatedUser(userPoolId, provider.getProviderName(), subject);
+                    if (existing.isPresent() && !existing.get().getUsername().equals(targetUsername)) {
+                        // Another thread linked this identity to a different destination user concurrently.
+                        // Release locks and retry with the new destination user's lock stripe.
+                        continue;
+                    }
+                    CognitoUser user;
+                    if (existing.isPresent()) {
+                        user = existing.get();
+                    } else {
+                        if (userStore.get(userKey(userPoolId, targetUsername)).isPresent()) {
+                            throw new AwsException("UsernameExistsException", "User already exists", 400);
+                        }
+                        user = new CognitoUser();
+                        user.setUsername(targetUsername);
+                        user.setUserPoolId(userPoolId);
+                        user.getAttributes().put("sub", UUID.randomUUID().toString());
+                    }
+                    user.getAttributes().putAll(mappedAttributes);
+                    user.setFederatedProviderName(provider.getProviderName());
+                    user.setFederatedSubject(subject);
+                    updateFederatedIdentity(user, provider, subject, issuer);
+                    user.setEnabled(true);
+                    user.setUserStatus("CONFIRMED");
+                    user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+                    userStore.put(userKey(userPoolId, user.getUsername()), user);
+                    LOG.infov("Reconciled federated user {0} from provider {1} in pool {2}",
+                            user.getUsername(), provider.getProviderName(), userPoolId);
+                    return user;
+                }
             }
-            user.getAttributes().putAll(mappedAttributes);
-            user.setFederatedProviderName(provider.getProviderName());
-            user.setFederatedSubject(subject);
-            updateFederatedIdentity(user, provider, subject, issuer);
-            user.setEnabled(true);
-            user.setUserStatus("CONFIRMED");
-            user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-            userStore.put(userKey(userPoolId, user.getUsername()), user);
-            LOG.infov("Reconciled federated user {0} from provider {1} in pool {2}",
-                    user.getUsername(), provider.getProviderName(), userPoolId);
-            return user;
         }
     }
 
     private void updateFederatedIdentity(CognitoUser user, IdentityProvider provider, String subject, String issuer) {
         ArrayNode identities = readIdentities(user);
         ArrayNode reconciled = MAPPER.createArrayNode();
+        long dateCreated = System.currentTimeMillis();
         for (JsonNode identity : identities) {
-            if (!provider.getProviderName().equals(identity.path("providerName").asText())
-                    || !subject.equals(identity.path("userId").asText())) {
+            if (provider.getProviderName().equals(identity.path("providerName").asText())
+                    && subject.equals(identity.path("userId").asText())) {
+                if (identity.has("dateCreated") && identity.path("dateCreated").isIntegralNumber()) {
+                    dateCreated = identity.path("dateCreated").asLong();
+                }
+            } else {
                 reconciled.add(identity);
             }
         }
@@ -2925,7 +2951,7 @@ public class CognitoService implements ResourceProvider {
                 .put("providerType", provider.getProviderType())
                 .put("issuer", issuer)
                 .put("primary", false)
-                .put("dateCreated", System.currentTimeMillis());
+                .put("dateCreated", dateCreated);
         user.getAttributes().put(IDENTITIES_ATTRIBUTE, reconciled.toString());
     }
 

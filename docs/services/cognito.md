@@ -118,17 +118,38 @@ pool's Region rather than the `SourceArn` Region, and does not apply `ReplyToEma
 | UpdateIdentityProvider | Updates a provider's details, attribute mapping or identifiers. |
 | DeleteIdentityProvider | Deletes an identity provider from a user pool. |
 
-Providers can be used for generic OIDC authorization-code sign-in. Floci routes the
+Providers can be used for generic OIDC and Google authorization-code sign-in. Floci routes the
 AWS-shaped `/oauth2/authorize` and `/oauth2/idpresponse` endpoints to the configured local
 OIDC provider, exchanges the returned code, provisions or reconciles the federated user,
 and issues a Cognito authorization code for the registered callback.
 
-Only `ProviderType=OIDC` is supported by this flow. Floci does not implement social providers
-such as Google, Facebook, Login with Amazon or SignInWithApple. The pool's own users sign in
+This flow supports `ProviderType=OIDC` and `ProviderType=Google`. Facebook, Login with Amazon
+and SignInWithApple are not implemented. The pool's own users sign in
 through managed login instead (see [Managed login](#managed-login)).
 
-Two deliberate divergences from AWS, both consequences of not calling out to a third
-party:
+#### Google sign-in
+
+Register a Google provider with `client_id`, `client_secret`, and `authorize_scopes` in
+`ProviderDetails`, for example `openid email profile`. Enable `Google` in the app client's
+`SupportedIdentityProviders`, then pass `identity_provider=Google` to `/oauth2/authorize`.
+Floci uses Google's authorization endpoint at `https://accounts.google.com/o/oauth2/v2/auth`,
+token endpoint at `https://oauth2.googleapis.com/token`, and OIDC userinfo endpoint at
+`https://openidconnect.googleapis.com/v1/userinfo`.
+
+Google users receive usernames of the form `Google_<sub>`. Repeated sign-ins reconcile the same
+user. `AttributeMapping` maps userinfo claims such as `email`, `email_verified`, `name`,
+`given_name`, `family_name`, `picture`, and `sub` to user pool attributes. The `identities`
+attribute records `providerName` and `providerType` as `Google`.
+
+For an offline test provider, set `floci.services.cognito.google-issuer` or
+`FLOCI_SERVICES_COGNITO_GOOGLE_ISSUER` to its issuer URL. The default is
+`https://accounts.google.com`. When overridden, Floci resolves the authorization, token, and
+userinfo endpoints from `<issuer>/.well-known/openid-configuration` during sign-in. The discovery
+document must return the configured `issuer` and all three endpoints. Local test issuers may
+use HTTP. Google endpoint overrides in `ProviderDetails` are not used: endpoint selection is
+controlled by the server configuration.
+
+Two deliberate divergences from AWS in identity provider registration:
 
 - **No create-time validation of `ProviderDetails`.** AWS resolves an OIDC provider's
   `oidc_issuer` discovery document while handling `CreateIdentityProvider`, and rejects
@@ -136,7 +157,8 @@ party:
   outbound request, so it also does not enforce the per-provider-type required keys.
 - **No injected provider defaults.** AWS adds keys such as
   `attributes_url_add_attributes` to an OIDC provider's stored details; Floci returns
-  only what was supplied.
+  only what was supplied, including for Google. Effective Google endpoints are resolved
+  during sign-in and are not added to the stored `ProviderDetails`.
 
 `AttributeMapping` and `IdpIdentifiers` follow AWS's update semantics: a member the
 request omits is left unchanged, and an explicitly empty map or list is what clears it.

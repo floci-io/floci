@@ -11,16 +11,25 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 final class MockOidcProvider implements AutoCloseable {
 
     private final HttpServer server;
     private final Map<String, String> authorizationParameters = new ConcurrentHashMap<>();
+    private final AtomicInteger discoveryRequests = new AtomicInteger();
     private volatile String tokenRequestBody;
     private volatile String userInfoAuthorization;
 
     MockOidcProvider() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/.well-known/openid-configuration", exchange -> {
+            discoveryRequests.incrementAndGet();
+            respond(exchange, 200, """
+                    {"issuer":"%s","authorization_endpoint":"%s/authorize",
+                     "token_endpoint":"%s/token","userinfo_endpoint":"%s/userinfo"}
+                    """.formatted(baseUrl(), baseUrl(), baseUrl(), baseUrl()));
+        });
         server.createContext("/authorize", exchange -> {
             authorizationParameters.putAll(queryParameters(exchange.getRequestURI().getRawQuery()));
             respond(exchange, 302, "");
@@ -31,7 +40,11 @@ final class MockOidcProvider implements AutoCloseable {
         });
         server.createContext("/userinfo", exchange -> {
             userInfoAuthorization = exchange.getRequestHeaders().getFirst("Authorization");
-            respond(exchange, 200, "{\"sub\":\"provider-subject\",\"email\":\"federated@example.com\"}");
+            respond(exchange, 200, """
+                    {"sub":"provider-subject","email":"federated@example.com","email_verified":true,
+                     "name":"Federated User","given_name":"Federated","family_name":"User",
+                     "picture":"https://picture.example/user"}
+                    """);
         });
         server.start();
     }
@@ -50,6 +63,10 @@ final class MockOidcProvider implements AutoCloseable {
 
     String userInfoAuthorization() {
         return userInfoAuthorization;
+    }
+
+    int discoveryRequests() {
+        return discoveryRequests.get();
     }
 
     private Map<String, String> queryParameters(String query) {

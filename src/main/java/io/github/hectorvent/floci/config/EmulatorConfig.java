@@ -1964,6 +1964,10 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        /** Google federation issuer; override to use a local OIDC provider for testing. */
+        @WithDefault("https://accounts.google.com")
+        String googleIssuer();
+
         /**
          * Rejects an app client whose token validity is outside AWS's limits: access and ID tokens
          * between 5 minutes and 1 day, refresh tokens between 60 minutes and 3,650 days. Env:

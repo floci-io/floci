@@ -57,14 +57,14 @@ public class CognitoFederationService {
     public String beginAuthorization(String userPoolId, String clientId, String redirectUri,
                                      List<String> requestedScopes, List<String> grantedScopes, String nonce,
                                      String providerName, String relyingPartyState, String codeChallenge) {
-        IdentityProvider provider = cognitoService.describeIdentityProvider(userPoolId, providerName);
-        requireOidcProvider(provider);
+        IdentityProvider provider = federationProvider(userPoolId, providerName);
         String authorizeEndpoint = requiredProviderDetail(provider, "authorize_url", "authorize endpoint");
         String providerClientId = requiredProviderDetail(provider, "client_id", "client_id");
         validateAuthorizeEndpoint(authorizeEndpoint, provider.getProviderName());
         Instant expiresAt = clock.instant().plus(TRANSACTION_LIFETIME);
         CognitoAuthorizationTransaction transaction = new CognitoAuthorizationTransaction(userPoolId, clientId,
-                redirectUri, grantedScopes, nonce, providerName, relyingPartyState, codeChallenge, expiresAt);
+                redirectUri, grantedScopes, nonce, providerName, relyingPartyState, codeChallenge,
+                provider.getProviderDetails(), expiresAt);
         String state = stateStore.putTransaction(transaction);
 
         Map<String, String> parameters = new LinkedHashMap<>();
@@ -86,9 +86,7 @@ public class CognitoFederationService {
     }
 
     String completeAuthorization(CognitoAuthorizationTransaction transaction, String providerCode) {
-        IdentityProvider provider = cognitoService.describeIdentityProvider(
-                transaction.userPoolId(), transaction.providerName());
-        requireOidcProvider(provider);
+        IdentityProvider provider = transactionProvider(transaction);
         String providerCallback = cognitoService.getIdentityProviderCallbackEndpoint(transaction.userPoolId());
         JsonNode tokenResponse = oidcClient.exchangeCode(provider, providerCode, providerCallback);
         String accessToken = requiredText(tokenResponse, "access_token", "access token");
@@ -102,6 +100,33 @@ public class CognitoFederationService {
                 transaction.scopes(), transaction.nonce(), transaction.codeChallenge(),
                 clock.instant().plus(AUTHORIZATION_CODE_LIFETIME));
         return stateStore.putAuthorizationCode(authorizationCode);
+    }
+
+    private IdentityProvider transactionProvider(CognitoAuthorizationTransaction transaction) {
+        IdentityProvider stored = cognitoService.describeIdentityProvider(transaction.userPoolId(),
+                transaction.providerName());
+        if ("Google".equals(stored.getProviderType())) {
+            if (transaction.providerDetails() != null && !transaction.providerDetails().isEmpty()) {
+                Map<String, String> details = new LinkedHashMap<>(stored.getProviderDetails());
+                details.putAll(transaction.providerDetails());
+                IdentityProvider resolved = new IdentityProvider();
+                resolved.setUserPoolId(stored.getUserPoolId());
+                resolved.setProviderName(stored.getProviderName());
+                resolved.setProviderType(stored.getProviderType());
+                resolved.setProviderDetails(details);
+                resolved.setAttributeMapping(stored.getAttributeMapping());
+                resolved.setIdpIdentifiers(stored.getIdpIdentifiers());
+                resolved.setCreationDate(stored.getCreationDate());
+                resolved.setLastModifiedDate(stored.getLastModifiedDate());
+                return resolved;
+            }
+            return oidcClient.googleProvider(stored);
+        }
+        if (!OIDC_PROVIDER_TYPE.equals(stored.getProviderType())) {
+            throw new AwsException("InvalidParameterException", "Identity provider " + stored.getProviderName()
+                    + " must have ProviderType OIDC or Google", 400);
+        }
+        return stored;
     }
 
     private Map<String, String> mapAttributes(IdentityProvider provider, JsonNode claims) {
@@ -130,6 +155,9 @@ public class CognitoFederationService {
     }
 
     private String optionalText(JsonNode json, String fieldName) {
+        if (json == null) {
+            return null;
+        }
         JsonNode value = json.get(fieldName);
         if (value == null || value.isNull() || !value.isValueNode() || value.asText().isBlank()) {
             return null;
@@ -146,11 +174,16 @@ public class CognitoFederationService {
         return value;
     }
 
-    private void requireOidcProvider(IdentityProvider provider) {
+    private IdentityProvider federationProvider(String userPoolId, String providerName) {
+        IdentityProvider provider = cognitoService.describeIdentityProvider(userPoolId, providerName);
+        if ("Google".equals(provider.getProviderType())) {
+            return oidcClient.googleProvider(provider);
+        }
         if (!OIDC_PROVIDER_TYPE.equals(provider.getProviderType())) {
             throw new AwsException("InvalidParameterException", "Identity provider " + provider.getProviderName()
-                    + " must have ProviderType OIDC", 400);
+                    + " must have ProviderType OIDC or Google", 400);
         }
+        return provider;
     }
 
     private void validateAuthorizeEndpoint(String endpoint, String providerName) {

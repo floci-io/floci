@@ -571,6 +571,7 @@ floci:
       enabled: true
     cognito:
       enabled: true
+      google-issuer: https://accounts.google.com
       enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
