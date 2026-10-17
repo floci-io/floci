@@ -2048,8 +2048,7 @@ public class EcsContainerManager {
                         selector.versionId(), selector.versionStage(), secretRegion);
                 value = secret == null ? null : secret.getSecretString();
             } else {
-                String parameterName = ssmParameterName(valueFrom);
-                Parameter parameter = ssmService.getParameter(parameterName, secretRegion);
+                Parameter parameter = ssmService.getParameter(valueFrom, secretRegion);
                 value = parameter == null ? null : parameter.getValue();
             }
         } catch (AwsException e) {
@@ -2093,16 +2092,6 @@ public class EcsContainerManager {
             }
         }
         return taskRegion;
-    }
-
-    private String ssmParameterName(String valueFrom) {
-        if (AwsArnUtils.isArnFor(valueFrom, "ssm")) {
-            int parameterMarker = valueFrom.indexOf(":parameter");
-            if (parameterMarker >= 0) {
-                return valueFrom.substring(parameterMarker + ":parameter".length());
-            }
-        }
-        return valueFrom;
     }
 
     /**

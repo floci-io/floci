@@ -107,22 +107,21 @@ class EcsContainerManagerSecretsTest {
     }
 
     @Test
-    void ssmArnKeepsLeadingSlashInParameterName() {
+    void ssmArnIsPassedWholeForSsmToResolve() {
         String ssmArn = "arn:aws:ssm:us-east-1:000000000000:parameter/foo/bar";
-        when(ssmService.getParameter("/foo/bar", "us-east-1"))
+        when(ssmService.getParameter(ssmArn, "us-east-1"))
                 .thenReturn(new Parameter("/foo/bar", "path-value", "String"));
 
         manager.startTask(task(), taskDef(containerDef("app", List.of(new Secret("PATH_VALUE", ssmArn)))),
                 List.of(), "us-east-1");
 
-        verify(ssmService).getParameter("/foo/bar", "us-east-1");
+        verify(ssmService).getParameter(ssmArn, "us-east-1");
     }
 
     /**
      * Both {@code valueFrom} guards required a literal {@code arn:aws:}. Outside the commercial
-     * partition a Secrets Manager ARN fell through to the SSM branch and a parameter ARN was
-     * passed along whole as a parameter name, so the task died at launch with ParameterNotFound
-     * rather than reading its own configuration.
+     * partition a Secrets Manager ARN fell through to the SSM branch, so the task died at launch
+     * with ParameterNotFound rather than reading its own configuration.
      */
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({
@@ -132,7 +131,7 @@ class EcsContainerManagerSecretsTest {
     void resolvesSecretsAndParametersInAnyPartition(String region, String partition) {
         String ssmArn = "arn:" + partition + ":ssm:" + region + ":000000000000:parameter/app/token";
         String secretArn = "arn:" + partition + ":secretsmanager:" + region + ":000000000000:secret:db-AbCdEf";
-        when(ssmService.getParameter("/app/token", region))
+        when(ssmService.getParameter(ssmArn, region))
                 .thenReturn(new Parameter("/app/token", "ssm-value", "String"));
         when(secretsManagerService.getSecretValue(secretArn, null, null, region))
                 .thenReturn(secretVersion("sm-value"));
@@ -156,7 +155,7 @@ class EcsContainerManagerSecretsTest {
     void crossRegionArnResolvesAgainstArnRegionNotTaskRegion() {
         String ssmArn = "arn:aws:ssm:eu-west-1:000000000000:parameter/app/token";
         String secretArn = "arn:aws:secretsmanager:eu-west-1:000000000000:secret:db-AbCdEf";
-        when(ssmService.getParameter("/app/token", "eu-west-1"))
+        when(ssmService.getParameter(ssmArn, "eu-west-1"))
                 .thenReturn(new Parameter("/app/token", "ssm-eu", "String"));
         when(secretsManagerService.getSecretValue(secretArn, null, null, "eu-west-1"))
                 .thenReturn(secretVersion("sm-eu"));
@@ -167,7 +166,7 @@ class EcsContainerManagerSecretsTest {
                 new Secret("PASSWORD", secretArn)))),
                 List.of(), "us-east-1");
 
-        verify(ssmService).getParameter("/app/token", "eu-west-1");
+        verify(ssmService).getParameter(ssmArn, "eu-west-1");
         verify(secretsManagerService).getSecretValue(secretArn, null, null, "eu-west-1");
     }
 

@@ -80,6 +80,13 @@ class SsmServicePublicAmiParameterTest {
     }
 
     @Test
+    void resolvesAPublicParameterByItsArnForAnEcsSecret() {
+        String arn = ssmService.getParameter(AL2023_DEFAULT, REGION).getArn();
+
+        assertEquals("ami-0abcdef1234567891", ssmService.getParameter(arn, REGION).getValue());
+    }
+
+    @Test
     void getParametersAnswersPublicNamesAlongsideStoredOnes() {
         ssmService.putParameter("/app/ami", "ami-custom", "String", null, false, REGION);
 
