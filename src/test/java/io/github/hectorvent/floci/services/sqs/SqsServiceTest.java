@@ -390,6 +390,134 @@ class SqsServiceTest {
         assertEquals(BASE_URL + "/000000000000/my-queue", url);
     }
 
+    private SqsService serviceWithStrategy(InMemoryStorage<String, Queue> store, RegionResolver resolver,
+                                           String strategy) {
+        return new SqsService(store, null, null, null, 30, 1048576, BASE_URL, resolver, false, null, clock,
+                ReceiptHandle.DEFAULT_SECRET, null, null, strategy);
+    }
+
+    private SqsService standardService() {
+        return serviceWithStrategy(new InMemoryStorage<>(), new RegionResolver("us-east-1", "000000000000"),
+                SqsService.STRATEGY_STANDARD);
+    }
+
+    @Test
+    void defaultPathStrategyReturnsTheEmulatorUrlForm() {
+        String region = "eu-west-1";
+        sqsService.createQueue("path-queue", null, region);
+        sqsService.createQueue("path-source", Map.of("RedrivePolicy",
+                "{\"deadLetterTargetArn\":\"arn:aws:sqs:eu-west-1:000000000000:path-queue\",\"maxReceiveCount\":\"3\"}"),
+                region);
+
+        assertEquals(BASE_URL + "/000000000000/path-queue",
+                sqsService.createQueue("path-queue", null, region).getQueueUrl());
+        assertEquals(BASE_URL + "/000000000000/path-queue", sqsService.getQueueUrl("path-queue", region));
+        assertEquals(List.of(BASE_URL + "/000000000000/path-queue", BASE_URL + "/000000000000/path-source"),
+                sqsService.listQueues(null, region).stream().map(Queue::getQueueUrl).sorted().toList());
+        assertEquals(List.of(BASE_URL + "/000000000000/path-source"),
+                sqsService.listDeadLetterSourceQueues(BASE_URL + "/000000000000/path-queue", region));
+    }
+
+    @Test
+    void standardStrategyReturnsTheAwsUrlForm() {
+        SqsService service = standardService();
+        String region = "eu-west-1";
+
+        assertEquals("https://sqs.eu-west-1.amazonaws.com/000000000000/std-queue",
+                service.createQueue("std-queue", null, region).getQueueUrl());
+        assertEquals("https://sqs.eu-west-1.amazonaws.com/000000000000/std-queue",
+                service.getQueueUrl("std-queue", region));
+    }
+
+    @Test
+    void standardStrategyListQueuesReturnsAwsUrls() {
+        SqsService service = standardService();
+        String region = "us-west-2";
+        service.createQueue("listed-queue", null, region);
+
+        List<Queue> queues = service.listQueues(null, region);
+        assertEquals(1, queues.size());
+        assertEquals("https://sqs.us-west-2.amazonaws.com/000000000000/listed-queue",
+                queues.getFirst().getQueueUrl());
+    }
+
+    @Test
+    void standardStrategyCarriesThePartitionDnsSuffix() {
+        SqsService service = standardService();
+        assertEquals("https://sqs.cn-north-1.amazonaws.com.cn/000000000000/cn-queue",
+                service.createQueue("cn-queue", null, "cn-north-1").getQueueUrl());
+        service.createQueue("gov-queue", null, "us-gov-west-1");
+        assertEquals("https://sqs.us-gov-west-1.amazonaws.com/000000000000/gov-queue",
+                service.getQueueUrl("gov-queue", "us-gov-west-1"));
+    }
+
+    @Test
+    void standardStrategyCreateQueueForAnExistingQueueReturnsTheAwsUrl() {
+        SqsService service = standardService();
+        String region = "eu-west-1";
+        service.createQueue("again", null, region);
+        assertEquals("https://sqs.eu-west-1.amazonaws.com/000000000000/again",
+                service.createQueue("again", null, region).getQueueUrl());
+    }
+
+    @Test
+    void standardStrategyListDeadLetterSourceQueuesReturnsAwsUrls() {
+        SqsService service = standardService();
+        String region = "eu-west-1";
+        service.createQueue("dlq", null, region);
+        service.createQueue("source", Map.of("RedrivePolicy",
+                "{\"deadLetterTargetArn\":\"arn:aws:sqs:eu-west-1:000000000000:dlq\",\"maxReceiveCount\":\"3\"}"),
+                region);
+
+        assertEquals(List.of("https://sqs.eu-west-1.amazonaws.com/000000000000/source"),
+                service.listDeadLetterSourceQueues(BASE_URL + "/000000000000/dlq", region));
+    }
+
+    @Test
+    void standardStrategyUsesTheQueueOwnerAccount() {
+        SqsService service = serviceWithStrategy(new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "111122223333"), SqsService.STRATEGY_STANDARD);
+
+        assertEquals("https://sqs.ap-southeast-2.amazonaws.com/111122223333/owned",
+                service.createQueue("owned", null, "ap-southeast-2").getQueueUrl());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {SqsService.STRATEGY_PATH, SqsService.STRATEGY_STANDARD})
+    void everyAcceptedQueueUrlFormResolvesUnderEitherStrategy(String strategy) {
+        SqsService service = serviceWithStrategy(new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), strategy);
+        String region = "eu-west-1";
+        String url = service.createQueue("round-trip", null, region).getQueueUrl();
+
+        for (String input : List.of(url, BASE_URL + "/000000000000/round-trip",
+                "https://sqs.eu-west-1.amazonaws.com/000000000000/round-trip",
+                "http://localhost.localstack.cloud:4566/000000000000/round-trip", "round-trip")) {
+            assertEquals("arn:aws:sqs:eu-west-1:000000000000:round-trip",
+                    service.getQueueAttributes(input, List.of("QueueArn"), region).get("QueueArn"), input);
+        }
+        service.sendMessage(url, "hello", 0, region);
+        assertEquals(1, service.receiveMessage(
+                "https://sqs.eu-west-1.amazonaws.com/000000000000/round-trip", 1, 30, 0, region).size());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "path, http://localhost:4566/000000000000/legacy-queue",
+            "standard, https://sqs.eu-west-1.amazonaws.com/000000000000/legacy-queue"
+    })
+    void storedQueuesAreReportedInTheCurrentForm(String strategy, String expectedUrl) {
+        String region = "eu-west-1";
+        InMemoryStorage<String, Queue> store = new InMemoryStorage<>();
+        Queue legacy = new Queue("legacy-queue", "http://old-host:4566/000000000000/legacy-queue");
+        legacy.setAccountId("000000000000");
+        store.put(region + "::/000000000000/legacy-queue", legacy);
+        SqsService service = serviceWithStrategy(store, new RegionResolver("us-east-1", "000000000000"), strategy);
+
+        assertEquals(expectedUrl, service.listQueues(null, region).getFirst().getQueueUrl());
+        assertEquals(expectedUrl, service.getQueueUrl("legacy-queue", region));
+    }
+
     @Test
     void getQueueUrlNotFound() {
         assertThrows(AwsException.class, () ->

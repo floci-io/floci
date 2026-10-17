@@ -1323,4 +1323,75 @@ class SqsIntegrationTest {
         }
         return request;
     }
+
+    @Test
+    void queueUrlsUseThePathFormByDefault() {
+        String queueName = "path-url-queue";
+        String expectedUrl = "http://localhost:4566/000000000000/" + queueName;
+
+        String createdUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            assertEquals(expectedUrl, createdUrl);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetQueueUrl")
+                .formParam("QueueName", queueName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("GetQueueUrlResponse.GetQueueUrlResult.QueueUrl", equalTo(expectedUrl));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ListQueues")
+                .formParam("QueueNamePrefix", queueName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<QueueUrl>" + expectedUrl + "</QueueUrl>"));
+
+            for (String input : List.of(expectedUrl, "https://sqs.us-east-1.amazonaws.com/000000000000/" + queueName,
+                    queueName)) {
+                given()
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "GetQueueAttributes")
+                    .formParam("QueueUrl", input)
+                    .formParam("AttributeName.1", "QueueArn")
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200)
+                    .body(containsString("arn:aws:sqs:us-east-1:000000000000:" + queueName));
+            }
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetQueueAttributes")
+                .formParam("AttributeName.1", "QueueArn")
+            .when()
+                .post("/000000000000/" + queueName)
+            .then()
+                .statusCode(200)
+                .body(containsString("arn:aws:sqs:us-east-1:000000000000:" + queueName));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", expectedUrl)
+            .when()
+                .post("/");
+        }
+    }
 }

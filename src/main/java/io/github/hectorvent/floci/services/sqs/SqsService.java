@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -265,12 +266,18 @@ public class SqsService implements Resettable, ResourceProvider {
         }
     }
 
+    /** Queue URLs use floci's own endpoint, {@code <base-url>/<account>/<name>}. The default. */
+    static final String STRATEGY_PATH = "path";
+    /** Queue URLs use the AWS form, {@code https://sqs.<region>.<dnsSuffix>/<account>/<name>}. */
+    static final String STRATEGY_STANDARD = "standard";
+
     private final int defaultVisibilityTimeout;
     private final int maxMessageSize;
     /** Upper bound accepted for the MaximumMessageSize attribute. Raising max-message-size above
      * the AWS limit widens this bound so the configured default stays settable explicitly. */
     private final int maxAllowedMessageSize;
     private final String baseUrl;
+    private final String endpointStrategy;
     private final RegionResolver regionResolver;
     private final boolean clearFifoDeduplicationCacheOnPurge;
     private final SnsService snsService;
@@ -316,7 +323,8 @@ public class SqsService implements Resettable, ResourceProvider {
                 clock,
                 config.services().sqs().receiptHandleSecret(),
                 requestContextInstance,
-                iamService
+                iamService,
+                config.services().sqs().endpointStrategy()
         );
     }
 
@@ -398,6 +406,19 @@ public class SqsService implements Resettable, ResourceProvider {
                RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
                SnsService snsService, Clock clock, String receiptHandleSecret,
                Instance<RequestContext> requestContextInstance, IamService iamService) {
+        this(queueStore, messageStore, dedupStore, dedupIdentityStore, defaultVisibilityTimeout, maxMessageSize,
+                baseUrl, regionResolver, clearFifoDeduplicationCacheOnPurge, snsService, clock,
+                receiptHandleSecret, requestContextInstance, iamService, STRATEGY_PATH);
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
+               StorageBackend<String, Map<String, Long>> dedupStore,
+               StorageBackend<String, Map<String, Map<String, String>>> dedupIdentityStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
+               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
+               SnsService snsService, Clock clock, String receiptHandleSecret,
+               Instance<RequestContext> requestContextInstance, IamService iamService,
+               String endpointStrategy) {
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
@@ -406,6 +427,7 @@ public class SqsService implements Resettable, ResourceProvider {
         this.maxMessageSize = maxMessageSize;
         this.maxAllowedMessageSize = Math.max(AWS_MAXIMUM_MESSAGE_SIZE, maxMessageSize);
         this.baseUrl = baseUrl;
+        this.endpointStrategy = endpointStrategy;
         this.regionResolver = regionResolver;
         this.clearFifoDeduplicationCacheOnPurge = clearFifoDeduplicationCacheOnPurge;
         this.snsService = snsService;
@@ -629,7 +651,7 @@ public class SqsService implements Resettable, ResourceProvider {
         attributes = validateMessageRetentionPeriod(attributes);
 
         String accountId = regionResolver.getAccountId();
-        String queueUrl = baseUrl + "/" + accountId + "/" + queueName;
+        String queueUrl = buildQueueUrl(region, accountId, queueName);
         String storageKey = regionKey(region, queueUrl);
 
         // If queue already exists with same name, check for attribute conflicts
@@ -662,7 +684,7 @@ public class SqsService implements Resettable, ResourceProvider {
                     }
                 }
             }
-            return existing;
+            return withCurrentQueueUrl(existing, region);
         }
 
         Queue queue = new Queue(queueName, queueUrl);
@@ -727,22 +749,26 @@ public class SqsService implements Resettable, ResourceProvider {
 
     public List<Queue> listQueues(String namePrefix, String region) {
         String prefix = region + "::";
+        List<Queue> queues;
         if (namePrefix == null || namePrefix.isEmpty()) {
-            return queueStore.scan(key -> key.startsWith(prefix));
+            queues = queueStore.scan(key -> key.startsWith(prefix));
+        } else {
+            queues = queueStore.scan(key -> {
+                if (!key.startsWith(prefix)) {
+                    return false;
+                }
+                String queueUrl = key.substring(prefix.length());
+                String name = queueUrl.substring(queueUrl.lastIndexOf('/') + 1);
+                return name.startsWith(namePrefix);
+            });
         }
-        return queueStore.scan(key -> {
-            if (!key.startsWith(prefix)) {
-                return false;
-            }
-            String queueUrl = key.substring(prefix.length());
-            String name = queueUrl.substring(queueUrl.lastIndexOf('/') + 1);
-            return name.startsWith(namePrefix);
-        });
+        queues.forEach(q -> withCurrentQueueUrl(q, region));
+        return queues;
     }
 
     public String getQueueUrl(String queueName, String region) {
         String accountId = regionResolver.getAccountId();
-        String queueUrl = baseUrl + "/" + accountId + "/" + queueName;
+        String queueUrl = buildQueueUrl(region, accountId, queueName);
         String storageKey = regionKey(region, queueUrl);
         if (queueStore.get(storageKey).isEmpty()) {
             throw new AwsException("AWS.SimpleQueueService.NonExistentQueue",
@@ -1520,7 +1546,7 @@ public class SqsService implements Resettable, ResourceProvider {
         String prefix = region + "::";
         for (Queue q : queueStore.scan(k -> k.startsWith(prefix))) {
             if (targetArn.equals(redriveDlqArn(q))) {
-                sourceQueues.add(q.getQueueUrl());
+                sourceQueues.add(withCurrentQueueUrl(q, region).getQueueUrl());
             }
         }
         return sourceQueues;
@@ -1968,6 +1994,30 @@ public class SqsService implements Resettable, ResourceProvider {
     public String senderIdFor(String queueUrl) {
         String fromUrl = accountFromQueueUrl(normalizeQueueUrl(queueUrl));
         return fromUrl != null ? fromUrl : regionResolver.getAccountId();
+    }
+
+    /**
+     * The QueueUrl handed back to clients. The {@code path} strategy, the default, returns floci's
+     * own endpoint form, {@code <base-url>/<account>/<name>}. The {@code standard} strategy returns
+     * the AWS form, {@code https://sqs.<region>.<dnsSuffix>/<account>/<name>}, for tooling that
+     * parses queue URLs. Lookups key off the URL path, so either form is accepted on input.
+     */
+    private String buildQueueUrl(String region, String accountId, String queueName) {
+        if (!STRATEGY_STANDARD.equalsIgnoreCase(endpointStrategy)) {
+            return baseUrl + "/" + accountId + "/" + queueName;
+        }
+        String effectiveRegion = region != null && !region.isBlank() ? region : regionResolver.getDefaultRegion();
+        return "https://" + AwsEndpoints.host("sqs", effectiveRegion) + "/" + accountId + "/" + queueName;
+    }
+
+    /**
+     * Reports a stored queue under the URL a fresh CreateQueue would return, so queues persisted
+     * by an earlier version, or under the other endpoint strategy, list consistently.
+     */
+    private Queue withCurrentQueueUrl(Queue queue, String region) {
+        String accountId = queue.getAccountId() != null ? queue.getAccountId() : regionResolver.getAccountId();
+        queue.setQueueUrl(buildQueueUrl(region, accountId, queue.getQueueName()));
+        return queue;
     }
 
     /**

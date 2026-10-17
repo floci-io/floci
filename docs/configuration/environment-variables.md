@@ -8,7 +8,7 @@ Floci is configured exclusively through environment variables. Every option belo
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_BASE_URL` | `http://localhost:4566` | Base URL embedded in response fields (SQS `QueueUrl`, pre-signed URLs, etc.) |
+| `FLOCI_BASE_URL` | `http://localhost:4566` | Base URL embedded in response fields (SQS `QueueUrl` unless `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY=standard`, pre-signed URLs, etc.) |
 | `FLOCI_HOSTNAME` | _(none)_ | Overrides only the hostname part of `FLOCI_BASE_URL`. Set to the Compose service name (e.g. `floci`) so other containers can reach Floci by DNS |
 | `FLOCI_DEFAULT_REGION` | `us-east-1` | AWS region used in ARNs and API responses when a request names none. Also selects the deployment's partition (`cn-north-1` means `aws-cn`), see [AWS Partitions](./partitions.md) |
 | `FLOCI_PARTITIONS_ID` | _(derived)_ | Pins the partition (`aws`, `aws-cn`, `aws-us-gov`, `aws-iso`, `aws-iso-b`, `aws-iso-e`, `aws-iso-f`, `aws-eusc`). Startup refuses a value that contradicts `FLOCI_DEFAULT_REGION` |
@@ -208,6 +208,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` | `1048576` | Maximum message body size in bytes (1 MiB) |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | Reset the deduplication cache when a FIFO queue is purged |
 | `FLOCI_SERVICES_SQS_RECEIPT_HANDLE_SECRET` | `local-emulator-secret` | HMAC secret that signs receipt handles |
+| `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY` | `path` | Shape of the returned `QueueUrl`. `path` gives `<FLOCI_BASE_URL>/<account>/<name>` and `standard` gives the AWS form `https://sqs.<region>.<dns-suffix>/<account>/<name>`. Both forms are accepted as input |
 
 ### SNS
 

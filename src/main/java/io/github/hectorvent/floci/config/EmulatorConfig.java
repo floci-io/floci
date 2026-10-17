@@ -1346,6 +1346,20 @@ public interface EmulatorConfig {
 
         @WithDefault("local-emulator-secret")
         String receiptHandleSecret();
+
+        /**
+         * Shape of the QueueUrl returned by CreateQueue, GetQueueUrl, ListQueues and
+         * ListDeadLetterSourceQueues.
+         * <ul>
+         *   <li>{@code path}: floci's own endpoint form, {@code <base-url>/<account>/<name>}.</li>
+         *   <li>{@code standard}: the AWS form, {@code https://sqs.<region>.<dnsSuffix>/<account>/<name>},
+         *       with the DNS suffix of the region's partition.</li>
+         * </ul>
+         * Either form is accepted on input under either setting, since queue lookups key off the
+         * URL path and ignore the host.
+         */
+        @WithDefault("path")
+        String endpointStrategy();
     }
 
     interface S3ServiceConfig {

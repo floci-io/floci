@@ -993,4 +993,80 @@ class SqsJsonProtocolTest {
         }
         return "{\"QueueUrl\":\"" + url + "\",\"Entries\":[" + entries + "]}";
     }
+
+    @Test
+    void queueUrlsUseThePathFormByDefault() {
+        String queueName = "json-path-url-queue";
+        String expectedUrl = "http://localhost:4566/" + ACCOUNT_ID + "/" + queueName;
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .header("Authorization", AUTH_SQS_EU_WEST_2)
+            .body("{\"QueueName\":\"" + queueName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("QueueUrl", equalTo(expectedUrl));
+
+        try {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.GetQueueUrl")
+                .header("Authorization", AUTH_SQS_EU_WEST_2)
+                .body("{\"QueueName\":\"" + queueName + "\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("QueueUrl", equalTo(expectedUrl));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ListQueues")
+                .header("Authorization", AUTH_SQS_EU_WEST_2)
+                .body("{\"QueueNamePrefix\":\"" + queueName + "\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("QueueUrls", contains(expectedUrl));
+
+            for (String input : List.of(expectedUrl,
+                    "https://sqs.eu-west-2.amazonaws.com/" + ACCOUNT_ID + "/" + queueName, queueName)) {
+                given()
+                    .contentType(CONTENT_TYPE)
+                    .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+                    .header("Authorization", AUTH_SQS_EU_WEST_2)
+                    .body("{\"QueueUrl\":\"" + input + "\",\"AttributeNames\":[\"QueueArn\"]}")
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(200)
+                    .body("Attributes.QueueArn",
+                            equalTo("arn:aws:sqs:eu-west-2:" + ACCOUNT_ID + ":" + queueName));
+            }
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+                .header("Authorization", AUTH_SQS_EU_WEST_2)
+                .body("{\"QueueUrl\":\"" + expectedUrl + "\",\"AttributeNames\":[\"QueueArn\"]}")
+            .when()
+                .post("/" + ACCOUNT_ID + "/" + queueName)
+            .then()
+                .statusCode(200)
+                .body("Attributes.QueueArn",
+                        equalTo("arn:aws:sqs:eu-west-2:" + ACCOUNT_ID + ":" + queueName));
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .header("Authorization", AUTH_SQS_EU_WEST_2)
+                .body("{\"QueueUrl\":\"" + expectedUrl + "\"}")
+            .when()
+                .post("/");
+        }
+    }
 }
