@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactReposi
 import io.github.hectorvent.floci.services.codeartifact.model.PackageOriginConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -41,6 +42,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -1429,8 +1431,8 @@ class CodeArtifactServiceTest {
         assertEquals("my-artifact", pv.getPackageName());
         assertEquals("1.0.0", pv.getVersion());
         assertEquals("Published", pv.getStatus());
-        assertEquals(Digests.sha256Hex((repoId + "/com.example/my-artifact/1.0.0").getBytes(StandardCharsets.UTF_8)),
-                pv.getRevision());
+        assertEquals(Digests.sha256Hex((repoId + "/com.example/my-artifact/1.0.0").getBytes(StandardCharsets.UTF_8))
+                .substring(0, 50), pv.getRevision());
     }
 
     @Test
@@ -2174,14 +2176,404 @@ class CodeArtifactServiceTest {
     }
 
     @Test
-    void copyPackageVersionsRejectsANonGenericFormat() {
+    void copyPackageVersionsRejectsAFormatThatIsNeitherGenericNorContainerBacked() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
         service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
 
         AwsException e = assertThrows(AwsException.class, () -> service.copyPackageVersions(REGION, "dom", null,
-                "src", "dst", "npm", null, "my-pkg", List.of("1.0.0"), null, false, false));
+                "src", "dst", "swift", null, "my-pkg", List.of("1.0.0"), null, false, false));
         assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    /**
+     * npm, pypi, and nuget are accepted at request validation (unlike real AWS, which places no
+     * restriction on this action's format at all, these three just don't have a sidecar bridge
+     * built yet) but have no {@link RepositorySidecarManager#listPackageVersionAssetNames}
+     * override, so the first container-backed step reached throws {@link
+     * UnsupportedOperationException}; the service turns that into the same real, if deliberately
+     * blunt, {@code InternalServerException} {@link CodeArtifactService
+     * #deleteContainerBackedPackageIfPresent} already uses for an unbuilt sidecar capability.
+     */
+    @Test
+    void copyPackageVersionsReportsNpmAsNotYetSupportedRatherThanFailingTheRequestValidation() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        when(verdaccioClient.packageVersionExists(any(), any(), any(), any(), any(), any())).thenReturn(true);
+        // Mockito's own default answer for an unstubbed List-returning method is an empty list,
+        // not a call to the real default method, so the real UnsupportedOperationException this
+        // test exists to check for has to be requested explicitly.
+        when(verdaccioClient.listPackageVersionAssetNames(any(), any(), any(), any(), any(), any()))
+                .thenCallRealMethod();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "npm", null, "my-pkg", List.of("1.0.0"), null, false, false));
+        assertEquals("InternalServerException", e.getErrorCode());
+        assertTrue(e.getMessage().contains("not yet supported"));
+    }
+
+    @Test
+    void copyPackageVersionsBridgesToReposiliteForMavenCopyingEveryListedAsset() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] jarBytes = "jar-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] pomBytes = "pom-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(false);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar", "a-1.0.pom"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals("Published", result.successfulVersions().get("1.0").status());
+        assertFalse(result.successfulVersions().get("1.0").revision().isBlank());
+        verify(reposiliteClient).storePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(jarBytes));
+        verify(reposiliteClient).storePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.pom"), eq(pomBytes));
+        verify(reposiliteClient, never()).deletePackageVersionAsset(any(), any(), any(), any(), any(), any(),
+                any());
+    }
+
+    @Test
+    void copyPackageVersionsFailsNotFoundForAMavenVersionMissingFromTheSource() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false);
+
+        assertEquals("NOT_FOUND", result.failedVersions().get("1.0").errorCode());
+        assertTrue(result.successfulVersions().isEmpty());
+    }
+
+    @Test
+    void copyPackageVersionsSkipsAMavenVersionThatWouldHaveSucceededWhenASiblingIsNotFound() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("2.0"))).thenReturn(false);
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0", "2.0"), null, false, false);
+
+        assertTrue(result.successfulVersions().isEmpty());
+        assertEquals("SKIPPED", result.failedVersions().get("1.0").errorCode());
+        assertEquals("NOT_FOUND", result.failedVersions().get("2.0").errorCode());
+        verify(reposiliteClient, never()).storePackageVersionAsset(any(), any(), any(), any(), any(), any(), any(),
+                any());
+    }
+
+    @Test
+    void copyPackageVersionsTreatsAByteIdenticalMavenVersionAsANoOpNotListedEitherWay() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] jarBytes = "jar-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes.clone()));
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false);
+
+        assertTrue(result.successfulVersions().isEmpty());
+        assertTrue(result.failedVersions().isEmpty());
+        verify(reposiliteClient, never()).storePackageVersionAsset(any(), any(), any(), any(), any(), any(), any(),
+                any());
+    }
+
+    @Test
+    void copyPackageVersionsFailsAlreadyExistsForADifferentMavenVersionWithoutAllowOverwrite() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar")))
+                .thenReturn(Optional.of("source-bytes".getBytes(StandardCharsets.UTF_8)));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar")))
+                .thenReturn(Optional.of("different-bytes".getBytes(StandardCharsets.UTF_8)));
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false);
+
+        assertEquals("ALREADY_EXISTS", result.failedVersions().get("1.0").errorCode());
+    }
+
+    @Test
+    void copyPackageVersionsOverwritesADifferentMavenVersionAndRemovesAStaleAssetWhenAllowOverwriteIsTrue() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] newJarBytes = "new-jar-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar", "stale-readme.txt"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJarBytes));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar")))
+                .thenReturn(Optional.of("old-jar-bytes".getBytes(StandardCharsets.UTF_8)));
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, true, false);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals("Published", result.successfulVersions().get("1.0").status());
+        // a-1.0.jar already exists at the destination with different content: Reposilite's own
+        // redeployment:false setting would reject a plain PUT over it (confirmed against a live
+        // container), so the old one must be deleted immediately before the new one is stored,
+        // never written straight over the existing path.
+        InOrder order = inOrder(reposiliteClient);
+        order.verify(reposiliteClient).deletePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"));
+        order.verify(reposiliteClient).storePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(newJarBytes));
+        verify(reposiliteClient).deletePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("stale-readme.txt"));
+    }
+
+    /**
+     * A later asset in the same version failing to write must not leave an earlier, otherwise
+     * successful asset of that same version sitting in a brand-new, half-copied state at the
+     * destination: the jar never existed there before this call, so the best-effort rollback
+     * deletes it outright rather than attempting to restore nonexistent prior content. The
+     * original {@code IllegalStateException} from the sidecar propagates unchanged, not masked
+     * by a rollback-time error.
+     */
+    @Test
+    void copyPackageVersionsForMavenRollsBackANewlyWrittenAssetWhenALaterAssetInTheSameVersionFailsToWrite() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] jarBytes = "jar-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] pomBytes = "pom-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(false);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar", "a-1.0.pom"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+        doThrow(new IllegalStateException("sidecar unreachable")).when(reposiliteClient).storePackageVersionAsset(
+                eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"),
+                eq(pomBytes));
+
+        assertThrows(IllegalStateException.class, () -> service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false));
+
+        verify(reposiliteClient).storePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(jarBytes));
+        verify(reposiliteClient).deletePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"));
+    }
+
+    /**
+     * An overwritten asset that already existed at the destination must come back as it was, not
+     * get deleted outright, when a later asset in the same version fails: rollback distinguishes
+     * "newly created, so delete it" from "previously existed, so restore it" per asset.
+     */
+    @Test
+    void copyPackageVersionsForMavenRestoresAnOverwrittenAssetsOriginalContentWhenALaterAssetFailsToWrite() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] newJarBytes = "new-jar-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] oldJarBytes = "old-jar-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] newPomBytes = "new-pom-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar", "a-1.0.pom"));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJarBytes));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(newPomBytes));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJarBytes));
+        doThrow(new IllegalStateException("sidecar unreachable")).when(reposiliteClient).storePackageVersionAsset(
+                eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"),
+                eq(newPomBytes));
+
+        assertThrows(IllegalStateException.class, () -> service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, true, false));
+
+        verify(reposiliteClient).storePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(oldJarBytes));
+    }
+
+    @Test
+    void copyPackageVersionsForMavenRecordsTheNewVersionInTheDestinationsArtifactMetadata() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] jarBytes = "jar-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(false);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+
+        service.copyPackageVersions(REGION, "dom", null, "src", "dst", "maven", "com.example", "a",
+                List.of("1.0"), null, false, false);
+
+        verify(reposiliteClient).recordVersionAvailable(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"));
+    }
+
+    @Test
+    void copyPackageVersionsForMavenIncreasesDescribeDomainsAssetSizeBytesByWhatWasCopied() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] jarBytes = "jar-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] pomBytes = "pom-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(false);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar", "a-1.0.pom"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+
+        long before = service.describeDomain(REGION, "dom", null).assetSizeBytes();
+        service.copyPackageVersions(REGION, "dom", null, "src", "dst", "maven", "com.example", "a",
+                List.of("1.0"), null, false, false);
+        long after = service.describeDomain(REGION, "dom", null).assetSizeBytes();
+
+        assertEquals(before + jarBytes.length + pomBytes.length, after);
+    }
+
+    @Test
+    void copyPackageVersionsFailsMismatchedRevisionForMavenWhenTheVersionRevisionsEntryDoesNotMatch() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", null, Map.of("1.0", "wrong-revision"), false, false);
+
+        assertEquals("MISMATCHED_REVISION", result.failedVersions().get("1.0").errorCode());
+    }
+
+    @Test
+    void copyPackageVersionsFailsMismatchedRevisionForMavenOnAShapeValidButWrongValue() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", null, Map.of("1.0", "a-shape-valid-revision"), false,
+                false);
+
+        assertEquals("MISMATCHED_REVISION", result.failedVersions().get("1.0").errorCode());
+    }
+
+    /**
+     * {@link CodeArtifactService#synthesizeContainerBackedRevision} is truncated to 50 hex
+     * characters specifically so a revision a caller obtained from {@code DescribePackageVersion}
+     * can be handed straight back into {@code versionRevisions} and actually match: confirms a
+     * real round trip through both APIs, not just that the two happen to be the same length.
+     */
+    @Test
+    void copyPackageVersionsSucceedsForMavenWhenTheVersionRevisionsEntryIsTheOneDescribePackageVersionReturned() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] jarBytes = "jar-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(false);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+
+        String describedRevision = service.describePackageVersion(REGION, "dom", null, "src", "maven",
+                "com.example", "a", "1.0").getRevision();
+        assertTrue(describedRevision.length() <= 50);
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", null, Map.of("1.0", describedRevision), false, false);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals("Published", result.successfulVersions().get("1.0").status());
     }
 
     @Test
@@ -2536,8 +2928,8 @@ class CodeArtifactServiceTest {
                 "com.example", "my-artifact", "1.0.0", "my-artifact-1.0.0.jar", null);
 
         assertEquals("jar bytes", new String(result.asset().getContent(), StandardCharsets.UTF_8));
-        assertEquals(Digests.sha256Hex((repoId + "/com.example/my-artifact/1.0.0").getBytes(StandardCharsets.UTF_8)),
-                result.packageVersionRevision());
+        assertEquals(Digests.sha256Hex((repoId + "/com.example/my-artifact/1.0.0").getBytes(StandardCharsets.UTF_8))
+                .substring(0, 50), result.packageVersionRevision());
     }
 
     @Test

@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -17,8 +19,14 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -36,6 +44,9 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     private static final String MAVEN_SETTINGS_PATH = "/api/settings/domain/maven";
     private static final int REPOSITORY_READY_POLL_MAX_MS = 3_000;
     private static final int REPOSITORY_READY_POLL_INTERVAL_MS = 50;
+    /** Real Maven metadata's own documented {@code lastUpdated} shape: UTC, {@code yyyyMMddHHmmss}. */
+    private static final DateTimeFormatter METADATA_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
+            .withZone(ZoneOffset.UTC);
 
     private final ReposiliteSidecarManager manager;
     private final ObjectMapper mapper;
@@ -193,8 +204,7 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     public boolean packageVersionExists(String repositoryContainerId, String domain, String repository,
             String namespace, String packageName, String version) {
         String baseUrl = manager.ensureReady();
-        String path = "/api/maven/details" + packageDirectoryPath(repositoryContainerId, namespace, packageName)
-                + SidecarUriUtils.encodeSegment(version);
+        String path = versionDetailsPath(repositoryContainerId, namespace, packageName, version);
         HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), path))
                 .timeout(Duration.ofSeconds(30))
                 .header("Authorization", manager.basicAuthHeader())
@@ -209,6 +219,174 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
                     + "Reposilite sidecar: upstream returned " + status);
         }
         return true;
+    }
+
+    private static String versionDetailsPath(String repositoryContainerId, String namespace, String packageName,
+            String version) {
+        return "/api/maven/details" + packageDirectoryPath(repositoryContainerId, namespace, packageName)
+                + SidecarUriUtils.encodeSegment(version);
+    }
+
+    /**
+     * Reposilite's own details API, already relied on by {@link #packageVersionExists} to confirm
+     * a version directory exists, also lists every entry directly beneath it: this reads that same
+     * response's {@code files} array a second way, keeping only the {@code FILE} entries (never a
+     * subdirectory, though a plain Maven version directory never has one) and returning their
+     * names, for {@code CopyPackageVersions} to enumerate what it needs to fetch and copy without
+     * any generic-format {@code packageVersions} record to read an asset list from.
+     */
+    @Override
+    public List<String> listPackageVersionAssetNames(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
+        String baseUrl = manager.ensureReady();
+        String path = versionDetailsPath(repositoryContainerId, namespace, packageName, version);
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), path))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        HttpResponse<String> response = send(request, BodyHandlers.ofString());
+        if (response.statusCode() == 404) {
+            return List.of();
+        }
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not list " + packageName + " " + version + " on the Reposilite "
+                    + "sidecar: upstream returned " + response.statusCode());
+        }
+        JsonNode details = readTree(response.body());
+        List<String> names = new ArrayList<>();
+        for (JsonNode entry : details.path("files")) {
+            if ("FILE".equals(entry.path("type").asText())) {
+                names.add(entry.path("name").asText());
+            }
+        }
+        return names;
+    }
+
+    /**
+     * Writes {@code content} straight to this version's {@code assetName} path, for {@code
+     * CopyPackageVersions}'s destination write. Unlike {@link #deployArtifact}, this never
+     * short-circuits on an existing byte-identical match and never leaves Reposilite's own {@code
+     * redeployment: false} rejection standing in the way of a differing overwrite: the caller
+     * ({@code CodeArtifactService#copyContainerBackedPackageVersions}) has already decided, from
+     * its own all-or-nothing batch semantics, exactly which versions get overwritten, and has
+     * already called {@link #deletePackageVersionAsset} first for any asset this would otherwise
+     * conflict with, so there is nothing left here to defer to Reposilite's own native-publish
+     * conflict rule for.
+     */
+    @Override
+    public void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, byte[] content) {
+        ensureRepository(repositoryContainerId);
+        String baseUrl = manager.ensureReady();
+        String gav = versionGav(namespace, packageName, version, assetName);
+        HttpRequest request = authenticated(baseUrl, repositoryContainerId, gav)
+                .PUT(BodyPublishers.ofByteArray(content))
+                .build();
+        int status = send(request, BodyHandlers.discarding()).statusCode();
+        if (status != 200 && status != 201) {
+            throw new IllegalStateException("Could not copy " + packageName + " " + version + "'s asset "
+                    + assetName + " to the Reposilite sidecar: upstream returned " + status);
+        }
+    }
+
+    /**
+     * Deletes one already-published asset outright, confirmed working for an arbitrarily deep path
+     * the same way {@link #deletePackage}'s own group/artifact-directory {@code DELETE} is already
+     * confirmed to work for a shallower one: Reposilite applies the same verb to whatever path it is
+     * given, file or directory. Only ever called by {@code CopyPackageVersions}'s overwrite path for
+     * an asset {@link #listPackageVersionAssetNames} already confirmed exists, so unlike {@link
+     * #deletePackage} this never has to special-case a never-existing path.
+     */
+    @Override
+    public void deletePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName) {
+        String baseUrl = manager.ensureReady();
+        String gav = versionGav(namespace, packageName, version, assetName);
+        HttpRequest request = authenticated(baseUrl, repositoryContainerId, gav).DELETE().build();
+        HttpResponse<Void> response = send(request, BodyHandlers.discarding());
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not delete " + packageName + " " + version + "'s asset "
+                    + assetName + " from the Reposilite sidecar: upstream returned " + response.statusCode());
+        }
+    }
+
+    /**
+     * The real Maven repository layout path for one asset of one package version:
+     * {@code <groupId-as-slashes>/<artifactId>/<version>/<filename>}, the same shape {@link
+     * #deployArtifact} and {@link #fetchArtifact} already take as their own {@code gav} parameter
+     * (and the inverse of what {@code CodeArtifactMavenController#parseNamespaceAndPackageName}
+     * builds back out of it).
+     */
+    private static String versionGav(String namespace, String packageName, String version, String assetName) {
+        return namespace.replace('.', '/') + "/" + packageName + "/" + version + "/" + assetName;
+    }
+
+    /**
+     * Merges {@code version} into the group/artifact-level {@code maven-metadata.xml} a real
+     * {@code mvn deploy} always also PUTs, separately from the version directory itself: without
+     * this, a version {@code CopyPackageVersions} lands straight in the version directory would
+     * never show up to a real client resolving "what versions does this artifact have" against
+     * the destination, the one thing this bridge's {@link #listPackageVersionAssetNames}/{@link
+     * #storePackageVersionAsset} pair, scoped to one version directory each, cannot reach.
+     *
+     * <p>Confirmed against a live Reposilite container, same as every other wire assumption in
+     * this class: unlike a release artifact, a metadata file is not subject to the repository's
+     * own {@code redeployment: false} setting, so {@link #deployArtifact} can PUT one with
+     * genuinely different content every time without the conflict a real artifact overwrite
+     * would hit.
+     *
+     * <p>{@code latest} is set to {@code version}: real Maven defines it as whichever version was
+     * most recently added, and this call existing at all means {@code version} just was. {@code
+     * release} only moves to {@code version} when it is not a {@code -SNAPSHOT}; a snapshot copy
+     * leaves whatever release version the metadata already named untouched. An existing
+     * {@code groupId}/{@code artifactId} already on the file is preserved verbatim rather than
+     * re-derived from {@code namespace}/{@code packageName}, since nothing here needs it to be;
+     * the already-published metadata is trusted over Floci's own request-path coordinates for
+     * these two fields specifically.
+     */
+    @Override
+    public void recordVersionAvailable(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
+        ensureRepository(repositoryContainerId);
+        String gav = artifactMetadataGav(namespace, packageName);
+        Optional<FetchedArtifact> existing = fetchArtifact(repositoryContainerId, gav);
+        List<String> versions = new ArrayList<>();
+        String groupId = namespace;
+        String artifactId = packageName;
+        String release = null;
+        if (existing.isPresent()) {
+            String xml = new String(existing.get().content(), StandardCharsets.UTF_8);
+            versions.addAll(XmlParser.extractAll(xml, "version"));
+            groupId = XmlParser.extractFirst(xml, "groupId", namespace);
+            artifactId = XmlParser.extractFirst(xml, "artifactId", packageName);
+            release = XmlParser.extractFirst(xml, "release", null);
+        }
+        if (!versions.contains(version)) {
+            versions.add(version);
+        }
+        if (!version.endsWith("-SNAPSHOT")) {
+            release = version;
+        }
+        XmlBuilder metadata = new XmlBuilder().start("metadata")
+                .elem("groupId", groupId)
+                .elem("artifactId", artifactId)
+                .start("versioning")
+                .elem("latest", version)
+                .elem("release", release)
+                .start("versions");
+        for (String v : versions) {
+            metadata.elem("version", v);
+        }
+        metadata.end("versions")
+                .elem("lastUpdated", METADATA_TIMESTAMP.format(Instant.now()))
+                .end("versioning")
+                .end("metadata");
+        deployArtifact(repositoryContainerId, gav, metadata.build().getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String artifactMetadataGav(String namespace, String packageName) {
+        return namespace.replace('.', '/') + "/" + packageName + "/maven-metadata.xml";
     }
 
     /** Ensures a Reposilite repository named {@code repoId} exists, creating it if not. */

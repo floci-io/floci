@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,6 +28,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -603,6 +605,165 @@ class ReposiliteSidecarClientTest {
 
         assertThrows(IllegalStateException.class, () -> client.deletePackage("dom--repo", "dom", "repo",
                 "com.example", "weird"));
+    }
+
+    @Test
+    void listPackageVersionAssetNamesReturnsOnlyTheFileEntriesFromTheVersionDirectory() {
+        server.createContext("/api/maven/details/dom--repo/com/example/a/1.0",
+                exchange -> respond(exchange, 200, "{\"name\":\"1.0\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"a-1.0.jar\",\"type\":\"FILE\"},"
+                        + "{\"name\":\"a-1.0.pom\",\"type\":\"FILE\"}]}"));
+
+        List<String> names = client.listPackageVersionAssetNames("dom--repo", "dom", "repo", "com.example", "a",
+                "1.0");
+
+        assertThat(names, equalTo(List.of("a-1.0.jar", "a-1.0.pom")));
+    }
+
+    @Test
+    void listPackageVersionAssetNamesIsEmptyForAMissingVersion() {
+        server.createContext("/api/maven/details/dom--repo/com/example/a/9.9",
+                exchange -> respond(exchange, 404, "{\"status\":404,\"message\":\"File not found\"}"));
+
+        assertThat(client.listPackageVersionAssetNames("dom--repo", "dom", "repo", "com.example", "a", "9.9"),
+                equalTo(List.of()));
+    }
+
+    @Test
+    void listPackageVersionAssetNamesThrowsOnAnUnexpectedStatus() {
+        server.createContext("/api/maven/details/dom--repo/com/example/a/1.0",
+                exchange -> respond(exchange, 500, "{\"status\":500,\"message\":\"internal error\"}"));
+
+        assertThrows(IllegalStateException.class,
+                () -> client.listPackageVersionAssetNames("dom--repo", "dom", "repo", "com.example", "a", "1.0"));
+    }
+
+    @Test
+    void storePackageVersionAssetPutsTheBytesDirectlyEvenWhenDifferingContentAlreadyExists() throws Exception {
+        // deployArtifact's own redeployment:false preflight would refuse this; storePackageVersionAsset
+        // never GETs first and must PUT unconditionally, the way CopyPackageVersions' own
+        // delete-then-store overwrite sequence relies on.
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        List<String> methodsSeen = new CopyOnWriteArrayList<>();
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> {
+            methodsSeen.add(exchange.getRequestMethod());
+            putBody.set(exchange.getRequestBody().readAllBytes());
+            respond(exchange, 200, "");
+        });
+
+        client.storePackageVersionAsset("dom--repo", "dom", "repo", "com.example", "a", "1.0", "a-1.0.jar",
+                "hello".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(methodsSeen, equalTo(List.of("PUT")));
+        assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), putBody.get());
+    }
+
+    @Test
+    void storePackageVersionAssetThrowsOnAnUnexpectedStatus() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> respond(exchange, 500, ""));
+
+        assertThrows(IllegalStateException.class, () -> client.storePackageVersionAsset("dom--repo", "dom", "repo",
+                "com.example", "a", "1.0", "a-1.0.jar", "hello".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    void deletePackageVersionAssetDeletesTheExactGavPath() {
+        AtomicReference<String> deletedMethod = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> {
+            deletedMethod.set(exchange.getRequestMethod());
+            respond(exchange, 200, "");
+        });
+
+        client.deletePackageVersionAsset("dom--repo", "dom", "repo", "com.example", "a", "1.0", "a-1.0.jar");
+
+        assertThat(deletedMethod.get(), equalTo("DELETE"));
+    }
+
+    @Test
+    void deletePackageVersionAssetThrowsOnAnUnexpectedStatus() {
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> respond(exchange, 500, ""));
+
+        assertThrows(IllegalStateException.class, () -> client.deletePackageVersionAsset("dom--repo", "dom", "repo",
+                "com.example", "a", "1.0", "a-1.0.jar"));
+    }
+
+    @Test
+    void recordVersionAvailableCreatesANewMetadataFileWhenNoneExists() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/maven-metadata.xml", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 404, "");
+            } else {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionAvailable("dom--repo", "dom", "repo", "com.example", "a", "1.0");
+
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals("com.example", XmlParser.extractFirst(xml, "groupId", null));
+        assertEquals("a", XmlParser.extractFirst(xml, "artifactId", null));
+        assertEquals("1.0", XmlParser.extractFirst(xml, "latest", null));
+        assertEquals("1.0", XmlParser.extractFirst(xml, "release", null));
+        assertEquals(List.of("1.0"), XmlParser.extractAll(xml, "version"));
+        assertTrue(XmlParser.extractFirst(xml, "lastUpdated", "").matches("\\d{14}"));
+    }
+
+    @Test
+    void recordVersionAvailableAppendsToExistingVersionsAndAdvancesReleaseForANonSnapshot() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/maven-metadata.xml", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionAvailable("dom--repo", "dom", "repo", "com.example", "a", "2.0");
+
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("1.0", "2.0"), XmlParser.extractAll(xml, "version"));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "latest", null));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "release", null));
+    }
+
+    @Test
+    void recordVersionAvailableLeavesTheExistingReleaseUntouchedForASnapshotVersion() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/maven-metadata.xml", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionAvailable("dom--repo", "dom", "repo", "com.example", "a", "2.0-SNAPSHOT");
+
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("1.0", "2.0-SNAPSHOT"), XmlParser.extractAll(xml, "version"));
+        assertEquals("2.0-SNAPSHOT", XmlParser.extractFirst(xml, "latest", null));
+        assertEquals("1.0", XmlParser.extractFirst(xml, "release", null));
     }
 
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {

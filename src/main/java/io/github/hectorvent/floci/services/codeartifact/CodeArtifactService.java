@@ -38,6 +38,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -1202,23 +1203,37 @@ public class CodeArtifactService implements Resettable {
      * revision would: nothing before this helper existed ever let a client obtain a revision for
      * these formats in the first place (not even a stale one), so this isn't a regression against
      * any previously working staleness check.
+     *
+     * <p>Truncated to {@link #MAX_REVISION_LENGTH} (50) hex characters of the full SHA-256 digest,
+     * not the full 64: {@code CopyPackageVersions}' own {@code versionRevisions} value is
+     * wire-model-capped at 50 characters, so a revision this helper hands out through {@code
+     * DescribePackageVersion}/{@code GetPackageVersionAsset} must itself fit back into that field
+     * or a caller could never round-trip it through a revision-pinned copy. 50 hex characters
+     * (200 bits) is still astronomically collision-resistant for distinguishing the handful of
+     * live repository/namespace/package/version coordinates this emulator ever holds at once.
      */
     private static String synthesizeContainerBackedRevision(String repoId, String namespace, String packageName,
             String version) {
         String revisionKey = repoId + "/" + (namespace == null ? "" : namespace) + "/" + packageName + "/" + version;
-        return Digests.sha256Hex(revisionKey.getBytes(StandardCharsets.UTF_8));
+        return Digests.sha256Hex(revisionKey.getBytes(StandardCharsets.UTF_8)).substring(0, MAX_REVISION_LENGTH);
     }
 
     /**
      * Copies one or more versions of a package from one repository to another in the same
-     * domain. Only {@code generic} is supported today — unlike real AWS, which does not
-     * restrict this action's {@code format} the way it restricts {@link #publishPackageVersion}'s
-     * to {@code generic} alone (confirmed against the wire model: {@code
-     * CopyPackageVersionsRequest.format}'s own doc carries no such restriction). This is a Floci
-     * implementation gap, not an AWS restriction being mirrored: Maven, npm, pypi, and nuget
-     * publish straight to their own sidecar and keep no {@code packageVersions} record this could
-     * read from or write to, so bridging them needs the same per-sidecar fetch-then-republish
-     * shape {@code GetPackageVersionAsset}'s own bridge already uses, not yet built here.
+     * domain. {@code generic} and {@code maven} are supported today; {@code npm}, {@code pypi},
+     * and {@code nuget} still are not — unlike real AWS, which does not restrict this action's
+     * {@code format} the way it restricts {@link #publishPackageVersion}'s to {@code generic}
+     * alone (confirmed against the wire model: {@code CopyPackageVersionsRequest.format}'s own
+     * doc carries no such restriction). The three-way split is a Floci implementation gap, not an
+     * AWS restriction being mirrored: every one of the four container-backed formats publishes
+     * straight to its own sidecar and keeps no {@code packageVersions} record this could read
+     * from or write to, so each needs the same per-sidecar fetch-then-republish shape {@code
+     * GetPackageVersionAsset}'s own bridge already uses (see {@link
+     * #copyContainerBackedPackageVersions}). {@code maven}'s {@code ReposiliteSidecarClient}
+     * already has a write path proven by {@link CodeArtifactMavenController}'s own {@code mvn
+     * deploy} passthrough to build this bridge on; {@code npm}, {@code pypi}, and {@code nuget}
+     * each need their own native-publish-protocol-accurate write path built and confirmed first,
+     * not yet done here.
      *
      * <p>Confirmed against the CodeArtifact User Guide's own worked examples ("Copy package
      * versions"), not assumed from the shared {@code PackageVersionError} error-code enum alone,
@@ -1253,26 +1268,31 @@ public class CodeArtifactService implements Resettable {
      * has no upstream-ingestion path for any format (see {@code docs/services/codeartifact.md}'s
      * Known limitations), so there is never a separate upstream repository to also search.
      *
-     * <p>A freshly copied version gets a new revision of its own ({@link #newRevision()}, never
-     * the source's): the User Guide's own definition of "package version revision" is explicit
-     * that "each time a package version is updated, a new package version revision is created,"
-     * and landing a version in a repository it previously had no record in is such an update at
-     * the destination — the same reason {@link #publishPackageVersion} always mints its own rather
-     * than ever accepting a caller-supplied one. An identical-content no-op (see above) is
-     * correctly the opposite case: nothing was updated at the destination, so its existing
-     * revision, whatever it already was, is left untouched.
+     * <p>For {@code generic}, a freshly copied version gets a new revision of its own ({@link
+     * #newRevision()}, never the source's): the User Guide's own definition of "package version
+     * revision" is explicit that "each time a package version is updated, a new package version
+     * revision is created," and landing a version in a repository it previously had no record in
+     * is such an update at the destination — the same reason {@link #publishPackageVersion}
+     * always mints its own rather than ever accepting a caller-supplied one. An identical-content
+     * no-op (see above) is correctly the opposite case: nothing was updated at the destination, so
+     * its existing revision, whatever it already was, is left untouched. {@code maven}'s
+     * destination revision is instead {@link #synthesizeContainerBackedRevision}'s own stable,
+     * coordinate-derived value, the same one {@link #describeContainerBackedPackageVersion} and
+     * {@link #getContainerBackedPackageVersionAsset} already return for it: there is no
+     * "revision changes on update" concept for a container-backed format at all, an existing,
+     * documented simplification this does not invent a new exception to.
      *
      * <p>{@code synchronized} for the same reason every other package-mutating method here is: a
      * concurrent publish or delete on either repository must never interleave with this method's
-     * own read-then-write of the destination's {@code packageVersions} record.
+     * own read-then-write of the destination's {@code packageVersions} record, or, for {@code
+     * maven}, its sidecar's own backing storage.
      */
     public synchronized CopyPackageVersionsResult copyPackageVersions(String region, String domain,
             String domainOwner, String sourceRepository, String destinationRepository, String format,
             String namespace, String packageName, List<String> versions, Map<String, String> versionRevisions,
             boolean allowOverwrite, boolean includeFromUpstream) {
-        if (!"generic".equals(format)) {
-            throw validation("format must be 'generic'; CopyPackageVersions only supports the generic package "
-                    + "format.");
+        if (!"generic".equals(format) && !CONTAINER_BACKED_FORMATS.contains(format)) {
+            throw validation("format must be 'generic', 'maven', 'npm', 'pypi', or 'nuget'.");
         }
         boolean hasVersions = versions != null && !versions.isEmpty();
         boolean hasRevisions = versionRevisions != null && !versionRevisions.isEmpty();
@@ -1322,6 +1342,12 @@ public class CodeArtifactService implements Resettable {
         // origin controls" chapter or the API reference ties the two together. ConflictException
         // is part of this action's documented error list (so it's a real possible response), but
         // this codebase has no confirmed trigger for it on this action and does not guess one.
+
+        if (CONTAINER_BACKED_FORMATS.contains(format)) {
+            return copyContainerBackedPackageVersions(region, domain, owner, sourceRepository,
+                    destinationRepository, format, namespace, packageName, requestedVersions, versionRevisions,
+                    hasRevisions, allowOverwrite);
+        }
 
         Map<String, PackageVersionCopyFailure> failures = new LinkedHashMap<>();
         List<String> pendingCopies = new ArrayList<>();
@@ -1391,6 +1417,250 @@ public class CodeArtifactService implements Resettable {
             successes.put(version, new PackageVersionCopyOutcome(copied.getRevision(), copied.getStatus()));
         }
         return new CopyPackageVersionsResult(successes, Map.of());
+    }
+
+    /**
+     * {@link #copyPackageVersions}'s bridge for a container-backed format: the same NOT_FOUND /
+     * MISMATCHED_REVISION / identical-content-no-op / ALREADY_EXISTS / all-or-nothing-SKIPPED
+     * semantics as the {@code generic} path, built on the sidecar primitives {@link
+     * RepositorySidecarManager#listPackageVersionAssetNames}, {@link
+     * RepositorySidecarManager#fetchPackageVersionAsset}, {@link
+     * RepositorySidecarManager#storePackageVersionAsset}, and {@link
+     * RepositorySidecarManager#deletePackageVersionAsset} instead of the generic path's own {@code
+     * packageVersions} store. {@code requestedVersions} and {@code hasRevisions} are the caller's
+     * own already-validated, already-deduplicated values, not recomputed here.
+     *
+     * <p>A sidecar whose {@link RepositorySidecarManager} implementation does not yet override
+     * these (every container-backed format except {@code maven} today) throws {@link
+     * UnsupportedOperationException} from the first one reached, caught here and turned into a
+     * real, if deliberately blunt, {@code InternalServerException}: the same convention {@link
+     * #deleteContainerBackedPackageIfPresent} already uses for a sidecar capability not yet built,
+     * rather than a silent no-op or an unhandled 500.
+     *
+     * <p>There is no persisted hash to re-verify a container-backed asset's bytes against the way
+     * {@link #verifyAndReadSourceAssets} does for generic, so this only confirms an asset {@link
+     * RepositorySidecarManager#listPackageVersionAssetNames} just reported is still fetchable
+     * immediately afterward, failing the whole batch with {@code InternalServerException} if not
+     * (the same storage-integrity failure {@link #verifyAndReadSourceAssets} reports, just without
+     * a hash to compare).
+     *
+     * <p>{@code hasRevisions} can succeed here the same as for {@code generic}: {@link
+     * #synthesizeContainerBackedRevision} is truncated to {@link #MAX_REVISION_LENGTH} (50)
+     * characters specifically so a revision a caller obtained from {@code
+     * DescribePackageVersion}/{@code GetPackageVersionAsset} always fits back into {@code
+     * versionRevisions}' own 1-50 character value constraint and compares equal when it is in
+     * fact the current one.
+     */
+    private CopyPackageVersionsResult copyContainerBackedPackageVersions(String region, String domain, String owner,
+            String sourceRepository, String destinationRepository, String format, String namespace,
+            String packageName, List<String> requestedVersions, Map<String, String> versionRevisions,
+            boolean hasRevisions, boolean allowOverwrite) {
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> new AwsException("InternalServerException", "Copying a " + format
+                        + " package version is not yet supported by this emulator.", 500));
+        String sourceRepoId = ensureFormatContainerId(format, region, domain, owner, sourceRepository);
+        String destRepoId = ensureFormatContainerId(format, region, domain, owner, destinationRepository);
+
+        Map<String, PackageVersionCopyFailure> failures = new LinkedHashMap<>();
+        List<String> pendingCopies = new ArrayList<>();
+        Map<String, List<String>> sourceAssetNamesByVersion = new LinkedHashMap<>();
+        Map<String, List<String>> destAssetNamesByVersion = new LinkedHashMap<>();
+        try {
+            for (String version : requestedVersions) {
+                if (!manager.packageVersionExists(sourceRepoId, domain, sourceRepository, namespace, packageName,
+                        version)) {
+                    failures.put(version, new PackageVersionCopyFailure("NOT_FOUND", "Could not find version "
+                            + version));
+                    continue;
+                }
+                if (hasRevisions) {
+                    String expectedRevision = versionRevisions.get(version);
+                    String actualRevision = synthesizeContainerBackedRevision(sourceRepoId, namespace, packageName,
+                            version);
+                    if (!actualRevision.equals(expectedRevision)) {
+                        failures.put(version, new PackageVersionCopyFailure("MISMATCHED_REVISION",
+                                "current revision: " + actualRevision + ", expected revision: "
+                                        + expectedRevision));
+                        continue;
+                    }
+                }
+                List<String> sourceAssetNames = manager.listPackageVersionAssetNames(sourceRepoId, domain,
+                        sourceRepository, namespace, packageName, version);
+                boolean destExists = manager.packageVersionExists(destRepoId, domain, destinationRepository,
+                        namespace, packageName, version);
+                if (destExists) {
+                    List<String> destAssetNames = manager.listPackageVersionAssetNames(destRepoId, domain,
+                            destinationRepository, namespace, packageName, version);
+                    if (containerBackedVersionContentMatches(manager, sourceRepoId, sourceRepository, destRepoId,
+                            destinationRepository, domain, namespace, packageName, version, sourceAssetNames,
+                            destAssetNames)) {
+                        // Identical in both repositories already: the same already-successful,
+                        // not-listed-anywhere no-op the generic path applies (see
+                        // #copyPackageVersions's own javadoc).
+                        continue;
+                    }
+                    if (!allowOverwrite) {
+                        failures.put(version, new PackageVersionCopyFailure("ALREADY_EXISTS",
+                                "Version " + version + " already exists"));
+                        continue;
+                    }
+                    destAssetNamesByVersion.put(version, destAssetNames);
+                }
+                sourceAssetNamesByVersion.put(version, sourceAssetNames);
+                pendingCopies.add(version);
+            }
+        } catch (UnsupportedOperationException e) {
+            throw new AwsException("InternalServerException", "Copying a " + format + " package version is not "
+                    + "yet supported by this emulator.", 500);
+        }
+
+        if (!failures.isEmpty()) {
+            for (String version : pendingCopies) {
+                failures.put(version, new PackageVersionCopyFailure("SKIPPED", "Version " + version
+                        + " was skipped"));
+            }
+            return new CopyPackageVersionsResult(Map.of(), failures);
+        }
+
+        // Same verify-before-write ordering as the generic path's own two-pass split: every
+        // pending version's source assets are fetched and confirmed present before any version in
+        // this batch has anything written to the destination.
+        Map<String, Map<String, byte[]>> verifiedContentByVersion = new LinkedHashMap<>();
+        for (String version : pendingCopies) {
+            Map<String, byte[]> contentByAsset = new LinkedHashMap<>();
+            for (String assetName : sourceAssetNamesByVersion.get(version)) {
+                byte[] content = manager.fetchPackageVersionAsset(sourceRepoId, domain, sourceRepository, namespace,
+                                packageName, version, assetName)
+                        .orElseThrow(() -> new AwsException("InternalServerException", "Could not copy version '"
+                                + version + "' of package '" + packageName + "': its asset '" + assetName
+                                + "' disappeared from the source repository between listing and fetching it.",
+                                500));
+                contentByAsset.put(assetName, content);
+            }
+            verifiedContentByVersion.put(version, contentByAsset);
+        }
+
+        Map<String, PackageVersionCopyOutcome> successes = new LinkedHashMap<>();
+        for (String version : pendingCopies) {
+            List<String> destAssetNames = destAssetNamesByVersion.getOrDefault(version, List.of());
+            Map<String, byte[]> originalContent = new LinkedHashMap<>();
+            for (String destAssetName : destAssetNames) {
+                manager.fetchPackageVersionAsset(destRepoId, domain, destinationRepository, namespace, packageName,
+                                version, destAssetName)
+                        .ifPresent(content -> originalContent.put(destAssetName, content));
+            }
+            List<String> touchedAssetNames = new ArrayList<>();
+            // Snapshotted immediately before this version's own writes, the same way every other
+            // container-backed write path already takes its fence snapshot right before issuing
+            // the real write it will later report: recording this version's bytes must still
+            // reflect the latest live state even if an earlier version in this same batch call
+            // already changed it (there is no shared snapshot spanning the whole batch to go
+            // stale as later versions are processed).
+            long packageFenceSnapshot = currentContainerBackedPackageFence(region, domain, owner,
+                    destinationRepository, format, namespace, packageName);
+            long bytesWritten = 0L;
+            try {
+                // Every source asset is deleted (if an old version of it already exists at the
+                // destination) immediately before it is rewritten, never written straight over
+                // an existing path: Reposilite's own redeployment:false setting rejects a plain
+                // PUT when the existing content differs, the same rejection a real mvn deploy
+                // would hit redeploying the same artifact. A brand-new asset name skips the
+                // delete entirely, since there is nothing there to reject the PUT. Any asset the
+                // destination had that the source no longer does (now absent from
+                // verifiedContentByVersion's own key set) is deleted outright last, once every
+                // asset that needed replacing already has its new content safely written.
+                for (Map.Entry<String, byte[]> entry : verifiedContentByVersion.get(version).entrySet()) {
+                    String assetName = entry.getKey();
+                    if (originalContent.containsKey(assetName)) {
+                        manager.deletePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
+                                packageName, version, assetName);
+                    }
+                    manager.storePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
+                            packageName, version, assetName, entry.getValue());
+                    touchedAssetNames.add(assetName);
+                    bytesWritten += entry.getValue().length;
+                }
+                for (String staleAssetName : destAssetNames) {
+                    if (!verifiedContentByVersion.get(version).containsKey(staleAssetName)) {
+                        manager.deletePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
+                                packageName, version, staleAssetName);
+                        touchedAssetNames.add(staleAssetName);
+                    }
+                }
+                manager.recordVersionAvailable(destRepoId, domain, destinationRepository, namespace, packageName,
+                        version);
+            } catch (RuntimeException e) {
+                rollbackContainerBackedVersionWrite(manager, destRepoId, domain, destinationRepository, namespace,
+                        packageName, version, originalContent, touchedAssetNames);
+                throw e;
+            }
+            if (bytesWritten > 0) {
+                recordContainerBackedAssetBytes(region, domain, owner, destinationRepository, format, namespace,
+                        packageName, bytesWritten, packageFenceSnapshot);
+            }
+            String revision = synthesizeContainerBackedRevision(destRepoId, namespace, packageName, version);
+            successes.put(version, new PackageVersionCopyOutcome(revision, "Published"));
+        }
+        return new CopyPackageVersionsResult(successes, Map.of());
+    }
+
+    /**
+     * Best-effort compensating cleanup for one version's partially-applied destination writes
+     * after {@link #copyContainerBackedPackageVersions} hits a failure partway through them:
+     * every asset this call itself touched is restored to whatever it held before (if it
+     * pre-existed, from {@code originalContent}) or deleted outright (if it was new). Does not
+     * attempt to re-create a stale asset it had not yet gotten to deleting, or undo a successful
+     * {@link RepositorySidecarManager#recordVersionAvailable} call, since neither leaves the
+     * destination in a worse state than before this version's write began. A failure during the
+     * rollback itself is logged and swallowed, never thrown over the original failure that
+     * triggered it: a best-effort cleanup that cannot fully complete is still strictly no worse
+     * than not attempting one, and must never hide the real error behind a cleanup error instead.
+     */
+    private void rollbackContainerBackedVersionWrite(RepositorySidecarManager manager, String destRepoId,
+            String domain, String destinationRepository, String namespace, String packageName, String version,
+            Map<String, byte[]> originalContent, List<String> touchedAssetNames) {
+        for (String assetName : touchedAssetNames) {
+            try {
+                byte[] original = originalContent.get(assetName);
+                if (original != null) {
+                    manager.storePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
+                            packageName, version, assetName, original);
+                } else {
+                    manager.deletePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
+                            packageName, version, assetName);
+                }
+            } catch (RuntimeException rollbackFailure) {
+                LOG.warnv(rollbackFailure, "Best-effort rollback could not restore {0}/{1} package ''{2}'' "
+                        + "version ''{3}'' asset ''{4}'' after a failed copy; the destination may still be "
+                        + "left in a partially-copied state for this version.", domain, destinationRepository,
+                        packageName, version, assetName);
+            }
+        }
+    }
+
+    /**
+     * {@code true} only when {@code source} and {@code dest} hold the exact same asset names for
+     * this version, each fetching to byte-identical content: the container-backed equivalent of
+     * {@link #packageVersionContentMatches}, which compares persisted hashes instead since generic
+     * assets have one and these don't.
+     */
+    private static boolean containerBackedVersionContentMatches(RepositorySidecarManager manager,
+            String sourceRepoId, String sourceRepository, String destRepoId, String destinationRepository,
+            String domain, String namespace, String packageName, String version, List<String> sourceAssetNames,
+            List<String> destAssetNames) {
+        if (!new LinkedHashSet<>(sourceAssetNames).equals(new LinkedHashSet<>(destAssetNames))) {
+            return false;
+        }
+        for (String assetName : sourceAssetNames) {
+            byte[] sourceContent = manager.fetchPackageVersionAsset(sourceRepoId, domain, sourceRepository,
+                    namespace, packageName, version, assetName).orElse(null);
+            byte[] destContent = manager.fetchPackageVersionAsset(destRepoId, domain, destinationRepository,
+                    namespace, packageName, version, assetName).orElse(null);
+            if (!Arrays.equals(sourceContent, destContent)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
