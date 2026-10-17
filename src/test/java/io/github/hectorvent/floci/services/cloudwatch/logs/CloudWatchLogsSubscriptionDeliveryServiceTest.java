@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import jakarta.enterprise.event.Event;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,13 +32,16 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class CloudWatchLogsSubscriptionDeliveryServiceTest {
 
@@ -375,7 +379,34 @@ class CloudWatchLogsSubscriptionDeliveryServiceTest {
         ), REGION);
 
         assertNotNull(nextToken);
-        verifyNoInteractions(lambdaService);
+        verify(lambdaService, never()).invokeArn(anyString(), any(), any());
+    }
+
+    /**
+     * A function whose LoggingConfig names a group writes there, so a subscription that sends that
+     * group to the function itself is skipped too, and delivered again once the function writes to
+     * its default group instead.
+     */
+    @Test
+    void aFunctionSubscribedToTheCustomGroupItWritesToIsSkipped() {
+        String shared = "/shared/app";
+        String forwarderArn = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":function:forwarder";
+        LambdaFunction forwarder = new LambdaFunction();
+        forwarder.setFunctionName("forwarder");
+        forwarder.setLogGroup(shared);
+        when(lambdaService.getFunction(REGION, "forwarder")).thenReturn(forwarder);
+        logsService.createLogGroup(shared, null, null, REGION);
+        logsService.createLogStream(shared, "2026/10/16/forwarder[$LATEST]abc", REGION);
+        logsService.putSubscriptionFilter(shared, "loop-filter", "", forwarderArn, null, REGION);
+
+        logsService.putLogEvents(shared, "2026/10/16/forwarder[$LATEST]abc", List.of(
+                Map.of("timestamp", 5000L, "message", "forwarder log line")), REGION);
+        verify(lambdaService, never()).invokeArn(anyString(), any(), any());
+
+        forwarder.setLogGroup(null);
+        logsService.putLogEvents(shared, "2026/10/16/forwarder[$LATEST]abc", List.of(
+                Map.of("timestamp", 5001L, "message", "another function's log line")), REGION);
+        verify(lambdaService).invokeArn(eq(forwarderArn), any(), eq(InvocationType.Event));
     }
 
     @Test

@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.lambda.launcher.kubernetes;
 
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.services.lambda.LambdaLogDestinations;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -33,8 +35,8 @@ public class KubernetesPodLogStreamer {
     }
 
     /** CloudWatch log stream name for one execution environment, same shape as the docker path. */
-    public String logStreamName(String shortId) {
-        return cloudWatchWriter.generateLogStreamName("[$LATEST]" + shortId);
+    public String logStreamName(LambdaFunction fn, String shortId) {
+        return cloudWatchWriter.generateLogStreamName(LambdaLogDestinations.logStreamSuffix(fn, shortId));
     }
 
     public Closeable attach(String namespace, String podName, String logGroup,

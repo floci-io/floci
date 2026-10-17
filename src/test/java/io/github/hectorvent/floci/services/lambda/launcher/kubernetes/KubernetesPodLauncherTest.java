@@ -127,7 +127,7 @@ class KubernetesPodLauncherTest {
         logStreamer = mock(KubernetesPodLogStreamer.class);
         lenient().when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(),
                 anyString(), anyString(), anyString())).thenReturn(() -> { });
-        lenient().when(logStreamer.logStreamName(anyString())).thenReturn("2026/07/25/[$LATEST]test");
+        lenient().when(logStreamer.logStreamName(any(), anyString())).thenReturn("2026/07/25/[$LATEST]test");
         s3Service = mock(S3Service.class);
         presignGenerator = mock(PreSignedUrlGenerator.class);
         lenient().when(presignGenerator.generatePresignedUrl(anyString(), anyString(), anyString(),

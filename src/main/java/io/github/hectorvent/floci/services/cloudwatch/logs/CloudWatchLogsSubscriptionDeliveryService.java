@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudwatch.logs;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -13,8 +14,10 @@ import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
+import io.github.hectorvent.floci.services.lambda.LambdaLogDestinations;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -46,7 +49,6 @@ public class CloudWatchLogsSubscriptionDeliveryService {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchLogsSubscriptionDeliveryService.class);
     private static final String DATA_MESSAGE = "DATA_MESSAGE";
-    private static final String LAMBDA_LOG_PREFIX = "/aws/lambda/";
     /** Max compressed record size for Kinesis and Firehose delivery (1 MB). */
     private static final int MAX_RECORD_PAYLOAD_BYTES = 1_000_000;
 
@@ -163,7 +165,7 @@ public class CloudWatchLogsSubscriptionDeliveryService {
         String service = arn.service();
 
         if ("lambda".equals(service)) {
-            if (isSelfSubscribedLambda(event.logGroupName(), destinationArn)) {
+            if (isSelfSubscribedLambda(event.logGroupName(), destinationArn, targetRegion)) {
                 LOG.warnv("Skipping delivery to Lambda destination {0} to prevent recursive loop on its own log group {1}",
                         destinationArn, event.logGroupName());
                 return;
@@ -180,17 +182,32 @@ public class CloudWatchLogsSubscriptionDeliveryService {
         }
     }
 
-    private boolean isSelfSubscribedLambda(String logGroupName, String functionArn) {
-        if (logGroupName == null || functionArn == null || !logGroupName.startsWith(LAMBDA_LOG_PREFIX)) {
+    /**
+     * Whether the destination function writes its own logs to the group, the one its LoggingConfig
+     * names or else {@code /aws/lambda/<name>}, so that delivering to it would feed it its own
+     * output. Floci skips that delivery, for a custom group as for the default one.
+     */
+    private boolean isSelfSubscribedLambda(String logGroupName, String functionArn, String region) {
+        if (logGroupName == null || functionArn == null) {
             return false;
         }
-        String logFunctionName = logGroupName.substring(LAMBDA_LOG_PREFIX.length());
+        String targetFunctionName;
         try {
-            String targetFunctionName = LambdaArnUtils.resolve(functionArn).name();
-            return logFunctionName.equals(targetFunctionName);
-        } catch (Exception e) {
+            targetFunctionName = LambdaArnUtils.resolve(functionArn).name();
+        } catch (RuntimeException e) {
             return false;
         }
+        LambdaFunction target = null;
+        if (lambdaService != null) {
+            try {
+                target = lambdaService.getFunction(region, targetFunctionName);
+            } catch (AwsException e) {
+                LOG.debugv("Destination function {0} not found: {1}", targetFunctionName, e.getMessage());
+            }
+        }
+        String ownGroup = target != null
+                ? LambdaLogDestinations.logGroup(target) : LambdaLogDestinations.defaultLogGroup(targetFunctionName);
+        return logGroupName.equals(ownGroup);
     }
 
     @FunctionalInterface

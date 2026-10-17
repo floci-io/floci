@@ -674,6 +674,34 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchFunction_writesToTheLogGroupLoggingConfigNames() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("custom-log-group"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("custom-logs-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:000000000000:function:custom-logs-fn");
+        fn.setLogGroup("/shared/app-logs");
+
+        launcher.launch(fn);
+
+        List<String> env = captureRealContainerSpec().env();
+        assertTrue(env.contains("AWS_LAMBDA_LOG_GROUP_NAME=/shared/app-logs"));
+        String stream = env.stream()
+                .filter(e -> e.startsWith("AWS_LAMBDA_LOG_STREAM_NAME="))
+                .findFirst().orElseThrow()
+                .substring("AWS_LAMBDA_LOG_STREAM_NAME=".length());
+        assertTrue(stream.matches("\\d{4}/\\d{2}/\\d{2}/custom-logs-fn\\[\\$LATEST][0-9a-f]{8}"), stream);
+        verify(logStreamer).ensureLogGroupAndStreamForAccount(
+                eq("000000000000"), eq("/shared/app-logs"), eq(stream), eq("us-east-1"));
+        verify(logStreamer).attachForAccount(
+                eq("000000000000"), eq("container-123"), eq("/shared/app-logs"), eq(stream),
+                eq("us-east-1"), eq("lambda:custom-logs-fn"));
+    }
+
+    @Test
     void launchFunction_endpointUsesListenPortNotAdvertisedBaseUrlPort() throws Exception {
         // docker run -p 4811:4566 -e FLOCI_BASE_URL=http://localhost:4811: 4811 exists only on the
         // host. The function container reaches Floci over the Docker network, where it listens on

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
+import io.github.hectorvent.floci.services.lambda.LambdaLogDestinations;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerLauncher;
@@ -175,8 +176,8 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             podName = LambdaPodSpecFactory.podName(fn.getFunctionName(), shortId);
             String region = AwsArnUtils.regionOrDefault(fn.getFunctionArn(), config.defaultRegion());
             String accountId = AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId());
-            String cwLogGroup = "/aws/lambda/" + fn.getFunctionName();
-            String cwLogStream = logStreamer.logStreamName(shortId);
+            String cwLogGroup = LambdaLogDestinations.logGroup(fn);
+            String cwLogStream = logStreamer.logStreamName(fn, shortId);
 
             String codeDownloadUrl = imagePackage ? null : codeDownloadUrl(fn, region);
             List<String> layerUrls = imagePackage ? List.of() : layerDownloadUrls(fn, region);

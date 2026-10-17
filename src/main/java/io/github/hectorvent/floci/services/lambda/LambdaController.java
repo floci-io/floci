@@ -862,9 +862,7 @@ public class LambdaController {
             logging.put("SystemLogLevel",
                     fn.getSystemLogLevel() != null ? fn.getSystemLogLevel() : "INFO");
         }
-        logging.put("LogGroup", fn.getLogGroup() != null && !fn.getLogGroup().isBlank()
-                ? fn.getLogGroup()
-                : "/aws/lambda/" + fn.getFunctionName());
+        logging.put("LogGroup", LambdaLogDestinations.logGroup(fn));
     }
 
     /** Managed-runtime only: AWS omits it for container images, which pin their own runtime. */
