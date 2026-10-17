@@ -45,7 +45,7 @@ behind them yet.
 | `DescribePackageVersion` | Returns a package version's status, revision, and origin. |
 | `GetPackageVersionAsset` | Downloads one asset from a package version by name, optionally pinned to a specific revision. |
 | `GetPackageVersionReadme` | Returns the readme text for a package version; `npm`, `pypi`, and `nuget` only, matching AWS's own restriction for this action. |
-| `CopyPackageVersions` | Copies one or more versions of a package from one repository to another in the same domain; `generic` only. |
+| `CopyPackageVersions` | Copies one or more versions of a package from one repository to another in the same domain; `generic` and `maven` only. |
 | `TagResource` | Adds or updates tags on a domain or repository ARN. |
 | `UntagResource` | Removes tags by key from a domain or repository ARN. |
 | `ListTagsForResource` | Lists the tags on a domain or repository ARN. |
@@ -257,15 +257,25 @@ state.
   `DisposePackageVersions`, and `UpdatePackageVersionsStatus` don't exist yet; the only way to
   move a version from `Unfinished` to `Published` today is a follow-up `PublishPackageVersion`
   call that omits the `unfinished` flag.
-- **`CopyPackageVersions` only supports the `generic` format, unlike real AWS.** The API
-  reference does not restrict this action's `format` parameter the way it restricts
-  `PublishPackageVersion`'s to `generic` alone; real CodeArtifact copies Maven, npm, pypi, and
-  nuget versions too. This is a Floci implementation gap, not an AWS restriction being mirrored:
-  Maven, npm, pypi, and nuget publish straight to their own sidecar and keep no `packageVersions`
-  record this could read from or write to, so bridging them needs the same per-sidecar
-  fetch-then-republish shape `GetPackageVersionAsset`'s own bridge already uses, not yet built.
-  `includeFromUpstream` is accepted but has no effect, since Floci has no upstream-ingestion path
-  for any format to begin with (see the upstream-resolution limitation below).
+- **`CopyPackageVersions` supports `generic` and `maven`, but not npm, pypi, or nuget yet, unlike
+  real AWS.** The API reference does not restrict this action's `format` parameter the way it
+  restricts `PublishPackageVersion`'s to `generic` alone; real CodeArtifact copies npm, pypi, and
+  nuget versions too. This remaining three-way gap is a Floci implementation gap, not an AWS
+  restriction being mirrored: every container-backed format publishes straight to its own sidecar
+  and keeps no `packageVersions` record this could read from or write to, so each needs the same
+  per-sidecar fetch-then-republish shape `GetPackageVersionAsset`'s own bridge already uses.
+  `maven`'s Reposilite sidecar already had a write path (`mvn deploy`'s own passthrough) to build
+  this on; npm, pypi, and nuget each need their own native-publish-protocol-accurate write path
+  built and confirmed first. `includeFromUpstream` is accepted but has no effect, since Floci has
+  no upstream-ingestion path for any format to begin with (see the upstream-resolution limitation
+  below). A `maven` copy retains byte-for-byte source assets but does not yet attempt full
+  cross-call rollback on a mid-copy sidecar failure: a best-effort compensating cleanup restores or
+  removes whatever this call itself touched, preserving the original error, but a Reposilite outage
+  mid-cleanup can still leave a version in an inconsistent state, the same residual risk the
+  generic path's own write-level failure handling already accepts. A single call also holds every
+  fetched `maven` asset in memory until the whole batch's destination writes complete, so a batch
+  of many large assets is bounded by available heap, not disk; the same nominal-quota tradeoff the
+  5 GB limitation below already accepts elsewhere.
 - **The 5 GB asset size quota is nominal.** `PublishPackageVersion` and the Maven, pypi, and
   nuget repository endpoints all receive the request body as a single byte array before Floci ever
   checks its length, so a request already large enough to exhaust available heap fails before the

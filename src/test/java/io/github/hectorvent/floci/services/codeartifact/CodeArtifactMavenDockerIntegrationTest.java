@@ -461,6 +461,91 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     /**
+     * The real-world gap this closes: {@code CopyPackageVersions} used to only support the
+     * generic format, since Maven, npm, pypi, and nuget all keep their published assets straight
+     * in their own sidecar rather than a {@code packageVersions} record. Confirms the bridge
+     * reads every asset from the real Reposilite sidecar (not a mock) and writes them to the
+     * destination repository's own Reposilite path, byte for byte. {@code other-repo} is the
+     * empty repository {@link #repositoriesAreIsolatedFromEachOther} already created and never
+     * published to.
+     */
+    @Test
+    @Order(18)
+    void copyPackageVersionsBridgesToTheRealReposiliteSidecar() {
+        byte[] jarBytes = "copy-me-jar-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] pomBytes = "copy-me-pom-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken).body(jarBytes)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/copyme/1.0.0/copyme-1.0.0.jar")
+                .then().statusCode(200);
+        given().header("Authorization", "Bearer " + bearerToken).body(pomBytes)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/copyme/1.0.0/copyme-1.0.0.pom")
+                .then().statusCode(200);
+
+        String revision = given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-repo&format=maven&namespace=com.example&package=copyme")
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0))
+                .extract().jsonPath().getString("successfulVersions.'1.0.0'.revision");
+        assertTrue(revision != null && !revision.isBlank());
+
+        byte[] copiedJar = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/maven/" + DOMAIN + "/other-repo/com/example/copyme/1.0.0/copyme-1.0.0.jar")
+                .then().statusCode(200)
+                .extract().asByteArray();
+        byte[] copiedPom = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/maven/" + DOMAIN + "/other-repo/com/example/copyme/1.0.0/copyme-1.0.0.pom")
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("copy-me-jar-bytes", new String(copiedJar, StandardCharsets.UTF_8));
+        assertEquals("copy-me-pom-bytes", new String(copiedPom, StandardCharsets.UTF_8));
+
+        String metadata = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/maven/" + DOMAIN + "/other-repo/com/example/copyme/maven-metadata.xml")
+                .then().statusCode(200)
+                .extract().asString();
+        assertTrue(metadata.contains("<version>1.0.0</version>"), metadata);
+        assertTrue(metadata.contains("<latest>1.0.0</latest>"), metadata);
+        assertTrue(metadata.contains("<release>1.0.0</release>"), metadata);
+    }
+
+    /**
+     * The real-world bug this closes: the destination already had {@code copyme-overwrite-1.0.0.jar}
+     * under the exact same name with different bytes, and Reposilite's own {@code
+     * redeployment: false} setting (confirmed live against this same container earlier in this
+     * class) rejects a plain PUT over it. Without deleting the old one first, this copy's PUT
+     * would come back {@code 409} even though {@code allowOverwrite} was set.
+     */
+    @Test
+    @Order(19)
+    void copyPackageVersionsOverwritesASameNamedAssetWithDifferentContentAtTheRealSidecar() {
+        byte[] oldJarBytes = "old-overwrite-jar-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] newJarBytes = "new-overwrite-jar-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken).body(oldJarBytes)
+                .put("/codeartifact/maven/" + DOMAIN + "/other-repo/com/example/copyover/1.0.0/copyover-1.0.0.jar")
+                .then().statusCode(200);
+        given().header("Authorization", "Bearer " + bearerToken).body(newJarBytes)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/copyover/1.0.0/copyover-1.0.0.jar")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"allowOverwrite\":true}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + REPO
+                        + "&destination-repository=other-repo&format=maven&namespace=com.example&package=copyover")
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+
+        byte[] copied = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/maven/" + DOMAIN + "/other-repo/com/example/copyover/1.0.0/copyover-1.0.0.jar")
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("new-overwrite-jar-bytes", new String(copied, StandardCharsets.UTF_8));
+    }
+
+    /**
      * A throwaway groupId/artifactId, not {@link #GAV}: deleting it exercises Reposilite's real
      * directory delete (confirmed live before this was built: a single {@code DELETE} on the
      * group/artifact path removes everything beneath it), and must not disturb the artifact every

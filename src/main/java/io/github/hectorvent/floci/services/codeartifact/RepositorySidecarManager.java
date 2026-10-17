@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -112,5 +113,62 @@ public interface RepositorySidecarManager {
     default Optional<String> fetchPackageVersionReadme(String repositoryContainerId, String domain, String repository,
             String namespace, String packageName, String version) {
         return Optional.empty();
+    }
+
+    /**
+     * Lists the asset name of every file published under one package version, for bridging
+     * {@code CopyPackageVersions} when there is no generic-format record to enumerate assets from
+     * the way {@code CodeArtifactPackageVersion#getAssets} does. The default throws {@link
+     * UnsupportedOperationException}, the same convention {@link #deletePackage} already uses for
+     * a capability not every sidecar backs yet; {@code ReposiliteSidecarClient} is the only
+     * override today.
+     */
+    default List<String> listPackageVersionAssetNames(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
+        throw new UnsupportedOperationException(format() + " package versions cannot be listed through this "
+                + "sidecar");
+    }
+
+    /**
+     * Writes one named asset's bytes directly into this sidecar's own backing storage for the
+     * given package version, for bridging {@code CopyPackageVersions}'s destination write. The
+     * caller is expected to have already removed any conflicting content at this exact path first
+     * (see {@link #deletePackageVersionAsset}) when overwriting, since this is a direct admin-level
+     * write, not a replay of whatever conflict rule the sidecar's own native publish path enforces.
+     * The default throws {@link UnsupportedOperationException}.
+     */
+    default void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, byte[] content) {
+        throw new UnsupportedOperationException(format() + " package versions cannot be copied through this "
+                + "sidecar");
+    }
+
+    /**
+     * Deletes one already-confirmed-present named asset from this sidecar's own backing storage
+     * for the given package version, used by {@code CopyPackageVersions}'s overwrite path to drop
+     * an asset the destination version held that the source version no longer does, and to clear
+     * the way for {@link #storePackageVersionAsset} to replace an asset whose content differs. The
+     * default throws {@link UnsupportedOperationException}.
+     */
+    default void deletePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName) {
+        throw new UnsupportedOperationException(format() + " package version assets cannot be deleted through "
+                + "this sidecar");
+    }
+
+    /**
+     * Records that {@code version} now exists under this package, for whatever artifact-level
+     * version listing this format's sidecar keeps separately from the version directory itself
+     * (one {@link #storePackageVersionAsset}/{@link #deletePackageVersionAsset} call already
+     * writes to), so a real client resolving "what versions does this artifact have" sees it.
+     * The default is a no-op: most formats have no such separate listing, since their package
+     * document is derived live from the version directories those two methods already maintain.
+     * {@code ReposiliteSidecarClient} overrides this: Maven's group/artifact-level {@code
+     * maven-metadata.xml} is a distinct upload a real {@code mvn deploy} always also PUTs,
+     * outside the version directory {@link #listPackageVersionAssetNames} enumerates, so nothing
+     * else here ever touches it on {@code maven}'s behalf.
+     */
+    default void recordVersionAvailable(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version) {
     }
 }
