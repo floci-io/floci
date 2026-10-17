@@ -1,21 +1,6 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
-import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
-import io.github.hectorvent.floci.services.ecs.EcsService;
-import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
-import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
-import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
-import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.scheduler.SchedulerController;
-import io.github.hectorvent.floci.services.scheduler.SchedulerService;
-import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
-import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
@@ -26,7 +11,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
-import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -231,29 +215,12 @@ class AslExecutorNestedSyncFailureTest {
     private AslExecutor newExecutor() {
         Instance<StepFunctionsService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(sfnService);
-        return new AslExecutor(
-                mock(LambdaExecutorService.class),
-                mock(LambdaFunctionStore.class),
-                mock(DynamoDbFacade.class),
-                mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
-                mock(CloudFormationQueryHandler.class),
-                mock(Ec2Service.class),
-                mock(S3Service.class),
-                mock(EcsService.class),
-                mock(EcsJsonHandler.class),
-                mock(EventBridgeHandler.class),
-                mock(SchedulerService.class),
-                mock(SchedulerController.class),
-                objectMapper,
-                new JsonataEvaluator(objectMapper),
-                instance,
-                mock(EmulatorConfig.class),
-                null,
-                null,
-                Clock.systemUTC(),
-                nanos -> { },
-                null);
+        return AslExecutorFixture.builder()
+                .objectMapper(objectMapper)
+                .sfnService(instance)
+                .customResourceLiveness(null)
+                .sleeper(nanos -> { })
+                .build();
     }
 
     private Execution run(String mode, String catcher) {

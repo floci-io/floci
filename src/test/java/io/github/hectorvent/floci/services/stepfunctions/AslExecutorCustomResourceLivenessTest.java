@@ -1,24 +1,17 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
-import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
-import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.mutiny.core.Vertx;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -74,23 +67,13 @@ class AslExecutorCustomResourceLivenessTest {
         when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(new InvokeResult(200, null, "{}".getBytes(), null, "poll-request"));
 
-        executor = new AslExecutor(
-                lambdaExecutor,
-                functionStore,
-                mock(DynamoDbFacade.class),
-                mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
-                mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
-                mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
-                mock(S3Service.class),
-                mock(io.github.hectorvent.floci.services.ecs.EcsService.class),
-                mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
-                mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerService.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
-                objectMapper,
-                new JsonataEvaluator(objectMapper),
-                mock(Instance.class), mock(EmulatorConfig.class), vertx, customResourceLiveness);
+        executor = AslExecutorFixture.builder()
+                .lambdaExecutor(lambdaExecutor)
+                .functionStore(functionStore)
+                .objectMapper(objectMapper)
+                .vertx(vertx)
+                .customResourceLiveness(customResourceLiveness)
+                .build();
     }
 
     @Test

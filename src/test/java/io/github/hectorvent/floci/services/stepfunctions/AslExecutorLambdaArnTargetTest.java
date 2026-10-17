@@ -3,13 +3,6 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
-import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
-import io.github.hectorvent.floci.services.ecs.EcsService;
-import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.lambda.LambdaAliasStore;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
@@ -17,17 +10,11 @@ import io.github.hectorvent.floci.services.lambda.LambdaTargetResolver;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
-import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.scheduler.SchedulerController;
-import io.github.hectorvent.floci.services.scheduler.SchedulerService;
-import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
-import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.mutiny.core.Vertx;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -96,24 +83,15 @@ class AslExecutorLambdaArnTargetTest {
     }
 
     private AslExecutor newExecutor(EmulatorConfig config, LambdaTaskAuthorizer authorizer) {
-        return new AslExecutor(
-                lambdaExecutor,
-                new LambdaTargetResolver(functionStore, mock(LambdaAliasStore.class)),
-                mock(DynamoDbFacade.class),
-                mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
-                mock(CloudFormationQueryHandler.class),
-                mock(Ec2Service.class),
-                mock(S3Service.class),
-                mock(EcsService.class),
-                mock(EcsJsonHandler.class),
-                mock(EventBridgeHandler.class),
-                mock(SchedulerService.class),
-                mock(SchedulerController.class),
-                null,
-                objectMapper,
-                new JsonataEvaluator(objectMapper),
-                mock(Instance.class), config, vertx, null, null, null, authorizer);
+        return AslExecutorFixture.builder()
+                .lambdaExecutor(lambdaExecutor)
+                .targetResolver(new LambdaTargetResolver(functionStore, mock(LambdaAliasStore.class)))
+                .objectMapper(objectMapper)
+                .config(config)
+                .vertx(vertx)
+                .customResourceLiveness(null)
+                .lambdaTaskAuthorizer(authorizer)
+                .build();
     }
 
     private static LambdaFunction function(String account, String region) {

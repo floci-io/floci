@@ -3,18 +3,12 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
-import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
-import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
-import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
-import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
@@ -23,7 +17,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
-import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -86,29 +79,15 @@ class AslExecutorEcsRunTaskModeTest {
         Instance<StepFunctionsService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(sfnService);
 
-        return new AslExecutor(
-                mock(LambdaExecutorService.class),
-                mock(LambdaFunctionStore.class),
-                mock(DynamoDbFacade.class),
-                mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
-                mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
-                mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
-                mock(io.github.hectorvent.floci.services.s3.S3Service.class),
-                ecsService,
-                ecsJsonHandler,
-                mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerService.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
-                objectMapper,
-                new JsonataEvaluator(objectMapper),
-                instance,
-                mock(EmulatorConfig.class),
-                null,
-                null,
-                Clock.systemUTC(),
-                sleeper,
-                30);
+        return AslExecutorFixture.builder()
+                .ecsService(ecsService)
+                .ecsJsonHandler(ecsJsonHandler)
+                .objectMapper(objectMapper)
+                .sfnService(instance)
+                .customResourceLiveness(null)
+                .sleeper(sleeper)
+                .maxWaitSeconds(30)
+                .build();
     }
 
     @Test

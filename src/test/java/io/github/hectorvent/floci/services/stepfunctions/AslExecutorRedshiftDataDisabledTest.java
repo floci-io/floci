@@ -53,9 +53,13 @@ class AslExecutorRedshiftDataDisabledTest {
         RedshiftDataService service = mock(RedshiftDataService.class);
         when(service.listStatements(any())).thenReturn(objectMapper.createObjectNode());
         RedshiftDataJsonHandler handler = spy(new RedshiftDataJsonHandler(service));
-        AslExecutor executor = new AslExecutor(null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, objectMapper,
-                new JsonataEvaluator(objectMapper), null, config, null, null, handler, serviceRegistry, null);
+        AslExecutor executor = AslExecutorFixture.builder()
+                .objectMapper(objectMapper)
+                .config(config)
+                .customResourceLiveness(null)
+                .redshiftDataHandler(handler)
+                .serviceRegistry(serviceRegistry)
+                .build();
 
         StateMachine stateMachine = new StateMachine();
         stateMachine.setStateMachineArn("arn:aws:states:us-east-1:000000000000:stateMachine:disabled-data");

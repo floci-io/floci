@@ -2,20 +2,11 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
-import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
-import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
-import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.mutiny.core.Vertx;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,7 +20,6 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
 
 /**
  * Guards that an {@link Error} escaping a state ends the execution instead of leaving it RUNNING
@@ -72,24 +62,11 @@ class AslExecutorErrorTerminationTest {
 
     @BeforeEach
     void setUp() {
-        executor = new AslExecutor(
-                mock(LambdaExecutorService.class),
-                mock(LambdaFunctionStore.class),
-                mock(DynamoDbFacade.class),
-                mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
-                mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
-                mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
-                mock(S3Service.class),
-                mock(io.github.hectorvent.floci.services.ecs.EcsService.class),
-                mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
-                mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerService.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
-                objectMapper,
-                new CrashingJsonataEvaluator(objectMapper),
-                mock(Instance.class), mock(EmulatorConfig.class), vertx,
-                mock(io.github.hectorvent.floci.core.common.CustomResourceLiveness.class));
+        executor = AslExecutorFixture.builder()
+                .objectMapper(objectMapper)
+                .jsonataEvaluator(new CrashingJsonataEvaluator(objectMapper))
+                .vertx(vertx)
+                .build();
     }
 
     private static final String PASS_WITH_JSONATA_OUTPUT = """

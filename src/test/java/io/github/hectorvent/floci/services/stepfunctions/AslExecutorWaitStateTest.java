@@ -1,26 +1,9 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
-import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
-import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
-import io.github.hectorvent.floci.services.ecs.EcsService;
-import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
-import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
-import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
-import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.scheduler.SchedulerController;
-import io.github.hectorvent.floci.services.scheduler.SchedulerService;
-import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
-import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
-import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -32,7 +15,6 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
 
 /**
  * Wait states must honor {@code Seconds}, {@code SecondsPath}, {@code Timestamp}, and
@@ -197,30 +179,12 @@ class AslExecutorWaitStateTest {
 
     private static AslExecutor newExecutor(RecordingSleeper sleeper, int maxWaitSeconds) {
         ObjectMapper objectMapper = new ObjectMapper();
-        return new AslExecutor(
-                mock(LambdaExecutorService.class),
-                mock(LambdaFunctionStore.class),
-                mock(DynamoDbFacade.class),
-                mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class),
-                mock(SnsJsonHandler.class),
-                mock(CloudFormationQueryHandler.class),
-                mock(Ec2Service.class),
-                mock(S3Service.class),
-                mock(EcsService.class),
-                mock(EcsJsonHandler.class),
-                mock(EventBridgeHandler.class),
-                mock(SchedulerService.class),
-                mock(SchedulerController.class),
-                objectMapper,
-                new JsonataEvaluator(objectMapper),
-                mock(Instance.class),
-                mock(EmulatorConfig.class),
-                null,
-                mock(CustomResourceLiveness.class),
-                Clock.fixed(NOW, ZoneOffset.UTC),
-                sleeper,
-                maxWaitSeconds);
+        return AslExecutorFixture.builder()
+                .objectMapper(objectMapper)
+                .clock(Clock.fixed(NOW, ZoneOffset.UTC))
+                .sleeper(sleeper)
+                .maxWaitSeconds(maxWaitSeconds)
+                .build();
     }
 
     private static Execution run(AslExecutor executor, String definition, String input) {

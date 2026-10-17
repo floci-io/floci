@@ -2,14 +2,6 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
-import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
-import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
-import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
-import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -17,7 +9,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
 
 /**
  * Unit coverage for the JSONPath/intrinsic features DPS's provisioning state machine relies on:
@@ -32,26 +23,10 @@ class AslExecutorPathIntrinsicsTest {
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
-        executor = new AslExecutor(
-                mock(LambdaExecutorService.class),
-                mock(LambdaFunctionStore.class),
-                mock(DynamoDbFacade.class),
-                mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
-                mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
-                mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
-                mock(io.github.hectorvent.floci.services.s3.S3Service.class),
-                mock(io.github.hectorvent.floci.services.ecs.EcsService.class),
-                mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
-                mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerService.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
-                mapper,
-                new JsonataEvaluator(mapper),
-                mock(Instance.class),
-                mock(EmulatorConfig.class),
-                null,
-                null);
+        executor = AslExecutorFixture.builder()
+                .objectMapper(mapper)
+                .customResourceLiveness(null)
+                .build();
     }
 
     @Test

@@ -2,13 +2,6 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
-import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
-import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
-import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.MockedResponseStep;
@@ -64,24 +57,12 @@ class AslExecutorBranchHistoryEventsTest {
         when(sfnService.get()).thenReturn(mock(StepFunctionsService.class));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().stepfunctions().maxWaitSeconds()).thenReturn(30);
-        executor = new AslExecutor(
-                mock(LambdaExecutorService.class),
-                mock(LambdaFunctionStore.class),
-                mock(DynamoDbFacade.class),
-                mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
-                mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
-                mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
-                mock(S3Service.class),
-                mock(io.github.hectorvent.floci.services.ecs.EcsService.class),
-                mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
-                mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerService.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
-                objectMapper,
-                new JsonataEvaluator(objectMapper),
-                sfnService, config, vertx,
-                mock(io.github.hectorvent.floci.core.common.CustomResourceLiveness.class));
+        executor = AslExecutorFixture.builder()
+                .objectMapper(objectMapper)
+                .sfnService(sfnService)
+                .config(config)
+                .vertx(vertx)
+                .build();
     }
 
     @Test

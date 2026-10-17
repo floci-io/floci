@@ -1,23 +1,9 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
-import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
-import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
-import io.github.hectorvent.floci.services.ecs.EcsService;
-import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
-import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
-import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
-import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
-import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,7 +12,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.Mockito.mock;
 
 class AslExecutorStatePathTest {
 
@@ -36,25 +21,10 @@ class AslExecutorStatePathTest {
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
-        executor = new AslExecutor(
-                mock(LambdaExecutorService.class),
-                mock(LambdaFunctionStore.class),
-                mock(DynamoDbFacade.class),
-                mock(DynamoDbJsonHandler.class),
-                mock(SqsJsonHandler.class), mock(SnsJsonHandler.class),
-                mock(CloudFormationQueryHandler.class),
-                mock(Ec2Service.class),
-                mock(S3Service.class),
-                mock(EcsService.class),
-                mock(EcsJsonHandler.class),
-                mock(io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerService.class),
-                mock(io.github.hectorvent.floci.services.scheduler.SchedulerController.class),
-                mapper,
-                new JsonataEvaluator(mapper),
-                mock(Instance.class),
-                mock(EmulatorConfig.class),
-                null, null);
+        executor = AslExecutorFixture.builder()
+                .objectMapper(mapper)
+                .customResourceLiveness(null)
+                .build();
     }
 
     @AfterEach
