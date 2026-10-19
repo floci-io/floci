@@ -58,4 +58,39 @@ must provide one (the instance ID is in the guest's `AWS_EC2_INSTANCE_ID` enviro
   `ec2:osuser` condition key.
 - The signing material lives in memory: a restart issues a new intermediate and signers under the
   same local CA, so guests keep verifying.
-- EC2 Instance Connect Endpoint tunnels.
+
+## Instance Connect Endpoint tunnels
+
+`aws ec2-instance-connect open-tunnel` and `aws ec2-instance-connect ssh --connection-type eice`
+open a SigV4-presigned WebSocket to `wss://<endpoint DnsName>/openTunnel`, and binary frames carry
+the TCP stream to the instance. Endpoint DNS names are `<endpoint id>.localhost.floci.io`, which
+public DNS resolves to `127.0.0.1` and Floci's wildcard certificate covers.
+
+Floci serves `/openTunnel` on every listener, plain HTTP included, but the AWS CLI only dials
+`wss://` on port 443. So the CLI needs `FLOCI_TLS_ENABLED=true`, the client's loopback port 443
+must reach Floci's port (publish `127.0.0.1:443:4566`, or forward it inside a client container),
+and the operating system's trust store (not `AWS_CA_BUNDLE`, which the tunnel's TLS ignores) must
+trust Floci's local CA (`GET /_floci/ca.pem`).
+
+The route sits outside Floci's JAX-RS request filters, so it applies their rules itself. Before the
+WebSocket upgrade, Floci checks what AWS checks and answers a refusal as an HTTP error the CLI
+prints:
+
+| Check | Refusal |
+| --- | --- |
+| The URL is presigned for `ec2-instance-connect`, `X-Amz-Expires` is 1 to 604800 seconds, the URL has not expired, and it was not signed more than five minutes ahead | 403 |
+| With `floci.auth.validate-signatures`, the signature verifies against the access key's secret (the CLI signs `GET /openTunnel`, the query and `host`) | 403 |
+| With IAM enforcement, the access key is known and is allowed `ec2-instance-connect:OpenTunnel` on the endpoint's ARN | 403 |
+| `remotePort` is 22 or 3389, `maxTunnelDuration` is 1 to 3600 seconds | 400 |
+| The endpoint exists, in a usable state, in the account the credential's access key belongs to | 404 |
+| A running instance holds `privateIpAddress` in the endpoint's VPC | 404 |
+| The endpoint's security groups allow the port out to the instance, and the instance's allow it in from the endpoint's address or groups | 403 |
+| The instance accepts the TCP connection | 504 |
+
+The account is resolved from the access key as for every other request: a 12-digit key is that
+account, an IAM or session key is its owner's, and anything else is the default account. With
+signature validation off (the default) the signature is not checked, as for every other service.
+
+The tunnel closes after `maxTunnelDuration` (3600 seconds by default), and either side closing
+closes the other. `PreserveClientIp` is recorded but not modelled: the instance always sees, and
+its security groups are evaluated against, the endpoint's own address and groups.

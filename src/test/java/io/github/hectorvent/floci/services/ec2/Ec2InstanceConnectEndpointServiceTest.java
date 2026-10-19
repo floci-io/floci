@@ -4,8 +4,13 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceConnectEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
@@ -294,5 +299,53 @@ class Ec2InstanceConnectEndpointServiceTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void tunnelReachNeedsTheEndpointsEgressAndTheInstancesIngress() {
+        Ec2Service service = newService();
+        String vpcId = service.createVpc(REGION, "10.73.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.73.1.0/24", "us-east-1a").getSubnetId();
+        String eiceGroup = service.createSecurityGroup(REGION, "eice", "x", vpcId).getGroupId();
+        String hostGroup = service.createSecurityGroup(REGION, "host", "x", vpcId).getGroupId();
+        service.revokeSecurityGroupEgress(REGION, eiceGroup, List.of(permission("-1", null, null, null, "0.0.0.0/0")));
+        service.authorizeSecurityGroupEgress(REGION, eiceGroup, List.of(permission("tcp", 22, 22, hostGroup, null)));
+        Instance instance = service.runInstances(REGION, "ami-1234567890abcdef0", "t3.micro", 1, 1, null,
+                List.of(hostGroup), subnetId, null, List.of(), null, null).getInstances().getFirst();
+        InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint(REGION, subnetId,
+                List.of(eiceGroup), null, null, List.of(), null);
+
+        assertFalse(service.instanceConnectEndpointMayReach(endpoint, instance, 22), "no ingress on the host yet");
+        service.authorizeSecurityGroupIngress(REGION, hostGroup, List.of(permission("tcp", 22, 22, eiceGroup, null)));
+        assertTrue(service.instanceConnectEndpointMayReach(endpoint, instance, 22));
+        assertFalse(service.instanceConnectEndpointMayReach(endpoint, instance, 3389), "the endpoint may only send 22");
+        assertTrue(service.findRunningInstanceByPrivateIp(REGION, vpcId, instance.getPrivateIpAddress()).isEmpty(),
+                "a pending instance is not a tunnel target");
+        // Mock mode has no container to report the launch; mark it running as the launch would.
+        service.getInstance(REGION, instance.getInstanceId()).orElseThrow().setState(InstanceState.running());
+        assertEquals(instance.getInstanceId(), service.findRunningInstanceByPrivateIp(REGION, vpcId,
+                instance.getPrivateIpAddress()).orElseThrow().getInstanceId());
+
+        service.deleteInstanceConnectEndpoint(REGION, endpoint.getInstanceConnectEndpointId());
+        assertTrue(service.findUsableInstanceConnectEndpoint(REGION, endpoint.getInstanceConnectEndpointId())
+                .isEmpty());
+    }
+
+    private static IpPermission permission(String protocol, Integer from, Integer to, String groupId, String cidr) {
+        IpPermission permission = new IpPermission();
+        permission.setIpProtocol(protocol);
+        permission.setFromPort(from);
+        permission.setToPort(to);
+        if (groupId != null) {
+            UserIdGroupPair pair = new UserIdGroupPair();
+            pair.setGroupId(groupId);
+            permission.setUserIdGroupPairs(new ArrayList<>(List.of(pair)));
+        }
+        if (cidr != null) {
+            IpRange range = new IpRange();
+            range.setCidrIp(cidr);
+            permission.setIpRanges(new ArrayList<>(List.of(range)));
+        }
+        return permission;
     }
 }
