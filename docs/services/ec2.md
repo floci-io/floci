@@ -771,6 +771,16 @@ an instance, network interface, NAT gateway or interface endpoint already holds 
 parameters (`SecondaryAllocationIds`, `SecondaryPrivateIpAddresses` and
 `SecondaryPrivateIpAddressCount`) fail with `UnsupportedOperation` before anything is created.
 
+### EC2 Instance Connect Endpoints
+
+| Action | Description |
+|--------|-------------|
+| CreateInstanceConnectEndpoint | Creates an endpoint in a subnet, `create-complete` at once, with a private address from the subnet. |
+| DescribeInstanceConnectEndpoints | Lists endpoints; filters `instance-connect-endpoint-id`, `state`, `vpc-id`, `subnet-id`, `availability-zone`, `owner-id`, `tag:<key>`, `tag-key`. |
+| DeleteInstanceConnectEndpoint | Deletes an endpoint and answers with it in `delete-in-progress`. |
+
+A repeated `ClientToken` returns the endpoint the first call created (`IdempotentParameterMismatch` when reused with another subnet). While an endpoint exists, `DeleteSubnet` on its subnet and `DeleteVpc` on its VPC fail with `DependencyViolation`, as on AWS. `MaxResults`/`NextToken` are ignored (every match is returned), and `publicDnsNames` carries only the `ipv4` names. The endpoint's tunnel (`openTunnel`) is not served yet.
+
 ### Capacity Reservations
 
 | Action | Description |
