@@ -4,7 +4,10 @@
 
 ## Instance Execution Model
 
-`RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest.
+`RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest. Those guests also get the Docker host's `/lib/modules` read-only, so `modprobe` finds modules the shared kernel already has (for example `br_netfilter`, which Kubernetes node setup loads); the guest cannot load a module the host kernel lacks.
+
+!!! warning "Systemd guests can load modules into the host kernel"
+    A systemd guest runs privileged unless security-group enforcement is on, and with the host's `/lib/modules` mounted it can `modprobe` any module that tree holds. The module loads into the **shared** kernel of the Docker host (or Docker Desktop / OrbStack VM), not into the guest. User data or an AMI that loads modules therefore changes the machine Floci runs on. Run systemd catalog images only with user data you would run on that host yourself, and prefer a disposable VM or CI runner for untrusted workloads.
 
 | EC2 state | Docker operation |
 |---|---|

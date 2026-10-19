@@ -723,7 +723,11 @@ public class Ec2ContainerManager {
                     .withCgroupnsMode("host")
                     .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run"))
                     .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run/lock"))
-                    .withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+                    .withBind("/sys/fs/cgroup", "/sys/fs/cgroup")
+                    // The guest shares the Docker host's kernel but ships none of its modules, so
+                    // `modprobe br_netfilter` (Kubernetes node setup) fails with "not found" even
+                    // when the module is built in. kind binds the host's tree the same way.
+                    .withReadOnlyBind("/lib/modules", "/lib/modules");
         }
         return specBuilder.build();
     }
