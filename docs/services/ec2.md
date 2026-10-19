@@ -6,6 +6,8 @@
 
 `RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest.
 
+A systemd guest gets a private cgroup namespace, as kind runs its nodes, so its systemd owns its own cgroup subtree and two guests running Kubernetes nodes do not share (and tear down) each other's `kubepods.slice`. Under security-group enforcement the guest runs unprivileged, and Docker mounts an unprivileged container's private cgroupfs read-only; there the guest keeps the host's cgroup namespace and a read-write bind of `/sys/fs/cgroup`, so it boots, but its cgroups are shared with the host and with other such guests. The private namespace was measured on OrbStack (cgroup v2); cgroup v1 hosts are untested.
+
 | EC2 state | Docker operation |
 |---|---|
 | `pending → running` | Container created and started |
