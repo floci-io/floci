@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -958,6 +959,13 @@ public class Route53Service implements Resettable {
 
     private void validateChange(String action, ResourceRecordSet rrs,
                                 List<ResourceRecordSet> current, String zoneName) {
+        String recordName = normalizeName(rrs.getName()).toLowerCase(Locale.ROOT);
+        String zone = normalizeName(zoneName).toLowerCase(Locale.ROOT);
+        if (!recordName.equals(zone) && !recordName.endsWith("." + zone)) {
+            throw new AwsException("InvalidChangeBatch",
+                    "RRSet with DNS name " + normalizeName(rrs.getName()) + " is not permitted in zone "
+                            + normalizeName(zoneName), 400);
+        }
         if ("DELETE".equals(action) && isApexSoaOrNs(rrs, zoneName)) {
             throw new AwsException("InvalidChangeBatch",
                     "Invalid resource record set: Deleting the SOA or NS record at the zone apex is not permitted.", 400);
