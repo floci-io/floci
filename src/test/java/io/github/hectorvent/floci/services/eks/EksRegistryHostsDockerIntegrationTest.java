@@ -435,13 +435,6 @@ class EksRegistryHostsDockerIntegrationTest {
     }
 
     private ContainerExec.Result execInContainerWithExitCode(String containerId, String[] cmd) {
-        try {
-            return ContainerExec.run(dockerClient, containerId, cmd, 30);
-        } catch (RuntimeException failure) {
-            if (Thread.currentThread().isInterrupted()) {
-                throw failure;
-            }
-            return new ContainerExec.Result(-1, "", failure.toString(), false);
-        }
+        return ContainerExec.run(dockerClient, containerId, cmd, 30);
     }
 }
