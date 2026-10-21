@@ -56,6 +56,7 @@ import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -10342,5 +10343,177 @@ class RdsServiceTest {
         // Losing the writer promotes the remaining member.
         rdsService.deleteDbInstance("writer");
         assertEquals("reader", rdsService.getDbCluster("aurora").resolveWriterIdentifier());
+    }
+
+    // ── Certificates ──────────────────────────────────────────────────────────
+
+    private DbInstance createInstanceWithCa(String id, String caCertificateIdentifier) {
+        return rdsService.createDbInstance(id, "postgres", "16.3", "admin", "password", "appdb", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null, Map.of(), List.of(), null, "us-east-1",
+                true, DbInstanceSettings.defaults().withCaCertificateIdentifier(caCertificateIdentifier));
+    }
+
+    private static List<String> certificateIds(RdsService.CertificatePage page) {
+        return page.certificates().stream().map(RdsService.Certificate::certificateIdentifier).toList();
+    }
+
+    /** The values the AWS CLI reference's describe-certificates example gives for us-west-2. */
+    @Test
+    void certificatesAreTheRegionsCasAsAwsReportsThem() {
+        RdsService.CertificatePage page = rdsService.describeCertificates("us-west-2", null, null, null);
+        assertEquals(List.of("rds-ca-ecc384-g1", "rds-ca-rsa2048-g1", "rds-ca-rsa4096-g1"), certificateIds(page));
+        assertEquals("rds-ca-rsa2048-g1", page.defaultForNewLaunches());
+        assertNull(page.marker());
+        RdsService.Certificate rsa2048 = page.certificates().get(1);
+        assertEquals("7c40cb42714b6fdb2b296f9bbd0e8bb364436a76", rsa2048.thumbprint());
+        assertEquals(Instant.parse("2021-05-24T21:59:00Z"), rsa2048.validFrom());
+        assertEquals(Instant.parse("2061-05-24T22:59:00Z"), rsa2048.validTill());
+        assertEquals("arn:aws:rds:us-west-2::cert:rds-ca-rsa2048-g1", rsa2048.certificateArn());
+        assertFalse(rsa2048.customerOverride());
+        assertNull(rsa2048.customerOverrideValidTill());
+        assertEquals("2ee3dcc06e50192559b13929e73484354f23387d", page.certificates().get(0).thumbprint());
+        assertEquals("19da4f2af579a8ae1f6a0fa77aa5befd874b4cab", page.certificates().get(2).thumbprint());
+
+        // Each Region has its own CAs.
+        assertNotEquals(rsa2048.thumbprint(), rdsService.describeCertificates("us-east-1", null, null, null)
+                .certificates().get(1).thumbprint());
+    }
+
+    @Test
+    void certificatesFilterByIdentifierWithoutRegardToCaseAndPage() {
+        assertEquals(List.of("rds-ca-ecc384-g1"), certificateIds(
+                rdsService.describeCertificates("us-east-1", "RDS-CA-ECC384-G1", null, null)));
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> rdsService.describeCertificates("us-east-1", "rds-ca-2019", null, null));
+        assertEquals("CertificateNotFound", unknown.getErrorCode());
+        assertEquals(404, unknown.getHttpStatus());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.describeCertificates("us-east-1", null, 19, null)).getErrorCode());
+        assertEquals(List.of("rds-ca-rsa4096-g1"), certificateIds(
+                rdsService.describeCertificates("us-east-1", null, 20, "2")));
+    }
+
+    @Test
+    void aRegionWithoutVendoredCertificatesUsesUsEast1sUnderItsOwnArn() {
+        RdsService.Certificate custom = rdsService.describeCertificates("xx-custom-1", "rds-ca-rsa2048-g1", null,
+                null).certificates().get(0);
+        RdsService.Certificate usEast1 = rdsService.describeCertificates("us-east-1", "rds-ca-rsa2048-g1", null,
+                null).certificates().get(0);
+        assertEquals(usEast1.thumbprint(), custom.thumbprint());
+        assertEquals("arn:aws:rds:xx-custom-1::cert:rds-ca-rsa2048-g1", custom.certificateArn());
+    }
+
+    /** The user guide lists six Regions without rds-ca-rsa4096-g1 and rds-ca-ecc384-g1; Mumbai is one. */
+    @Test
+    void aRegionWithoutTheNewerCasOffersOnlyRsa2048() {
+        assertEquals(List.of("rds-ca-rsa2048-g1"),
+                certificateIds(rdsService.describeCertificates("ap-south-1", null, null, null)));
+        assertEquals("CertificateNotFound", assertThrows(AwsException.class,
+                () -> rdsService.describeCertificates("ap-south-1", "rds-ca-ecc384-g1", null, null)).getErrorCode());
+        assertEquals("CertificateNotFound", assertThrows(AwsException.class,
+                () -> rdsService.modifyCertificates("ap-south-1", "rds-ca-rsa4096-g1", null)).getErrorCode());
+    }
+
+    @Test
+    void modifyCertificatesSetsAndRemovesTheDefaultForNewInstances() {
+        RdsService.Certificate set = rdsService.modifyCertificates("us-east-1", "RDS-CA-ECC384-G1", null);
+        assertEquals("rds-ca-ecc384-g1", set.certificateIdentifier());
+        assertTrue(set.customerOverride());
+        assertEquals(set.validTill(), set.customerOverrideValidTill());
+
+        RdsService.CertificatePage page = rdsService.describeCertificates("us-east-1", null, null, null);
+        assertEquals("rds-ca-ecc384-g1", page.defaultForNewLaunches());
+        assertEquals(List.of(true, false, false),
+                page.certificates().stream().map(RdsService.Certificate::customerOverride).toList());
+        // The override is the account's in this Region only.
+        assertEquals("rds-ca-rsa2048-g1",
+                rdsService.describeCertificates("us-west-2", null, null, null).defaultForNewLaunches());
+
+        RdsService.Certificate removed = rdsService.modifyCertificates("us-east-1", null, true);
+        assertEquals("rds-ca-ecc384-g1", removed.certificateIdentifier());
+        assertFalse(removed.customerOverride());
+        assertEquals("rds-ca-rsa2048-g1",
+                rdsService.describeCertificates("us-east-1", null, null, null).defaultForNewLaunches());
+
+        for (Executable both : List.<Executable>of(
+                () -> rdsService.modifyCertificates("us-east-1", "rds-ca-rsa4096-g1", true),
+                () -> rdsService.modifyCertificates("us-east-1", null, null),
+                () -> rdsService.modifyCertificates("us-east-1", "", false))) {
+            assertEquals("InvalidParameterCombination", assertThrows(AwsException.class, both).getErrorCode());
+        }
+        assertEquals("CertificateNotFound", assertThrows(AwsException.class,
+                () -> rdsService.modifyCertificates("us-east-1", "rds-ca-2015", null)).getErrorCode());
+        assertEquals("rds-ca-rsa2048-g1",
+                rdsService.describeCertificates("us-east-1", null, null, null).defaultForNewLaunches());
+    }
+
+    @Test
+    void anInstanceTakesItsCaOrTheAccountsDefaultAndCanChangeIt() {
+        assertEquals("rds-ca-rsa2048-g1", createInstanceWithCa("plain", null).getCaCertificateIdentifier());
+        rdsService.modifyCertificates("us-east-1", "rds-ca-ecc384-g1", null);
+        assertEquals("rds-ca-ecc384-g1", createInstanceWithCa("after-override", null).getCaCertificateIdentifier());
+        DbInstance explicit = createInstanceWithCa("explicit", "RDS-CA-RSA4096-G1");
+        assertEquals("rds-ca-rsa4096-g1", explicit.getCaCertificateIdentifier());
+        // The instance keeps the CA it was given when the default moves again.
+        rdsService.modifyCertificates("us-east-1", null, true);
+        assertEquals("rds-ca-ecc384-g1", rdsService.getDbInstance("after-override").getCaCertificateIdentifier());
+
+        RdsService.InstanceCertificate details = rdsService.instanceCertificate(explicit);
+        assertEquals("rds-ca-rsa4096-g1", details.caIdentifier());
+        assertEquals(rdsService.describeCertificates("us-east-1", "rds-ca-rsa4096-g1", null, null)
+                .certificates().get(0).validTill(), details.validTill());
+
+        AwsException unknown = assertThrows(AwsException.class, () -> createInstanceWithCa("refused", "rds-ca-2019"));
+        assertEquals("CertificateNotFound", unknown.getErrorCode());
+        assertEquals("DBInstanceNotFound", assertThrows(AwsException.class,
+                () -> rdsService.getDbInstance("refused")).getErrorCode());
+
+        DbInstanceSettings change = DbInstanceSettings.unchanged().withCaCertificateIdentifier("rds-ca-ecc384-g1");
+        assertEquals("rds-ca-ecc384-g1", rdsService.modifyDbInstance("plain", null, null, null, null, null,
+                "us-east-1", null, change).getCaCertificateIdentifier());
+        DbInstanceSettings bad = DbInstanceSettings.unchanged().withCaCertificateIdentifier("rds-ca-2019");
+        assertEquals("CertificateNotFound", assertThrows(AwsException.class, () -> rdsService.modifyDbInstance(
+                "plain", null, null, null, null, null, "us-east-1", null, bad)).getErrorCode());
+        assertEquals("rds-ca-ecc384-g1", rdsService.getDbInstance("plain").getCaCertificateIdentifier());
+        // A modify that leaves the CA out, or sends it blank, keeps it.
+        assertEquals("rds-ca-ecc384-g1", rdsService.modifyDbInstance("plain", null, true, null)
+                .getCaCertificateIdentifier());
+        DbInstanceSettings blank = DbInstanceSettings.unchanged().withCaCertificateIdentifier("");
+        assertEquals("rds-ca-ecc384-g1", rdsService.modifyDbInstance("plain", null, null, null, null, null,
+                "us-east-1", null, blank).getCaCertificateIdentifier());
+    }
+
+    @Test
+    void anInstanceStoredWithoutACaReportsRdsDefaultNotTheOverride() {
+        DbInstance legacy = createInstanceWithCa("legacy", null);
+        legacy.setCaCertificateIdentifier(null);
+        // An override applies only to instances created after it.
+        rdsService.modifyCertificates("us-east-1", "rds-ca-rsa4096-g1", null);
+        assertEquals("rds-ca-rsa2048-g1", rdsService.instanceCertificate(legacy).caIdentifier());
+    }
+
+    @Test
+    void restoresAndReplicasTakeACa() {
+        createPostgresSource("ca-source");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+        rdsService.createDbSnapshot("ca-snapshot", "ca-source");
+
+        assertEquals("rds-ca-ecc384-g1", rdsService.restoreDbInstanceFromDbSnapshot("ca-restored", "ca-snapshot",
+                null, null, false, null, List.of(), Map.of(), "us-east-1", null, null, null, "rds-ca-ecc384-g1")
+                .getCaCertificateIdentifier());
+        assertEquals("rds-ca-rsa2048-g1", rdsService.restoreDbInstanceFromDbSnapshot("ca-default", "ca-snapshot",
+                null, null, false, null, List.of(), Map.of(), "us-east-1").getCaCertificateIdentifier());
+        assertEquals("CertificateNotFound", assertThrows(AwsException.class, () ->
+                rdsService.restoreDbInstanceFromDbSnapshot("ca-refused", "ca-snapshot", null, null, false, null,
+                        List.of(), Map.of(), "us-east-1", null, null, null, "rds-ca-2019")).getErrorCode());
+
+        assertEquals("rds-ca-rsa4096-g1", rdsService.createDbInstanceReadReplica(new ReadReplicaRequest(
+                "ca-replica", "ca-source", null, null, null, null, null, null, null, null, null, null, null, null,
+                null, Map.of(), null, "rds-ca-rsa4096-g1"), null).getCaCertificateIdentifier());
+
+        assertEquals("rds-ca-ecc384-g1", rdsService.restoreDbInstanceToPointInTime(new PointInTimeRestoreRequest(
+                "ca-pitr", "ca-source", null, null, null, true, null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null, Map.of(), null, "rds-ca-ecc384-g1"), "us-east-1")
+                .getCaCertificateIdentifier());
     }
 }

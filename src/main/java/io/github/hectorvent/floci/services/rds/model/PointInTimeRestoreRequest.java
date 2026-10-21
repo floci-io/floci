@@ -36,7 +36,40 @@ public record PointInTimeRestoreRequest(String targetDbInstanceIdentifier,
                                         String preferredBackupWindow,
                                         Boolean deletionProtection,
                                         Map<String, String> tags,
-                                 String storageType) {
+                                        String storageType,
+                                        String caCertificateIdentifier) {
+    public PointInTimeRestoreRequest(String targetDbInstanceIdentifier,
+            String sourceDbInstanceIdentifier,
+            String sourceDbiResourceId,
+            String sourceDbInstanceAutomatedBackupsArn,
+            Instant restoreTime,
+            Boolean useLatestRestorableTime,
+            String dbInstanceClass,
+            Integer port,
+            String availabilityZone,
+            Boolean multiAz,
+            Boolean autoMinorVersionUpgrade,
+            String dbName,
+            String optionGroupName,
+            String dbParameterGroupName,
+            Boolean publiclyAccessible,
+            String dbSubnetGroupName,
+            List<String> vpcSecurityGroupIds,
+            Boolean copyTagsToSnapshot,
+            Boolean iamDatabaseAuthenticationEnabled,
+            Integer backupRetentionPeriod,
+            String preferredBackupWindow,
+            Boolean deletionProtection,
+            Map<String, String> tags,
+            String storageType) {
+        this(targetDbInstanceIdentifier, sourceDbInstanceIdentifier, sourceDbiResourceId,
+                sourceDbInstanceAutomatedBackupsArn, restoreTime, useLatestRestorableTime, dbInstanceClass,
+                port, availabilityZone, multiAz, autoMinorVersionUpgrade, dbName, optionGroupName,
+                dbParameterGroupName, publiclyAccessible, dbSubnetGroupName, vpcSecurityGroupIds,
+                copyTagsToSnapshot, iamDatabaseAuthenticationEnabled, backupRetentionPeriod,
+                preferredBackupWindow, deletionProtection, tags, storageType, null);
+    }
+
 
     public PointInTimeRestoreRequest(String targetDbInstanceIdentifier,
             String sourceDbInstanceIdentifier,
@@ -66,6 +99,6 @@ public record PointInTimeRestoreRequest(String targetDbInstanceIdentifier,
                 port, availabilityZone, multiAz, autoMinorVersionUpgrade, dbName, optionGroupName,
                 dbParameterGroupName, publiclyAccessible, dbSubnetGroupName, vpcSecurityGroupIds,
                 copyTagsToSnapshot, iamDatabaseAuthenticationEnabled, backupRetentionPeriod,
-                preferredBackupWindow, deletionProtection, tags, null);
+                preferredBackupWindow, deletionProtection, tags, null, null);
     }
 }

@@ -27,7 +27,20 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                                  List<String> enabledCloudwatchLogsExports,
                                  LogExportChanges logExportChanges,
                                  Integer maxAllocatedStorage,
-                                 String storageType) {
+                                 String storageType,
+                                 String caCertificateIdentifier) {
+    public DbInstanceSettings(Boolean storageEncrypted, String kmsKeyId, Integer backupRetentionPeriod,
+                              String preferredBackupWindow, String preferredMaintenanceWindow,
+                              Boolean copyTagsToSnapshot, Integer monitoringInterval, String monitoringRoleArn,
+                              Boolean performanceInsightsEnabled, Integer performanceInsightsRetentionPeriod,
+                              String engineLifecycleSupport, List<String> enabledCloudwatchLogsExports,
+                              LogExportChanges logExportChanges, Integer maxAllocatedStorage, String storageType) {
+        this(storageEncrypted, kmsKeyId, backupRetentionPeriod, preferredBackupWindow,
+                preferredMaintenanceWindow, copyTagsToSnapshot, monitoringInterval, monitoringRoleArn,
+                performanceInsightsEnabled, performanceInsightsRetentionPeriod, engineLifecycleSupport,
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType, null);
+    }
+
 
     public DbInstanceSettings(Boolean storageEncrypted, String kmsKeyId, Integer backupRetentionPeriod,
                               String preferredBackupWindow, String preferredMaintenanceWindow,
@@ -187,7 +200,8 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 backupWindow, maintenanceWindow, copyTagsToSnapshot,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
-                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType);
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
+                caCertificateIdentifier);
     }
 
     public DbInstanceSettings withKmsKeyId(String resolvedKmsKeyId) {
@@ -195,7 +209,8 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 preferredBackupWindow, preferredMaintenanceWindow, copyTagsToSnapshot,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
-                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType);
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
+                caCertificateIdentifier);
     }
 
     public DbInstanceSettings withStorageType(String resolvedStorageType) {
@@ -203,7 +218,18 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 preferredBackupWindow, preferredMaintenanceWindow, copyTagsToSnapshot,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
-                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, resolvedStorageType);
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, resolvedStorageType,
+                caCertificateIdentifier);
+    }
+
+    /** The same settings with the CA certificate the service resolved. */
+    public DbInstanceSettings withCaCertificateIdentifier(String resolvedCaCertificateIdentifier) {
+        return new DbInstanceSettings(storageEncrypted, kmsKeyId, backupRetentionPeriod,
+                preferredBackupWindow, preferredMaintenanceWindow, copyTagsToSnapshot,
+                monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
+                performanceInsightsRetentionPeriod, engineLifecycleSupport,
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
+                resolvedCaCertificateIdentifier);
     }
 
     public void validateStorageType() {
@@ -260,6 +286,9 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         }
         if (maxAllocatedStorage != null) {
             instance.setMaxAllocatedStorage(maxAllocatedStorage);
+        }
+        if (caCertificateIdentifier != null && !caCertificateIdentifier.isBlank()) {
+            instance.setCaCertificateIdentifier(caCertificateIdentifier);
         }
     }
 }

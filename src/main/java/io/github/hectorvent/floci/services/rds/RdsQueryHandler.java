@@ -109,6 +109,8 @@ public class RdsQueryHandler {
                 case "DescribeValidDBInstanceModifications" -> handleDescribeValidDbInstanceModifications(params, region);
                 case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
                 case "DescribeEvents" -> handleDescribeEvents(params, region);
+                case "DescribeCertificates" -> handleDescribeCertificates(params, region);
+                case "ModifyCertificates" -> handleModifyCertificates(params, region);
                 case "CreateEventSubscription" -> handleCreateEventSubscription(params, region);
                 case "DescribeEventSubscriptions" -> handleDescribeEventSubscriptions(params, region);
                 case "ModifyEventSubscription" -> handleModifyEventSubscription(params, region);
@@ -618,6 +620,45 @@ public class RdsQueryHandler {
         return xml.end("EventSubscription").build();
     }
 
+    private Response handleDescribeCertificates(MultivaluedMap<String, String> params, String region) {
+        RdsService.CertificatePage page = service.describeCertificates(region, params.getFirst("CertificateIdentifier"),
+                parseOptionalInt(params.getFirst("MaxRecords")), params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder()
+                .elem("DefaultCertificateForNewLaunches", page.defaultForNewLaunches())
+                .start("Certificates");
+        for (RdsService.Certificate certificate : page.certificates()) {
+            certificateXml(xml, certificate);
+        }
+        xml.end("Certificates");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeCertificates", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleModifyCertificates(MultivaluedMap<String, String> params, String region) {
+        RdsService.Certificate certificate = service.modifyCertificates(region,
+                params.getFirst("CertificateIdentifier"), parseOptionalBoolean(params, "RemoveCustomerOverride"));
+        XmlBuilder xml = new XmlBuilder();
+        certificateXml(xml, certificate);
+        return Response.ok(AwsQueryResponse.envelope("ModifyCertificates", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private static void certificateXml(XmlBuilder xml, RdsService.Certificate certificate) {
+        xml.start("Certificate")
+                .elem("CertificateIdentifier", certificate.certificateIdentifier())
+                .elem("CertificateType", "CA")
+                .elem("Thumbprint", certificate.thumbprint())
+                .elem("ValidFrom", certificate.validFrom().toString())
+                .elem("ValidTill", certificate.validTill().toString())
+                .elem("CertificateArn", certificate.certificateArn())
+                .elem("CustomerOverride", certificate.customerOverride());
+        if (certificate.customerOverrideValidTill() != null) {
+            xml.elem("CustomerOverrideValidTill", certificate.customerOverrideValidTill().toString());
+        }
+        xml.end("Certificate");
+    }
+
     private Response handleDescribeEvents(MultivaluedMap<String, String> params, String region) {
         String sourceIdentifier = params.getFirst("SourceIdentifier");
         String sourceType = params.getFirst("SourceType");
@@ -805,7 +846,8 @@ public class RdsQueryHandler {
                 includeEncryption ? cloudwatchLogsExports(params) : null,
                 includeEncryption ? null : cloudwatchLogsExportChanges(params),
                 optionalInt(params.getFirst("MaxAllocatedStorage")),
-                params.getFirst("StorageType"));
+                params.getFirst("StorageType"),
+                params.getFirst("CACertificateIdentifier"));
     }
 
     /**
@@ -1168,7 +1210,7 @@ public class RdsQueryHandler {
                     parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
                     optionalInt(params.getFirst("AllocatedStorage")),
                     params.getFirst("ReplicaMode"),
-                    parseTags(params), params.getFirst("StorageType"));
+                    parseTags(params), params.getFirst("StorageType"), params.getFirst("CACertificateIdentifier"));
             DbInstance replica = service.createDbInstanceReadReplica(request, region);
             return Response.ok(AwsQueryResponse.envelope(
                     "CreateDBInstanceReadReplica", AwsNamespaces.RDS, dbInstanceXml(replica))).build();
@@ -1983,7 +2025,8 @@ public class RdsQueryHandler {
             DbInstance instance = service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
                     dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
                     vpcSecurityGroupIds, tags, region, requestedPort,
-                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"), params.getFirst("StorageType"));
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"), params.getFirst("StorageType"),
+                    params.getFirst("CACertificateIdentifier"));
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBInstanceFromDBSnapshot", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -2684,7 +2727,7 @@ public class RdsQueryHandler {
                     parseIntegerParam(params, "BackupRetentionPeriod"),
                     params.getFirst("PreferredBackupWindow"),
                     parseOptionalBoolean(params, "DeletionProtection"),
-                    parseTags(params), params.getFirst("StorageType"));
+                    parseTags(params), params.getFirst("StorageType"), params.getFirst("CACertificateIdentifier"));
             DbInstance instance = service.restoreDbInstanceToPointInTime(request, region);
             return Response.ok(AwsQueryResponse.envelope(
                     "RestoreDBInstanceToPointInTime", AwsNamespaces.RDS, dbInstanceXml(instance))).build();
@@ -2877,6 +2920,13 @@ public class RdsQueryHandler {
                .elem("Port", ep.port())
                .end("Endpoint");
         }
+        RdsService.InstanceCertificate ca = service.instanceCertificate(i);
+        xml.elem("CACertificateIdentifier", ca.caIdentifier())
+           .start("CertificateDetails").elem("CAIdentifier", ca.caIdentifier());
+        if (ca.validTill() != null) {
+            xml.elem("ValidTill", ca.validTill().toString());
+        }
+        xml.end("CertificateDetails");
         xml.elem("IAMDatabaseAuthenticationEnabled", i.isIamDatabaseAuthenticationEnabled())
            .elem("MultiAZ", i.isMultiAz())
            .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())

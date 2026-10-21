@@ -23,6 +23,8 @@
 # by tools/aws/regen_ecs_shapes.py.
 # src/main/resources/aws/ecr-request-shapes.json, the ECR request constraints, is generated
 # from botocore's ECR model by tools/aws/regen_ecr_shapes.py.
+# src/main/resources/aws/rds-ca-certificates.json, each Region's RDS certificate authorities, is
+# generated from the certificate bundles AWS publishes by tools/aws/regen_rds_ca_certificates.py.
 # src/test/resources/aws/rest-routes.json, the REST routes IamRestRouteCoverageTest checks, is
 # generated from botocore's models by tools/aws/regen_rest_routes.py.
 
@@ -215,6 +217,7 @@ slr-test: ## Run the service-linked role tooling's unit tests
 aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-policy catalog from local/aws (commit the result)
 	$(PYTHON) tools/aws/regen_partitions.py
 	$(PYTHON) tools/aws/regen_region_facts.py
+	$(PYTHON) tools/aws/regen_rds_ca_certificates.py
 	$(PYTHON) tools/aws/regen_dynamodb_shapes.py
 	$(PYTHON) tools/aws/regen_redshift_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_resource_groups_shapes.py
@@ -237,6 +240,12 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 		echo ""; \
 		echo "error: src/main/resources/aws/region-facts.json is out of date or malformed."; \
 		echo "       Run 'make aws-data-sync' with local/aws checked out and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_rds_ca_certificates.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/rds-ca-certificates.json is out of date or malformed."; \
+		echo "       Run 'tools/aws/regen_rds_ca_certificates.py --download', then 'make aws-data-sync', and commit the result."; \
 		exit 1; \
 	}
 	@$(PYTHON) tools/aws/regen_dynamodb_shapes.py --check || { \

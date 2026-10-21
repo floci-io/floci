@@ -383,6 +383,38 @@ teardown() {
     assert_output --partial 'true'
 }
 
+@test "rds: certificates list, an override applies to a new instance and is removed" {
+    run aws_cmd rds describe-certificates --certificate-identifier rds-ca-rsa2048-g1
+    assert_success
+    [ "$(json_get "$output" '.Certificates[0].CertificateType')" = "CA" ]
+    [ "$(json_get "$output" '.DefaultCertificateForNewLaunches')" = "rds-ca-rsa2048-g1" ]
+
+    run aws_cmd rds modify-certificates --certificate-identifier rds-ca-ecc384-g1
+    assert_success
+    [ "$(json_get "$output" '.Certificate.CustomerOverride')" = "true" ]
+
+    run aws_cmd rds create-db-instance --db-instance-identifier "$DB_ID" --engine postgres \
+        --db-instance-class db.t3.micro --allocated-storage 10
+    status_create=$status
+    create_output=$output
+    run aws_cmd rds modify-certificates --remove-customer-override
+    assert_success
+    [ "$status_create" -eq 0 ]
+    [ "$(json_get "$create_output" '.DBInstance.CACertificateIdentifier')" = "rds-ca-ecc384-g1" ]
+
+    run aws_cmd rds modify-db-instance --db-instance-identifier "$DB_ID" \
+        --ca-certificate-identifier rds-ca-rsa4096-g1 --apply-immediately
+    assert_success
+    run aws_cmd rds describe-db-instances --db-instance-identifier "$DB_ID" \
+        --query 'DBInstances[0].CertificateDetails.CAIdentifier' --output text
+    assert_success
+    assert_output 'rds-ca-rsa4096-g1'
+
+    run aws_cmd rds describe-certificates --certificate-identifier rds-ca-2019
+    assert_failure
+    assert_output --partial 'CertificateNotFound'
+}
+
 @test "rds: a KmsKeyId that names no key is refused as on AWS" {
     run aws_cmd rds create-db-instance \
         --db-instance-identifier "$DB_ID" \
