@@ -745,6 +745,76 @@ class S3ServiceTest {
     }
 
     @Test
+    void notificationFilterMatchesThePercentEncodedKey() {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notif-s3-encoded-filter"), false, lambdaInvoker,
+                new RegionResolver("us-east-1", "000000000000"));
+        service.createBucket("test-bucket", "ap-northeast-1");
+        service.putBucketNotificationConfiguration("test-bucket",
+                lambdaNotificationConfig("dt%3D2024/", ".parquet"), true);
+
+        service.putObject("test-bucket", "dt=2024/a.parquet", "v1".getBytes(StandardCharsets.UTF_8),
+                "application/octet-stream", null);
+
+        assertEquals("s3-notif-test", lambdaInvoker.functionName);
+    }
+
+    @Test
+    void notificationFilterWithPlusMatchesAKeyWithASpace() {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notif-s3-plus-filter"), false, lambdaInvoker,
+                new RegionResolver("us-east-1", "000000000000"));
+        service.createBucket("test-bucket", "ap-northeast-1");
+        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("my+folder/", ".txt"), true);
+
+        service.putObject("test-bucket", "my folder/a.txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+
+        assertEquals("s3-notif-test", lambdaInvoker.functionName);
+    }
+
+    @Test
+    void notificationFilterWithARawSpecialCharacterDoesNotMatch() {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notif-s3-raw-filter"), false, lambdaInvoker,
+                new RegionResolver("us-east-1", "000000000000"));
+        service.createBucket("test-bucket", "ap-northeast-1");
+        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("dt=2024/", ".parquet"), true);
+
+        service.putObject("test-bucket", "dt=2024/a.parquet", "v1".getBytes(StandardCharsets.UTF_8),
+                "application/octet-stream", null);
+
+        assertNull(lambdaInvoker.functionName);
+    }
+
+    @Test
+    void eventRecordCarriesTheIdOfTheConfigurationItMatched() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notif-s3-configuration-id"), false, lambdaInvoker,
+                new RegionResolver("us-east-1", "000000000000"));
+        service.createBucket("test-bucket", "us-east-1");
+        NotificationConfiguration config = new NotificationConfiguration();
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification("images-config",
+                "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
+                List.of("s3:ObjectCreated:*"), List.of(new FilterRule("prefix", "images/"))));
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification("docs-config",
+                "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
+                List.of("s3:ObjectCreated:*"), List.of(new FilterRule("prefix", "docs/"))));
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
+
+        service.putObject("test-bucket", "docs/a.txt", "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        assertEquals("docs-config",
+                onlyRecordedS3Event(lambdaInvoker).path("s3").path("configurationId").asText());
+        service.putObject("test-bucket", "images/a.png", "v1".getBytes(StandardCharsets.UTF_8), "image/png", null);
+        assertEquals("images-config",
+                onlyRecordedS3Event(lambdaInvoker).path("s3").path("configurationId").asText());
+    }
+
+    @Test
     void putObjectKeepsTheQualifierOfTheNotificationFunctionArn() {
         RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");

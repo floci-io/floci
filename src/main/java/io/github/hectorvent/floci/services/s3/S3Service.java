@@ -6417,13 +6417,16 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         String region = bucket.getRegion();
-        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled(),
+        ObjectNode event = buildS3Event(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled(),
                 sequencer);
+        // "If you use any other special characters in the value of the prefix or suffix, you must
+        // enter them in URL-encoded (percent-encoded) format", so filters see the key as the record has it.
+        String recordKey = eventRecordKey(key);
 
         for (QueueNotification qn : config.getQueueConfigurations()) {
-            if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(key)) {
+            if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(recordKey)) {
                 try {
-                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0,
+                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), s3EventJson(event, qn.id()), 0,
                             extractRegionFromArn(qn.queueArn()));
                     LOG.debugv("Fired S3 event {0} to SQS {1}", eventName, qn.queueArn());
                 } catch (Exception e) {
@@ -6433,9 +6436,9 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         for (TopicNotification tn : config.getTopicConfigurations()) {
-            if (tn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && tn.matchesKey(key)) {
+            if (tn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && tn.matchesKey(recordKey)) {
                 try {
-                    snsService.publish(tn.topicArn(), null, eventJson, "Amazon S3 Notification",
+                    snsService.publish(tn.topicArn(), null, s3EventJson(event, tn.id()), "Amazon S3 Notification",
                             extractRegionFromArn(tn.topicArn()));
                     LOG.debugv("Fired S3 event {0} to SNS {1}", eventName, tn.topicArn());
                 } catch (Exception e) {
@@ -6446,7 +6449,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
         if (lambdaInvoker != null || resolveLambdaService() != null) {
             for (LambdaNotification ln : config.getLambdaFunctionConfigurations()) {
-                if (ln.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && ln.matchesKey(key)) {
+                if (ln.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && ln.matchesKey(recordKey)) {
                     try {
                         String lambdaRegion = extractRegionFromArn(ln.functionArn());
                         String functionName = extractLambdaFunctionName(ln.functionArn());
@@ -6454,7 +6457,8 @@ public class S3Service implements Resettable, ResourceProvider {
                             throw new AwsException("InvalidParameterValueException",
                                     "Invalid Lambda function ARN: " + ln.functionArn(), 400);
                         }
-                        invokeLambda(lambdaRegion, functionName, eventJson.getBytes(StandardCharsets.UTF_8));
+                        invokeLambda(lambdaRegion, functionName,
+                                s3EventJson(event, ln.id()).getBytes(StandardCharsets.UTF_8));
                         LOG.debugv("Fired S3 event {0} to Lambda {1}", eventName, ln.functionArn());
                     } catch (Exception e) {
                         LOG.warnv("Failed to deliver S3 event to Lambda {0}: {1}", ln.functionArn(), e.getMessage());
@@ -6585,51 +6589,62 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private String buildS3EventJson(String bucketName, String key, String eventName,
+    /**
+     * One event for every destination it reaches, so they share its request id and time; each
+     * destination's copy names its own configuration through {@link #s3EventJson}.
+     */
+    private ObjectNode buildS3Event(String bucketName, String key, String eventName,
                                     S3Object obj, String region, boolean isVersionEnabled, String sequencer) {
+        String eventTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
+        long size = obj != null ? obj.getSize() : 0;
+        String eTag = obj != null && obj.getETag() != null ? obj.getETag().replace("\"", "") : "";
+        String requestId = UUID.randomUUID().toString();
+
+        ObjectNode bucketNode = objectMapper.createObjectNode();
+        bucketNode.put("name", bucketName);
+        bucketNode.put("arn", AwsArnUtils.Arn.global(bucketPartition(bucketName), "s3", "", bucketName).toString());
+
+        ObjectNode objectNode = objectMapper.createObjectNode();
+        objectNode.put("key", eventRecordKey(key));
+        objectNode.put("size", size);
+        objectNode.put("eTag", eTag);
+        if(isVersionEnabled) {
+            String versionId = obj !=null && obj.getVersionId()!=null ? obj.getVersionId() : "";
+            objectNode.put("versionId", versionId);
+        }
+        objectNode.put("sequencer", sequencer);
+        ObjectNode s3Node = objectMapper.createObjectNode();
+        s3Node.put("s3SchemaVersion", "1.0");
+        s3Node.putNull("configurationId");
+        s3Node.set("bucket", bucketNode);
+        s3Node.set("object", objectNode);
+
+        ObjectNode record = objectMapper.createObjectNode();
+        record.put("eventVersion", "2.1");
+        record.put("eventSource", "aws:s3");
+        record.put("awsRegion", region);
+        record.put("eventTime", eventTime);
+        record.put("eventName", eventName);
+        // The user guide's s3:LifecycleExpiration:Delete example names S3 itself as both.
+        boolean lifecycle = isLifecycleEvent(eventName);
+        record.putObject("userIdentity").put("principalId", lifecycle ? ServicePrincipals.of("s3") : "AWS:EMULATOR");
+        record.putObject("requestParameters")
+                .put("sourceIPAddress", lifecycle ? ServicePrincipals.of("s3") : "127.0.0.1");
+        record.putObject("responseElements").put("x-amz-request-id", requestId);
+        record.set("s3", s3Node);
+
+        ObjectNode root = objectMapper.createObjectNode();
+        root.putArray("Records").add(record);
+        return root;
+    }
+
+    /** The event as sent to one destination: {@code configurationId} is the ID of the configuration it matched. */
+    private String s3EventJson(ObjectNode event, String configurationId) {
+        ((ObjectNode) event.path("Records").path(0).path("s3")).put("configurationId", configurationId);
         try {
-            String eventTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
-            long size = obj != null ? obj.getSize() : 0;
-            String eTag = obj != null && obj.getETag() != null ? obj.getETag().replace("\"", "") : "";
-            String requestId = UUID.randomUUID().toString();
-
-            ObjectNode bucketNode = objectMapper.createObjectNode();
-            bucketNode.put("name", bucketName);
-            bucketNode.put("arn", AwsArnUtils.Arn.global(bucketPartition(bucketName), "s3", "", bucketName).toString());
-
-            ObjectNode objectNode = objectMapper.createObjectNode();
-            objectNode.put("key", eventRecordKey(key));
-            objectNode.put("size", size);
-            objectNode.put("eTag", eTag);
-            if(isVersionEnabled) {
-                String versionId = obj !=null && obj.getVersionId()!=null ? obj.getVersionId() : "";
-                objectNode.put("versionId", versionId);
-            }
-            objectNode.put("sequencer", sequencer);
-            ObjectNode s3Node = objectMapper.createObjectNode();
-            s3Node.put("s3SchemaVersion", "1.0");
-            s3Node.put("configurationId", "emulator");
-            s3Node.set("bucket", bucketNode);
-            s3Node.set("object", objectNode);
-
-            ObjectNode record = objectMapper.createObjectNode();
-            record.put("eventVersion", "2.1");
-            record.put("eventSource", "aws:s3");
-            record.put("awsRegion", region);
-            record.put("eventTime", eventTime);
-            record.put("eventName", eventName);
-            // The user guide's s3:LifecycleExpiration:Delete example names S3 itself as both.
-            boolean lifecycle = isLifecycleEvent(eventName);
-            record.putObject("userIdentity").put("principalId", lifecycle ? ServicePrincipals.of("s3") : "AWS:EMULATOR");
-            record.putObject("requestParameters")
-                    .put("sourceIPAddress", lifecycle ? ServicePrincipals.of("s3") : "127.0.0.1");
-            record.putObject("responseElements").put("x-amz-request-id", requestId);
-            record.set("s3", s3Node);
-
-            ObjectNode root = objectMapper.createObjectNode();
-            root.putArray("Records").add(record);
-            return objectMapper.writeValueAsString(root);
-        } catch (Exception e) {
+            return objectMapper.writeValueAsString(event);
+        } catch (JsonProcessingException e) {
+            LOG.warnv("Failed to serialize S3 event: {0}", e.getMessage());
             return "{\"Records\":[]}";
         }
     }

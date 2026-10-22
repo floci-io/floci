@@ -2297,7 +2297,12 @@ public class S3Controller {
             }
         }
 
-        return new ParsedNotificationGroup(id, arn, events, filterRules);
+        return new ParsedNotificationGroup(id.isBlank() ? generatedNotificationId() : id, arn, events, filterRules);
+    }
+
+    /** "If you don't provide one, Amazon S3 will assign an ID", shaped like the IDs S3 hands out. */
+    private static String generatedNotificationId() {
+        return Base64.getEncoder().encodeToString(UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
     }
 
     private static FilterRule readFilterRule(XMLStreamReader reader) throws XMLStreamException {

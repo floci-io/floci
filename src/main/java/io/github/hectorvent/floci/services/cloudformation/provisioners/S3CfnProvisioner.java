@@ -373,8 +373,8 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
      * outside the stack, is left alone, as AWS leaves it.
      *
      * <p>CloudFormation names one {@code Event} per entry where the API takes a list, and has no
-     * {@code Id}. Each entry becomes one API configuration with a blank id, which is what the
-     * service stores for an API request that omits {@code Id}.
+     * {@code Id}. Each entry becomes one API configuration with a blank id, so an unchanged
+     * template compares equal to what the bucket already has.
      */
     private NotificationConfiguration notificationConfiguration(JsonNode props, ProvisionContext ctx) {
         JsonNode declaredNode = declared(props, "NotificationConfiguration");

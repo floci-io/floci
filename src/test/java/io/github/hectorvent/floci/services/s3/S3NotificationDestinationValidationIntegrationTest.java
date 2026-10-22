@@ -208,6 +208,24 @@ class S3NotificationDestinationValidationIntegrationTest {
     }
 
     @Test
+    void omittedIdIsGeneratedAndNamedByObjectEvents() throws Exception {
+        String queueArn = createQueue("generated-id", Map.of());
+        putNotification(notificationConfiguration(queueConfiguration(queueArn)), true).statusCode(200);
+
+        String id = given().when().get("/" + bucket + "?notification")
+                .then().statusCode(200)
+                .extract().xmlPath().getString("NotificationConfiguration.QueueConfiguration.Id");
+        assertFalse(id.isBlank());
+
+        given().contentType("text/plain").body("payload")
+                .when().put("/" + bucket + "/generated-id-object")
+                .then().statusCode(200);
+        JsonNode objectEvent = objectMapper.readTree(receiveQueueMessage(queueUrls.getFirst()).getFirst().getBody());
+        given().when().delete("/" + bucket + "/generated-id-object").then().statusCode(204);
+        assertEquals(id, objectEvent.path("Records").get(0).path("s3").path("configurationId").asText());
+    }
+
+    @Test
     void failedTestMessageLeavesPreviousConfigurationUntouched() {
         String validQueueArn = createQueue("before-failure", Map.of());
         putNotification(notificationConfiguration(queueConfiguration(validQueueArn)), false)
