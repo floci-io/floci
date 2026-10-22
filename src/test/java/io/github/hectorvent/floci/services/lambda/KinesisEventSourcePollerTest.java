@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -645,6 +646,46 @@ class KinesisEventSourcePollerTest {
                 delivered.stream().filter(seq -> !seq.equals(merged)).toList());
         assertEquals(merged, delivered.get(3), "the merged shard's record comes after both parents', delivered "
                 + delivered);
+    }
+
+    /**
+     * A record can reach the still-open parent after GetRecords took its snapshot, and a split can then close the
+     * parent before the poller looks at it: an empty read of a shard that was open when the read began does not
+     * mean the shard is drained.
+     */
+    @Test
+    void parentClosedDuringAnEmptyReadIsNotFinishedOnThatPass() {
+        KinesisShard parent = new KinesisShard(SHARD, "0", "1", "0");
+        KinesisShard child = new KinesisShard(SHARD_2, "0", "1", "0");
+        child.setParentShardId(SHARD);
+        KinesisStream stream = new KinesisStream("s", STREAM_ARN);
+        stream.setShards(List.of(parent, child));
+        AtomicInteger pass = new AtomicInteger();
+        List<String> iteratorRequests = new CopyOnWriteArrayList<>();
+        when(kinesisService.describeStreamForAccount(eq(ACCOUNT), anyString(), eq(REGION))).thenAnswer(inv -> {
+            pass.incrementAndGet();
+            return stream;
+        });
+        when(kinesisService.getShardIteratorForAccount(eq(ACCOUNT), anyString(), anyString(), anyString(), any(),
+                eq(REGION))).thenAnswer(inv -> {
+                    iteratorRequests.add(pass.get() + ":" + inv.getArgument(2));
+                    return "iter-" + inv.getArgument(2);
+                });
+        when(kinesisService.getRecordsForAccount(eq(ACCOUNT), eq("iter-" + SHARD), anyInt(), eq(REGION)))
+                .thenAnswer(inv -> {
+                    parent.setClosed(true);
+                    return Map.of("Records", List.of());
+                });
+        when(kinesisService.getRecordsForAccount(eq(ACCOUNT), eq("iter-" + SHARD_2), anyInt(), eq(REGION)))
+                .thenReturn(Map.of("Records", List.of()));
+        stubFunction();
+        EventSourceMapping esm = esm();
+
+        poller.pollAndInvoke(esm);
+        awaitPollCompletedViaSecondDescribe(poller, esm);
+
+        assertEquals(List.of("1:" + SHARD),
+                iteratorRequests.stream().filter(request -> request.startsWith("1:")).toList());
     }
 
     private static String putTo(KinesisService kinesis, String stream, String explicitHashKey, String data) {

@@ -190,6 +190,10 @@ public class KinesisEventSourcePoller implements Resettable {
                             || !parentsFinished(esm.getUuid(), shard, listed)) {
                         continue;
                     }
+                    // Must be taken before the read: a shard open at that point can take a record after
+                    // GetRecords' snapshot and be closed by a split before the read returns, so its empty
+                    // page would not prove it drained.
+                    boolean closedBeforeRead = shard.isClosed();
                     String lastSeq = esm.getShardSequenceNumbers().get(shard.getShardId());
                     String iterator;
                     if (lastSeq == null && "AT_TIMESTAMP".equals(esm.getStartingPosition())
@@ -210,7 +214,7 @@ public class KinesisEventSourcePoller implements Resettable {
                     List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
 
                     if (records.isEmpty()) {
-                        if (shard.isClosed()) {
+                        if (closedBeforeRead) {
                             finishedShards.add(finishedShardKey(esm.getUuid(), shard.getShardId()));
                         }
                         continue;
