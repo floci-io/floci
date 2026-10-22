@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.sns;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -141,6 +142,44 @@ class SnsSqsFanoutFifoDeliveryTest {
         List<String> bodies = messages.stream().map(Message::getBody).toList();
         assertTrue(bodies.stream().anyMatch(b -> b.contains("cbd-batch-msg-1")));
         assertTrue(bodies.stream().anyMatch(b -> b.contains("cbd-batch-msg-2")));
+    }
+
+    @Test
+    void publish_withoutDedupIdOnTopicWithoutContentBasedDedup_isRejected() {
+        sqsService.createQueue("fifo-no-dedup-queue.fifo", Map.of("FifoQueue", "true"), REGION);
+        String topicArn = createFifoTopic("fifo-no-dedup-topic.fifo", Map.of("FifoTopic", "true"),
+                "fifo-no-dedup-queue.fifo");
+
+        AwsException ex = assertThrows(AwsException.class, () -> snsService.publish(topicArn, null, null,
+                "no dedup id", null, null, "group-1", null, REGION));
+
+        assertEquals("InvalidParameter", ex.getErrorCode());
+        String queueUrl = BASE_URL + "/" + ACCOUNT + "/fifo-no-dedup-queue.fifo";
+        assertTrue(sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION).isEmpty());
+    }
+
+    @Test
+    void publishBatch_entryWithoutDedupIdOnTopicWithoutContentBasedDedup_fails() {
+        sqsService.createQueue("fifo-batch-no-dedup-queue.fifo", Map.of("FifoQueue", "true"), REGION);
+        String topicArn = createFifoTopic("fifo-batch-no-dedup-topic.fifo", Map.of("FifoTopic", "true"),
+                "fifo-batch-no-dedup-queue.fifo");
+
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Id", "with-dedup", "Message", "has-dedup",
+                        "MessageGroupId", "group-1", "MessageDeduplicationId", "dedup-1"),
+                Map.of("Id", "without-dedup", "Message", "lacks-dedup", "MessageGroupId", "group-1"));
+        SnsService.BatchPublishResult result = snsService.publishBatch(topicArn, entries, REGION);
+
+        assertEquals(List.of("with-dedup"), result.successful().stream().map(entry -> entry[0]).toList());
+        assertEquals(1, result.failed().size());
+        String[] failure = result.failed().getFirst();
+        assertEquals("without-dedup", failure[0]);
+        assertEquals("InvalidParameter", failure[1]);
+        assertEquals("true", failure[3]);
+        String queueUrl = BASE_URL + "/" + ACCOUNT + "/fifo-batch-no-dedup-queue.fifo";
+        List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
+        assertEquals(1, messages.size());
+        assertTrue(messages.getFirst().getBody().contains("has-dedup"));
     }
 
     @Test

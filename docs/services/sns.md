@@ -241,6 +241,9 @@ unwrapped.
 A topic whose name ends in `.fifo` is a FIFO topic. `Publish` and `PublishBatch` require a
 `MessageGroupId`, and a message is deduplicated against its `MessageDeduplicationId` for five
 minutes. Set `ContentBasedDeduplication` on the topic to derive that id from the message body.
+With neither a `MessageDeduplicationId` nor `ContentBasedDeduplication`, `Publish` fails with
+`InvalidParameter` and a `PublishBatch` entry is reported under `Failed` with the same code, as on
+AWS. Floci does not return a `SequenceNumber` for FIFO publishes.
 
 The `FifoThroughputScope` attribute decides how wide that deduplication reaches:
 

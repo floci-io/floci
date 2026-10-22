@@ -78,6 +78,8 @@ public class SnsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SnsService.class);
     private static final Duration FIFO_DEDUP_WINDOW = Duration.ofMinutes(5);
+    private static final String MISSING_DEDUPLICATION_ID_MESSAGE = "Invalid parameter: The topic should either have "
+            + "ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly";
     private static final Set<String> SMS_ATTRIBUTE_NAMES = Set.of("MonthlySpendLimit",
             "DeliveryStatusIAMRole", "DeliveryStatusSuccessSamplingRate", "DefaultSenderID",
             "DefaultSMSType", "UsageReportS3Bucket");
@@ -1090,8 +1092,10 @@ public class SnsService implements Resettable, ResourceProvider {
             if (dedupId == null && "true".equals(topic.getAttributes().get("ContentBasedDeduplication"))) {
                 dedupId = Digests.sha256Hex(message);
             }
-            if (dedupId != null && isDuplicate(effectiveArn, messageGroupId, dedupId,
-                    isGroupScopedDeduplication(topic))) {
+            if (dedupId == null) {
+                throw new AwsException("InvalidParameter", MISSING_DEDUPLICATION_ID_MESSAGE, 400);
+            }
+            if (isDuplicate(effectiveArn, messageGroupId, dedupId, isGroupScopedDeduplication(topic))) {
                 LOG.debugv("FIFO dedup: skipping duplicate for topic {0}, dedupId {1}", effectiveArn, dedupId);
                 return UUID.randomUUID().toString();
             }
@@ -1557,8 +1561,11 @@ public class SnsService implements Resettable, ResourceProvider {
             if (isFifo && messageDeduplicationId == null && "true".equals(topic.getAttributes().get("ContentBasedDeduplication"))) {
                 messageDeduplicationId = Digests.sha256Hex(message);
             }
-            if (isFifo && messageDeduplicationId != null && isDuplicate(topicArn, messageGroupId,
-                    messageDeduplicationId, groupScopedDedup)) {
+            if (isFifo && messageDeduplicationId == null) {
+                failed.add(new String[]{id, "InvalidParameter", MISSING_DEDUPLICATION_ID_MESSAGE, "true"});
+                continue;
+            }
+            if (isFifo && isDuplicate(topicArn, messageGroupId, messageDeduplicationId, groupScopedDedup)) {
                 successful.add(new String[]{id, UUID.randomUUID().toString()});
                 continue;
             }
