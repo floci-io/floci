@@ -1950,6 +1950,45 @@ class SqsServiceTest {
         assertEquals(List.of("keep-me"), bodies(sqsService.peekMessages(source.getQueueUrl(), region)));
     }
 
+    @Test
+    void changeMessageVisibility_reachesAnotherAccountsQueueByUrlOutsideARequest() {
+        String region = "us-east-1";
+        String queueUrl = BASE_URL + "/111111111111/worker-queue";
+        SqsService service = serviceWithQueueOwnedBy("111111111111", "worker-queue", region);
+        service.sendMessage(queueUrl, "retry-me", null, region);
+        String handle = service.receiveMessage(queueUrl, 1, 30, 0, region).getFirst().getReceiptHandle();
+
+        service.changeMessageVisibility(queueUrl, handle, 0, region);
+
+        assertEquals(List.of("retry-me"), bodies(service.receiveMessage(queueUrl, 1, 30, 0, region)));
+    }
+
+    @Test
+    void getQueueAttributes_reachesAnotherAccountsQueueByUrlOutsideARequest() {
+        String region = "us-east-1";
+        String queueUrl = BASE_URL + "/111111111111/worker-queue";
+        SqsService service = serviceWithQueueOwnedBy("111111111111", "worker-queue", region);
+        service.sendMessage(queueUrl, "counted", null, region);
+
+        Map<String, String> attributes = service.getQueueAttributes(queueUrl,
+                List.of("VisibilityTimeout", "ApproximateNumberOfMessages"), region);
+
+        assertEquals("30", attributes.get("VisibilityTimeout"));
+        assertEquals("1", attributes.get("ApproximateNumberOfMessages"));
+    }
+
+    /**
+     * A service whose account-aware queue store holds a queue of {@code account} while the default account
+     * is 000000000000, as a poller thread with no request scope sees it.
+     */
+    private SqsService serviceWithQueueOwnedBy(String account, String queueName, String region) {
+        AccountAwareStorageBackend<Queue> store = AccountAwareStorageBackend.inMemory("000000000000");
+        Queue queue = new Queue(queueName, BASE_URL + "/" + account + "/" + queueName);
+        queue.setAccountId(account);
+        store.putForAccount(account, region + "::/" + account + "/" + queueName, queue);
+        return new SqsService(store, 30, 1048576, BASE_URL, clock);
+    }
+
     @ParameterizedTest
     @ValueSource(ints = {-1, 0, 11})
     void receiveMessage_maxNumberOfMessagesOutsideOneToTen_isRejected(int maxMessages) {
