@@ -1951,6 +1951,60 @@ class SqsServiceTest {
     }
 
     @Test
+    void setQueueAttributes_newDeadLetterTargetTakesEffectOnTheNextReceive() {
+        String region = "us-east-1";
+        Queue dlqA = sqsService.createQueue("redrive-change-dlq-a", null, region);
+        Queue dlqB = sqsService.createQueue("redrive-change-dlq-b", null, region);
+        Queue source = sqsService.createQueue("redrive-change-src",
+                Map.of("RedrivePolicy", redrivePolicy(queueArn("redrive-change-dlq-a"))), region);
+        sqsService.sendMessage(source.getQueueUrl(), "moved", null, region);
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region).size());
+
+        sqsService.setQueueAttributes(source.getQueueUrl(),
+                Map.of("RedrivePolicy", redrivePolicy(queueArn("redrive-change-dlq-b"))), region);
+
+        assertTrue(sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region).isEmpty());
+        assertEquals(List.of("moved"), bodies(sqsService.peekMessages(dlqB.getQueueUrl(), region)));
+        assertTrue(sqsService.peekMessages(dlqA.getQueueUrl(), region).isEmpty());
+    }
+
+    @Test
+    void setQueueAttributes_raisedMaxReceiveCountTakesEffectOnTheNextReceive() {
+        String region = "us-east-1";
+        sqsService.createQueue("redrive-raise-dlq", null, region);
+        Queue source = sqsService.createQueue("redrive-raise-src",
+                Map.of("RedrivePolicy", redrivePolicy(queueArn("redrive-raise-dlq"))), region);
+        sqsService.sendMessage(source.getQueueUrl(), "kept", null, region);
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region).size());
+
+        sqsService.setQueueAttributes(source.getQueueUrl(), Map.of("RedrivePolicy",
+                "{\"deadLetterTargetArn\":\"" + queueArn("redrive-raise-dlq") + "\",\"maxReceiveCount\":\"5\"}"),
+                region);
+
+        assertEquals(List.of("kept"), bodies(sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region)));
+    }
+
+    @Test
+    void recreatedQueueUsesItsOwnRedrivePolicy() {
+        String region = "us-east-1";
+        Queue dlqA = sqsService.createQueue("redrive-recreate-dlq-a", null, region);
+        Queue dlqB = sqsService.createQueue("redrive-recreate-dlq-b", null, region);
+        Queue first = sqsService.createQueue("redrive-recreate-src",
+                Map.of("RedrivePolicy", redrivePolicy(queueArn("redrive-recreate-dlq-a"))), region);
+        sqsService.receiveMessage(first.getQueueUrl(), 1, 0, 0, region);
+        sqsService.deleteQueue(first.getQueueUrl(), region);
+
+        Queue second = sqsService.createQueue("redrive-recreate-src",
+                Map.of("RedrivePolicy", redrivePolicy(queueArn("redrive-recreate-dlq-b"))), region);
+        sqsService.sendMessage(second.getQueueUrl(), "moved", null, region);
+        sqsService.receiveMessage(second.getQueueUrl(), 1, 0, 0, region);
+        sqsService.receiveMessage(second.getQueueUrl(), 1, 0, 0, region);
+
+        assertEquals(List.of("moved"), bodies(sqsService.peekMessages(dlqB.getQueueUrl(), region)));
+        assertTrue(sqsService.peekMessages(dlqA.getQueueUrl(), region).isEmpty());
+    }
+
+    @Test
     void startMessageMoveTask_sourceIsNotDeadLetterQueue_throwsInvalidParameterValue() {
         sqsService.createQueue("just-a-queue", null, "us-east-1");
         sqsService.createQueue("dest", null, "us-east-1");
