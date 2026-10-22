@@ -642,9 +642,9 @@ public class PipesPoller implements Resettable {
 
     /**
      * Delivers filtered stream records and returns the eventIDs to read again: the ones a Lambda target
-     * reported in {@code batchItemFailures}, every record when the delivery failed with no DLQ to take it,
-     * and none otherwise. A batch only partly delivered to a per-record target is read again whole
-     * (at-least-once).
+     * reported in {@code batchItemFailures}, every record when a batch delivery failed with no DLQ to take
+     * it, and none otherwise. A per-record target stops at the first record neither delivered nor sent to
+     * the DLQ, which is read again with the records after it, so no later record is delivered twice.
      */
     private Set<String> deliverStreamRecords(Pipe pipe, List<JsonNode> records, String region) {
         // Enrichment (source → filter → ENRICHMENT → target) is currently applied only on the SQS
@@ -654,13 +654,12 @@ public class PipesPoller implements Resettable {
         if (receivesBatchArray(pipe)) {
             return deliverBatch(pipe, records, "eventID", region);
         }
-        boolean failed = false;
-        for (JsonNode record : records) {
-            if (!invokeWithDlq(pipe, record.toString(), region)) {
-                failed = true;
+        for (int i = 0; i < records.size(); i++) {
+            if (!invokeWithDlq(pipe, records.get(i).toString(), region)) {
+                return idsOf(records.subList(i, records.size()), "eventID");
             }
         }
-        return failed ? idsOf(records, "eventID") : Set.of();
+        return Set.of();
     }
 
     /**

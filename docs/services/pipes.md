@@ -174,7 +174,9 @@ the field on a source its parameter block does not describe, for example
   in Unix seconds) are honored. The position is resolved once, on the pipe's first poll.
 - The pipe moves past a batch only once it is filtered out, delivered, or sent to the
   `DeadLetterConfig` queue, as AWS checkpoints only a fully successful batch. A failed batch is read
-  again on the next poll, and later records wait behind it.
+  again on the next poll, and later records wait behind it. With a per-record target, the batch stops
+  at the first record that is neither delivered nor sent to the DLQ, and the next poll resumes at that
+  record, so the records before it are not delivered twice.
 - Progress survives `StopPipe` and `StartPipe`: a restarted pipe resumes after the last batch it
   disposed of. The progress is kept in memory, so it is lost when Floci restarts.
 - `MaximumRetryAttempts`, `MaximumRecordAgeInSeconds` and `OnPartialBatchItemFailure` are accepted
@@ -189,8 +191,9 @@ the field on a source its parameter block does not describe, for example
 - Records are delivered in the AWS DynamoDB Streams record shape (`eventName`, `dynamodb.Keys`,
   `dynamodb.NewImage` and so on) with `eventSourceARN` set to the stream ARN, so filter patterns on
   `dynamodb.*` fields match as on AWS.
-- A failed batch is retried until it is delivered or sent to the `DeadLetterConfig` queue. When
-  some records of a batch reach a non-Lambda target and others fail, the whole batch is retried.
+- A failed batch is retried until it is delivered or sent to the `DeadLetterConfig` queue. With a
+  per-record target, the batch stops at the first record that is neither delivered nor sent to the
+  DLQ, and the next poll resumes at that record, so the records before it are not delivered twice.
 - `MaximumRetryAttempts`, `MaximumRecordAgeInSeconds` and `OnPartialBatchItemFailure` are accepted
   and returned but not enforced, so they do not bound or split those retries.
 

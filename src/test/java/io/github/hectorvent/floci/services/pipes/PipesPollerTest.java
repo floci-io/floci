@@ -751,6 +751,35 @@ class PipesPollerTest {
     }
 
     @Test
+    void perRecordTargetStopsAKinesisBatchAtTheFirstFailedRecordAndResumesThere() throws Exception {
+        Pipe pipe = kinesisPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
+        when(kinesisService.getShardIteratorForAccount("000000000000", "orders-stream", "shardId-000000000000",
+                "TRIM_HORIZON", null, "us-east-1")).thenReturn("it-0");
+        lenient().when(kinesisService.getRecordsForAccount("000000000000", "it-0", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1",
+                        kinesisRecord("{\"n\":1}", "pk-1", "4959001", Instant.now()),
+                        kinesisRecord("{\"n\":2}", "pk-1", "4959002", Instant.now()),
+                        kinesisRecord("{\"n\":3}", "pk-1", "4959003", Instant.now())));
+        lenient().when(kinesisService.getShardIteratorForAccount("000000000000", "orders-stream",
+                "shardId-000000000000", "AFTER_SEQUENCE_NUMBER", "4959001", "us-east-1")).thenReturn("it-retry");
+        lenient().when(kinesisService.getRecordsForAccount("000000000000", "it-retry", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1",
+                        kinesisRecord("{\"n\":2}", "pk-1", "4959002", Instant.now()),
+                        kinesisRecord("{\"n\":3}", "pk-1", "4959003", Instant.now())));
+        doReturn(List.of()).doThrow(new RuntimeException("target down")).doReturn(List.of())
+                .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
+
+        poller.startPolling(pipe);
+        poller.pollKinesis(pipe, "us-east-1");
+        assertEquals(List.of("4959001", "4959002"), deliveredRecordFields(pipe, "/sequenceNumber"),
+                "the poll stops at the record that failed");
+        poller.pollKinesis(pipe, "us-east-1");
+
+        assertEquals(List.of("4959001", "4959002", "4959002", "4959003"),
+                deliveredRecordFields(pipe, "/sequenceNumber"));
+    }
+
+    @Test
     void kinesisLambdaBatchItemFailureResumesAtTheFirstFailedRecord() throws Exception {
         Pipe pipe = kinesisPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
         pipe.setTarget("arn:aws:lambda:us-east-1:000000000000:function:orders-target");
@@ -884,6 +913,25 @@ class PipesPollerTest {
         poller.pollDynamoDbStreams(pipe, "us-east-1");
 
         assertEquals(List.of(List.of("001"), List.of("001"), List.of("002")), deliveredSequences(pipe));
+    }
+
+    @Test
+    void perRecordTargetStopsADynamoDbBatchAtTheFirstFailedRecordAndResumesThere() throws Exception {
+        Pipe pipe = dynamoDbPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
+        pipe.setTarget("arn:aws:sqs:us-east-1:000000000000:orders-target");
+        streams.shard.add(ddbRecord("001", "active"));
+        streams.shard.add(ddbRecord("002", "active"));
+        streams.shard.add(ddbRecord("003", "active"));
+        doReturn(List.of()).doThrow(new RuntimeException("target down")).doReturn(List.of())
+                .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
+
+        poller.startPolling(pipe);
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+        assertEquals(List.of("001", "002"), deliveredRecordFields(pipe, "/dynamodb/SequenceNumber"),
+                "the poll stops at the record that failed");
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+
+        assertEquals(List.of("001", "002", "002", "003"), deliveredRecordFields(pipe, "/dynamodb/SequenceNumber"));
     }
 
     @Test
@@ -1164,6 +1212,17 @@ class PipesPollerTest {
             awsRecord.putObject("userIdentity").put("PrincipalId", "dynamodb.amazonaws.com").put("Type", "Service");
         }
         return record;
+    }
+
+    /** The field at {@code pointer} of each record a per-record target was invoked with, in invocation order. */
+    private List<String> deliveredRecordFields(Pipe pipe, String pointer) throws Exception {
+        ArgumentCaptor<String> payloads = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker, atLeastOnce()).invoke(eq(pipe), payloads.capture(), eq("us-east-1"));
+        List<String> values = new ArrayList<>();
+        for (String payload : payloads.getAllValues()) {
+            values.add(MAPPER.readTree(payload).at(pointer).asText());
+        }
+        return values;
     }
 
     /** The sequence numbers of each batch the Lambda target was invoked with, in invocation order. */
