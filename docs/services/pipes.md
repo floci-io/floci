@@ -121,10 +121,13 @@ pipe's dead-letter queue, or stays in the source to be retried, instead of being
   `{"batchItemFailures":[{"itemIdentifier":"<id>"}]}`, where the id is the record's `messageId` (SQS)
   or `eventID` (Kinesis, DynamoDB Streams). For an SQS source only the reported messages stay in the
   queue for redelivery. For a stream source the pipe resumes at the first reported record, so it and
-  the records after it are delivered again. A `batchItemFailures` that is not an array, or an entry
-  whose `itemIdentifier` is empty, null, missing or not in the batch, fails the whole batch. A Step
-  Functions target is started asynchronously, so it cannot report partial failures, and partial
-  failures are not read after an enrichment or for Kafka sources.
+  the records after it are delivered again. A stream record reported in `batchItemFailures` is retried
+  until it succeeds (`MaximumRetryAttempts` is not enforced) and is not sent to the dead-letter queue,
+  while a whole-batch failure goes to the dead-letter queue when one is configured. A
+  `batchItemFailures` that is not an array, or an entry whose `itemIdentifier` is empty, null,
+  missing or not in the batch, fails the whole batch. A Step Functions target is started
+  asynchronously, so it cannot report partial failures, and partial failures are not read after an
+  enrichment or for Kafka sources.
 
 ## ParallelizationFactor
 
@@ -171,7 +174,9 @@ the field on a source its parameter block does not describe, for example
   `{"partitionKey":["1"],"data":{"City":["Seattle"]}}` works as on AWS. The delivered record keeps
   `data` base64 encoded.
 - `StartingPosition` `TRIM_HORIZON`, `LATEST` and `AT_TIMESTAMP` (with `StartingPositionTimestamp`,
-  in Unix seconds) are honored. The position is resolved once, on the pipe's first poll.
+  in Unix seconds) are honored. The position is resolved once, on the first poll after the pipe
+  starts, so a `LATEST` pipe delivers only records written after that poll; a restarted pipe resumes
+  from its progress instead.
   `CreatePipe` and `UpdatePipe` reject `AT_TIMESTAMP` without a `StartingPositionTimestamp`, or with
   one that is not a timestamp, with `ValidationException`.
 - The pipe moves past a batch only once it is filtered out, delivered, or sent to the
