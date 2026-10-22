@@ -194,7 +194,6 @@ public class LambdaExecutorService implements Resettable {
         }
 
         LambdaService lambdaService = resolveLambdaService();
-        LambdaConcurrencyLimiter.Permit permit = acquire(lambdaService, fn);
 
         if (type == InvocationType.Event) {
             FunctionEventInvokeConfig eventInvokeConfig = null;
@@ -220,18 +219,13 @@ public class LambdaExecutorService implements Resettable {
             // again after it removes the function from the store. So either this check sees the function
             // gone, or the count moves after the event's snapshot and stale() drops the event.
             if (lambdaService != null && !lambdaService.isLive(fn)) {
-                permit.close();
                 return new InvokeResult(202, null, new byte[0], null, requestId);
             }
-            try {
-                asyncExecutor.submit(() -> attempt(event, 1, null, permit));
-            } catch (RuntimeException e) {
-                permit.close();
-                throw e;
-            }
+            asyncExecutor.submit(() -> attempt(event, 1, null));
             return new InvokeResult(202, null, new byte[0], null, requestId);
         }
 
+        LambdaConcurrencyLimiter.Permit permit = acquire(lambdaService, fn);
         try {
             return executeSync(fn, payload, requestId, clientContext);
         } finally {
@@ -254,38 +248,42 @@ public class LambdaExecutorService implements Resettable {
      * record, which holds the reservation, rather than a version's snapshot, which has none.
      */
     private LambdaConcurrencyLimiter.Permit acquire(LambdaService lambdaService, LambdaFunction fn) {
-        LambdaFunction function = lambdaService != null ? lambdaService.findLatest(fn).orElse(fn) : fn;
-        return concurrencyLimiter.acquire(function);
+        return concurrencyLimiter.acquire(latest(lambdaService, fn));
+    }
+
+    private static LambdaFunction latest(LambdaService lambdaService, LambdaFunction fn) {
+        return lambdaService != null ? lambdaService.findLatest(fn).orElse(fn) : fn;
     }
 
     /**
      * Runs one attempt of an asynchronous event and either routes the outcome or schedules the next
      * attempt. Retry n waits n times the configured delay, never past the event's maximum age, and
      * the pending event of a function deleted meanwhile is dropped, whether it was waiting to retry
-     * or to expire. The concurrency permit covers only the attempt; {@code held} is the one the
-     * invoke itself took.
+     * or to expire. The concurrency permit covers only the attempt: one that finds the function's
+     * concurrency in use waits for a permit without spending an attempt, as AWS keeps a throttled
+     * event queued, except under a reservation of zero, which AWS answers by sending the event to its
+     * failure destination at once, without retries.
      */
-    private void attempt(AsyncEvent event, int attempt, InvokeResult previous,
-                         LambdaConcurrencyLimiter.Permit held) {
+    private void attempt(AsyncEvent event, int attempt, InvokeResult previous) {
         if (stale(event) || clock.millis() >= event.expiresAtMs()) {
-            if (held != null) {
-                held.close();
-            }
             route(event, previous, attempt - 1);
             return;
         }
+        LambdaFunction function = latest(resolveLambdaService(), event.fn());
         LambdaConcurrencyLimiter.Permit permit;
-        if (held != null) {
-            permit = held;
-        } else {
-            try {
-                permit = acquire(resolveLambdaService(), event.fn());
-            } catch (AwsException throttled) {
-                // ponytail: AWS backs a throttled retry off exponentially, up to five minutes; one
-                // fixed poll is enough locally, and the event still expires on time.
-                schedule(event, THROTTLED_RETRY_POLL_MS, attempt, previous);
+        try {
+            permit = concurrencyLimiter.acquire(function);
+        } catch (AwsException throttled) {
+            if (Integer.valueOf(0).equals(function.getReservedConcurrentExecutions())) {
+                route(event, previous != null ? previous : new InvokeResult(429, "Unhandled",
+                        buildErrorPayload(throttled.getMessage(), throttled.getErrorCode()), null,
+                        event.requestId()), attempt - 1);
                 return;
             }
+            // ponytail: AWS backs a throttled retry off exponentially, up to five minutes; one
+            // fixed poll is enough locally, and the event still expires on time.
+            schedule(event, THROTTLED_RETRY_POLL_MS, attempt, previous);
+            return;
         }
         InvokeResult result;
         try (permit) {
@@ -313,7 +311,7 @@ public class LambdaExecutorService implements Resettable {
     private void schedule(AsyncEvent event, long delayMs, int attempt, InvokeResult previous) {
         long remainingMs = event.expiresAtMs() - clock.millis();
         Runnable next = delayMs < remainingMs
-                ? () -> attempt(event, attempt, previous, null)
+                ? () -> attempt(event, attempt, previous)
                 : () -> route(event, previous, attempt - 1);
         CompletableFuture.delayedExecutor(Math.max(0, Math.min(delayMs, remainingMs)), TimeUnit.MILLISECONDS,
                 RETRY_THREADS).execute(next);

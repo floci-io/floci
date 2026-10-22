@@ -1,18 +1,30 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.hamcrest.Matcher;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Invoke ignored the {@code Qualifier} query parameter, so {@code ?Qualifier=} ran {@code $LATEST}
@@ -20,6 +32,13 @@ import static org.hamcrest.Matchers.equalTo;
  */
 @QuarkusTest
 class LambdaInvokeQualifierIntegrationTest {
+
+    private static final String ACCOUNT = "000000000000";
+    private static final String REGION = "us-east-1";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Inject
+    SqsService sqsService;
 
     private static String zipB64(String body) throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -135,7 +154,7 @@ class LambdaInvokeQualifierIntegrationTest {
     }
 
     @Test
-    void aZeroReservationThrottlesQualifiedInvokes() throws Exception {
+    void aZeroReservationThrottlesQualifiedSyncInvokesAndSendsEventsToOnFailureWithoutRetries() throws Exception {
         String fn = createFunction("v1");
         publishVersion(fn, "1");
         given()
@@ -145,6 +164,18 @@ class LambdaInvokeQualifierIntegrationTest {
             .post("/2015-03-31/functions/" + fn + "/aliases")
         .then()
             .statusCode(201);
+        String queueUrl = RequestScopes.callAs(ACCOUNT,
+                () -> sqsService.createQueue(fn + "-failures", Map.of(), REGION)).getQueueUrl();
+        String queueArn = RequestScopes.callAs(ACCOUNT,
+                () -> sqsService.getQueueAttributes(queueUrl, List.of("QueueArn"), REGION).get("QueueArn"));
+        given()
+            .contentType("application/json")
+            .body("{\"MaximumRetryAttempts\": 2, \"DestinationConfig\": {\"OnFailure\": {\"Destination\": \"%s\"}}}"
+                    .formatted(queueArn))
+        .when()
+            .put("/2019-09-25/functions/" + fn + "/event-invoke-config?Qualifier=1")
+        .then()
+            .statusCode(200);
         given()
             .contentType("application/json")
             .body("{\"ReservedConcurrentExecutions\": 0}")
@@ -153,12 +184,31 @@ class LambdaInvokeQualifierIntegrationTest {
         .then()
             .statusCode(200);
 
-        for (String target : new String[] {fn + "/invocations?Qualifier=1", fn + "/invocations?Qualifier=live",
-                fn + ":1/invocations", fn + ":live/invocations"}) {
-            given().header("X-Amz-Invocation-Type", "Event").body("{}")
+        String[] targets = {fn + "/invocations?Qualifier=1", fn + "/invocations?Qualifier=live",
+                fn + ":1/invocations", fn + ":live/invocations"};
+        for (String target : targets) {
+            given().header("X-Amz-Invocation-Type", "RequestResponse").body("{}")
             .when().post("/2015-03-31/functions/" + target)
             .then().statusCode(429).body("__type", equalTo("TooManyRequestsException"));
         }
+        for (String target : targets) {
+            given().header("X-Amz-Invocation-Type", "Event").body("{}")
+            .when().post("/2015-03-31/functions/" + target)
+            .then().statusCode(202);
+        }
+
+        List<Message> records = awaitMessages(queueUrl, targets.length);
+        for (Message message : records) {
+            JsonNode record = MAPPER.readTree(message.getBody());
+            assertEquals(0, record.path("requestContext").path("approximateInvokeCount").asInt(),
+                    "a throttled event never ran: " + record);
+            assertTrue(record.path("requestContext").path("functionArn").asText().endsWith(":1"),
+                    "the record should name the invoked version: " + record);
+            assertEquals(429, record.path("responseContext").path("statusCode").asInt());
+            assertEquals("TooManyRequestsException", record.path("responsePayload").path("errorType").asText());
+        }
+        Thread.sleep(2500);
+        assertTrue(receive(queueUrl).isEmpty(), "a zero reservation sends each event once, without retries");
     }
 
     @Test
@@ -190,5 +240,20 @@ class LambdaInvokeQualifierIntegrationTest {
         given().header("X-Amz-Invocation-Type", "DryRun").queryParam("Qualifier", " ").body("{}")
         .when().post("/2015-03-31/functions/" + fn + "/invocations")
         .then().statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
+    private List<Message> receive(String queueUrl) {
+        return RequestScopes.callAs(ACCOUNT, () -> sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION));
+    }
+
+    private List<Message> awaitMessages(String queueUrl, int count) throws Exception {
+        List<Message> messages = new ArrayList<>();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        while (messages.size() < count && System.nanoTime() < deadline) {
+            messages.addAll(receive(queueUrl));
+            Thread.sleep(100);
+        }
+        assertEquals(count, messages.size(), "OnFailure records received from " + queueUrl);
+        return messages;
     }
 }

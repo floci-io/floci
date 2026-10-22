@@ -507,6 +507,54 @@ class LambdaExecutorServiceTest {
     }
 
     @Test
+    void eventInvocation_throttledWhenInvoked_isQueuedUntilAPermitFrees() {
+        when(concurrencyLimiter.acquire(any()))
+                .thenThrow(new AwsException("TooManyRequestsException", "Rate Exceeded.", 429))
+                .thenReturn(() -> {});
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-throttled", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(fn)).thenReturn(handle);
+        doAnswer(invocation -> {
+            PendingInvocation pendingInvocation = invocation.getArgument(0);
+            pendingInvocation.getResultFuture().complete(
+                    new InvokeResult(200, null, "{}".getBytes(), null, pendingInvocation.getRequestId()));
+            return pendingInvocation.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.Event);
+
+        assertEquals(202, result.getStatusCode());
+        verify(warmPool, timeout(5000)).release(handle);
+        verify(warmPool).acquire(fn);
+        verify(concurrencyLimiter, times(2)).acquire(any());
+    }
+
+    @Test
+    void eventInvocation_withZeroReservedConcurrency_goesToOnFailureWithoutAnAttempt() throws Exception {
+        fn.setReservedConcurrentExecutions(0);
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaService lambdaService = eventInvokeConfig(2, 21600);
+        when(lambdaService.findLatest(fn)).thenReturn(Optional.of(fn));
+        LambdaExecutorService zeroExecutor = new LambdaExecutorService(warmPool, new ObjectMapper(),
+                new LambdaConcurrencyLimiter(), router, lambdaService, Clock.systemUTC(), Duration.ZERO);
+        retryExecutors.add(zeroExecutor);
+        CountDownLatch routed = countRoutes(router);
+
+        byte[] payload = "{}".getBytes();
+        InvokeResult result = zeroExecutor.invoke(fn, payload, InvocationType.Event);
+
+        assertEquals(202, result.getStatusCode());
+        assertTrue(routed.await(5, TimeUnit.SECONDS), "the event never reached the failure destination");
+        ArgumentCaptor<InvokeResult> outcome = ArgumentCaptor.forClass(InvokeResult.class);
+        verify(router).route(eq(fn), eq(payload), outcome.capture(), eq(0), eq(0), isNull());
+        assertEquals(429, outcome.getValue().getStatusCode());
+        assertNotNull(outcome.getValue().getFunctionError(), "only a failed outcome reaches OnFailure or the DLQ");
+        assertTrue(new String(outcome.getValue().getPayload()).contains("TooManyRequestsException"));
+        verify(warmPool, after(1500).never()).acquire(any());
+        verify(router, times(1)).route(any(), any(), any(), anyInt(), anyInt(), any());
+    }
+
+    @Test
     void eventInvocation_expiryDuringTheRetryWaitRoutesTheLastAttempt() throws Exception {
         AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
         LambdaExecutorService retryExecutor =
@@ -617,8 +665,6 @@ class LambdaExecutorServiceTest {
         AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
         LambdaService lambdaService = eventInvokeConfig(2, 21600);
         LambdaExecutorService retryExecutor = retryingExecutor(router, lambdaService, Duration.ZERO);
-        LambdaConcurrencyLimiter.Permit permit = mock(LambdaConcurrencyLimiter.Permit.class);
-        when(concurrencyLimiter.acquire(fn)).thenReturn(permit);
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
         failEveryAttempt(rtas, failedAttempt("req-deleted-before-invoke"));
         // DeleteFunction ran between the caller resolving fn and this invoke: the function has left
@@ -631,7 +677,7 @@ class LambdaExecutorServiceTest {
         assertEquals(202, result.getStatusCode());
         verify(warmPool, after(1000).never()).acquire(any());
         verify(router, never()).route(any(), any(), any(), anyInt(), anyInt(), any());
-        verify(permit).close();
+        verify(concurrencyLimiter, never()).acquire(any());
     }
 
     @Test

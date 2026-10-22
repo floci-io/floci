@@ -361,8 +361,14 @@ disabled fails with Lambda's error as the resource status reason.
 !!! note "Concurrency enforcement"
     Reserved concurrency is enforced function-wide: invocations of every
     version and alias count against the function's reservation, and
-    invocations beyond the reserved value return `TooManyRequestsException`
-    (HTTP 429). Functions without a reserved value share a **per-region**
+    synchronous invocations beyond the reserved value return
+    `TooManyRequestsException` (HTTP 429). An asynchronous (`Event`)
+    invocation is always accepted with 202 and queued: an attempt that finds
+    the function's concurrency in use waits for a free slot, without using up
+    a retry, until the event reaches its `MaximumEventAgeInSeconds`. With a
+    reserved value of 0, an asynchronous invocation goes straight to the
+    function's `OnFailure` destination or dead-letter queue, without retries.
+    Functions without a reserved value share a **per-region**
     pool. AWS Lambda's "account-level" limit is in fact a
     per-account-per-region quota, and Floci mirrors that by partitioning
     counters on the ARN's region segment. The pool size (default 1000) is
