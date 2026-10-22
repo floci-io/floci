@@ -48,8 +48,9 @@ import java.util.Set;
  *
  * <p>A table's {@code TimeToLiveSpecification} is reconciled against what DescribeTimeToLive
  * reports, so UpdateTimeToLive is called only when the setting differs. An in-place update of an
- * {@code AWS::DynamoDB::Table} keeps the tags, stream and TTL setting it replaces, so a failed
- * stack update can put all three back.
+ * {@code AWS::DynamoDB::Table} keeps what it may change (tags, stream, TTL, billing, global
+ * secondary indexes, the Kinesis streaming destination with its precision, and the recorded
+ * declared billing), so a failed stack update can put all of it back.
  */
 @ApplicationScoped
 public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
@@ -632,8 +633,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Keeps the tags, stream setting, TTL setting, billing and global secondary indexes the table
-     * has before an in-place update changes them, with the account and region that address it, so
+     * Keeps the tags, stream setting, TTL setting, billing, global secondary indexes, Kinesis
+     * streaming destination and its precision, and the recorded declared billing the table has
+     * before an in-place update changes them, with the account and region that address it, so
      * {@link #rollbackUpdate} can put them back.
      */
     private static void snapshotBeforeUpdate(StackResource r, Scope scope, String tableName, TableDefinition table,
@@ -702,11 +704,13 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Puts back the tags, stream setting and TTL setting an in-place table update changed. All
-     * three go back or none is claimed: restoring one alone would report a rollback while the
-     * others stayed changed. Only an in-place {@code AWS::DynamoDB::Table} update takes the
-     * snapshot, so a global table or a replacing update still reports that rollback is not
-     * implemented. The snapshot is spent only once the restore succeeded: a restore that throws
+     * Puts back what an in-place table update changed: tags, stream setting, TTL setting, billing,
+     * global secondary indexes, the Kinesis streaming destination with its precision, and the
+     * recorded declared billing. All of it goes back or none is claimed: restoring part alone would
+     * report a rollback while the rest stayed changed. Only an in-place
+     * {@code AWS::DynamoDB::Table} update takes the snapshot, so a global table or a replacing
+     * update still reports that rollback is not implemented. The snapshot is spent only once the
+     * restore succeeded: a restore that throws
      * leaves it in place for the next attempt.
      */
     @Override
