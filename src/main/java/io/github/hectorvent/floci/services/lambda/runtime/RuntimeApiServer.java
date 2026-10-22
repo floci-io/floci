@@ -889,20 +889,6 @@ public class RuntimeApiServer {
         return false;
     }
 
-    /**
-     * Handles {@code POST /runtime/invocation/{requestId}/error}: the runtime reports that the
-     * handler itself failed (an uncaught exception, {@code callback(err)}, a response Lambda
-     * could not marshal, ...).
-     *
-     * <p>Always completes with {@code FunctionError: Unhandled} - real AWS reports that for
-     * every one of these regardless of runtime or error shape. The {@code
-     * Lambda-Runtime-Function-Error-Type} header this used to be keyed on does not decide it
-     * (see #3314): the Python and Node.js RICs don't even send that header on this path, and
-     * the Java RIC's own vocabulary ({@code Runtime.UserException}, {@code
-     * Runtime.BadFunctionCode}) is coincidentally what an earlier, narrower
-     * {@code contains("Runtime")} heuristic here keyed on. {@code Handled} is a legacy value
-     * current runtimes never produce.
-     */
     /** The function error AWS reports for a synchronous response over {@link #MAX_SYNC_RESPONSE_BYTES}. */
     public static InvokeResult responseSizeTooLarge(String requestId) {
         return new InvokeResult(200, "Unhandled", RESPONSE_SIZE_TOO_LARGE_PAYLOAD.clone(), null, requestId);
@@ -929,6 +915,20 @@ public class RuntimeApiServer {
         }
     }
 
+    /**
+     * Handles {@code POST /runtime/invocation/{requestId}/error}: the runtime reports that the
+     * handler itself failed (an uncaught exception, {@code callback(err)}, a response Lambda
+     * could not marshal, ...).
+     *
+     * <p>Always completes with {@code FunctionError: Unhandled} - real AWS reports that for
+     * every one of these regardless of runtime or error shape. The {@code
+     * Lambda-Runtime-Function-Error-Type} header this used to be keyed on does not decide it
+     * (see #3314): the Python and Node.js RICs don't even send that header on this path, and
+     * the Java RIC's own vocabulary ({@code Runtime.UserException}, {@code
+     * Runtime.BadFunctionCode}) is coincidentally what an earlier, narrower
+     * {@code contains("Runtime")} heuristic here keyed on. {@code Handled} is a legacy value
+     * current runtimes never produce.
+     */
     private void handleInvocationError(RoutingContext ctx) {
         String requestId = ctx.pathParam("requestId");
         PendingInvocation invocation = inFlight.remove(requestId);
