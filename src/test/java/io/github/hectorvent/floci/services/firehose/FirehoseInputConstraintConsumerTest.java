@@ -142,6 +142,27 @@ class FirehoseInputConstraintConsumerTest {
     }
 
     @Test
+    void putRecordAndPutRecordBatch_kinesisStreamAsSource_returnInvalidArgument() {
+        call("CreateDeliveryStream", "{\"DeliveryStreamName\":\"ab-kinesis-sourced\","
+                + "\"DeliveryStreamType\":\"KinesisStreamAsSource\","
+                + "\"KinesisStreamSourceConfiguration\":{"
+                + "\"KinesisStreamARN\":\"arn:aws:kinesis:us-east-1:000000000000:stream/ab-kinesis-source\","
+                + "\"RoleARN\":\"arn:aws:iam::000000000000:role/firehose\"}}")
+        .then()
+            .statusCode(200);
+
+        call("PutRecord", "{\"DeliveryStreamName\":\"ab-kinesis-sourced\",\"Record\":{\"Data\":\"aGVsbG8=\"}}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+        call("PutRecordBatch", "{\"DeliveryStreamName\":\"ab-kinesis-sourced\","
+                + "\"Records\":[{\"Data\":\"aGVsbG8=\"}]}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
     void tagDeliveryStream_emptyAndOversizedTags_returnInvalidArgument() {
         createStream("ab-tag-bounds");
         call("TagDeliveryStream", "{\"DeliveryStreamName\":\"ab-tag-bounds\",\"Tags\":[]}")

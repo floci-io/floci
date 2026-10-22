@@ -995,13 +995,18 @@ public class FirehoseService implements ResourceProvider {
 
     /**
      * @param checkpointAdvance run under the buffer lock once the records are buffered,
-     *                          or null for records that are not read from a source stream.
+     *                          or null for records put directly (PutRecord, PutRecordBatch),
+     *                          which a KinesisStreamAsSource stream refuses.
      */
     private void putRecordBatch(String streamKey, String streamName, List<Record> records, Runnable checkpointAdvance) {
         for (int i = 0; i < records.size(); i++) {
             requireRecordData(records.get(i), "records." + (i + 1) + ".member");
         }
         DeliveryStreamDescription stream = describeDeliveryStreamByKey(streamKey);
+        if (checkpointAdvance == null && "KinesisStreamAsSource".equals(stream.getDeliveryStreamType())) {
+            throw new AwsException("InvalidArgumentException",
+                    "This operation is not permitted on KinesisStreamAsSource delivery stream type.", 400);
+        }
         List<byte[]> buffer = buffers.computeIfAbsent(
                 streamKey, k -> Collections.synchronizedList(new ArrayList<>()));
         long bufferedBytes = 0;

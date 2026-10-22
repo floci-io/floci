@@ -26,7 +26,7 @@ Floci emulates Amazon Data Firehose for streaming data ingestion and delivery to
 
 ## How it works
 
-1. **Buffering**: Incoming records are buffered in memory. A record without `Data`, or with more than 1,024,000 bytes of it, is rejected with `ValidationException` as on AWS, and a `PutRecordBatch` carrying such an entry buffers none of its records.
+1. **Buffering**: Incoming records are buffered in memory. A record without `Data`, or with more than 1,024,000 bytes of it, is rejected with `ValidationException` as on AWS, and a `PutRecordBatch` carrying such an entry buffers none of its records. A `KinesisStreamAsSource` delivery stream takes its records only from its source stream: `PutRecord` and `PutRecordBatch` on it answer `InvalidArgumentException`, as on AWS, and SNS, EventBridge, CloudWatch Logs, SES and IoT deliveries to it fail the same way.
 2. **Automatic Flush**: A buffer is delivered to S3 when either trigger of the stream's `BufferingHints` fires first, mirroring AWS's buffered delivery:
     - the buffered records reach `SizeInMBs` (default 5 MiB), or
     - `IntervalInSeconds` (default 300 s) has elapsed since the first buffered record. A background flusher checks this every `floci.services.firehose.tick-interval-seconds` (default 1 s).

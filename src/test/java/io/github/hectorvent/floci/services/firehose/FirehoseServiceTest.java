@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.ArgumentCaptor;
@@ -686,6 +687,25 @@ class FirehoseServiceTest {
         firehoseService.flush("sourced-stream");
 
         assertEquals("hello\n", delivered("sink").text());
+    }
+
+    @Test
+    void directPutsToAKinesisSourcedStreamAreRejectedAndBufferNothing() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        Record record = new Record("direct".getBytes(StandardCharsets.UTF_8));
+
+        List<Executable> directPuts = List.of(
+                () -> firehoseService.putRecord("sourced-stream", record),
+                () -> firehoseService.putRecord("000000000000", "us-east-1", "sourced-stream", record),
+                () -> firehoseService.putRecordBatch("sourced-stream", List.of(record)),
+                () -> firehoseService.putRecordBatch("000000000000", "us-east-1", "sourced-stream", List.of(record)));
+        for (Executable put : directPuts) {
+            AwsException e = assertThrows(AwsException.class, put);
+            assertEquals("InvalidArgumentException", e.getErrorCode());
+        }
+
+        firehoseService.flush("sourced-stream");
+        verifyNothingDelivered();
     }
 
     @Test
