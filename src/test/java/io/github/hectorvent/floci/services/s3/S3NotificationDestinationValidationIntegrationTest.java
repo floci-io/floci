@@ -118,8 +118,9 @@ class S3NotificationDestinationValidationIntegrationTest {
         String missingTopic = regionResolver.buildArn("sns", REGION, "missing-topic");
         String missingFunction = regionResolver.buildArn("lambda", REGION, "function:missing-function");
         putNotification(notificationConfiguration(
-                queueConfiguration(missingQueueOne) + queueConfiguration(missingQueueTwo)
-                        + topicConfiguration(missingTopic) + lambdaConfiguration(missingFunction)), false)
+                queueConfiguration(missingQueueOne) + queueConfiguration(missingQueueTwo, "s3:ObjectRemoved:*", "")
+                        + topicConfiguration(missingTopic, "s3:ObjectTagging:*", "")
+                        + lambdaConfiguration(missingFunction, "s3:ObjectRestore:*")), false)
                 .statusCode(400)
                 .body(containsString("<Code>InvalidArgument</Code>"))
                 .body(containsString("Unable to validate the following destination configurations"))
@@ -147,9 +148,9 @@ class S3NotificationDestinationValidationIntegrationTest {
         String missingFunctionArn = regionResolver.buildArn("lambda", REGION, "function:skip-function");
 
         putNotification(notificationConfiguration(queueConfiguration(existingQueueArn)
-                + queueConfiguration(missingQueueArn)
-                + topicConfiguration(missingTopicArn)
-                + lambdaConfiguration(missingFunctionArn)), true).statusCode(200);
+                + queueConfiguration(missingQueueArn, "s3:ObjectRemoved:*", "")
+                + topicConfiguration(missingTopicArn, "s3:ObjectTagging:*", "")
+                + lambdaConfiguration(missingFunctionArn, "s3:ObjectRestore:*")), true).statusCode(200);
 
         given().when().get("/" + bucket + "?notification")
                 .then().statusCode(200)
@@ -169,7 +170,7 @@ class S3NotificationDestinationValidationIntegrationTest {
                 Map.of("RawMessageDelivery", "true"));
 
         putNotification(notificationConfiguration(queueConfiguration(directQueueArn)
-                + topicConfiguration(topicArn)), false).statusCode(200);
+                + topicConfiguration(topicArn, "s3:ObjectRemoved:*", "")), false).statusCode(200);
 
         assertTestEvent(receiveQueueMessage(queueUrls.get(0)).getFirst().getBody());
         assertTestEvent(receiveQueueMessage(queueUrls.get(1)).getFirst().getBody());
@@ -205,6 +206,71 @@ class S3NotificationDestinationValidationIntegrationTest {
             snsService.deleteTopic(topicArn, topicRegion);
             sqsService.deleteQueue(queueUrl, topicRegion);
         }
+    }
+
+    @Test
+    void unsupportedEventIsRejected() {
+        String queueArn = regionResolver.buildArn("sqs", REGION, "unsupported-event");
+        putNotification(notificationConfiguration(queueConfiguration(queueArn, "s3:ObjectCreated:Nope", "")), true)
+                .statusCode(400)
+                .body(containsString("<Code>InvalidArgument</Code>"))
+                .body(containsString("<ArgumentValue>s3:ObjectCreated:Nope</ArgumentValue>"));
+
+        given().when().get("/" + bucket + "?notification")
+                .then().statusCode(200).body(not(containsString("QueueConfiguration")));
+    }
+
+    @Test
+    void filterRuleOtherThanOnePrefixAndOneSuffixIsRejected() {
+        String queueArn = regionResolver.buildArn("sqs", REGION, "bad-filter");
+        putNotification(notificationConfiguration(queueConfiguration(queueArn, "s3:ObjectCreated:*",
+                filterRule("extension", ".jpg"))), true)
+                .statusCode(400)
+                .body(containsString("<Code>InvalidArgument</Code>"))
+                .body(containsString("<ArgumentName>FilterRule.Name</ArgumentName>"));
+        putNotification(notificationConfiguration(queueConfiguration(queueArn, "s3:ObjectCreated:*",
+                filterRule("prefix", "a/") + filterRule("Prefix", "b/"))), true)
+                .statusCode(400)
+                .body(containsString("<Code>InvalidArgument</Code>"));
+
+        given().when().get("/" + bucket + "?notification")
+                .then().statusCode(200).body(not(containsString("QueueConfiguration")));
+    }
+
+    @Test
+    void configurationsWhoseFiltersOverlapForACommonEventAreRejected() {
+        String queueArn = regionResolver.buildArn("sqs", REGION, "overlap-queue");
+        String topicArn = regionResolver.buildArn("sns", REGION, "overlap-topic");
+        putNotification(notificationConfiguration(queueConfiguration(queueArn, "s3:ObjectCreated:*", "")
+                + queueConfiguration(queueArn, "s3:ObjectCreated:*", "")), true)
+                .statusCode(400)
+                .body(containsString("<Code>InvalidArgument</Code>"));
+        putNotification(notificationConfiguration(queueConfiguration(queueArn, "s3:ObjectCreated:*",
+                filterRule("suffix", "jpg"))
+                + topicConfiguration(topicArn, "s3:ObjectCreated:Put", filterRule("suffix", "pg"))), true)
+                .statusCode(400)
+                .body(containsString("<Code>InvalidArgument</Code>"));
+
+        given().when().get("/" + bucket + "?notification")
+                .then().statusCode(200).body(not(containsString("QueueConfiguration")));
+    }
+
+    @Test
+    void configurationsThatCannotMatchTheSameEventAreAccepted() {
+        String queueArn = regionResolver.buildArn("sqs", REGION, "disjoint-queue");
+        String topicArn = regionResolver.buildArn("sns", REGION, "disjoint-topic");
+        putNotification(notificationConfiguration(
+                queueConfiguration(queueArn, "s3:ObjectCreated:Put", filterRule("prefix", "images/"))
+                + queueConfiguration(queueArn, "s3:ObjectCreated:Put", filterRule("prefix", "logs/"))
+                + topicConfiguration(topicArn, "s3:ObjectCreated:*",
+                        filterRule("prefix", "docs") + filterRule("suffix", ".png"))
+                + topicConfiguration(topicArn, "s3:ObjectCreated:Put",
+                        filterRule("prefix", "docs") + filterRule("suffix", ".jpg"))
+                + queueConfiguration(queueArn, "s3:ObjectRemoved:*", filterRule("prefix", "images/"))), true)
+                .statusCode(200);
+
+        given().when().get("/" + bucket + "?notification")
+                .then().statusCode(200).body(containsString("<Value>logs/</Value>"));
     }
 
     @Test
@@ -365,5 +431,28 @@ class S3NotificationDestinationValidationIntegrationTest {
     private static String lambdaConfiguration(String arn) {
         return "<CloudFunctionConfiguration><CloudFunction>" + arn
                 + "</CloudFunction><Event>s3:ObjectCreated:*</Event></CloudFunctionConfiguration>";
+    }
+
+    private static String queueConfiguration(String arn, String event, String filterRules) {
+        return "<QueueConfiguration><Queue>" + arn + "</Queue><Event>" + event + "</Event>"
+                + filter(filterRules) + "</QueueConfiguration>";
+    }
+
+    private static String topicConfiguration(String arn, String event, String filterRules) {
+        return "<TopicConfiguration><Topic>" + arn + "</Topic><Event>" + event + "</Event>"
+                + filter(filterRules) + "</TopicConfiguration>";
+    }
+
+    private static String lambdaConfiguration(String arn, String event) {
+        return "<CloudFunctionConfiguration><CloudFunction>" + arn + "</CloudFunction><Event>" + event
+                + "</Event></CloudFunctionConfiguration>";
+    }
+
+    private static String filter(String filterRules) {
+        return filterRules.isEmpty() ? "" : "<Filter><S3Key>" + filterRules + "</S3Key></Filter>";
+    }
+
+    private static String filterRule(String name, String value) {
+        return "<FilterRule><Name>" + name + "</Name><Value>" + value + "</Value></FilterRule>";
     }
 }

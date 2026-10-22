@@ -12,6 +12,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -91,16 +92,19 @@ class S3PresignedPostIntegrationTest {
                             <Id>post-notification</Id>
                             <Queue>arn:aws:sqs:us-east-1:000000000000:%s</Queue>
                             <Event>s3:ObjectCreated:Post</Event>
+                            <Filter><S3Key><FilterRule><Name>prefix</Name><Value>uploads/</Value></FilterRule></S3Key></Filter>
                         </QueueConfiguration>
                         <QueueConfiguration>
                             <Id>put-notification</Id>
                             <Queue>arn:aws:sqs:us-east-1:000000000000:%s</Queue>
                             <Event>s3:ObjectCreated:Put</Event>
+                            <Filter><S3Key><FilterRule><Name>prefix</Name><Value>uploads/</Value></FilterRule></S3Key></Filter>
                         </QueueConfiguration>
                         <QueueConfiguration>
                             <Id>wildcard-notification</Id>
                             <Queue>arn:aws:sqs:us-east-1:000000000000:%s</Queue>
                             <Event>s3:ObjectCreated:*</Event>
+                            <Filter><S3Key><FilterRule><Name>prefix</Name><Value>wildcard/</Value></FilterRule></S3Key></Filter>
                         </QueueConfiguration>
                     </NotificationConfiguration>
                     """.formatted(postQueueName, putQueueName, wildcardQueueName))
@@ -113,13 +117,15 @@ class S3PresignedPostIntegrationTest {
             consumeValidationEvent(putQueueUrl);
             consumeValidationEvent(wildcardQueueUrl);
 
-            given()
-                .multiPart("key", "uploads/notified.txt")
-                .multiPart("file", "notified.txt", "notified".getBytes(StandardCharsets.UTF_8), "text/plain")
-            .when()
-                .post("/" + BUCKET)
-            .then()
-                .statusCode(204);
+            for (String key : List.of("uploads/notified.txt", "wildcard/notified.txt")) {
+                given()
+                    .multiPart("key", key)
+                    .multiPart("file", "notified.txt", "notified".getBytes(StandardCharsets.UTF_8), "text/plain")
+                .when()
+                    .post("/" + BUCKET)
+                .then()
+                    .statusCode(204);
+            }
 
             assertQueueContainsPostNotification(postQueueUrl);
             assertQueueContainsPostNotification(wildcardQueueUrl);
@@ -141,6 +147,7 @@ class S3PresignedPostIntegrationTest {
                 .queryParam("notification", "")
                 .body("<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>")
                 .put("/" + BUCKET);
+            given().delete("/" + BUCKET + "/wildcard/notified.txt");
 
             deleteQueue(postQueueUrl);
             deleteQueue(putQueueUrl);

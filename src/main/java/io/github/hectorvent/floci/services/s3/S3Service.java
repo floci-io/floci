@@ -4989,6 +4989,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         "The specified bucket does not exist.", 404));
 
         List<NotificationDestination> destinations = notificationDestinations(config);
+        validateNotificationRules(config);
         if (!skipDestinationValidation) {
             List<DestinationFailure> failures = new ArrayList<>();
             for (NotificationDestination destination : destinations) {
@@ -5036,6 +5037,107 @@ public class S3Service implements Resettable, ResourceProvider {
     private record NotificationDestination(String arn, String service, String region, String accountId) {}
 
     private record DestinationFailure(NotificationDestination destination, String reason) {}
+
+    /** The event types a notification configuration may name, as the API's {@code Event} enumeration lists them. */
+    private static final Set<String> NOTIFICATION_EVENTS = Set.of(
+            "s3:ReducedRedundancyLostObject",
+            "s3:ObjectCreated:*", "s3:ObjectCreated:Put", "s3:ObjectCreated:Post", "s3:ObjectCreated:Copy",
+            "s3:ObjectCreated:CompleteMultipartUpload",
+            "s3:ObjectRemoved:*", "s3:ObjectRemoved:Delete", "s3:ObjectRemoved:DeleteMarkerCreated",
+            "s3:ObjectRestore:*", "s3:ObjectRestore:Post", "s3:ObjectRestore:Completed", "s3:ObjectRestore:Delete",
+            "s3:Replication:*", "s3:Replication:OperationFailedReplication", "s3:Replication:OperationNotTracked",
+            "s3:Replication:OperationMissedThreshold", "s3:Replication:OperationReplicatedAfterThreshold",
+            "s3:LifecycleTransition", "s3:IntelligentTiering", "s3:ObjectAcl:Put",
+            "s3:LifecycleExpiration:*", "s3:LifecycleExpiration:Delete", "s3:LifecycleExpiration:DeleteMarkerCreated",
+            "s3:ObjectTagging:*", "s3:ObjectTagging:Put", "s3:ObjectTagging:Delete",
+            "s3:ObjectAnnotation:*", "s3:ObjectAnnotation:Put", "s3:ObjectAnnotation:Delete",
+            "s3:ObjectRetention:Put");
+
+    /** One configuration's events and key filter; an absent prefix or suffix is empty, which overlaps any other. */
+    private record NotificationRule(List<String> events, String prefix, String suffix, boolean filtered) {
+
+        boolean overlaps(NotificationRule other) {
+            return events.stream().anyMatch(event -> other.events.stream()
+                            .anyMatch(otherEvent -> eventsIntersect(event, otherEvent)))
+                    && (prefix.startsWith(other.prefix) || other.prefix.startsWith(prefix))
+                    && (suffix.endsWith(other.suffix) || other.suffix.endsWith(suffix));
+        }
+
+        private static boolean eventsIntersect(String event, String other) {
+            return event.equals(other) || coveredBy(event, other) || coveredBy(other, event);
+        }
+
+        private static boolean coveredBy(String event, String pattern) {
+            return pattern.endsWith(":*") && event.startsWith(pattern.substring(0, pattern.length() - 1));
+        }
+    }
+
+    /**
+     * Refuses what S3 does not store: an event type it does not notify, a filter rule other than one
+     * prefix and one suffix, and two configurations, of any destination type, that some event could
+     * match both of: a common event type with overlapping prefixes and overlapping suffixes.
+     */
+    private static void validateNotificationRules(NotificationConfiguration config) {
+        List<NotificationRule> rules = new ArrayList<>();
+        for (QueueNotification queue : config.getQueueConfigurations()) {
+            rules.add(notificationRule(queue.events(), queue.filterRules()));
+        }
+        for (TopicNotification topic : config.getTopicConfigurations()) {
+            rules.add(notificationRule(topic.events(), topic.filterRules()));
+        }
+        for (LambdaNotification lambda : config.getLambdaFunctionConfigurations()) {
+            rules.add(notificationRule(lambda.events(), lambda.filterRules()));
+        }
+        for (int index = 0; index < rules.size(); index++) {
+            for (int otherIndex = index + 1; otherIndex < rules.size(); otherIndex++) {
+                NotificationRule rule = rules.get(index);
+                NotificationRule other = rules.get(otherIndex);
+                if (rule.overlaps(other)) {
+                    throw new AwsException("InvalidArgument", rule.filtered() || other.filtered()
+                            ? "Configuration is ambiguously defined. Cannot have overlapping suffixes in two rules"
+                                    + " if the prefixes are overlapping for the same event type."
+                            : "Configurations overlap. Configurations on the same bucket cannot share a common"
+                                    + " event type.", 400);
+                }
+            }
+        }
+    }
+
+    private static NotificationRule notificationRule(List<String> events, List<FilterRule> filterRules) {
+        List<String> eventTypes = events != null ? events : List.of();
+        for (String event : eventTypes) {
+            if (!NOTIFICATION_EVENTS.contains(event)) {
+                throw invalidNotificationArgument("The event is not supported for notifications", "Event", event);
+            }
+        }
+        List<FilterRule> rules = filterRules != null ? filterRules : List.of();
+        String prefix = null;
+        String suffix = null;
+        for (FilterRule rule : rules) {
+            String name = rule.name() != null ? rule.name().toLowerCase(Locale.ROOT) : "";
+            if ("prefix".equals(name) && prefix == null) {
+                prefix = rule.value();
+            } else if ("suffix".equals(name) && suffix == null) {
+                suffix = rule.value();
+            } else if ("prefix".equals(name) || "suffix".equals(name)) {
+                throw invalidNotificationArgument("Cannot specify more than one " + name + " rule in a filter.",
+                        "FilterRule.Name", rule.name());
+            } else {
+                throw invalidNotificationArgument("filter rule name must be either prefix or suffix",
+                        "FilterRule.Name", rule.name());
+            }
+        }
+        return new NotificationRule(eventTypes, prefix != null ? prefix : "", suffix != null ? suffix : "",
+                !rules.isEmpty());
+    }
+
+    private static AwsException invalidNotificationArgument(String message, String argumentName,
+                                                            String argumentValue) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("ArgumentName", argumentName);
+        details.put("ArgumentValue", argumentValue);
+        return new AwsException("InvalidArgument", message, 400, details);
+    }
 
     private static List<NotificationDestination> notificationDestinations(NotificationConfiguration config) {
         List<NotificationDestination> destinations = new ArrayList<>();
