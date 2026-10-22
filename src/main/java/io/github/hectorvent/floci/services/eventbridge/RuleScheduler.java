@@ -14,8 +14,9 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Clock;
-import java.time.ZoneOffset;
+import java.time.Instant;
 import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -187,14 +188,14 @@ public class RuleScheduler implements Resettable {
 
     private String buildScheduledEvent(Rule rule, String region) {
         try {
-            ZonedDateTime now = ZonedDateTime.now(ZoneOffset.UTC);
+            Instant now = Instant.now(clock).truncatedTo(ChronoUnit.SECONDS);
             ObjectNode node = objectMapper.createObjectNode();
             node.put("version", "0");
             node.put("id", UUID.randomUUID().toString());
             node.put("source", "aws.events");
             node.put("detail-type", "Scheduled Event");
             node.put("account", rule.getAccountId() != null ? rule.getAccountId() : defaultAccountId);
-            node.put("time", now.toInstant().toString());
+            node.put("time", now.toString());
             node.put("region", region);
             node.putArray("resources").add(rule.getArn());
             node.putObject("detail");

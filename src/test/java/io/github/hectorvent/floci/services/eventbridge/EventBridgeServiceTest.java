@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
 import io.github.hectorvent.floci.services.eventbridge.model.ApiDestinationState;
 import io.github.hectorvent.floci.services.eventbridge.model.Archive;
+import io.github.hectorvent.floci.services.eventbridge.model.ArchivedEvent;
 import io.github.hectorvent.floci.services.eventbridge.model.Connection;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
@@ -31,6 +32,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -1474,6 +1476,46 @@ class EventBridgeServiceTest {
         assertEquals("my.app", envelope.path("source").asText());
         assertTrue(envelope.path("resources").isArray());
         assertEquals(0, envelope.path("resources").size());
+    }
+
+    // ─────────────── Event time ───────────────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void putEventsUsesTheEntryTimeForTheEnvelopeAndTheArchive() throws Exception {
+        Rule rule = service.putRule("timed", null, "{\"time\":[{\"prefix\":\"2015-11-11\"}]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("timed", null, List.of(target), REGION);
+        String archiveArn = service.createArchive("all", DEFAULT_BUS, null, null, 0, REGION).getArchiveArn();
+        Map<String, Object> entry = new HashMap<>(Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}"));
+        entry.put("Time", Instant.parse("2015-11-11T21:29:54.789Z"));
+
+        service.putEvents(List.of(entry), REGION);
+
+        ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
+        verify(dispatcherMock).dispatch(eq(rule.getArn()), eq(target), json.capture(), eq(REGION), any());
+        assertEquals("2015-11-11T21:29:54Z", OBJECT_MAPPER.readTree(json.getValue()).path("time").asText());
+
+        service.startReplay("from-2015", null, archiveArn, Instant.EPOCH, Instant.now(), DEFAULT_BUS, REGION);
+        ArgumentCaptor<List<ArchivedEvent>> archived = ArgumentCaptor.forClass(List.class);
+        verify(replayDispatcherMock).dispatch(any(), archived.capture(), any(), any(), any());
+        assertEquals(Instant.parse("2015-11-11T21:29:54Z"), archived.getValue().getFirst().getEventTime());
+    }
+
+    @Test
+    void putEventsStampsTheEnvelopeTimeInWholeSeconds() throws Exception {
+        service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("my-rule", null, List.of(target), REGION);
+
+        service.putEvents(List.of(Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), REGION);
+
+        ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
+        verify(dispatcherMock).dispatch(anyString(), eq(target), json.capture(), eq(REGION), any());
+        String time = OBJECT_MAPPER.readTree(json.getValue()).path("time").asText();
+        assertTrue(time.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z"), time);
     }
 
     // ─────────────── Envelope region/account propagation ───────────────

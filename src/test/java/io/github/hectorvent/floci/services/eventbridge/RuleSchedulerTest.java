@@ -170,6 +170,21 @@ class RuleSchedulerTest {
         assertTrue(scheduler.isRunning(RULE_ARN), "the recreated rule must keep its timer");
     }
 
+    @Test
+    void scheduledEventTimeIsInWholeSeconds() throws Exception {
+        Vertx vertx = mock(Vertx.class);
+        ArgumentCaptor<Handler<Long>> fire = timerHandlerCaptor();
+        when(vertx.setPeriodic(anyLong(), fire.capture())).thenReturn(1L);
+        StoppingInvoker invoker = new StoppingInvoker(() -> { });
+        RuleScheduler scheduler = newScheduler(vertx, invoker);
+        scheduler.startScheduler(RULE_ARN, "rate(1 minute)", () -> toScheduleData(enabledRule()));
+
+        fire.getValue().handle(1L);
+
+        String time = new ObjectMapper().readTree(invoker.lastEventJson()).path("time").asText();
+        assertTrue(time.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z"), time);
+    }
+
     @SuppressWarnings("unchecked")
     private static ArgumentCaptor<Handler<Long>> timerHandlerCaptor() {
         return ArgumentCaptor.forClass(Handler.class);
@@ -211,6 +226,7 @@ class RuleSchedulerTest {
 
         private final Runnable onDelivery;
         private final AtomicInteger invocationCount = new AtomicInteger();
+        private final AtomicReference<String> lastEventJson = new AtomicReference<>();
 
         StoppingInvoker(Runnable onDelivery) {
             super(null, null, null, new ObjectMapper(), testConfig());
@@ -221,11 +237,16 @@ class RuleSchedulerTest {
         public void invokeTarget(Target target, String eventJson, String region, String ruleArn,
                                  Instant ingestionTime) {
             invocationCount.incrementAndGet();
+            lastEventJson.set(eventJson);
             onDelivery.run();
         }
 
         int invocationCount() {
             return invocationCount.get();
+        }
+
+        String lastEventJson() {
+            return lastEventJson.get();
         }
     }
 

@@ -5,6 +5,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.*;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
@@ -139,7 +140,7 @@ class EventBridgeIntegrationTest {
                 .then().statusCode(200);
 
         String expectedMessage = "\\{\"version\":\"0\",\"id\":\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\",\"source\":\"com.mycompany.myapp\"," +
-                "\"detail-type\":\"myDetailType\",\"account\":\"000000000000\",\"time\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]+Z\"," +
+                "\"detail-type\":\"myDetailType\",\"account\":\"000000000000\",\"time\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\"," +
                 "\"region\":\"us-east-1\",\"resources\":\\[\"resource1\",\"resource2\"],\"detail\":\\{\"key1\":\"value1\",\"key2\":\"value2\"},\"event-bus-name\":\"default\"}";
 
         given()
@@ -297,5 +298,48 @@ class EventBridgeIntegrationTest {
                 .when().post("/")
                 .then().statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(10)
+    void putEventsUsesTheEntryTime() {
+        String queueUrl = given()
+                .contentType(SQS_CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+                .body("{\"QueueName\":\"eb-integration-time-queue\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("QueueUrl");
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.PutRule")
+                .body("{\"Name\":\"eb-integration-time-rule\",\"EventPattern\":\"{\\\"source\\\":[\\\"com.mycompany.time\\\"]}\"}")
+                .when().post("/")
+                .then().statusCode(200);
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.PutTargets")
+                .body("{\"Rule\":\"eb-integration-time-rule\",\"Targets\":[{\"Id\":\"1\","
+                        + "\"Arn\":\"arn:aws:sqs:us-east-1:000000000000:eb-integration-time-queue\"}]}")
+                .when().post("/")
+                .then().statusCode(200);
+
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.PutEvents")
+                .body("{\"Entries\":[{\"Source\":\"com.mycompany.time\",\"DetailType\":\"t\",\"Detail\":\"{}\","
+                        + "\"Time\":1447277394}]}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("FailedEntryCount", equalTo(0));
+
+        given()
+                .contentType(SQS_CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body("{\"QueueUrl\":\"" + queueUrl + "\",\"MaxNumberOfMessages\":1}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Messages", hasSize(1))
+                .body("Messages[0].Body", containsString("\"time\":\"2015-11-11T21:29:54Z\""));
     }
 }
