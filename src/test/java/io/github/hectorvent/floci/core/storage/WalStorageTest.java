@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.storage;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
@@ -16,6 +18,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -378,6 +387,97 @@ class WalStorageTest {
             assertEquals(unreadableContents, Files.readString(quarantinePath));
         } finally {
             store.shutdown();
+        }
+    }
+
+    @Test
+    void racingPutsOnOneKeyReplayToTheValueHeldInMemory() throws Exception {
+        assertReplayMatchesMemoryAfterRace(
+                (store, gated) -> store.put("key", gated),
+                store -> store.put("key", new GatedValue("racer")));
+    }
+
+    @Test
+    void putRacingADeleteOfTheSameKeyReplaysToTheStateHeldInMemory() throws Exception {
+        assertReplayMatchesMemoryAfterRace(
+                (store, gated) -> store.put("key", gated),
+                store -> store.delete("key"));
+    }
+
+    @Test
+    void putAllRacingAPutOfTheSameKeyReplaysToTheValueHeldInMemory() throws Exception {
+        assertReplayMatchesMemoryAfterRace(
+                (store, gated) -> store.putAll(Map.of("key", gated)),
+                store -> store.put("key", new GatedValue("racer")));
+    }
+
+    /**
+     * Parks the first writer while its value is being encoded for the log, lets a second writer
+     * change the same key, then releases the first. Whatever order the two writes land in, a fresh
+     * instance replaying the log must arrive at the value the live store holds.
+     */
+    private void assertReplayMatchesMemoryAfterRace(
+            BiConsumer<WalStorage<String, GatedValue>, GatedValue> parkedWrite,
+            Consumer<WalStorage<String, GatedValue>> racingWrite) throws Exception {
+        Path snapshotPath = tempDir.resolve("race-snapshot.json");
+        Path walPath = tempDir.resolve("race-data.wal");
+        WalStorage<String, GatedValue> live = new WalStorage<>(snapshotPath, walPath,
+                new TypeReference<Map<String, GatedValue>>() {}, 600000);
+        live.load();
+        CountDownLatch parked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        GatedValue gated = new GatedValue("parked", parked, release);
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        WalStorage<String, GatedValue> replayed = null;
+        try {
+            Future<?> first = pool.submit(() -> parkedWrite.accept(live, gated));
+            assertTrue(parked.await(5, TimeUnit.SECONDS), "the first writer reached its log encoding");
+            racingWrite.accept(live);
+            release.countDown();
+            first.get(5, TimeUnit.SECONDS);
+
+            replayed = new WalStorage<>(snapshotPath, walPath,
+                    new TypeReference<Map<String, GatedValue>>() {}, 600000);
+            replayed.load();
+            assertEquals(live.get("key").map(GatedValue::getName),
+                    replayed.get("key").map(GatedValue::getName));
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+            if (replayed != null) {
+                replayed.shutdown();
+            }
+            live.shutdown();
+        }
+    }
+
+    /** A value whose first serialization parks until released when it carries latches. */
+    public static final class GatedValue {
+        private final String name;
+        private final CountDownLatch parked;
+        private final CountDownLatch release;
+
+        @JsonCreator
+        public GatedValue(@JsonProperty("name") String name) {
+            this(name, null, null);
+        }
+
+        GatedValue(String name, CountDownLatch parked, CountDownLatch release) {
+            this.name = name;
+            this.parked = parked;
+            this.release = release;
+        }
+
+        public String getName() {
+            if (parked != null && parked.getCount() > 0) {
+                parked.countDown();
+                try {
+                    release.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return name;
         }
     }
 

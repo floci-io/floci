@@ -52,6 +52,9 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
     private final ObjectMapper walMapper;
     private final TypeReference<Map<K, V>> typeReference;
     private final ReentrantReadWriteLock compactionLock = new ReentrantReadWriteLock();
+    // Held across each mutation's memory update and its log append, so the log records the changes
+    // to a key in the order memory applied them and a replay ends at the value memory holds.
+    private final Object appendLock = new Object();
     private final ScheduledExecutorService scheduler;
     private volatile DataOutputStream walWriter;
     // Set under the read lock by every mutation and cleared under the write lock by compaction,
@@ -86,9 +89,12 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
     public void put(K key, V value) {
         compactionLock.readLock().lock();
         try {
-            store.put(key, value);
-            dirty = true;
-            appendPut(key, value);
+            byte[] record = encodePut(key, value);
+            synchronized (appendLock) {
+                store.put(key, value);
+                dirty = true;
+                append(record);
+            }
         } finally {
             compactionLock.readLock().unlock();
         }
@@ -105,9 +111,12 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
         }
         compactionLock.readLock().lock();
         try {
-            store.putAll(entries);
-            dirty = true;
-            appendPuts(entries);
+            byte[] records = encodePuts(entries);
+            synchronized (appendLock) {
+                store.putAll(entries);
+                dirty = true;
+                append(records);
+            }
         } finally {
             compactionLock.readLock().unlock();
         }
@@ -122,9 +131,12 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
     public void delete(K key) {
         compactionLock.readLock().lock();
         try {
-            store.remove(key);
-            dirty = true;
-            appendDelete(key);
+            byte[] record = encodeDelete(key);
+            synchronized (appendLock) {
+                store.remove(key);
+                dirty = true;
+                append(record);
+            }
         } finally {
             compactionLock.readLock().unlock();
         }
@@ -233,41 +245,47 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
         }
     }
 
-    private void appendPut(K key, V value) {
-        DataOutputStream out = walWriter;
-        if (out == null) return;
+    // The encoders run before appendLock is taken, so serialization never holds up other writers.
+
+    private byte[] encodePut(K key, V value) {
         try {
-            byte[] keyBytes = walMapper.writeValueAsBytes(key);
-            byte[] valueBytes = walMapper.writeValueAsBytes(value);
-            synchronized (out) {
-                writePutRecord(out, keyBytes, valueBytes);
-                out.flush();
-            }
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            writePutRecord(new DataOutputStream(bytes), walMapper.writeValueAsBytes(key),
+                    walMapper.writeValueAsBytes(value));
+            return bytes.toByteArray();
         } catch (IOException e) {
-            LOG.errorv(e, "Failed to append PUT WAL entry");
+            LOG.errorv(e, "Failed to encode PUT WAL entry");
+            return null;
         }
     }
 
-    private void appendPuts(Map<K, V> entries) {
-        DataOutputStream out = walWriter;
-        if (out == null) {
-            return;
-        }
+    private byte[] encodePuts(Map<K, V> entries) {
         try {
-            // Encode the whole batch off the shared writer so the lock is held for one write.
-            ByteArrayOutputStream batch = new ByteArrayOutputStream();
-            DataOutputStream records = new DataOutputStream(batch);
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            DataOutputStream records = new DataOutputStream(bytes);
             for (Map.Entry<K, V> entry : entries.entrySet()) {
                 writePutRecord(records, walMapper.writeValueAsBytes(entry.getKey()),
                         walMapper.writeValueAsBytes(entry.getValue()));
             }
-            records.flush();
-            synchronized (out) {
-                batch.writeTo(out);
-                out.flush();
-            }
+            return bytes.toByteArray();
         } catch (IOException e) {
-            LOG.errorv(e, "Failed to append {0} PUT WAL entries", entries.size());
+            LOG.errorv(e, "Failed to encode {0} PUT WAL entries", entries.size());
+            return null;
+        }
+    }
+
+    private byte[] encodeDelete(K key) {
+        try {
+            byte[] keyBytes = walMapper.writeValueAsBytes(key);
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            DataOutputStream record = new DataOutputStream(bytes);
+            record.writeByte(OP_DELETE);
+            record.writeInt(keyBytes.length);
+            record.write(keyBytes);
+            return bytes.toByteArray();
+        } catch (IOException e) {
+            LOG.errorv(e, "Failed to encode DELETE WAL entry");
+            return null;
         }
     }
 
@@ -280,19 +298,17 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
         out.write(valueBytes);
     }
 
-    private void appendDelete(K key) {
+    /** Must be called holding {@link #appendLock}, right after the memory update the records describe. */
+    private void append(byte[] records) {
         DataOutputStream out = walWriter;
-        if (out == null) return;
+        if (records == null || out == null) {
+            return;
+        }
         try {
-            byte[] keyBytes = walMapper.writeValueAsBytes(key);
-            synchronized (out) {
-                out.writeByte(OP_DELETE);
-                out.writeInt(keyBytes.length);
-                out.write(keyBytes);
-                out.flush();
-            }
+            out.write(records);
+            out.flush();
         } catch (IOException e) {
-            LOG.errorv(e, "Failed to append DELETE WAL entry");
+            LOG.errorv(e, "Failed to append to WAL {0}", walPath);
         }
     }
 
