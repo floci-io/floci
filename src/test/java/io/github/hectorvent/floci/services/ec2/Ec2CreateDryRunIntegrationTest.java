@@ -1,0 +1,208 @@
+package io.github.hectorvent.floci.services.ec2;
+
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
+import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+
+import java.util.UUID;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.emptyOrNullString;
+import static org.hamcrest.Matchers.equalTo;
+
+/**
+ * DryRun on CreateVpc, CreateSubnet and CreateSecurityGroup is answered with DryRunOperation and HTTP 412,
+ * and nothing is created, so the real create that follows can still take the same CIDR block or group
+ * name. Floci answers it before the CIDR block, tenancy, VPC and group name are checked, an order AWS
+ * does not document.
+ */
+@QuarkusTest
+class Ec2CreateDryRunIntegrationTest {
+
+    private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20261022/us-east-1/ec2/aws4_request";
+    private static final String MISSING_VPC = "vpc-0123456789abcdef0";
+
+    @Test
+    void aCreateVpcDryRunCreatesNoVpc() {
+        String name = "dryrun-" + UUID.randomUUID();
+        try {
+            assertDryRun(tagged(createVpc("10.91.0.0/16"), "vpc", name).formParam("DryRun", "true"));
+
+            ec2("DescribeVpcs")
+                    .formParam("Filter.1.Name", "tag:Name")
+                    .formParam("Filter.1.Value.1", name)
+                    .post("/").then().statusCode(200)
+                    .body("DescribeVpcsResponse.vpcSet", emptyOrNullString());
+
+            tagged(createVpc("10.91.0.0/16"), "vpc", name).formParam("DryRun", "false")
+                    .post("/").then().statusCode(200)
+                    .body("CreateVpcResponse.vpc.cidrBlock", equalTo("10.91.0.0/16"));
+        } finally {
+            deleteVpcsNamed(name);
+        }
+    }
+
+    @Test
+    void aCreateSubnetDryRunCreatesNoSubnetAndLeavesItsRangeFree() {
+        String vpcId = createVpcId("10.92.0.0/16");
+        try {
+            assertDryRun(createSubnet(vpcId, "10.92.1.0/24").formParam("DryRun", "true"));
+
+            ec2("DescribeSubnets")
+                    .formParam("Filter.1.Name", "vpc-id")
+                    .formParam("Filter.1.Value.1", vpcId)
+                    .post("/").then().statusCode(200)
+                    .body("DescribeSubnetsResponse.subnetSet", emptyOrNullString());
+
+            createSubnet(vpcId, "10.92.1.0/24")
+                    .post("/").then().statusCode(200)
+                    .body("CreateSubnetResponse.subnet.cidrBlock", equalTo("10.92.1.0/24"));
+        } finally {
+            deleteVpcAndItsContents(vpcId);
+        }
+    }
+
+    @Test
+    void aCreateSecurityGroupDryRunCreatesNoGroupAndLeavesItsNameFree() {
+        String vpcId = createVpcId("10.93.0.0/16");
+        try {
+            assertDryRun(createSecurityGroup(vpcId, "dryrun-group").formParam("DryRun", "true"));
+
+            ec2("DescribeSecurityGroups")
+                    .formParam("Filter.1.Name", "vpc-id")
+                    .formParam("Filter.1.Value.1", vpcId)
+                    .post("/").then().statusCode(200)
+                    .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.groupName", equalTo("default"));
+
+            createSecurityGroup(vpcId, "dryrun-group")
+                    .post("/").then().statusCode(200)
+                    .body("CreateSecurityGroupResponse.return", equalTo("true"));
+        } finally {
+            deleteVpcAndItsContents(vpcId);
+        }
+    }
+
+    /**
+     * A dry run whose real create would fail one of those checks is answered with DryRunOperation too,
+     * and the same request without DryRun still fails with its own error.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "vpc-prefix-out-of-range, InvalidVpc.Range",
+            "vpc-reserved-range, InvalidVpc.Range",
+            "vpc-host-tenancy, InvalidParameterValue",
+            "subnet-range-in-use, InvalidSubnet.Conflict",
+            "subnet-outside-the-vpc, InvalidSubnet.Range",
+            "subnet-in-missing-vpc, InvalidVpcID.NotFound",
+            "group-name-taken, InvalidGroup.Duplicate",
+            "group-in-missing-vpc, InvalidVpcID.NotFound"
+    })
+    void aDryRunIsAnsweredBeforeTheChecksThatFailTheRealCreate(String request, String errorCode) {
+        String name = "dryrun-" + UUID.randomUUID();
+        String vpcId = createVpcId("10.94.0.0/16");
+        try {
+            createSubnet(vpcId, "10.94.1.0/24").post("/").then().statusCode(200);
+            createSecurityGroup(vpcId, "taken-group").post("/").then().statusCode(200);
+
+            assertDryRun(failingCreate(request, vpcId, name).formParam("DryRun", "true"));
+
+            failingCreate(request, vpcId, name)
+                    .post("/").then().statusCode(400)
+                    .body("Response.Errors.Error.Code", equalTo(errorCode));
+        } finally {
+            try {
+                deleteVpcAndItsContents(vpcId);
+            } finally {
+                deleteVpcsNamed(name);
+            }
+        }
+    }
+
+    /** The failing request named by {@code request}; a VPC it might create carries the tag {@code name}. */
+    private static RequestSpecification failingCreate(String request, String vpcId, String name) {
+        return switch (request) {
+            case "vpc-prefix-out-of-range" -> tagged(createVpc("10.0.0.0/8"), "vpc", name);
+            case "vpc-reserved-range" -> tagged(createVpc("127.0.0.0/16"), "vpc", name);
+            case "vpc-host-tenancy" -> tagged(createVpc("10.95.0.0/16"), "vpc", name)
+                    .formParam("InstanceTenancy", "host");
+            case "subnet-range-in-use" -> createSubnet(vpcId, "10.94.1.0/24");
+            case "subnet-outside-the-vpc" -> createSubnet(vpcId, "10.96.1.0/24");
+            case "subnet-in-missing-vpc" -> createSubnet(MISSING_VPC, "10.94.2.0/24");
+            case "group-name-taken" -> createSecurityGroup(vpcId, "taken-group");
+            case "group-in-missing-vpc" -> createSecurityGroup(MISSING_VPC, "missing-vpc-group");
+            default -> throw new IllegalArgumentException(request);
+        };
+    }
+
+    private static void assertDryRun(RequestSpecification request) {
+        request.post("/").then()
+                .statusCode(412)
+                .body("Response.Errors.Error.Code", equalTo("DryRunOperation"))
+                .body("Response.Errors.Error.Message",
+                        equalTo("Request would have succeeded, but DryRun flag is set."));
+    }
+
+    private static RequestSpecification ec2(String action) {
+        return given().header("Authorization", AUTH).formParam("Action", action);
+    }
+
+    private static RequestSpecification tagged(RequestSpecification request, String resourceType, String name) {
+        return request
+                .formParam("TagSpecification.1.ResourceType", resourceType)
+                .formParam("TagSpecification.1.Tag.1.Key", "Name")
+                .formParam("TagSpecification.1.Tag.1.Value", name);
+    }
+
+    private static RequestSpecification createVpc(String cidrBlock) {
+        return ec2("CreateVpc").formParam("CidrBlock", cidrBlock);
+    }
+
+    private static RequestSpecification createSubnet(String vpcId, String cidrBlock) {
+        return ec2("CreateSubnet").formParam("VpcId", vpcId).formParam("CidrBlock", cidrBlock);
+    }
+
+    private static RequestSpecification createSecurityGroup(String vpcId, String groupName) {
+        return ec2("CreateSecurityGroup")
+                .formParam("VpcId", vpcId)
+                .formParam("GroupName", groupName)
+                .formParam("GroupDescription", "dry run test group");
+    }
+
+    private static String createVpcId(String cidrBlock) {
+        return createVpc(cidrBlock).post("/").then().statusCode(200)
+                .extract().path("CreateVpcResponse.vpc.vpcId");
+    }
+
+    private static void deleteVpcsNamed(String name) {
+        XmlPath vpcs = ec2("DescribeVpcs")
+                .formParam("Filter.1.Name", "tag:Name")
+                .formParam("Filter.1.Value.1", name)
+                .post("/").then().statusCode(200).extract().xmlPath();
+        for (String vpcId : vpcs.getList("DescribeVpcsResponse.vpcSet.item.vpcId", String.class)) {
+            deleteVpcAndItsContents(vpcId);
+        }
+    }
+
+    /** Deletes the VPC with every subnet and non-default group in it, including any a dry run left. */
+    private static void deleteVpcAndItsContents(String vpcId) {
+        XmlPath subnets = ec2("DescribeSubnets")
+                .formParam("Filter.1.Name", "vpc-id")
+                .formParam("Filter.1.Value.1", vpcId)
+                .post("/").then().statusCode(200).extract().xmlPath();
+        for (String subnetId : subnets.getList("DescribeSubnetsResponse.subnetSet.item.subnetId", String.class)) {
+            ec2("DeleteSubnet").formParam("SubnetId", subnetId).post("/").then().statusCode(200);
+        }
+        XmlPath groups = ec2("DescribeSecurityGroups")
+                .formParam("Filter.1.Name", "vpc-id")
+                .formParam("Filter.1.Value.1", vpcId)
+                .post("/").then().statusCode(200).extract().xmlPath();
+        for (String groupId : groups.getList("DescribeSecurityGroupsResponse.securityGroupInfo.item"
+                + ".findAll { it.groupName != 'default' }.groupId", String.class)) {
+            ec2("DeleteSecurityGroup").formParam("GroupId", groupId).post("/").then().statusCode(200);
+        }
+        ec2("DeleteVpc").formParam("VpcId", vpcId).post("/").then().statusCode(200);
+    }
+}
