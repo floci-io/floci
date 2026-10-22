@@ -641,6 +641,19 @@ class SqsEventSourcePollerTest {
     }
 
     @Test
+    void batchSizeAboveTheReceiveLimitAsksForAtMostTenMessagesPerReceive() {
+        stubThrowFn();
+        EventSourceMapping esm = esm();
+        esm.setBatchSize(25);
+        stubReceive(esm, List.of());
+
+        poller.pollAndInvoke(esm);
+
+        verify(sqsService, timeout(2000)).receiveMessage(
+                eq(esm.getQueueUrl()), eq(10), anyInt(), anyInt(), eq("us-east-1"));
+    }
+
+    @Test
     void turningTheBatchingWindowOffDeliversAnAlreadyBufferedBatch() {
         LambdaFunction fn = stubThrowFn();
         EventSourceMapping esm = esm();

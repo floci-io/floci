@@ -1950,6 +1950,22 @@ class SqsServiceTest {
         assertEquals(List.of("keep-me"), bodies(sqsService.peekMessages(source.getQueueUrl(), region)));
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {-1, 0, 11})
+    void receiveMessage_maxNumberOfMessagesOutsideOneToTen_isRejected(int maxMessages) {
+        String region = "us-east-1";
+        Queue queue = sqsService.createQueue("receive-range", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "kept", null, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.receiveMessage(queue.getQueueUrl(), maxMessages, 0, 0, region));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("MaxNumberOfMessages"), ex.getMessage());
+        assertEquals("1", sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("ApproximateNumberOfMessages"), region).get("ApproximateNumberOfMessages"));
+    }
+
     @Test
     void setQueueAttributes_newDeadLetterTargetTakesEffectOnTheNextReceive() {
         String region = "us-east-1";

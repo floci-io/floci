@@ -191,7 +191,7 @@ public class SqsEventSourcePoller implements Resettable {
 
                 PendingBatch pending = pendingBatches.get(esm.getUuid());
                 int alreadyBuffered = pending != null ? pending.messages.size() : 0;
-                int wanted = Math.max(1, esm.getBatchSize() - alreadyBuffered);
+                int wanted = Math.clamp(esm.getBatchSize() - alreadyBuffered, 1, SqsService.MAX_RECEIVE_MESSAGES);
 
                 List<Message> received = sqsService.receiveMessage(
                         esm.getQueueUrl(), wanted, visibilityTimeout, 0, esm.getRegion());

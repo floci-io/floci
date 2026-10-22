@@ -196,6 +196,21 @@ class PipesPollerTest {
     }
 
     @Test
+    void pollSqs_batchSizeAboveTheReceiveLimitAsksForAtMostTenMessages() throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setName("large-batch");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setTarget("arn:aws:lambda:us-east-1:000000000000:function:tgt");
+        pipe.setSourceParameters(MAPPER.readTree("{\"SqsQueueParameters\":{\"BatchSize\":25}}"));
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of());
+
+        poller.pollSqs(pipe, "us-east-1");
+
+        verify(sqsService).receiveMessage(anyString(), eq(10), anyInt(), anyInt(), eq("us-east-1"));
+    }
+
+    @Test
     void pollSqs_enrichmentToLambdaTargetWrapsResponseInBatchArray() throws Exception {
         // A Lambda target expects the SQSRecord[]-style batch, so a single-object enrichment response
         // is wrapped in a one-element array.

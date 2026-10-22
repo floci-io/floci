@@ -719,6 +719,35 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    void receiveMessageRejectsMaxNumberOfMessagesOutsideOneToTen() {
+        String rangeQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-max-messages-range-queue\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        try {
+            for (String invalid : new String[]{"0", "11"}) {
+                given()
+                    .contentType(CONTENT_TYPE)
+                    .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                    .body("{\"QueueUrl\":\"" + rangeQueueUrl + "\",\"MaxNumberOfMessages\":" + invalid + "}")
+                .when().post("/").then()
+                    .statusCode(400)
+                    .body("__type", equalTo("InvalidParameterValue"))
+                    .body("message", containsString("MaxNumberOfMessages"));
+            }
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + rangeQueueUrl + "\"}")
+            .when().post("/");
+        }
+    }
+
+    @Test
     void receiveMessageReturnsPerMessageSenderId() {
         String testQueueUrl = given()
             .contentType(CONTENT_TYPE)

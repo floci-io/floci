@@ -65,6 +65,8 @@ import java.util.stream.Collectors;
 @ApplicationScoped
 public class SqsService implements Resettable, ResourceProvider {
 
+    /** The most messages one ReceiveMessage call may ask for. */
+    public static final int MAX_RECEIVE_MESSAGES = 10;
     private static final Logger LOG = Logger.getLogger(SqsService.class);
     private static final int DEDUP_WINDOW_SECONDS = 300; // 5 minutes
     private static final int DEDUP_LOCK_STRIPES = 256;
@@ -1481,8 +1483,10 @@ public class SqsService implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
 
-        if (maxMessages < 1 || maxMessages > 10) {
-            maxMessages = 1;
+        if (maxMessages < 1 || maxMessages > MAX_RECEIVE_MESSAGES) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value " + maxMessages + " for parameter MaxNumberOfMessages is invalid. "
+                            + "Reason: Must be between 1 and " + MAX_RECEIVE_MESSAGES + ", if provided.", 400);
         }
         if (waitTimeSeconds != null && (waitTimeSeconds < 0 || waitTimeSeconds > MAX_RECEIVE_WAIT_TIME_SECONDS)) {
             throw new AwsException("InvalidParameterValue",
