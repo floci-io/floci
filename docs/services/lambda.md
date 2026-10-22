@@ -365,7 +365,9 @@ disabled fails with Lambda's error as the resource status reason.
     `TooManyRequestsException` (HTTP 429). An asynchronous (`Event`)
     invocation is always accepted with 202 and queued: an attempt that finds
     the function's concurrency in use waits for a free slot, without using up
-    a retry, until the event reaches its `MaximumEventAgeInSeconds`. With a
+    a retry, until the event reaches its `MaximumEventAgeInSeconds`. It checks
+    again after 1 second, then after waits that double up to 30 seconds, and a
+    wait never runs past the event's maximum age. With a
     reserved value of 0, an asynchronous invocation goes straight to the
     function's `OnFailure` destination or dead-letter queue, without retries.
     Functions without a reserved value share a **per-region**
