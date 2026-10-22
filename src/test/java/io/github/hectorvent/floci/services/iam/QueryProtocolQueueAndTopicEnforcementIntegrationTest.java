@@ -75,6 +75,29 @@ class QueryProtocolQueueAndTopicEnforcementIntegrationTest {
                 "sqs:SendMessage");
     }
 
+    /**
+     * The AWS SDK for Java v1 posts to the queue URL's path and leaves QueueUrl out of the form body;
+     * the router adds it back, and the check has to see that queue.
+     */
+    @Test
+    void aPathStyleQuerySendMessageIsCheckedAgainstTheQueueItsPathNames() {
+        String queueUrl = createQueue();
+        String other = createQueue();
+        String allowedOnQueue = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"sqs:SendMessage","Resource":"%s"}
+                ]}""".formatted(queueArn(queueUrl)));
+        String deniedOnQueue = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"sqs:*","Resource":"*"},
+                  {"Effect":"Deny","Action":"sqs:SendMessage","Resource":"%s"}
+                ]}""".formatted(queueArn(queueUrl)));
+
+        pathStyleSendMessage(signed(allowedOnQueue, "sqs"), queueUrl).statusCode(200);
+        assertAccessDenied(pathStyleSendMessage(signed(allowedOnQueue, "sqs"), other), "sqs:SendMessage");
+        assertAccessDenied(pathStyleSendMessage(signed(deniedOnQueue, "sqs"), queueUrl), "sqs:SendMessage");
+    }
+
     @Test
     void aQueryCreateQueueIsCheckedAgainstTheQueueItNames() {
         String prefix = "query-" + UUID.randomUUID().toString().substring(0, 8);
@@ -144,6 +167,14 @@ class QueryProtocolQueueAndTopicEnforcementIntegrationTest {
 
     private static ValidatableResponse sendMessage(RequestSpecification request, String queueUrl) {
         return query(request, "SendMessage", "QueueUrl", queueUrl, "MessageBody", "hello");
+    }
+
+    private static ValidatableResponse pathStyleSendMessage(RequestSpecification request, String queueUrl) {
+        return request
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("MessageBody", "hello")
+                .when().post(URI.create(queueUrl).getPath()).then();
     }
 
     private static ValidatableResponse createQueue(RequestSpecification request, String queueName) {
