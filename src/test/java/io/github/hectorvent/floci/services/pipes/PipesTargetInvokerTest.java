@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.pipes;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -25,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -38,6 +41,7 @@ class PipesTargetInvokerTest {
     @Mock private SnsService snsService;
     @Mock private EventBridgeService eventBridgeService;
     @Mock private StepFunctionsService stepFunctionsService;
+    @Mock private KinesisService kinesisService;
     @Mock private EmulatorConfig config;
 
     private PipesTargetInvoker invoker;
@@ -46,7 +50,7 @@ class PipesTargetInvokerTest {
     void setUp() {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         invoker = new PipesTargetInvoker(lambdaService, sqsService, snsService,
-                eventBridgeService, stepFunctionsService, MAPPER, config);
+                eventBridgeService, stepFunctionsService, kinesisService, MAPPER, config);
     }
 
     private Pipe createPipe(String targetArn, ObjectNode targetParameters) {
@@ -158,6 +162,53 @@ class PipesTargetInvokerTest {
         ArgumentCaptor<String> input = ArgumentCaptor.forClass(String.class);
         verify(stepFunctionsService).startExecution(eq(stateMachineArn), anyString(), input.capture(), eq("us-east-1"));
         assertEquals("[\"42 items\"]", input.getValue());
+    }
+
+    @Test
+    void invoke_unsupportedTargetThrowsSoTheBatchIsNotConsumed() {
+        String firehoseArn = "arn:aws:firehose:us-east-1:000000000000:deliverystream/out";
+        Pipe pipe = createPipe(firehoseArn, null);
+
+        AwsException e = assertThrows(AwsException.class, () -> invoker.invoke(pipe, "{}", "us-east-1"));
+
+        assertTrue(e.getMessage().contains(firehoseArn), "the error names the target, was: " + e.getMessage());
+    }
+
+    @Test
+    void invoke_kinesisTargetPutsTheRecordUnderTheLiteralPartitionKey() {
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.putObject("KinesisStreamParameters").put("PartitionKey", "orders");
+        Pipe pipe = createPipe("arn:aws:kinesis:eu-west-1:111111111111:stream/out", tp);
+
+        invoker.invoke(pipe, "{\"messageId\":\"m1\"}", "us-east-1");
+
+        verify(kinesisService).putRecordForAccount(eq("111111111111"), eq("out"),
+                aryEq("{\"messageId\":\"m1\"}".getBytes(StandardCharsets.UTF_8)), eq("orders"), eq("eu-west-1"));
+    }
+
+    @Test
+    void invoke_kinesisTargetResolvesAJsonPathPartitionKeyFromTheUntransformedEvent() {
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.putObject("KinesisStreamParameters").put("PartitionKey", "$.body.someKey");
+        tp.put("InputTemplate", "{\"id\": <$.messageId>}");
+        Pipe pipe = createPipe("arn:aws:kinesis:us-east-1:000000000000:stream/out", tp);
+
+        invoker.invoke(pipe, "{\"messageId\":\"m1\",\"body\":\"{\\\"someKey\\\":\\\"someValue\\\"}\"}", "us-east-1");
+
+        verify(kinesisService).putRecordForAccount(eq("000000000000"), eq("out"),
+                aryEq("{\"id\": \"m1\"}".getBytes(StandardCharsets.UTF_8)), eq("someValue"), eq("us-east-1"));
+    }
+
+    @Test
+    void invoke_kinesisTargetWithoutAResolvablePartitionKeyThrows() {
+        Pipe noParameters = createPipe("arn:aws:kinesis:us-east-1:000000000000:stream/out", null);
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.putObject("KinesisStreamParameters").put("PartitionKey", "$.body.missing");
+        Pipe unmatchedPath = createPipe("arn:aws:kinesis:us-east-1:000000000000:stream/out", tp);
+
+        assertThrows(AwsException.class, () -> invoker.invoke(noParameters, "{\"body\":\"{}\"}", "us-east-1"));
+        assertThrows(AwsException.class, () -> invoker.invoke(unmatchedPath, "{\"body\":\"{}\"}", "us-east-1"));
+        verifyNoInteractions(kinesisService);
     }
 
     @Test

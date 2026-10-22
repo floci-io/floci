@@ -1,7 +1,12 @@
 package io.github.hectorvent.floci.services.pipes;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.*;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -15,6 +20,11 @@ import static org.junit.jupiter.api.Assertions.fail;
 class PipesPollerIntegrationTest {
 
     private static final String SQS_CONTENT_TYPE = "application/x-www-form-urlencoded";
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @Test
     @Order(1)
@@ -729,6 +739,95 @@ class PipesPollerIntegrationTest {
             .contentType("application/json")
         .when()
             .delete("/v1/pipes/msgattr-pipe")
+        .then()
+            .statusCode(200);
+    }
+
+    // ──────────────────────────── Kinesis Target Tests ────────────────────────────
+
+    @Test
+    @Order(60)
+    void createKinesisTargetSourceQueueAndStream() throws Exception {
+        given()
+            .contentType(SQS_CONTENT_TYPE)
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "pipe-kinesis-target-source")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        RestAssuredJsonUtils.awsActionJson("Kinesis_20131202", "CreateStream",
+                "{\"StreamName\": \"pipe-kinesis-target\", \"ShardCount\": 1}");
+    }
+
+    @Test
+    @Order(61)
+    void createPipeFromSqsToKinesis() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Source": "arn:aws:sqs:us-east-1:000000000000:pipe-kinesis-target-source",
+                    "Target": "arn:aws:kinesis:us-east-1:000000000000:stream/pipe-kinesis-target",
+                    "RoleArn": "arn:aws:iam::000000000000:role/pipe-role",
+                    "DesiredState": "RUNNING",
+                    "TargetParameters": {
+                        "KinesisStreamParameters": {"PartitionKey": "$.body.orderId"}
+                    }
+                }
+                """)
+        .when()
+            .post("/v1/pipes/sqs-to-kinesis-pipe")
+        .then()
+            .statusCode(200)
+            .body("CurrentState", equalTo("RUNNING"));
+    }
+
+    @Test
+    @Order(62)
+    void sendMessageForKinesisTarget() {
+        given()
+            .contentType(SQS_CONTENT_TYPE)
+            .formParam("Action", "SendMessage")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/pipe-kinesis-target-source")
+            .formParam("MessageBody", "{\"orderId\": \"order-42\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(63)
+    void kinesisTargetReceivesTheRecordUnderTheResolvedPartitionKey() throws Exception {
+        String iterator = RestAssuredJsonUtils.awsActionJson("Kinesis_20131202", "GetShardIterator", """
+                {"StreamName": "pipe-kinesis-target", "ShardId": "shardId-000000000000",
+                 "ShardIteratorType": "TRIM_HORIZON"}
+                """).path("ShardIterator").asText();
+        JsonNode records = null;
+        for (int i = 0; i < 10; i++) {
+            Thread.sleep(500);
+            records = RestAssuredJsonUtils.awsActionJson("Kinesis_20131202", "GetRecords",
+                    "{\"ShardIterator\": \"" + iterator + "\"}").path("Records");
+            if (!records.isEmpty()) {
+                break;
+            }
+        }
+        assertEquals(1, records.size(), "the Kinesis target should hold the forwarded record, got " + records);
+        assertEquals("order-42", records.get(0).path("PartitionKey").asText());
+        String data = new String(Base64.getDecoder().decode(records.get(0).path("Data").asText()),
+                StandardCharsets.UTF_8);
+        assertTrue(data.contains("order-42") && data.contains("messageId"),
+                "the record carries the SQS source record, got " + data);
+    }
+
+    @Test
+    @Order(64)
+    void cleanupKinesisTargetPipe() {
+        given()
+            .contentType("application/json")
+        .when()
+            .delete("/v1/pipes/sqs-to-kinesis-pipe")
         .then()
             .statusCode(200);
     }

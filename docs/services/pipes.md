@@ -92,8 +92,16 @@ Floci emulates EventBridge Pipes with the following supported source and target 
 - Lambda functions
 - SQS queues
 - SNS topics
-- Kinesis streams
+- EventBridge event buses
+- Kinesis streams. `TargetParameters.KinesisStreamParameters.PartitionKey` is required, as on AWS, and
+  can be a JSON path into the event, such as `$.body.orderId` for an SQS source. A partition key that
+  is missing or resolves to nothing fails the delivery.
 - Step Functions state machines
+
+Other target types AWS supports (API destinations, API Gateway, Batch job queues, CloudWatch log
+groups, ECS tasks, Firehose streams, Redshift, SageMaker pipelines, Timestream) are accepted by
+`CreatePipe`, as on AWS, but are not emulated. Delivering to one fails, so the batch goes to the
+pipe's dead-letter queue, or stays in the source to be retried, instead of being consumed.
 
 ## Delivery to Targets
 
@@ -101,8 +109,8 @@ Floci emulates EventBridge Pipes with the following supported source and target 
   invocation, or one execution) as a bare JSON array of source records, even when the batch holds a
   single record, as AWS does. A Lambda handler on an SQS source reads `event[0].body`, not
   `event.Records[0].body`.
-- **Every other target** (SQS queues, SNS topics, EventBridge event buses) receives one request per
-  record.
+- **Every other target** (SQS queues, SNS topics, EventBridge event buses, Kinesis streams) receives
+  one request per record.
 - **`InputTemplate`**, on `TargetParameters` and on `EnrichmentParameters`, is applied to each record
   of a batch, not to the array as a whole. A template output that is not JSON becomes a string
   element of the array.

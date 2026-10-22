@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -42,6 +43,7 @@ public class PipesTargetInvoker {
     private final SnsService snsService;
     private final EventBridgeService eventBridgeService;
     private final StepFunctionsService stepFunctionsService;
+    private final KinesisService kinesisService;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
 
@@ -51,6 +53,7 @@ public class PipesTargetInvoker {
                               SnsService snsService,
                               EventBridgeService eventBridgeService,
                               StepFunctionsService stepFunctionsService,
+                              KinesisService kinesisService,
                               ObjectMapper objectMapper,
                               EmulatorConfig config) {
         this.lambdaService = lambdaService;
@@ -58,6 +61,7 @@ public class PipesTargetInvoker {
         this.snsService = snsService;
         this.eventBridgeService = eventBridgeService;
         this.stepFunctionsService = stepFunctionsService;
+        this.kinesisService = kinesisService;
         this.objectMapper = objectMapper;
         this.baseUrl = config.effectiveBaseUrl();
     }
@@ -77,6 +81,7 @@ public class PipesTargetInvoker {
      */
     public void invoke(Pipe pipe, String payload, String region) {
         String targetArn = pipe.getTarget();
+        String event = payload;
 
         JsonNode tp = pipe.getTargetParameters();
         if (tp != null && tp.has("InputTemplate")) {
@@ -96,8 +101,13 @@ public class PipesTargetInvoker {
             invokeEventBridge(targetArn, payload, region, tp);
         } else if (targetArn.contains(":states:")) {
             invokeStepFunctions(targetArn, payload, region);
+        } else if (targetArn.contains(":kinesis:")) {
+            invokeKinesis(pipe, targetArn, event, payload, region);
         } else {
-            LOG.warnv("Pipe {0}: unsupported target ARN type: {1}", pipe.getName(), targetArn);
+            // AWS accepts these targets at CreatePipe, so the pipe exists; failing the delivery sends
+            // the batch to the DLQ or leaves it for a retry instead of consuming it undelivered.
+            throw new AwsException("InternalException",
+                    "Pipe " + pipe.getName() + " uses a target type that is not emulated: " + targetArn, 500);
         }
     }
 
@@ -235,6 +245,42 @@ public class PipesTargetInvoker {
     }
 
     /**
+     * Puts one record on the target stream under {@code KinesisStreamParameters.PartitionKey}, which
+     * AWS requires and which may be a JSON path into the event.
+     */
+    private void invokeKinesis(Pipe pipe, String arn, String event, String payload, String region) {
+        JsonNode tp = pipe.getTargetParameters();
+        String partitionKeyParameter = tp == null ? null
+                : tp.path("KinesisStreamParameters").path("PartitionKey").asText(null);
+        String partitionKey = resolveDynamicParameter(partitionKeyParameter, event);
+        if (partitionKey == null || partitionKey.isEmpty()) {
+            throw new AwsException("ValidationException", "Pipe " + pipe.getName()
+                    + " needs a TargetParameters.KinesisStreamParameters.PartitionKey that resolves to a value "
+                    + "for its Kinesis stream target, got " + partitionKeyParameter, 400);
+        }
+        String streamName = arn.substring(arn.lastIndexOf('/') + 1);
+        kinesisService.putRecordForAccount(AwsArnUtils.accountOrDefault(arn, null), streamName,
+                payload.getBytes(StandardCharsets.UTF_8), partitionKey, extractRegionFromArn(arn, region));
+        LOG.debugv("Pipe delivered to Kinesis: {0}", arn);
+    }
+
+    /**
+     * A target parameter's value. A JSON path is read from the event the target is invoked for, before
+     * any input transformation, as AWS resolves dynamic path parameters; any other value is literal. A
+     * path that matches nothing resolves to null.
+     */
+    String resolveDynamicParameter(String value, String event) {
+        if (value == null || !value.startsWith("$.")) {
+            return value;
+        }
+        JsonNode node = extractJsonPathNode(value, event);
+        if (node == null) {
+            return null;
+        }
+        return node.isValueNode() ? node.asText() : node.toString();
+    }
+
+    /**
      * Applies an input template to each record of a batch array, as AWS transforms a batch record by
      * record rather than as a whole. A template output that is not JSON becomes a string record.
      */
@@ -282,6 +328,20 @@ public class PipesTargetInvoker {
     }
 
     String extractJsonPath(String jsonPath, String json) {
+        JsonNode node = extractJsonPathNode(jsonPath, json);
+        if (node == null) {
+            return null;
+        }
+        try {
+            return node.isValueNode() ? objectMapper.writeValueAsString(node) : node.toString();
+        } catch (JsonProcessingException e) {
+            LOG.warnv("Failed to render JSONPath {0}: {1}", jsonPath, e.getOriginalMessage());
+            return null;
+        }
+    }
+
+    /** The node a JSON path selects in {@code json}, or null when it selects nothing. */
+    private JsonNode extractJsonPathNode(String jsonPath, String json) {
         if (jsonPath == null || json == null) {
             return null;
         }
@@ -322,10 +382,7 @@ public class PipesTargetInvoker {
                     return null;
                 }
             }
-            if (current.isValueNode()) {
-                return objectMapper.writeValueAsString(current);
-            }
-            return current.toString();
+            return current;
         } catch (Exception e) {
             LOG.warnv("Failed to extract JSONPath {0}: {1}", jsonPath, e.getMessage());
             return null;
