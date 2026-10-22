@@ -281,11 +281,9 @@ final class BedrockOpenAiTranslator {
         if (!block.isObject()) {
             throw new AwsException("ValidationException", unsupportedMessage, 400);
         }
-        ObjectNode members = mapper.createObjectNode();
-        for (Map.Entry<String, JsonNode> member : block.properties()) {
-            if (!member.getValue().isNull()) {
-                members.set(member.getKey(), member.getValue());
-            }
+        ObjectNode members = nonNullMembers(mapper, block);
+        if (members.isEmpty()) {
+            throw new AwsException("ValidationException", "The content block sets no member. " + unsupportedMessage, 400);
         }
         if (members.size() != 1) {
             throw new AwsException("ValidationException", unsupportedMessage, 400);
@@ -293,7 +291,7 @@ final class BedrockOpenAiTranslator {
         if (!members.has("guardContent")) {
             return members;
         }
-        JsonNode guarded = members.path("guardContent");
+        ObjectNode guarded = nonNullMembers(mapper, members.path("guardContent"));
         JsonNode guardedText = guarded.path("text").path("text");
         if (guarded.size() == 1 && guardedText.isTextual()) {
             return mapper.createObjectNode().put("text", guardedText.asText());
@@ -303,6 +301,17 @@ final class BedrockOpenAiTranslator {
         }
         throw new AwsException("ValidationException",
                 "The proxy supports only a text or image block in guardContent.", 400);
+    }
+
+    /** A union serializes like a structure with at most one non-null member, so a null member is unset. */
+    private static ObjectNode nonNullMembers(ObjectMapper mapper, JsonNode node) {
+        ObjectNode members = mapper.createObjectNode();
+        for (Map.Entry<String, JsonNode> member : node.properties()) {
+            if (!member.getValue().isNull()) {
+                members.set(member.getKey(), member.getValue());
+            }
+        }
+        return members;
     }
 
     private static String imageDataUrl(JsonNode image) {

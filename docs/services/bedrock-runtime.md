@@ -161,9 +161,10 @@ block before contacting the backend:
 - `cachePoint` blocks, and `reasoningContent` blocks from earlier assistant turns,
   are dropped, since OpenAI Chat Completions has no equivalent input.
 - Any other block, including `document`, `video`, `audio`, `searchResult`,
-  `citationsContent`, `toolAddition`, and `toolRemoval`, or a block that sets more
-  than one member, is rejected with `400 ValidationException` rather than being
-  silently discarded.
+  `citationsContent`, `toolAddition`, and `toolRemoval`, or a block that sets no
+  member or more than one member, is rejected with `400 ValidationException` rather
+  than being silently discarded. A member whose value is `null` counts as unset, in a
+  block and in the `guardContent` it wraps.
 
 ### Text requests
 

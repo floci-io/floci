@@ -732,6 +732,64 @@ class BedrockProxyIntegrationTest {
             """), objectMapper.readTree(received.get().body()).path("messages"));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"converse", "converse-stream"})
+    void nullGuardContentMembersAreTreatedAsUnset(String operation) throws IOException {
+        nextResponseBody.set(operation.equals("converse")
+                ? """
+                    {"choices":[{"finish_reason":"stop","message":{"content":"ok"}}]}
+                    """
+                : """
+                    data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
+
+                    data: [DONE]
+                    """);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"system":[{"guardContent":{"text":{"text":"Be brief."},"image":null}}],
+                 "messages":[{"role":"user","content":[
+                    {"guardContent":{"text":{"text":"Describe"},"image":null}},
+                    {"guardContent":{"text":null,"image":{"format":"png","source":{"bytes":"AQID"}}}}
+                 ]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+        .then()
+            .statusCode(200);
+        assertEquals(objectMapper.readTree("""
+            [{"role":"system","content":"Be brief."},
+             {"role":"user","content":[
+                {"type":"text","text":"Describe"},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}}
+             ]}]
+            """), objectMapper.readTree(received.get().body()).path("messages"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"text\":null}", "{\"text\":null,\"image\":null}", "{}"})
+    void contentBlockWithNoNonNullMemberFailsBeforeCallingProxy(String block) {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"unexpected"}}]}
+            """);
+        for (String operation : new String[]{"converse", "converse-stream"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {"messages":[{"role":"user","content":[%s]}]}
+                    """.formatted(block))
+            .when()
+                .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("sets no member"));
+            assertNull(received.get());
+        }
+    }
+
     @Test
     void converse_toolCallsTranslateToToolUse() throws IOException {
         nextResponseBody.set("""
