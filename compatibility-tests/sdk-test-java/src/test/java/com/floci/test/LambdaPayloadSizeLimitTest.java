@@ -104,8 +104,8 @@ class LambdaPayloadSizeLimitTest {
     // ── Response payload limit ──────────────────────────────────────────────
 
     @Test
-    @DisplayName("sync invoke returning > 6 MB response returns 413 RequestTooLargeException")
-    void syncInvoke_responseExceeds6MB_throwsRequestTooLargeException() {
+    @DisplayName("sync invoke returning a response over 6,291,556 bytes is a Function.ResponseSizeTooLarge function error")
+    void syncInvoke_responseOverTheLimit_returnsResponseSizeTooLargeFunctionError() {
         Assumptions.assumeTrue(TestFixtures.isLambdaDispatchAvailable(),
                 "skipping: Lambda dispatch (Docker) not available in this environment");
 
@@ -115,18 +115,20 @@ class LambdaPayloadSizeLimitTest {
                 .role(ROLE)
                 .handler("index.handler")
                 .code(FunctionCode.builder()
-                        .zipFile(SdkBytes.fromByteArray(LambdaUtils.largeResponseZip(_6_MB + 1)))
+                        .zipFile(SdkBytes.fromByteArray(LambdaUtils.largeResponseZip(7_000_000)))
                         .build())
                 .build());
 
-        assertThatThrownBy(() -> lambda.invoke(InvokeRequest.builder()
+        InvokeResponse resp = lambda.invoke(InvokeRequest.builder()
                 .functionName(FN_LARGE)
                 .invocationType(InvocationType.REQUEST_RESPONSE)
                 .payload(SdkBytes.fromUtf8String("{}"))
                 .overrideConfiguration(c -> c.apiCallTimeout(Duration.ofSeconds(60)))
-                .build()))
-                .isInstanceOf(RequestTooLargeException.class)
-                .satisfies(ex -> assertThat(((RequestTooLargeException) ex).statusCode()).isEqualTo(413));
+                .build());
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.functionError()).isEqualTo("Unhandled");
+        assertThat(resp.payload().asUtf8String()).contains("\"errorType\":\"Function.ResponseSizeTooLarge\"");
     }
 
     @Test

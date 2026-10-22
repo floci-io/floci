@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
@@ -268,6 +269,59 @@ class LambdaExecutorServiceTest {
         executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, 0, null, clientContext);
 
         assertEquals(clientContext, seen.get());
+    }
+
+    /** A warm handle whose runtime answers every invocation with {@code response}. */
+    private ContainerHandle handleAnswering(byte[] response) {
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-size", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            pi.getResultFuture().complete(new InvokeResult(200, null, response, null, pi.getRequestId()));
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+        return handle;
+    }
+
+    @Test
+    void syncInvoke_responseOverTheSynchronousLimit_isAResponseSizeTooLargeFunctionError() throws Exception {
+        ContainerHandle handle = handleAnswering(new byte[7_000_000]);
+
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+
+        assertEquals(200, result.getStatusCode());
+        assertEquals("Unhandled", result.getFunctionError());
+        JsonNode error = new ObjectMapper().readTree(result.getPayload());
+        assertEquals("Function.ResponseSizeTooLarge", error.path("errorType").asText());
+        assertEquals("Response payload size exceeded maximum allowed payload size (6291556 bytes).",
+                error.path("errorMessage").asText());
+        verify(warmPool).release(handle);
+    }
+
+    @Test
+    void syncInvoke_responseOfExactlyTheSynchronousLimit_isReturnedUnchanged() {
+        handleAnswering(new byte[6_291_556]);
+
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+
+        assertNull(result.getFunctionError());
+        assertEquals(6_291_556, result.getPayload().length);
+    }
+
+    @Test
+    void asyncInvoke_responseOverTheSynchronousLimit_reachesTheDestinationRouterUnchanged() {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        executor.shutdown();
+        executor = new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, router);
+        handleAnswering(new byte[7_000_000]);
+
+        executor.invoke(fn, "{}".getBytes(), InvocationType.Event);
+
+        ArgumentCaptor<InvokeResult> routed = ArgumentCaptor.forClass(InvokeResult.class);
+        verify(router, timeout(5000)).route(eq(fn), any(), routed.capture(), eq(1), eq(0), isNull());
+        assertNull(routed.getValue().getFunctionError());
+        assertEquals(7_000_000, routed.getValue().getPayload().length);
     }
 
     @Test

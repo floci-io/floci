@@ -15,6 +15,7 @@ import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -99,6 +100,23 @@ public class RuntimeApiServer {
 
     private static final byte[] CONTAINER_STOPPED_PAYLOAD =
             "{\"errorMessage\":\"Container stopped\",\"errorType\":\"ContainerStopped\"}".getBytes();
+
+    /** AWS's synchronous response limit: 6 MB, plus the 100 bytes the Lambda service allows on top. */
+    public static final int MAX_SYNC_RESPONSE_BYTES = 6 * 1024 * 1024 + 100;
+
+    private static final byte[] RESPONSE_SIZE_TOO_LARGE_PAYLOAD = ("{\"errorMessage\":\"Response payload size exceeded"
+            + " maximum allowed payload size (" + MAX_SYNC_RESPONSE_BYTES + " bytes).\","
+            + "\"errorType\":\"Function.ResponseSizeTooLarge\"}").getBytes(StandardCharsets.UTF_8);
+
+    private static final String REQUEST_ENTITY_TOO_LARGE_BODY = "{\"errorMessage\":\"Exceeded maximum allowed payload"
+            + " size (" + MAX_SYNC_RESPONSE_BYTES + " bytes).\",\"errorType\":\"RequestEntityTooLarge\"}";
+
+    /**
+     * The most of one request body the server reads. It is above the synchronous limit, which the
+     * executor applies so an asynchronous result keeps its payload; a larger /response still
+     * completes its invocation, see {@link #handleUnreadResponse}.
+     */
+    private static final long BODY_LIMIT_BYTES = 12L * 1024 * 1024;
 
     // Acknowledgement body for the /response, /error and /init/error endpoints. Some
     // runtime clients (e.g. .NET's Amazon.Lambda.RuntimeSupport) deserialize it and
@@ -342,7 +360,7 @@ public class RuntimeApiServer {
         CompletableFuture<Void> started = new CompletableFuture<>();
 
         Router router = Router.router(vertx);
-        router.route().handler(BodyHandler.create());
+        router.route().handler(BodyHandler.create().setBodyLimit(BODY_LIMIT_BYTES));
 
         // GET /runtime/invocation/next — AWS Runtime API contract: blocks until an invocation
         // arrives, then returns 200 with the invocation payload and required headers.
@@ -402,7 +420,7 @@ public class RuntimeApiServer {
                 invocation.getResultFuture().complete(result);
             }
             sendStatusOk(ctx);
-        });
+        }).failureHandler(this::handleUnreadResponse);
 
         router.post(ERROR_PATH).handler(this::handleInvocationError);
 
@@ -885,6 +903,32 @@ public class RuntimeApiServer {
      * {@code contains("Runtime")} heuristic here keyed on. {@code Handled} is a legacy value
      * current runtimes never produce.
      */
+    /** The function error AWS reports for a synchronous response over {@link #MAX_SYNC_RESPONSE_BYTES}. */
+    public static InvokeResult responseSizeTooLarge(String requestId) {
+        return new InvokeResult(200, "Unhandled", RESPONSE_SIZE_TOO_LARGE_PAYLOAD.clone(), null, requestId);
+    }
+
+    /**
+     * A /response body over {@link #BODY_LIMIT_BYTES} is refused unread with 413. Its invocation
+     * completes as ResponseSizeTooLarge, since nothing else would complete it before its timeout.
+     */
+    private void handleUnreadResponse(RoutingContext ctx) {
+        if (ctx.statusCode() != 413) {
+            ctx.next();
+            return;
+        }
+        PendingInvocation invocation = inFlight.remove(ctx.pathParam("requestId"));
+        if (invocation != null) {
+            invocation.getResultFuture().complete(responseSizeTooLarge(invocation.getRequestId()));
+        }
+        if (!ctx.response().ended()) {
+            ctx.response()
+                    .setStatusCode(413)
+                    .putHeader("Content-Type", "application/json")
+                    .end(REQUEST_ENTITY_TOO_LARGE_BODY);
+        }
+    }
+
     private void handleInvocationError(RoutingContext ctx) {
         String requestId = ctx.pathParam("requestId");
         PendingInvocation invocation = inFlight.remove(requestId);

@@ -280,6 +280,65 @@ class RuntimeApiServerTest {
         assertEquals("OK", new JsonObject(response.body()).getString("status"));
     }
 
+    private static PendingInvocation invocation(String requestId) {
+        return new PendingInvocation(
+                requestId, "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+    }
+
+    /** Takes {@code invocation} off the queue as a runtime would, then posts {@code body} as its response. */
+    private HttpResponse<String> respond(PendingInvocation invocation, byte[] body) throws Exception {
+        server.enqueue(invocation);
+        httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        return httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port
+                                + "/2018-06-01/runtime/invocation/" + invocation.getRequestId() + "/response"))
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * A response larger than the server reads at all must still complete the invocation, as
+     * AWS's ResponseSizeTooLarge function error, instead of leaving it to run into its timeout.
+     */
+    @Test
+    @Timeout(30)
+    void responseEndpoint_bodyOverTheBodyLimit_completesTheInvocationAsResponseSizeTooLarge() throws Exception {
+        PendingInvocation invocation = invocation("req-huge");
+
+        HttpResponse<String> response = respond(invocation, new byte[13 * 1024 * 1024]);
+
+        assertEquals(413, response.statusCode());
+        InvokeResult result = invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError());
+        JsonObject error = new JsonObject(new String(result.getPayload()));
+        assertEquals("Function.ResponseSizeTooLarge", error.getString("errorType"));
+        assertEquals("Response payload size exceeded maximum allowed payload size (6291556 bytes).",
+                error.getString("errorMessage"));
+    }
+
+    /**
+     * Below the body limit the server hands the response over as it is: the executor applies the
+     * synchronous limit, and an asynchronous invocation keeps its payload for its destination.
+     */
+    @Test
+    @Timeout(30)
+    void responseEndpoint_bodyOverTheSynchronousLimitButUnderTheBodyLimit_isHandedOverUnchanged() throws Exception {
+        PendingInvocation invocation = invocation("req-large");
+
+        HttpResponse<String> response = respond(invocation, new byte[7_000_000]);
+
+        assertEquals(202, response.statusCode());
+        InvokeResult result = invocation.getResultFuture().get(5, TimeUnit.SECONDS);
+        assertNull(result.getFunctionError());
+        assertEquals(7_000_000, result.getPayload().length);
+    }
+
     /**
      * Regression for #3314: the Python and Node.js runtime interface clients never send
      * {@code Lambda-Runtime-Function-Error-Type} on {@code /invocation/{id}/error} at all, so

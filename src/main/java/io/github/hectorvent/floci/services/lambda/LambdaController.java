@@ -232,7 +232,6 @@ public class LambdaController {
 
     private static final int SYNC_REQUEST_LIMIT  = 6 * 1024 * 1024;
     private static final int ASYNC_REQUEST_LIMIT = 1 * 1024 * 1024;
-    private static final int SYNC_RESPONSE_LIMIT = 6 * 1024 * 1024;
 
     @POST
     @Path("/functions/{functionName}/invocations")
@@ -268,15 +267,6 @@ public class LambdaController {
 
         InvokeResult result = lambdaService.invoke(region, functionName, qualifier, payload, type, clientContext,
                 durableExecutionName);
-
-        if (type != InvocationType.Event
-                && result.getPayload() != null
-                && result.getPayload().length > SYNC_RESPONSE_LIMIT) {
-            return Response.status(413)
-                    .type(MediaType.APPLICATION_JSON)
-                    .entity("{\"__type\":\"RequestTooLargeException\",\"message\":\"The response payload exceeded the maximum allowed payload size (6 MB).\"}")
-                    .build();
-        }
 
         Response.ResponseBuilder builder = Response.status(result.getStatusCode());
 

@@ -104,6 +104,10 @@ part in authorizing calls to the function:
 - `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
   admits no caller.
 
+### Invocation payload limits
+
+`Invoke` rejects a request payload over 6 MB (`RequestResponse`) or 1 MB (`Event`) with `RequestTooLargeException` (HTTP 413). A synchronous response may be up to 6,291,556 bytes, which is 6 MB plus the 100 bytes AWS allows on top. A larger response is a function error on every synchronous path: `Invoke` answers 200 with `X-Amz-Function-Error: Unhandled` and the payload `{"errorMessage":"Response payload size exceeded maximum allowed payload size (6291556 bytes).","errorType":"Function.ResponseSizeTooLarge"}`, a REST API proxy integration or a function URL answers 502, an HTTP API answers 500, and an event source mapping retries the batch as it does for any function error. Asynchronous invocations are not held to this limit.
+
 ### Reserved Concurrency
 
 Unqualified `GetFunction` reads include `Concurrency.ReservedConcurrentExecutions` when a reservation

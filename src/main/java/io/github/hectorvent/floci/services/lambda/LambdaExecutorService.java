@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
+import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -286,10 +287,21 @@ public class LambdaExecutorService implements Resettable {
 
         LambdaConcurrencyLimiter.Permit permit = acquire(lambdaService, fn);
         try {
-            return executeSync(fn, payload, requestId, clientContext);
+            return withinSyncResponseLimit(executeSync(fn, payload, requestId, clientContext));
         } finally {
             permit.close();
         }
+    }
+
+    /**
+     * Every synchronous caller (Invoke, API Gateway, function URLs, event source mappings) gets
+     * AWS's function error for a response over the limit; asynchronous attempts are not checked.
+     */
+    private static InvokeResult withinSyncResponseLimit(InvokeResult result) {
+        byte[] response = result.getPayload();
+        return response != null && response.length > RuntimeApiServer.MAX_SYNC_RESPONSE_BYTES
+                ? RuntimeApiServer.responseSizeTooLarge(result.getRequestId())
+                : result;
     }
 
     private LambdaService resolveLambdaService() {
