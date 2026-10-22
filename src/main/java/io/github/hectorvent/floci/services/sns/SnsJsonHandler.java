@@ -345,6 +345,7 @@ public class SnsJsonHandler {
                 entry.put("Id", id);
                 entry.put("Message", entryNode.path("Message").asText(null));
                 entry.put("Subject", entryNode.path("Subject").asText(null));
+                entry.put("MessageStructure", entryNode.path("MessageStructure").asText(null));
                 entry.put("MessageGroupId", entryNode.path("MessageGroupId").asText(null));
                 entry.put("MessageDeduplicationId", entryNode.path("MessageDeduplicationId").asText(null));
 

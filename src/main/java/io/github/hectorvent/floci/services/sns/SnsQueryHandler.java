@@ -507,6 +507,7 @@ public class SnsQueryHandler {
             entry.put("Id", id);
             entry.put("Message", getParam(params, entryPrefix + ".Message"));
             entry.put("Subject", getParam(params, entryPrefix + ".Subject"));
+            entry.put("MessageStructure", getParam(params, entryPrefix + ".MessageStructure"));
             entry.put("MessageGroupId", getParam(params, entryPrefix + ".MessageGroupId"));
             entry.put("MessageDeduplicationId", getParam(params, entryPrefix + ".MessageDeduplicationId"));
 

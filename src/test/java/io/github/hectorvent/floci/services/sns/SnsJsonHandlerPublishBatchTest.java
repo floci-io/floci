@@ -100,4 +100,51 @@ class SnsJsonHandlerPublishBatchTest {
         assertEquals(1, messages.size(), "only the valid entry should be delivered");
         assertEquals("valid-message", messages.get(0).getBody());
     }
+
+    @Test
+    void publishBatch_messageStructureJson_deliversTheSqsKey() {
+        String topicArn = rawDeliveryTopic("json-structure-topic", "json-structure-queue");
+
+        Response response = handler.handle("PublishBatch",
+                structuredBatch(topicArn, "{\"default\":\"d\",\"sqs\":\"s\"}"), REGION);
+
+        assertEquals(200, response.getStatus());
+        List<Message> messages = sqsService.receiveMessage(
+                BASE_URL + "/" + ACCOUNT + "/json-structure-queue", 10, 30, 0, REGION);
+        assertEquals(1, messages.size());
+        assertEquals("s", messages.getFirst().getBody());
+    }
+
+    @Test
+    void publishBatch_messageStructureJsonWithoutDefault_failsTheEntry() {
+        String topicArn = rawDeliveryTopic("json-structure-nodefault-topic", "json-structure-nodefault-queue");
+
+        Response response = handler.handle("PublishBatch", structuredBatch(topicArn, "{\"sqs\":\"s\"}"), REGION);
+
+        JsonNode failed = objectMapper.valueToTree(response.getEntity()).path("Failed");
+        assertEquals(1, failed.size());
+        assertEquals("structured", failed.get(0).path("Id").asText());
+        assertEquals("InvalidParameter", failed.get(0).path("Code").asText());
+        assertTrue(sqsService.receiveMessage(
+                BASE_URL + "/" + ACCOUNT + "/json-structure-nodefault-queue", 10, 30, 0, REGION).isEmpty());
+    }
+
+    private String rawDeliveryTopic(String topicName, String queueName) {
+        sqsService.createQueue(queueName, Map.of(), REGION);
+        snsService.createTopic(topicName, Map.of(), null, REGION);
+        String topicArn = "arn:aws:sns:" + REGION + ":" + ACCOUNT + ":" + topicName;
+        snsService.subscribe(topicArn, "sqs", "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":" + queueName, REGION,
+                Map.of("RawMessageDelivery", "true"));
+        return topicArn;
+    }
+
+    private ObjectNode structuredBatch(String topicArn, String message) {
+        ObjectNode request = objectMapper.createObjectNode();
+        request.put("TopicArn", topicArn);
+        ObjectNode entry = request.putArray("PublishBatchRequestEntries").addObject();
+        entry.put("Id", "structured");
+        entry.put("Message", message);
+        entry.put("MessageStructure", "json");
+        return request;
+    }
 }

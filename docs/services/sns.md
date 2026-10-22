@@ -346,7 +346,9 @@ aws sns publish --topic-arn $TOPIC_ARN --message-structure json \
 
 The SQS subscriber receives `hi sqs`, the platform endpoint receives the `GCM` payload,
 and every other subscriber receives `hello`. As with any topic publish, the envelope must
-be a JSON object carrying `default`, validated before fan-out begins.
+be a JSON object carrying `default`, validated before fan-out begins. Each `PublishBatch`
+entry takes its own `MessageStructure` the same way, and an entry whose envelope is invalid is
+reported under `Failed` with `InvalidParameter` while the rest of the batch is published.
 
 ### Inspecting captured pushes
 

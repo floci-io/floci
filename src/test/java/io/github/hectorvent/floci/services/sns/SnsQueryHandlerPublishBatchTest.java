@@ -164,6 +164,52 @@ class SnsQueryHandlerPublishBatchTest {
         }
     }
 
+    @Test
+    void publishBatch_messageStructureJson_deliversTheSqsKey() {
+        String topicArn = rawDeliveryTopic("query-structure-topic", "query-structure-queue");
+
+        Response response = handler.handle("PublishBatch",
+                structuredBatch(topicArn, "{\"default\":\"d\",\"sqs\":\"s\"}"), REGION);
+
+        assertEquals(200, response.getStatus());
+        List<Message> messages = sqsService.receiveMessage(
+                BASE_URL + "/" + ACCOUNT + "/query-structure-queue", 10, 30, 0, REGION);
+        assertEquals(1, messages.size());
+        assertEquals("s", messages.getFirst().getBody());
+    }
+
+    @Test
+    void publishBatch_messageStructureJsonWithoutDefault_failsTheEntry() {
+        String topicArn = rawDeliveryTopic("query-structure-nodefault-topic", "query-structure-nodefault-queue");
+
+        Response response = handler.handle("PublishBatch", structuredBatch(topicArn, "{\"sqs\":\"s\"}"), REGION);
+
+        String body = (String) response.getEntity();
+        String failed = body.substring(body.indexOf("<Failed>"));
+        assertTrue(failed.contains("<Id>structured</Id>"), body);
+        assertTrue(failed.contains("<Code>InvalidParameter</Code>"), body);
+        assertTrue(sqsService.receiveMessage(
+                BASE_URL + "/" + ACCOUNT + "/query-structure-nodefault-queue", 10, 30, 0, REGION).isEmpty());
+    }
+
+    private String rawDeliveryTopic(String topicName, String queueName) {
+        sqsService.createQueue(queueName, Map.of(), REGION);
+        snsService.createTopic(topicName, Map.of(), null, REGION);
+        String topicArn = "arn:aws:sns:" + REGION + ":" + ACCOUNT + ":" + topicName;
+        snsService.subscribe(topicArn, "sqs", "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":" + queueName, REGION,
+                Map.of("RawMessageDelivery", "true"));
+        return topicArn;
+    }
+
+    private static MultivaluedMap<String, String> structuredBatch(String topicArn, String message) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("TopicArn", topicArn);
+        params.add("PublishBatchRequestEntries.member.1.Id", "structured");
+        params.add("PublishBatchRequestEntries.member.1.Message", message);
+        params.add("PublishBatchRequestEntries.member.1.MessageStructure", "json");
+        return params;
+    }
+
     private static void putBatchEntry(MultivaluedMap<String, String> params, int idx,
                                       String id, String message, Attr... attrs) {
         String entryPrefix = "PublishBatchRequestEntries.member." + idx;
