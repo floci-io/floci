@@ -150,6 +150,21 @@ silently discarded.
 It does not decode image files or enforce model-specific image dimensions and
 size limits; those remain the responsibility of the configured backend.
 
+### Content blocks through the proxy
+
+Both `Converse` and `ConverseStream` check every message and `system` content
+block before contacting the backend:
+
+- `text`, `image`, `toolUse`, and `toolResult` blocks are translated as described above.
+- `guardContent` is forwarded as the text or image it wraps, because the proxy does
+  not apply guardrails. In `system`, only guarded text is accepted.
+- `cachePoint` blocks, and `reasoningContent` blocks from earlier assistant turns,
+  are dropped, since OpenAI Chat Completions has no equivalent input.
+- Any other block, including `document`, `video`, `audio`, `searchResult`,
+  `citationsContent`, `toolAddition`, and `toolRemoval`, or a block that sets more
+  than one member, is rejected with `400 ValidationException` rather than being
+  silently discarded.
+
 ### Text requests
 
 ```bash

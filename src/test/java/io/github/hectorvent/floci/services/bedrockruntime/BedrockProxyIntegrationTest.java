@@ -517,6 +517,192 @@ class BedrockProxyIntegrationTest {
         assertEquals("result\n{\"ok\":true}\ndone", toolMessage.path("content").asText());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "{\"document\":{\"format\":\"txt\",\"name\":\"note\",\"source\":{\"bytes\":\"AQID\"}}}",
+        "{\"video\":{\"format\":\"mp4\",\"source\":{\"bytes\":\"AQID\"}}}",
+        "{\"audio\":{\"format\":\"mp3\",\"source\":{\"bytes\":\"AQID\"}}}",
+        "{\"searchResult\":{\"source\":\"https://example.com\",\"title\":\"result\",\"content\":[{\"text\":\"result\"}]}}",
+        "{\"citationsContent\":{\"content\":[{\"text\":\"cited\"}],\"citations\":[]}}",
+        "{\"toolAddition\":{\"tool\":{\"name\":\"get_weather\"}}}",
+        "{\"futureMember\":{}}",
+        "{}",
+        "null",
+        "{\"text\":\"Summarize\",\"document\":{\"format\":\"txt\",\"name\":\"note\",\"source\":{\"bytes\":\"AQID\"}}}"
+    })
+    void unsupportedContentBlocksFailBeforeCallingProxy(String block) {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"unexpected"}}]}
+            """);
+        for (String operation : new String[]{"converse", "converse-stream"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {"messages":[{"role":"user","content":[{"text":"Summarize"},%s]}]}
+                    """.formatted(block))
+            .when()
+                .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("message content"));
+            assertNull(received.get());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "{\"guardContent\":{\"image\":{\"format\":\"png\",\"source\":{\"bytes\":\"AQID\"}}}}",
+        "{\"document\":{\"format\":\"txt\",\"name\":\"note\",\"source\":{\"bytes\":\"AQID\"}}}",
+        "{\"futureMember\":{}}",
+        "{}",
+        "{\"text\":\"Be brief.\",\"cachePoint\":{\"type\":\"default\"}}"
+    })
+    void unsupportedSystemBlocksFailBeforeCallingProxy(String block) {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"unexpected"}}]}
+            """);
+        for (String operation : new String[]{"converse", "converse-stream"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {"system":[{"text":"Be brief."},%s],
+                     "messages":[{"role":"user","content":[{"text":"hi"}]}]}
+                    """.formatted(block))
+            .when()
+                .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("system"));
+            assertNull(received.get());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "{}",
+        "null",
+        "{\"text\":{}}",
+        "{\"text\":{\"text\":42}}",
+        "{\"text\":{\"text\":\"guarded\"},\"image\":{\"format\":\"png\",\"source\":{\"bytes\":\"AQID\"}}}"
+    })
+    void malformedGuardContentFailsBeforeCallingProxy(String guardContent) {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"unexpected"}}]}
+            """);
+        for (String operation : new String[]{"converse", "converse-stream"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {"messages":[{"role":"user","content":[{"text":"Describe"},{"guardContent":%s}]}]}
+                    """.formatted(guardContent))
+            .when()
+                .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("guardContent"));
+            assertNull(received.get());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"converse", "converse-stream"})
+    void guardContentReachesProxyAsText(String operation) throws IOException {
+        nextResponseBody.set(operation.equals("converse")
+                ? """
+                    {"choices":[{"finish_reason":"stop","message":{"content":"Yes"}}]}
+                    """
+                : """
+                    data: {"choices":[{"delta":{"content":"Yes"},"finish_reason":"stop"}]}
+
+                    data: [DONE]
+                    """);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"system":[{"guardContent":{"text":{"text":"Answer in one word."}}}],
+                 "messages":[{"role":"user","content":[
+                    {"guardContent":{"text":{"text":"Is the sky blue?","qualifiers":["query"]}}}
+                 ]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+        .then()
+            .statusCode(200);
+        assertEquals(objectMapper.readTree("""
+            [{"role":"system","content":"Answer in one word."},
+             {"role":"user","content":"Is the sky blue?"}]
+            """), objectMapper.readTree(received.get().body()).path("messages"));
+    }
+
+    @Test
+    void guardContentImageReachesProxyInOriginalOrder() throws IOException {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"image received"}}]}
+            """);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages":[{"role":"user","content":[
+                    {"text":"Describe"},
+                    {"guardContent":{"image":{"format":"png","source":{"bytes":"AQID"}}}}
+                ]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+        .then()
+            .statusCode(200);
+        assertEquals(objectMapper.readTree("""
+            [{"type":"text","text":"Describe"},
+             {"type":"image_url","image_url":{"url":"data:image/png;base64,AQID"}}]
+            """), objectMapper.readTree(received.get().body()).path("messages").get(0).path("content"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"converse", "converse-stream"})
+    void cachePointsAndPriorReasoningAreNotForwarded(String operation) throws IOException {
+        nextResponseBody.set(operation.equals("converse")
+                ? """
+                    {"choices":[{"finish_reason":"stop","message":{"content":"ok"}}]}
+                    """
+                : """
+                    data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
+
+                    data: [DONE]
+                    """);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"system":[{"text":"Be brief."},{"cachePoint":{"type":"default"}}],
+                 "messages":[
+                    {"role":"user","content":[{"text":"hi"},{"cachePoint":{"type":"default"}}]},
+                    {"role":"assistant","content":[
+                        {"reasoningContent":{"reasoningText":{"text":"greet back","signature":"sig"}}},
+                        {"text":"hello"}
+                    ]},
+                    {"role":"user","content":[{"text":"again"}]}
+                 ]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+        .then()
+            .statusCode(200);
+        assertEquals(objectMapper.readTree("""
+            [{"role":"system","content":"Be brief."},
+             {"role":"user","content":"hi"},
+             {"role":"assistant","content":"hello"},
+             {"role":"user","content":"again"}]
+            """), objectMapper.readTree(received.get().body()).path("messages"));
+    }
+
     @Test
     void converse_toolCallsTranslateToToolUse() throws IOException {
         nextResponseBody.set("""

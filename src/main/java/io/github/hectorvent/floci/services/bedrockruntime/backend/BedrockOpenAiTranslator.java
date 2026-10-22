@@ -27,6 +27,11 @@ final class BedrockOpenAiTranslator {
 
     private static final Logger LOG = Logger.getLogger(BedrockOpenAiTranslator.class);
 
+    private static final String UNSUPPORTED_MESSAGE_BLOCK = "The proxy supports only text, image, guardContent, toolUse, "
+            + "toolResult, reasoningContent, or cachePoint blocks in message content.";
+    private static final String UNSUPPORTED_SYSTEM_BLOCK =
+            "The proxy supports only text, guardContent text, or cachePoint blocks in system.";
+
     private BedrockOpenAiTranslator() {
     }
 
@@ -43,7 +48,14 @@ final class BedrockOpenAiTranslator {
 
         JsonNode system = bedrockRequest.path("system");
         if (system.isArray()) {
-            for (JsonNode block : system) {
+            for (JsonNode systemBlock : system) {
+                JsonNode block = contentBlock(mapper, systemBlock, UNSUPPORTED_SYSTEM_BLOCK);
+                if (block.has("cachePoint")) {
+                    continue;
+                }
+                if (!block.has("text")) {
+                    throw new AwsException("ValidationException", UNSUPPORTED_SYSTEM_BLOCK, 400);
+                }
                 String text = block.path("text").asText(null);
                 if (text != null) {
                     ObjectNode msg = openAiMessages.addObject();
@@ -194,7 +206,12 @@ final class BedrockOpenAiTranslator {
         ArrayNode toolCalls = null;
 
         if (content.isArray()) {
-            for (JsonNode block : content) {
+            for (JsonNode contentBlock : content) {
+                JsonNode block = contentBlock(mapper, contentBlock, UNSUPPORTED_MESSAGE_BLOCK);
+                // Chat Completions has no input for cache checkpoints or prior-turn reasoning.
+                if (block.has("cachePoint") || block.has("reasoningContent")) {
+                    continue;
+                }
                 if (block.has("toolResult")) {
                     JsonNode toolResult = block.path("toolResult");
                     ObjectNode toolMsg = openAiMessages.addObject();
@@ -221,6 +238,9 @@ final class BedrockOpenAiTranslator {
                             .put("url", imageDataUrl(block.path("image")));
                     hasImages = true;
                     continue;
+                }
+                if (!block.has("text")) {
+                    throw new AwsException("ValidationException", UNSUPPORTED_MESSAGE_BLOCK, 400);
                 }
                 String blockText = block.path("text").asText(null);
                 if (blockText != null) {
@@ -249,6 +269,30 @@ final class BedrockOpenAiTranslator {
                 msg.set("tool_calls", toolCalls);
             }
         }
+    }
+
+    /**
+     * Requires a content block to set exactly one union member, so a member the proxy cannot
+     * translate is never silently discarded. guardContent is returned as the text or image block it
+     * wraps: the proxy applies no guardrail, so guarded content is ordinary model input.
+     */
+    private static JsonNode contentBlock(ObjectMapper mapper, JsonNode block, String unsupportedMessage) {
+        if (!block.isObject() || block.size() != 1) {
+            throw new AwsException("ValidationException", unsupportedMessage, 400);
+        }
+        if (!block.has("guardContent")) {
+            return block;
+        }
+        JsonNode guarded = block.path("guardContent");
+        JsonNode guardedText = guarded.path("text").path("text");
+        if (guarded.size() == 1 && guardedText.isTextual()) {
+            return mapper.createObjectNode().put("text", guardedText.asText());
+        }
+        if (guarded.size() == 1 && guarded.path("image").isObject()) {
+            return mapper.createObjectNode().set("image", guarded.path("image"));
+        }
+        throw new AwsException("ValidationException",
+                "The proxy supports only a text or image block in guardContent.", 400);
     }
 
     private static String imageDataUrl(JsonNode image) {
