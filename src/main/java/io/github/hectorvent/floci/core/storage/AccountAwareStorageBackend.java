@@ -30,8 +30,9 @@ import java.util.stream.Collectors;
  * {@code *ForAccount} overloads, passing the account ID stored on the resource model.
  *
  * <p>Backward compatibility: on a {@link #get} miss for the prefixed key, the un-prefixed
- * key is tried and the entry is migrated on read. This covers existing persistent/WAL data
- * created before multi-account support was added.
+ * key is tried and the entry is migrated on read, unless the key itself starts with an
+ * account prefix. This covers existing persistent/WAL data created before multi-account
+ * support was added.
  */
 public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> {
 
@@ -86,14 +87,15 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     public Optional<V> get(String key) {
         String prefixedKey = prefixed(key);
         Optional<V> result = delegate.get(prefixedKey);
-        if (result.isPresent()) {
+        if (result.isPresent() || hasAccountPrefix(key)) {
             return result;
         }
-        // Backward-compat: try un-prefixed key (pre-multi-account data) and migrate on read. The
-        // migration is a write (put then delete), so it runs under the same monitor the explicit-account
-        // migrators hold, or two readers resolving the same legacy key from different account contexts
-        // would each copy it into their own partition and the two copies would then diverge. The hit
-        // path above stays outside the monitor, so only a miss pays for it.
+        // Backward-compat: try un-prefixed key (pre-multi-account data) and migrate on read. A raw key
+        // that starts with an account prefix is that account's entry, not legacy data, so it is never
+        // tried. The migration is a write (put then delete), so it runs under the same monitor the
+        // explicit-account migrators hold, or two readers resolving the same legacy key from different
+        // account contexts would each copy it into their own partition and the two copies would then
+        // diverge. The hit path above stays outside the monitor, so only a miss pays for it.
         synchronized (this) {
             Optional<V> migratedByAnotherReader = delegate.get(prefixedKey);
             if (migratedByAnotherReader.isPresent()) {
@@ -479,7 +481,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         String callerAccount = prefix();
         Optional<V> own = delegate.get(callerAccount + "/" + key);
         // get locks the store on a miss, so call it only when there is legacy data to migrate
-        if (own.isEmpty() && delegate.get(key).isPresent()) {
+        if (own.isEmpty() && !hasAccountPrefix(key) && delegate.get(key).isPresent()) {
             own = get(key);
         }
         if (own.isPresent()) {

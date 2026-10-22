@@ -509,6 +509,35 @@ class AccountAwareStorageBackendTest {
         assertTrue(raw.get("LEGACY").isEmpty());
     }
 
+    /**
+     * A logical key can itself start with twelve digits and a slash: an S3 object key is
+     * {@code bucket/key}, and {@code 222222222222} is a valid bucket name. The raw entry below is
+     * account 222222222222's key {@code x/y}, not a pre-multi-account entry.
+     */
+    @Test
+    void getDoesNotMigrateAnotherAccountsEntryWhoseRawKeyEqualsTheLogicalKey() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("222222222222/x/y", "v");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+
+        assertEquals(Optional.empty(), storage.get("222222222222/x/y"));
+        assertEquals(Optional.of("v"), raw.get("222222222222/x/y"));
+        assertEquals(Optional.empty(), raw.get("111111111111/222222222222/x/y"));
+    }
+
+    @Test
+    void findAnyAccountEntryDoesNotMigrateAnotherAccountsEntryWhoseRawKeyEqualsTheLogicalKey() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("222222222222/x/y", "v");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+
+        assertEquals(Optional.empty(), storage.findAnyAccountEntry("222222222222/x/y"));
+        assertEquals(Optional.of("v"), raw.get("222222222222/x/y"));
+        assertEquals(Optional.empty(), raw.get("111111111111/222222222222/x/y"));
+    }
+
     @Test
     void crossAccountLookupDoesNotWaitForTheStoreMonitor() throws Exception {
         AccountAwareStorageBackend<String> storage = AccountAwareStorageBackend.inMemory("111111111111");
