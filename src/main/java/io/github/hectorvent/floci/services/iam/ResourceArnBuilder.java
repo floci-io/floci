@@ -138,7 +138,7 @@ public class ResourceArnBuilder {
             case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
-            case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
+            case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId, false));
             case "kms"            -> List.of(buildKmsArn(path, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
@@ -1440,33 +1440,36 @@ public class ResourceArnBuilder {
     public List<String> buildSsmResources(String action, ContainerRequestContext ctx, String region,
                                           String accountId) {
         return switch (action) {
-            case "ssm:GetParameters", "ssm:DeleteParameters" -> buildSsmParameterArns(ctx, region, accountId);
+            case "ssm:GetParameters" -> buildSsmParameterArns(ctx, region, accountId, true);
+            case "ssm:DeleteParameters" -> buildSsmParameterArns(ctx, region, accountId, false);
             case "ssm:GetParametersByPath" -> List.of(buildSsmPathArn(ctx, region, accountId));
-            default -> List.of(buildSsmArn(ctx, region, accountId));
+            default -> List.of(buildSsmArn(ctx, region, accountId, "ssm:GetParameter".equals(action)));
         };
     }
 
-    private String buildSsmArn(ContainerRequestContext ctx, String region, String accountId) {
+    private String buildSsmArn(ContainerRequestContext ctx, String region, String accountId,
+                               boolean selectorAllowed) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
             if (json.hasNonNull("Name")) {
                 String name = json.get("Name").asText().trim();
                 if (!name.isEmpty()) {
-                    return ssmParameterArn(name, region, accountId);
+                    return ssmParameterArn(name, region, accountId, selectorAllowed);
                 }
             }
         }
         return AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString();
     }
 
-    private List<String> buildSsmParameterArns(ContainerRequestContext ctx, String region, String accountId) {
+    private List<String> buildSsmParameterArns(ContainerRequestContext ctx, String region, String accountId,
+                                               boolean selectorAllowed) {
         JsonNode json = readJsonBody(ctx);
         Set<String> arns = new LinkedHashSet<>();
         if (json != null && json.isObject()) {
             for (JsonNode element : json.path("Names")) {
                 String name = element.asText().trim();
                 if (!name.isEmpty()) {
-                    arns.add(ssmParameterArn(name, region, accountId));
+                    arns.add(ssmParameterArn(name, region, accountId, selectorAllowed));
                 }
             }
         }
@@ -1480,23 +1483,24 @@ public class ResourceArnBuilder {
         String path = json != null && json.hasNonNull("Path") ? json.get("Path").asText().trim() : "";
         return path.isEmpty()
                 ? AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString()
-                : ssmParameterArn(path, region, accountId);
+                : ssmParameterArn(path, region, accountId, false);
     }
 
     /**
-     * A {@code :version} or {@code :label} selector reads a version of the parameter, so it is
-     * checked against the parameter itself. A parameter name cannot contain a colon, so the first
-     * one starts the selector.
+     * Only GetParameter and GetParameters accept a {@code :version} or {@code :label} selector, which
+     * reads a version of the parameter, so with {@code selectorAllowed} the name is checked against the
+     * parameter itself. A parameter name cannot contain a colon on AWS, so the first one starts the
+     * selector. Every other operation is checked against the literal name it sends.
      */
-    private static String ssmParameterArn(String name, String region, String accountId) {
+    private static String ssmParameterArn(String name, String region, String accountId, boolean selectorAllowed) {
         Optional<String> arnResource = AwsArnUtils.resourceIfArnFor(name, "ssm");
         if (arnResource.isPresent()) {
             String resource = arnResource.get();
-            return resource.startsWith("parameter/")
+            return selectorAllowed && resource.startsWith("parameter/")
                     ? name.substring(0, name.length() - resource.length()) + withoutSsmSelector(resource)
                     : name;
         }
-        String bareName = withoutSsmSelector(name);
+        String bareName = selectorAllowed ? withoutSsmSelector(name) : name;
         String paramResource = bareName.startsWith("/") ? "parameter" + bareName : "parameter/" + bareName;
         return AwsArnUtils.Arn.of("ssm", region, accountId, paramResource).toString();
     }

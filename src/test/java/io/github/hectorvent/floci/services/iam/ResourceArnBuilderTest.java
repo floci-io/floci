@@ -1219,19 +1219,48 @@ class ResourceArnBuilderTest {
                     name);
         }
         setJsonBody("{\"Name\":\"config-key:2\"}");
-        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/config-key",
-                builder.build("ssm", ctx, "us-east-1", ACCOUNT));
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/config-key"),
+                builder.buildSsmResources("ssm:GetParameter", ctx, "us-east-1", ACCOUNT));
     }
 
     @Test
-    void ssmChecksSelectorsInNamesAndPathAgainstTheBareParameter() {
+    void ssmChecksSelectorsInNamesAgainstTheBareParameter() {
         setJsonBody("{\"Names\":[\"/app/a:1\",\"/app/a:prod\","
                 + "\"arn:aws:ssm:us-east-1:000000000000:parameter/app/b:2\"]}");
         assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/a",
                         "arn:aws:ssm:us-east-1:000000000000:parameter/app/b"),
                 builder.buildSsmResources("ssm:GetParameters", ctx, "us-east-1", ACCOUNT));
+    }
+
+    /** Only GetParameter and GetParameters accept a selector; every other name and path is the parameter's own. */
+    @Test
+    void ssmChecksTheLiteralNameWhereTheOperationTakesNoSelector() {
+        String literal = "arn:aws:ssm:us-east-1:000000000000:parameter/app/a:x";
+        for (String action : List.of("ssm:PutParameter", "ssm:DeleteParameter", "ssm:LabelParameterVersion",
+                "ssm:GetParameterHistory")) {
+            setJsonBody("{\"Name\":\"/app/a:x\"}");
+            assertEquals(List.of(literal), builder.buildSsmResources(action, ctx, "us-east-1", ACCOUNT), action);
+        }
+        setJsonBody("{\"Name\":\"" + literal + "\"}");
+        assertEquals(List.of(literal), builder.buildSsmResources("ssm:DeleteParameter", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @Test
+    void ssmChecksEachLiteralNameDeleteParametersNames() {
+        setJsonBody("{\"Names\":[\"/app/a:x\",\"/app/b\"]}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/a:x",
+                        "arn:aws:ssm:us-east-1:000000000000:parameter/app/b"),
+                builder.buildSsmResources("ssm:DeleteParameters", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @Test
+    void ssmChecksTheLiteralPathAPathQueryRequests() {
+        String literal = "arn:aws:ssm:us-east-1:000000000000:parameter/app/a:x";
+        setJsonBody("{\"Path\":\"/app/a:x\"}");
+        assertEquals(List.of(literal),
+                builder.buildSsmResources("ssm:GetParametersByPath", ctx, "us-east-1", ACCOUNT));
         setJsonBody("{\"Path\":\"/app:1\"}");
-        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app"),
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app:1"),
                 builder.buildSsmResources("ssm:GetParametersByPath", ctx, "us-east-1", ACCOUNT));
     }
 
