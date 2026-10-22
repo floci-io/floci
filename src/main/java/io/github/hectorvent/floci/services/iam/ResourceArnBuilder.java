@@ -1135,7 +1135,9 @@ public class ResourceArnBuilder {
             if (json.hasNonNull("TableName")) {
                 String tableName = json.get("TableName").asText().trim();
                 if (!tableName.isEmpty()) {
-                    return List.of(toDynamoDbTableArn(tableName, region, accountId));
+                    String tableArn = toDynamoDbTableArn(tableName, region, accountId);
+                    String indexName = json.hasNonNull("IndexName") ? json.get("IndexName").asText().trim() : "";
+                    return List.of(indexName.isEmpty() ? tableArn : tableArn + "/index/" + indexName);
                 }
             }
             if (json.path("TableCreationParameters").hasNonNull("TableName")) {

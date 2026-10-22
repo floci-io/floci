@@ -785,6 +785,25 @@ class ResourceArnBuilderTest {
         }
     }
 
+    /**
+     * Query, Scan and the contributor insights actions on an index are authorized against the
+     * {@code index} resource, {@code table/${TableName}/index/${IndexName}}, not the table.
+     */
+    @Test
+    void dynamoDbBuildsTheIndexArnOfARequestOnAnIndex() {
+        setJsonBody("{\"TableName\":\"Books\",\"IndexName\":\"ByAuthor\",\"KeyConditionExpression\":\"a = :a\"}");
+        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/Books/index/ByAuthor",
+                builder.build("dynamodb", ctx, "us-east-1", ACCOUNT));
+
+        String tableArn = "arn:aws-cn:dynamodb:cn-north-1:000000000000:table/Books";
+        setJsonBody("{\"TableName\":\"" + tableArn + "\",\"IndexName\":\"ByAuthor\"}");
+        assertEquals(tableArn + "/index/ByAuthor", builder.build("dynamodb", ctx, "us-east-1", ACCOUNT));
+
+        setJsonBody("{\"TableName\":\"Books\",\"IndexName\":\"\"}");
+        assertEquals("arn:aws:dynamodb:us-east-1:000000000000:table/Books",
+                builder.build("dynamodb", ctx, "us-east-1", ACCOUNT));
+    }
+
     /** A bare name that merely looks ARN-ish is still a name, not an ARN. */
     @Test
     void dynamoDbTreatsAnIncompleteArnAsATableName() {

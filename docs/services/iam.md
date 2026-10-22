@@ -1461,7 +1461,10 @@ IAM action, grants nothing. The mapping is taken from AWS's Service Reference an
 `src/main/resources/aws/iam-authorized-actions.json`. DynamoDB `TransactGetItems`, which AWS checks
 as `dynamodb:GetItem`, is checked item by item, as described under
 [Condition keys floci populates](#condition-keys-floci-populates): each `Get` as
-`dynamodb:GetItem` on its own table, with its own `dynamodb:LeadingKeys`.
+`dynamodb:GetItem` on its own table, with its own `dynamodb:LeadingKeys`. A DynamoDB request that
+names an `IndexName` beside its `TableName`, such as a `Query` or `Scan` of a secondary index, is
+checked against the index, `table/<table>/index/<index>`, as AWS checks it, so a statement naming only
+the table does not cover it; `table/<table>/index/*` names every index of a table.
 
 A Query request is checked against the resource its parameters name, as a JSON body's are: an SQS
 call against the queue its `QueueUrl` or `QueueName` names, and an SNS call against the topic its

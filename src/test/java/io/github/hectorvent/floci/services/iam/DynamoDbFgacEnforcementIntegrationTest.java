@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -246,6 +247,50 @@ class DynamoDbFgacEnforcementIntegrationTest {
         .when()
                 .post("/")
         .then()
+                .statusCode(400)
+                .body(containsString("AccessDeniedException"));
+    }
+
+    /**
+     * DynamoDB's Service Reference authorizes Query and Scan on an index against the index
+     * resource, {@code table/<table>/index/<index>}, and the "Specifying conditions" guide grants
+     * Query on an index with a statement naming that index ARN alone.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"Query", "Scan"})
+    void aRequestOnAnIndexIsAuthorizedAgainstTheIndexNotTheTable(String operation) {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String tableName = "fgac-index-" + suffix;
+        String roleName = "FgacIndexRole" + suffix;
+        String tableArn = "arn:aws:dynamodb:" + REGION + ":" + ROLE_ACCOUNT_ID + ":table/" + tableName;
+        createTableWithGsi(tableName, "TenantGSI");
+        putItemWithGsiKey(tableName, "item-1", "USER_alice");
+        createRole(roleName);
+        putBroadDynamoDbRolePolicy(roleName);
+        String onIndex = """
+                {"TableName":"%s","IndexName":"TenantGSI"%s}""".formatted(tableName, "Query".equals(operation)
+                ? ",\"KeyConditionExpression\":\"GSI_PK = :gsi\","
+                        + "\"ExpressionAttributeValues\":{\":gsi\":{\"S\":\"USER_alice\"}}"
+                : "");
+
+        String tableOnly = assumeRoleWithSessionPolicy(roleName, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:%s","Resource":"%s"}]}""".formatted(operation, tableArn));
+        dynamoDb(tableOnly, operation, onIndex)
+                .statusCode(400)
+                .body(containsString("AccessDeniedException"));
+
+        String indexOnly = assumeRoleWithSessionPolicy(roleName, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:%s","Resource":"%s/index/TenantGSI"}]}"""
+                .formatted(operation, tableArn));
+        dynamoDb(indexOnly, operation, onIndex)
+                .statusCode(200)
+                .body("Count", equalTo(1));
+        dynamoDb(indexOnly, operation, """
+                {"TableName":"%s"%s}""".formatted(tableName, "Query".equals(operation)
+                ? ",\"KeyConditionExpression\":\"PK = :pk\",\"ExpressionAttributeValues\":{\":pk\":{\"S\":\"item-1\"}}"
+                : ""))
                 .statusCode(400)
                 .body(containsString("AccessDeniedException"));
     }
@@ -503,6 +548,17 @@ class DynamoDbFgacEnforcementIntegrationTest {
                 .body("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId", startsWith("ASIA"))
                 .extract()
                 .path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId");
+    }
+
+    private static ValidatableResponse dynamoDb(String accessKeyId, String operation, String body) {
+        return given()
+                .header("Authorization", auth(accessKeyId, "dynamodb"))
+                .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body(body)
+        .when()
+                .post("/")
+        .then();
     }
 
     private static String auth(String accessKeyId, String service) {
