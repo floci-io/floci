@@ -1399,6 +1399,46 @@ class EventBridgeServiceTest {
         assertFalse(service.matchesPattern(event, "{\"detail\":{\"status\":\"PENDING\"}}"));
     }
 
+    // ─────────────── Numbers outside the double range ───────────────
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"detail\":{\"n\":[{\"numeric\":[\">\",1e400]}]}}",
+            "{\"detail\":{\"n\":[1e400]}}",
+            "{\"detail\":{\"n\":[{\"anything-but\":1e400}]}}",
+            "{\"detail\":{\"n\":[{\"anything-but\":[1,-1e400]}]}}"
+    })
+    void putRuleRejectsANonFiniteNumber(String pattern) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule("bad-rule", null, pattern, null, RuleState.ENABLED, null, null, null, REGION));
+
+        assertEquals("InvalidEventPatternException", error.getErrorCode());
+        assertTrue(service.listRules(null, null, REGION).isEmpty());
+    }
+
+    @Test
+    void matchesPatternTreatsANonFiniteNumberAsNotANumber() {
+        Map<String, Object> infinite = eventWithDetail("{\"n\":1e400}");
+        assertFalse(service.matchesPattern(infinite, "{\"detail\":{\"n\":[{\"numeric\":[\">\",0]}]}}"));
+        assertFalse(service.matchesPattern(infinite, "{\"detail\":{\"n\":[1]}}"));
+        assertTrue(service.matchesPattern(infinite, "{\"detail\":{\"n\":[{\"exists\":true}]}}"));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"n\":5}"), "{\"detail\":{\"n\":[1e400]}}"));
+    }
+
+    @Test
+    void putEventsWithANonFiniteNumberInTheDetailIsAcceptedWithoutMatching() {
+        service.putRule("numeric", null, "{\"detail\":{\"n\":[{\"numeric\":[\">\",0]}]}}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+        service.putTargets("numeric", null,
+                List.of(new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null)), REGION);
+
+        EventBridgeService.PutEventsResult result = service.putEvents(
+                List.of(Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{\"n\":1e400}")), REGION);
+
+        assertEquals(0, result.failedCount());
+        verify(dispatcherMock, never()).dispatch(anyString(), any(), anyString(), anyString(), any());
+    }
+
     // ─────────────── Array-valued event fields ───────────────
 
     @Test

@@ -82,6 +82,9 @@ final class EventPatternMatcher {
         if (element.isArray()) {
             throw invalid("Match value for \"" + key + "\" must be a string, number, true, false, or null");
         }
+        if (element.isNumber() && !isFiniteNumber(element)) {
+            throw invalid("Number out of range for \"" + key + "\": " + element.asText());
+        }
         if (!element.isObject()) {
             return;
         }
@@ -108,14 +111,14 @@ final class EventPatternMatcher {
     private static boolean isValidAnythingBut(JsonNode operand) {
         if (operand.isArray()) {
             for (JsonNode value : operand) {
-                if (value.isContainerNode()) {
+                if (value.isContainerNode() || (value.isNumber() && !isFiniteNumber(value))) {
                     return false;
                 }
             }
             return true;
         }
         if (!operand.isObject()) {
-            return true;
+            return !operand.isNumber() || isFiniteNumber(operand);
         }
         if (operand.size() != 1) {
             return false;
@@ -147,11 +150,19 @@ final class EventPatternMatcher {
         for (int i = 0; i < condition.size(); i += 2) {
             JsonNode comparator = condition.get(i);
             if (!comparator.isTextual() || !NUMERIC_COMPARATORS.contains(comparator.asText())
-                    || !condition.get(i + 1).isNumber()) {
+                    || !isFiniteNumber(condition.get(i + 1))) {
                 return false;
             }
         }
         return true;
+    }
+
+    /**
+     * EventBridge compares numbers as IEEE 754 doubles, so a JSON number beyond that range, such as
+     * 1e400, which Jackson reads as an infinite double, is not a number it can match.
+     */
+    private static boolean isFiniteNumber(JsonNode node) {
+        return node.isNumber() && Double.isFinite(node.doubleValue());
     }
 
     /** A wildcard is valid when every backslash escapes {@code *} or {@code \} and no two wildcards touch. */
@@ -293,7 +304,8 @@ final class EventPatternMatcher {
         }
         if (expected.isNumber()) {
             // AWS normalizes numbers before comparing: 300, 300.0 and 3.0e2 are all equal.
-            return value.isNumber() && expected.decimalValue().compareTo(value.decimalValue()) == 0;
+            return isFiniteNumber(expected) && isFiniteNumber(value)
+                    && expected.decimalValue().compareTo(value.decimalValue()) == 0;
         }
         return false;
     }
@@ -309,7 +321,7 @@ final class EventPatternMatcher {
             case "suffix" -> matchesAffix(operand, value, false);
             case "equals-ignore-case", "wildcard", "cidr" -> operand.isTextual() && value.isTextual()
                     && matchesString(operator, operand.asText(), value.asText());
-            case "numeric" -> value.isNumber() && matchesNumeric(operand, value.decimalValue());
+            case "numeric" -> isFiniteNumber(value) && matchesNumeric(operand, value.decimalValue());
             case "anything-but" -> matchesAnythingBut(operand, value);
             default -> false;
         };
