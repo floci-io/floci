@@ -867,6 +867,30 @@ class S3ServiceTest {
     }
 
     @Test
+    void eventFromAConfigurationWithoutAnIdCarriesAStableConfigurationId() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notif-s3-blank-id"), false, lambdaInvoker,
+                new RegionResolver("us-east-1", "000000000000"));
+        service.createBucket("test-bucket", "us-east-1");
+        NotificationConfiguration config = new NotificationConfiguration();
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification("",
+                "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
+                List.of("s3:ObjectCreated:*"), List.of(new FilterRule("prefix", "docs/"))));
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
+
+        service.putObject("test-bucket", "docs/a.txt", "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        String first = onlyRecordedS3Event(lambdaInvoker).path("s3").path("configurationId").asText();
+        service.putObject("test-bucket", "docs/b.txt", "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        String second = onlyRecordedS3Event(lambdaInvoker).path("s3").path("configurationId").asText();
+
+        assertFalse(first.isBlank(), "configurationId must not be blank");
+        assertEquals(first, second);
+        assertEquals("", service.getBucketNotificationConfiguration("test-bucket")
+                .getLambdaFunctionConfigurations().getFirst().id());
+    }
+
+    @Test
     void putObjectKeepsTheQualifierOfTheNotificationFunctionArn() {
         RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");

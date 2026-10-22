@@ -6571,7 +6571,9 @@ public class S3Service implements Resettable, ResourceProvider {
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(recordKey)) {
                 try {
-                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), s3EventJson(event, qn.id()), 0,
+                    String configurationId = eventConfigurationId(qn.id(), qn.queueArn(), qn.events(),
+                            qn.filterRules());
+                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), s3EventJson(event, configurationId), 0,
                             extractRegionFromArn(qn.queueArn()));
                     LOG.debugv("Fired S3 event {0} to SQS {1}", eventName, qn.queueArn());
                 } catch (Exception e) {
@@ -6583,8 +6585,10 @@ public class S3Service implements Resettable, ResourceProvider {
         for (TopicNotification tn : config.getTopicConfigurations()) {
             if (tn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && tn.matchesKey(recordKey)) {
                 try {
-                    snsService.publish(tn.topicArn(), null, s3EventJson(event, tn.id()), "Amazon S3 Notification",
-                            extractRegionFromArn(tn.topicArn()));
+                    String configurationId = eventConfigurationId(tn.id(), tn.topicArn(), tn.events(),
+                            tn.filterRules());
+                    snsService.publish(tn.topicArn(), null, s3EventJson(event, configurationId),
+                            "Amazon S3 Notification", extractRegionFromArn(tn.topicArn()));
                     LOG.debugv("Fired S3 event {0} to SNS {1}", eventName, tn.topicArn());
                 } catch (Exception e) {
                     LOG.warnv("Failed to deliver S3 event to SNS {0}: {1}", tn.topicArn(), e.getMessage());
@@ -6602,8 +6606,10 @@ public class S3Service implements Resettable, ResourceProvider {
                             throw new AwsException("InvalidParameterValueException",
                                     "Invalid Lambda function ARN: " + ln.functionArn(), 400);
                         }
+                        String configurationId = eventConfigurationId(ln.id(), ln.functionArn(), ln.events(),
+                                ln.filterRules());
                         invokeLambda(lambdaRegion, functionName,
-                                s3EventJson(event, ln.id()).getBytes(StandardCharsets.UTF_8));
+                                s3EventJson(event, configurationId).getBytes(StandardCharsets.UTF_8));
                         LOG.debugv("Fired S3 event {0} to Lambda {1}", eventName, ln.functionArn());
                     } catch (Exception e) {
                         LOG.warnv("Failed to deliver S3 event to Lambda {0}: {1}", ln.functionArn(), e.getMessage());
@@ -6801,6 +6807,28 @@ public class S3Service implements Resettable, ResourceProvider {
         ObjectNode root = objectMapper.createObjectNode();
         root.putArray("Records").add(record);
         return root;
+    }
+
+    /**
+     * The id an event names its configuration by: the stored one, or for a configuration stored without
+     * one (by CloudFormation, or before ids were generated) one derived from its destination, events
+     * and filters, so every event of that configuration carries the same id. The derived id is not
+     * stored, so an unchanged CloudFormation template still compares equal to the bucket's.
+     */
+    private static String eventConfigurationId(String id, String destinationArn, List<String> events,
+                                               List<FilterRule> filterRules) {
+        if (id != null && !id.isBlank()) {
+            return id;
+        }
+        String identity = destinationArn + "\n" + events + "\n" + filterRules;
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(identity.getBytes(StandardCharsets.UTF_8));
+            // Shaped like the ids S3Controller generates: 48 characters of base64 over hex text.
+            return Base64.getEncoder().encodeToString(
+                    HexFormat.of().formatHex(digest).getBytes(StandardCharsets.UTF_8)).substring(0, 48);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is not available", e);
+        }
     }
 
     /** The event as sent to one destination: {@code configurationId} is the ID of the configuration it matched. */
