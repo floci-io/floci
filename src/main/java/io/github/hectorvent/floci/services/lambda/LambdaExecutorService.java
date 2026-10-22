@@ -335,6 +335,7 @@ public class LambdaExecutorService implements Resettable {
             permit = concurrencyLimiter.acquire(function);
         } catch (AwsException throttled) {
             if (Integer.valueOf(0).equals(function.getReservedConcurrentExecutions())) {
+                // This Floci-only placeholder covers an event a zero reservation turns away; AWS documents no payload.
                 route(event, previous != null ? previous : new InvokeResult(429, "Unhandled",
                         buildErrorPayload(throttled.getMessage(), throttled.getErrorCode()), null,
                         event.requestId()), attempt - 1);
