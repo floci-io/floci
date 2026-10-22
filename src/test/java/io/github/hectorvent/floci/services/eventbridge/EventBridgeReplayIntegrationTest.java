@@ -369,6 +369,116 @@ class EventBridgeReplayIntegrationTest {
         deletePartialUpdateArchive("partial-zero-archive");
     }
 
+    @Test
+    @Order(17)
+    void replayedEventKeepsItsOriginalTime() throws InterruptedException {
+        String timeBusArn = given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.CreateEventBus")
+                .body("{\"Name\":\"replay-time-bus\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("EventBusArn");
+        String timeArchiveArn = given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.CreateArchive")
+                .body("{\"ArchiveName\":\"replay-time-archive\",\"EventSourceArn\":\"" + timeBusArn + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("ArchiveArn");
+        String timeQueueUrl = given()
+                .contentType(SQS_CT)
+                .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+                .body("{\"QueueName\":\"replay-time-queue\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("QueueUrl");
+        String timeQueueArn = given()
+                .contentType(SQS_CT)
+                .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+                .body("{\"QueueUrl\":\"" + timeQueueUrl + "\",\"AttributeNames\":[\"QueueArn\"]}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("Attributes.QueueArn");
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.PutRule")
+                .body("""
+                        {
+                          "Name": "replay-time-rule",
+                          "EventBusName": "replay-time-bus",
+                          "EventPattern": "{\\"source\\":[\\"replay.time\\"]}"
+                        }
+                        """)
+                .when().post("/")
+                .then().statusCode(200);
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.PutTargets")
+                .body("""
+                        {"Rule": "replay-time-rule", "EventBusName": "replay-time-bus",
+                         "Targets": [{"Id": "1", "Arn": "%s"}]}
+                        """.formatted(timeQueueArn))
+                .when().post("/")
+                .then().statusCode(200);
+
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.PutEvents")
+                .body("""
+                        {"Entries": [{"EventBusName": "replay-time-bus", "Source": "replay.time",
+                          "DetailType": "OrderCreated", "Detail": "{\\"orderId\\":\\"t-1\\"}", "Time": 1447277394}]}
+                        """)
+                .when().post("/")
+                .then().statusCode(200)
+                .body("FailedEntryCount", equalTo(0));
+        given()
+                .contentType(SQS_CT)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body("{\"QueueUrl\":\"" + timeQueueUrl + "\",\"MaxNumberOfMessages\":10,\"WaitTimeSeconds\":2}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Messages", hasSize(1))
+                .body("Messages[0].Body", containsString("\"time\":\"2015-11-11T21:29:54Z\""));
+
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.StartReplay")
+                .body("""
+                        {"ReplayName": "replay-time-replay", "EventSourceArn": "%s",
+                         "EventStartTime": 1447277000, "EventEndTime": 1447278000,
+                         "Destination": {"Arn": "%s"}}
+                        """.formatted(timeArchiveArn, timeBusArn))
+                .when().post("/")
+                .then().statusCode(200);
+        awaitReplayCompleted("replay-time-replay");
+
+        given()
+                .contentType(SQS_CT)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body("{\"QueueUrl\":\"" + timeQueueUrl + "\",\"MaxNumberOfMessages\":10,\"WaitTimeSeconds\":2}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Messages", hasSize(1))
+                .body("Messages[0].Body", containsString("\"orderId\":\"t-1\""))
+                .body("Messages[0].Body", containsString("\"time\":\"2015-11-11T21:29:54Z\""));
+    }
+
+    private static void awaitReplayCompleted(String replayName) throws InterruptedException {
+        String state = "STARTING";
+        for (int i = 0; i < 50 && !"COMPLETED".equals(state) && !"FAILED".equals(state); i++) {
+            Thread.sleep(100);
+            state = given()
+                    .contentType(EB_CT)
+                    .header("X-Amz-Target", "AWSEvents.DescribeReplay")
+                    .body("{\"ReplayName\":\"" + replayName + "\"}")
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .extract().jsonPath().getString("State");
+        }
+        Assertions.assertEquals("COMPLETED", state, "Replay did not reach COMPLETED state");
+    }
+
     private static void createPartialUpdateArchive(String name) {
         given()
                 .contentType(EB_CT)
