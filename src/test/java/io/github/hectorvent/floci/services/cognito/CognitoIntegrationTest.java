@@ -17,6 +17,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
@@ -2143,6 +2145,7 @@ class CognitoIntegrationTest {
                   "UserPoolId": "%s",
                   "ClientName": "rotation-client",
                   "GenerateSecret": true,
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
                   "AllowedOAuthFlowsUserPoolClient": true,
                   "AllowedOAuthFlows": ["client_credentials"],
                   "AllowedOAuthScopes": ["api/read"]
@@ -2178,6 +2181,21 @@ class CognitoIntegrationTest {
         // authenticate with new client-credentials successfully
         oauthToken(rotClientId, secret2Value).then().statusCode(200);
 
+        // both active secrets sign SECRET_HASH during the rotation window
+        passwordAuth(rotClientId, secretHash(secret1Value, USERNAME, rotClientId)).then().statusCode(200);
+        String revocable = passwordAuth(rotClientId, secretHash(secret2Value, USERNAME, rotClientId)).then()
+                .statusCode(200)
+                .extract().path("AuthenticationResult.RefreshToken");
+        cognitoAction("RevokeToken", """
+                {
+                  "ClientId": "%s",
+                  "Token": "%s",
+                  "ClientSecret": "%s"
+                }
+                """.formatted(rotClientId, revocable, secret2Value))
+                .then()
+                .statusCode(200);
+
         // delete client-credentials 1
         cognitoAction("DeleteUserPoolClientSecret", """
                 {
@@ -2194,6 +2212,19 @@ class CognitoIntegrationTest {
 
         // secret 2 still works after rotation
         oauthToken(rotClientId, secret2Value).then().statusCode(200);
+
+        // the client is still confidential: SECRET_HASH stays required, signed by the remaining secret
+        passwordAuth(rotClientId, null).then()
+                .statusCode(400)
+                .body("__type", containsString("InvalidParameterException"));
+        passwordAuth(rotClientId, secretHash(secret1Value, USERNAME, rotClientId)).then()
+                .statusCode(400)
+                .body("__type", containsString("NotAuthorizedException"));
+        String refreshToken = passwordAuth(rotClientId, secretHash(secret2Value, USERNAME, rotClientId)).then()
+                .statusCode(200)
+                .extract().path("AuthenticationResult.RefreshToken");
+        oauthRefresh(rotClientId, secret1Value, refreshToken).then().statusCode(400);
+        oauthRefresh(rotClientId, secret2Value, refreshToken).then().statusCode(200);
     }
 
     @Test
@@ -2321,6 +2352,35 @@ class CognitoIntegrationTest {
                 .formParam("client_secret", oauthClientSecret)
         .when()
                 .post("/cognito-idp/oauth2/token");
+    }
+
+    private static Response oauthRefresh(String oauthClientId, String oauthClientSecret, String refreshToken) {
+        return given()
+                .formParam("grant_type", "refresh_token")
+                .formParam("client_id", oauthClientId)
+                .formParam("client_secret", oauthClientSecret)
+                .formParam("refresh_token", refreshToken)
+        .when()
+                .post("/cognito-idp/oauth2/token");
+    }
+
+    /** USER_PASSWORD_AUTH as {@link #USERNAME}, sending {@code secretHash} only when it is not null. */
+    private static Response passwordAuth(String authClientId, String secretHash) {
+        String hashParameter = secretHash == null ? "" : ", \"SECRET_HASH\": \"%s\"".formatted(secretHash);
+        return cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s"%s }
+                }
+                """.formatted(authClientId, USERNAME, PASSWORD, hashParameter));
+    }
+
+    private static String secretHash(String clientSecret, String username, String hashClientId) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(clientSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        return Base64.getEncoder().encodeToString(
+                mac.doFinal((username + hashClientId).getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test

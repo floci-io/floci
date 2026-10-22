@@ -761,25 +761,32 @@ final class CognitoAuthFlowHandler {
     }
 
     private void validateSecretHash(UserPoolClient client, Map<String, String> params, String username) {
-        String secret = client.getClientSecret();
-        if (secret == null || secret.isBlank()) return;
+        if (!CognitoService.isConfidentialClient(client)) {
+            return;
+        }
         String provided = params.get("SECRET_HASH");
         if (provided == null || provided.isBlank()) {
             throw new AwsException("InvalidParameterException",
                     "Client " + client.getClientId() + " has a secret; SECRET_HASH is required", 400);
         }
-        String expected;
+        byte[] providedBytes = provided.getBytes(StandardCharsets.UTF_8);
+        for (String secret : CognitoService.activeClientSecrets(client)) {
+            String expected = secretHash(secret, username, client.getClientId());
+            if (MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), providedBytes)) {
+                return;
+            }
+        }
+        throw new AwsException("NotAuthorizedException", "SECRET_HASH does not match", 400);
+    }
+
+    private static String secretHash(String secret, String username, String clientId) {
         try {
             javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
             mac.init(new javax.crypto.spec.SecretKeySpec(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] sig = mac.doFinal((username + client.getClientId()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            expected = Base64.getEncoder().encodeToString(sig);
+            byte[] sig = mac.doFinal((username + clientId).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return Base64.getEncoder().encodeToString(sig);
         } catch (Exception e) {
             throw new AwsException("InternalErrorException", "SECRET_HASH computation failed", 500);
-        }
-        if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),
-                provided.getBytes(StandardCharsets.UTF_8))) {
-            throw new AwsException("NotAuthorizedException", "SECRET_HASH does not match", 400);
         }
     }
 

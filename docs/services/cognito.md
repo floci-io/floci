@@ -94,9 +94,9 @@ pool's Region rather than the `SourceArn` Region, and does not apply `ReplyToEma
 | ListUserPoolClients | Lists app clients for a user pool. |
 | UpdateUserPoolClient | Updates an app client's settings. As on AWS, a setting the request omits is reset to its default, the one a new client gets. An omitted `ClientName` keeps the client's name, since the API documents no default for it. |
 | DeleteUserPoolClient | Deletes an app client from a user pool. |
-| AddUserPoolClientSecret | Adds a client secret to an app client, up to 2. A supplied `ClientSecret` must be 24 to 64 word characters; without one Floci generates the secret and returns its value. |
+| AddUserPoolClientSecret | Adds a client secret to an app client, up to 2. A supplied `ClientSecret` must be 24 to 64 word characters; without one Floci generates the secret and returns its value. Every active secret is accepted wherever the client authenticates (`SECRET_HASH`, `RevokeToken`, the OAuth token and revoke endpoints), so a secret can be rotated without downtime. |
 | ListUserPoolClientSecrets | Lists an app client's client secrets, without their values. |
-| DeleteUserPoolClientSecret | Deletes one of an app client's client secrets. The client's only secret cannot be deleted. |
+| DeleteUserPoolClientSecret | Deletes one of an app client's client secrets. The client's only secret cannot be deleted. A client created with a secret stays confidential after the secret it was created with is deleted: it still needs `SECRET_HASH`, signed with a remaining secret. |
 
 ### Resource Servers
 

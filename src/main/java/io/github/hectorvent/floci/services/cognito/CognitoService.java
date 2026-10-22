@@ -4483,6 +4483,49 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
+     * Whether the client was created with a secret. Rotating its secrets never makes it public, even
+     * once the secret it was created with has been deleted.
+     */
+    static boolean isConfidentialClient(UserPoolClient client) {
+        return client.isGenerateSecret()
+                || (client.getClientSecret() != null && !client.getClientSecret().isBlank());
+    }
+
+    /**
+     * Every secret the client accepts: the up to two that AddUserPoolClientSecret keeps active for
+     * rotation, plus the single secret of a client stored before secrets could be rotated.
+     */
+    static List<String> activeClientSecrets(UserPoolClient client) {
+        List<String> secrets = new ArrayList<>();
+        if (client.getUserPoolClientSecrets() != null) {
+            for (UserPoolClientSecret secret : client.getUserPoolClientSecrets()) {
+                String value = secret.getClientSecretValue();
+                if (value != null && !value.isBlank()) {
+                    secrets.add(value);
+                }
+            }
+        }
+        String original = client.getClientSecret();
+        if (original != null && !original.isBlank() && !secrets.contains(original)) {
+            secrets.add(original);
+        }
+        return secrets;
+    }
+
+    /** Whether {@code presented} is one of the client's active secrets, compared in constant time. */
+    static boolean matchesActiveClientSecret(UserPoolClient client, String presented) {
+        if (presented == null) {
+            return false;
+        }
+        byte[] presentedBytes = presented.getBytes(StandardCharsets.UTF_8);
+        boolean matched = false;
+        for (String secret : activeClientSecrets(client)) {
+            matched |= MessageDigest.isEqual(secret.getBytes(StandardCharsets.UTF_8), presentedBytes);
+        }
+        return matched;
+    }
+
+    /**
      * Refuses to refresh an OAuth grant holding a scope the client no longer allows. AWS refuses
      * rather than narrows the grant, on both APIs and the token endpoint. {@code scopes} null, a
      * sign-in through the API, holds none.
@@ -4506,8 +4549,7 @@ public class CognitoService implements ResourceProvider {
 
         // Authenticate the caller before disclosing configuration state: a confidential client must
         // present a valid secret first, matching AWS which validates identity ahead of feature checks.
-        String secret = client.getClientSecret();
-        if (secret != null && !secret.isBlank() && !secret.equals(clientSecret)) {
+        if (isConfidentialClient(client) && !matchesActiveClientSecret(client, clientSecret)) {
             throw new AwsException("UnauthorizedException", "Invalid client secret", 403);
         }
 
@@ -4915,24 +4957,15 @@ public class CognitoService implements ResourceProvider {
     }
 
     private void validateClientSecret(UserPoolClient client, String clientSecret) {
-        String expectedSecret = client.getClientSecret();
-        if (client.getUserPoolClientSecrets().isEmpty()
-                && (expectedSecret == null || expectedSecret.isBlank() || !client.isGenerateSecret())) {
+        if (activeClientSecrets(client).isEmpty()) {
             throw new AwsException("InvalidClientException", "Client must have a secret for client_credentials", 400);
         }
         if (clientSecret == null || clientSecret.isBlank()) {
             throw new AwsException("InvalidClientException", "Client secret is required", 400);
         }
-        for (UserPoolClientSecret userPoolClientSecret : client.getUserPoolClientSecrets()) {
-            if (clientSecret.equals(userPoolClientSecret.getClientSecretValue())) {
-                return;
-            }
+        if (!matchesActiveClientSecret(client, clientSecret)) {
+            throw new AwsException("InvalidClientException", "Client secret is invalid", 400);
         }
-        // for "legacy" clients
-        if (expectedSecret != null && expectedSecret.equals(clientSecret)) {
-            return;
-        }
-        throw new AwsException("InvalidClientException", "Client secret is invalid", 400);
     }
 
     private void validateClientAllowsClientCredentials(UserPoolClient client) {

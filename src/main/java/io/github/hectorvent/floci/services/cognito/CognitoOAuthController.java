@@ -680,12 +680,12 @@ public class CognitoOAuthController {
     }
 
     private static boolean hasSecret(UserPoolClient client) {
-        return client.getClientSecret() != null && !client.getClientSecret().isBlank();
+        return CognitoService.isConfidentialClient(client);
     }
 
-    /** A client with a secret must present it; a public client needs none. */
+    /** A client with a secret must present one of its active secrets; a public client needs none. */
     private boolean clientSecretMatches(UserPoolClient client, String clientSecret) {
-        return !hasSecret(client) || secretsEqual(client.getClientSecret(), clientSecret);
+        return !hasSecret(client) || CognitoService.matchesActiveClientSecret(client, clientSecret);
     }
 
     /** The token endpoint's answer for minted tokens, with an ID or refresh token only when one was minted. */
