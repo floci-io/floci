@@ -250,6 +250,23 @@ class SnsServiceTest {
         assertEquals(Map.of("attr1", "value1", "attr2", "value2"), sub.getAttributes());
     }
 
+    /** As on AWS, an empty filter or redrive policy removes it, so GetSubscriptionAttributes omits it. */
+    @Test
+    void setSubscriptionAttribute_emptyFilterOrRedrivePolicyRemovesIt() {
+        Topic topic = snsService.createTopic("my-topic", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "sqs",
+                "http://localhost:4566/000000000000/my-queue", REGION,
+                Map.of("FilterPolicy", "{\"eventType\":[\"created\"]}",
+                        "RedrivePolicy", "{\"deadLetterTargetArn\":\"arn:aws:sqs:us-east-1:000000000000:dlq\"}"));
+
+        snsService.setSubscriptionAttribute(sub.getSubscriptionArn(), "FilterPolicy", "", REGION);
+        snsService.setSubscriptionAttribute(sub.getSubscriptionArn(), "RedrivePolicy", "", REGION);
+
+        Map<String, String> attributes = snsService.getSubscriptionAttributes(sub.getSubscriptionArn(), REGION);
+        assertFalse(attributes.containsKey("FilterPolicy"), attributes.toString());
+        assertFalse(attributes.containsKey("RedrivePolicy"), attributes.toString());
+    }
+
     @Test
     void subscribe_firehoseRequiresValidRoleArn() {
         Topic topic = snsService.createTopic("firehose-topic", null, null, REGION);

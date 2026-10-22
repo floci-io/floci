@@ -1490,7 +1490,13 @@ public class SnsService implements Resettable, ResourceProvider {
         if ("firehose".equals(sub.getProtocol()) && SUBSCRIPTION_ROLE_ARN.equals(attributeName)) {
             requireFirehoseRoleArn(attributeValue);
         }
-        sub.getAttributes().put(attributeName, attributeValue);
+        // An empty filter or redrive policy removes it, so GetSubscriptionAttributes omits it as AWS does.
+        if (("FilterPolicy".equals(attributeName) || SUBSCRIPTION_REDRIVE_POLICY.equals(attributeName))
+                && (attributeValue == null || attributeValue.isEmpty())) {
+            sub.getAttributes().remove(attributeName);
+        } else {
+            sub.getAttributes().put(attributeName, attributeValue);
+        }
         subscriptionStore.put(key, sub);
     }
 

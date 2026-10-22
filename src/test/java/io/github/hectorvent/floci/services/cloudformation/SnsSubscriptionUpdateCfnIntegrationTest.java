@@ -11,6 +11,8 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * An UpdateStack that changes an AWS::SNS::Subscription's filter and drops its raw delivery flag
@@ -55,17 +57,17 @@ class SnsSubscriptionUpdateCfnIntegrationTest {
 
     @Test
     void aChangedFilterPolicyAndADroppedRawMessageDeliveryReachTheSubscription() {
-        cloudFormation("CreateStack", TEMPLATE.formatted("""
+        cloudFormation(STACK, "CreateStack", TEMPLATE.formatted("""
                 "FilterPolicy": {"eventType": ["created"]},
                 "RawMessageDelivery": true"""));
-        String subscriptionArn = outputValue(describeStacks("CREATE_COMPLETE"), "SubscriptionArn");
+        String subscriptionArn = outputValue(describeStacks(STACK, "CREATE_COMPLETE"), "SubscriptionArn");
         Map<String, String> created = subscriptionAttributes(subscriptionArn);
         assertEquals("{\"eventType\":[\"created\"]}", created.get("FilterPolicy"));
         assertEquals("true", created.get("RawMessageDelivery"));
 
-        cloudFormation("UpdateStack", TEMPLATE.formatted("""
+        cloudFormation(STACK, "UpdateStack", TEMPLATE.formatted("""
                 "FilterPolicy": {"eventType": ["deleted"]}"""));
-        assertEquals(subscriptionArn, outputValue(describeStacks("UPDATE_COMPLETE"), "SubscriptionArn"),
+        assertEquals(subscriptionArn, outputValue(describeStacks(STACK, "UPDATE_COMPLETE"), "SubscriptionArn"),
                 "a FilterPolicy change is an in-place update, so the subscription keeps its ARN");
         Map<String, String> updated = subscriptionAttributes(subscriptionArn);
         assertEquals("{\"eventType\":[\"deleted\"]}", updated.get("FilterPolicy"),
@@ -73,28 +75,50 @@ class SnsSubscriptionUpdateCfnIntegrationTest {
         assertEquals("false", updated.get("RawMessageDelivery"),
                 "a dropped RawMessageDelivery goes back to the default");
 
-        cloudFormation("DeleteStack", null);
+        cloudFormation(STACK, "DeleteStack", null);
         CfnStackWaits.awaitStackDeleted(STACK);
     }
 
-    private static void cloudFormation(String action, String template) {
+    /** AWS omits a filter or redrive policy that was removed; it does not report an empty one. */
+    @Test
+    void droppedFilterAndRedrivePoliciesAreRemovedFromTheSubscription() {
+        String stack = STACK + "-drop";
+        cloudFormation(stack, "CreateStack", TEMPLATE.replace(STACK, stack).formatted("""
+                "FilterPolicy": {"eventType": ["created"]},
+                "RedrivePolicy": {"deadLetterTargetArn": {"Fn::GetAtt": ["Queue", "Arn"]}}"""));
+        String subscriptionArn = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "SubscriptionArn");
+        assertTrue(subscriptionAttributes(subscriptionArn).containsKey("RedrivePolicy"));
+
+        cloudFormation(stack, "UpdateStack", TEMPLATE.replace(STACK, stack).formatted("""
+                "RawMessageDelivery": false"""));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        Map<String, String> updated = subscriptionAttributes(subscriptionArn);
+
+        assertFalse(updated.containsKey("FilterPolicy"), updated.toString());
+        assertFalse(updated.containsKey("RedrivePolicy"), updated.toString());
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    private static void cloudFormation(String stack, String action, String template) {
         RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
             .formParam("Action", action)
-            .formParam("StackName", STACK);
+            .formParam("StackName", stack);
         if (template != null) {
             request.formParam("TemplateBody", template);
         }
         request.when().post("/").then().statusCode(200);
     }
 
-    private static String describeStacks(String expectedStatus) {
+    private static String describeStacks(String stack, String expectedStatus) {
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", STACK)
+            .formParam("StackName", stack)
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();

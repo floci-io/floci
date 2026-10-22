@@ -220,7 +220,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * Writes the declared attributes and puts back the SNS default of each one the previous template
-     * declared and this one dropped. A blank FilterPolicy or RedrivePolicy is how SNS reads "none".
+     * declared and this one dropped. An empty FilterPolicy or RedrivePolicy removes it.
      */
     private void updateSubscriptionAttributes(String subscriptionArn, Map<String, String> declared,
                                               ProvisionContext ctx) {

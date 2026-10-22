@@ -146,6 +146,9 @@ Supported subscription protocols:
 For `FilterPolicyScope=MessageBody`, nested policy objects descend into JSON objects and arrays.
 An object inside an array matches when one array element satisfies the complete nested policy.
 
+`SetSubscriptionAttributes` with an empty `FilterPolicy` or `RedrivePolicy` removes that policy, so
+`GetSubscriptionAttributes` no longer returns it.
+
 For SQS subscriptions, Floci retries a failed delivery up to three times total, with two immediate
 retries. If all attempts fail and the subscription has a `RedrivePolicy` containing a valid
 `deadLetterTargetArn` for an SQS queue, Floci sends the original notification to that queue. SNS
