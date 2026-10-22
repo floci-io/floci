@@ -4425,9 +4425,26 @@ public class CognitoService implements ResourceProvider {
     }
 
     /**
+     * {@code GetTokensFromRefreshToken}: authenticates a client that has a secret with its
+     * {@code ClientSecret} before refreshing.
+     */
+    public Map<String, Object> getTokensFromRefreshToken(String clientId, String clientSecret, String refreshToken) {
+        if (refreshToken == null) {
+            throw new AwsException("InvalidParameterException", "RefreshToken is required", 400);
+        }
+        UserPoolClient client = clientStore.get(clientId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
+        if (isConfidentialClient(client) && !matchesActiveClientSecret(client, clientSecret)) {
+            throw new AwsException("NotAuthorizedException", "Invalid client secret", 400);
+        }
+        return getTokensFromRefreshToken(clientId, refreshToken);
+    }
+
+    /**
      * Mints new access and ID tokens from a refresh token, as the sign-in that issued it did: an OAuth
      * grant's access token keeps the grant's scopes, and has an ID token only with {@code openid}.
-     * Shared by {@code GetTokensFromRefreshToken} and the OAuth token endpoint's refresh_token grant.
+     * Shared by {@code GetTokensFromRefreshToken} and the OAuth token endpoint's refresh_token grant,
+     * each of which authenticates the client first.
      */
     public Map<String, Object> getTokensFromRefreshToken(String clientId, String refreshToken) {
         if (refreshToken == null) {

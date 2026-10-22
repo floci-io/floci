@@ -691,9 +691,12 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
         }
         CognitoService.requireRefreshTokenOfClient(client, parts);
+        String username = parts[1];
+        // Signed over the username the refresh token carries: in an alias sign-in pool that is
+        // the immutable UUID, not the email or phone number the user signed in with.
+        validateSecretHash(client, params, username);
         List<String> scopes = CognitoService.refreshTokenScopes(parts);
         CognitoService.requireScopesStillAllowed(client, scopes);
-        String username = parts[1];
         long iat;
         try {
             iat = parts.length > 3 && !parts[3].isEmpty() ? Long.parseLong(parts[3]) : 0L;

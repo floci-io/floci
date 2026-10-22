@@ -231,7 +231,34 @@ class CognitoAliasUsernameIntegrationTest {
         assertEquals(NEW_EMAIL, attribute(user.path("UserAttributes"), "email"));
     }
 
+    @Test
+    @Order(8)
+    void refreshSecretHashIsComputedOverTheUuidUsername() {
+        // The refresh token names the user by its immutable username, so REFRESH_TOKEN_AUTH's
+        // SECRET_HASH is signed over the UUID, never over the email the user signed in with.
+        String refreshToken = initiateUserPasswordAuth(NEW_EMAIL).then()
+                .statusCode(200)
+                .extract().path("AuthenticationResult.RefreshToken");
+
+        initiateRefreshTokenAuth(refreshToken, secretHash(NEW_EMAIL)).then()
+                .statusCode(400)
+                .body("__type", containsString("NotAuthorizedException"));
+        initiateRefreshTokenAuth(refreshToken, secretHash(uuidUsername)).then()
+                .statusCode(200)
+                .body("AuthenticationResult.AccessToken", org.hamcrest.Matchers.notNullValue());
+    }
+
     // ──────────────────────────── helpers ────────────────────────────
+
+    private static Response initiateRefreshTokenAuth(String refreshToken, String secretHash) {
+        return cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": { "REFRESH_TOKEN": "%s", "SECRET_HASH": "%s" }
+                }
+                """.formatted(clientId, refreshToken, secretHash));
+    }
 
     private static Response initiateUserPasswordAuth(String username) {
         return cognitoAction("InitiateAuth", """

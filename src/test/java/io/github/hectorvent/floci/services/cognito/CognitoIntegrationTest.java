@@ -1972,6 +1972,61 @@ class CognitoIntegrationTest {
         assertNotNull(refreshed.path("AuthenticationResult").path("IdToken").asText(null));
     }
 
+    @Test
+    @Order(72)
+    void refreshTokenAuthRequiresTheSecretHashOfAConfidentialClient() throws Exception {
+        ConfidentialSession session = confidentialSession("confidential-refresh-auth-client");
+        String validHash = secretHash(session.secret(), USERNAME, session.clientId());
+
+        refreshTokenAuth(session.clientId(), session.refreshToken(), null).then()
+                .statusCode(400)
+                .body("__type", containsString("InvalidParameterException"));
+        refreshTokenAuth(session.clientId(), session.refreshToken(),
+                secretHash(session.secret(), "someone-else", session.clientId())).then()
+                .statusCode(400)
+                .body("__type", containsString("NotAuthorizedException"));
+        refreshTokenAuth(session.clientId(), session.refreshToken(), validHash).then()
+                .statusCode(200)
+                .body("AuthenticationResult.AccessToken", notNullValue());
+    }
+
+    @Test
+    @Order(73)
+    void getTokensFromRefreshTokenRequiresTheSecretOfAConfidentialClient() throws Exception {
+        ConfidentialSession session = confidentialSession("confidential-get-tokens-client");
+
+        getTokensFromRefreshToken(session.clientId(), session.refreshToken(), null).then()
+                .statusCode(400)
+                .body("__type", containsString("NotAuthorizedException"));
+        getTokensFromRefreshToken(session.clientId(), session.refreshToken(), "wrong-" + session.secret()).then()
+                .statusCode(400)
+                .body("__type", containsString("NotAuthorizedException"));
+        getTokensFromRefreshToken(session.clientId(), session.refreshToken(), session.secret()).then()
+                .statusCode(200)
+                .body("AuthenticationResult.AccessToken", notNullValue());
+    }
+
+    private record ConfidentialSession(String clientId, String secret, String refreshToken) {
+    }
+
+    /** A new client with a secret in the shared pool, and a refresh token {@link #USERNAME} got from it. */
+    private static ConfidentialSession confidentialSession(String clientName) throws Exception {
+        JsonNode clientResp = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "%s",
+                  "GenerateSecret": true,
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+                }
+                """.formatted(poolId, clientName));
+        String secretClientId = clientResp.path("UserPoolClient").path("ClientId").asText();
+        String secret = clientResp.path("UserPoolClient").path("ClientSecret").asText();
+        String refreshToken = passwordAuth(secretClientId, secretHash(secret, USERNAME, secretClientId)).then()
+                .statusCode(200)
+                .extract().path("AuthenticationResult.RefreshToken");
+        return new ConfidentialSession(secretClientId, secret, refreshToken);
+    }
+
     // ── Client Secrets ────────────────────────────────────────────────
 
     private static String clientSecretId1;
@@ -2374,6 +2429,26 @@ class CognitoIntegrationTest {
                   "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s"%s }
                 }
                 """.formatted(authClientId, USERNAME, PASSWORD, hashParameter));
+    }
+
+    /** REFRESH_TOKEN_AUTH, sending {@code secretHash} only when it is not null. */
+    private static Response refreshTokenAuth(String authClientId, String refreshToken, String secretHash) {
+        String hashParameter = secretHash == null ? "" : ", \"SECRET_HASH\": \"%s\"".formatted(secretHash);
+        return cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": { "REFRESH_TOKEN": "%s"%s }
+                }
+                """.formatted(authClientId, refreshToken, hashParameter));
+    }
+
+    /** GetTokensFromRefreshToken, sending {@code clientSecret} only when it is not null. */
+    private static Response getTokensFromRefreshToken(String authClientId, String refreshToken, String clientSecret) {
+        String secretMember = clientSecret == null ? "" : ", \"ClientSecret\": \"%s\"".formatted(clientSecret);
+        return cognitoAction("GetTokensFromRefreshToken", """
+                { "ClientId": "%s", "RefreshToken": "%s"%s }
+                """.formatted(authClientId, refreshToken, secretMember));
     }
 
     private static String secretHash(String clientSecret, String username, String hashClientId) throws Exception {

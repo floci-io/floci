@@ -909,6 +909,7 @@ public class CognitoJsonHandler {
     private Response handleGetTokensFromRefreshToken(JsonNode request) {
         Map<String, Object> result = service.getTokensFromRefreshToken(
                 request.path("ClientId").asText(),
+                request.path("ClientSecret").asText(null),
                 request.path("RefreshToken").asText()
         );
         return Response.ok(objectMapper.valueToTree(result)).build();

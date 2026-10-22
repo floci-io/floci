@@ -350,7 +350,7 @@ which a pre token generation trigger leaves when it suppresses every scope.
 | AdminInitiateAuth | Starts an admin authentication flow for a user pool user. |
 | RespondToAuthChallenge | Responds to supported Cognito auth challenges, including TOTP setup and software-token MFA. |
 | AdminRespondToAuthChallenge | Responds to a challenge from `AdminInitiateAuth`, with the same challenges `RespondToAuthChallenge` supports. |
-| GetTokensFromRefreshToken | Issues new access and ID tokens from a refresh token. A client's `RefreshTokenRotation` setting is stored but not applied, so no new refresh token is issued. |
+| GetTokensFromRefreshToken | Issues new access and ID tokens from a refresh token. A client with a secret must send one of its active secrets as `ClientSecret`, or gets `NotAuthorizedException`. A client's `RefreshTokenRotation` setting is stored but not applied, so no new refresh token is issued. |
 | RevokeToken | Revokes a refresh token. The client must have token revocation enabled and, when it has a secret, present it. Only refresh tokens can be revoked. |
 | AssociateSoftwareToken | Creates a TOTP secret for a user identified by an MFA setup session or access token. |
 | VerifySoftwareToken | Verifies the TOTP code and registers the user's authenticator. |
@@ -488,6 +488,10 @@ check is `NotAuthorizedException`.
 `REFRESH_TOKEN_AUTH` and `REFRESH_TOKEN`. `AdminInitiateAuth` accepts `ADMIN_USER_PASSWORD_AUTH`,
 `ADMIN_NO_SRP_AUTH`, `USER_SRP_AUTH`, `USER_PASSWORD_AUTH`, `CUSTOM_AUTH`, `USER_AUTH`,
 `REFRESH_TOKEN_AUTH` and `REFRESH_TOKEN`.
+
+For an app client with a secret every flow needs `SECRET_HASH`, the refresh flows included: a
+missing one fails with `InvalidParameterException` and a wrong one with `NotAuthorizedException`.
+`REFRESH_TOKEN_AUTH` computes it over the username the refresh token carries.
 
 `USER_AUTH` is the choice-based flow: with no `PREFERRED_CHALLENGE` it returns
 `ChallengeName=SELECT_CHALLENGE` and an `AvailableChallenges` list drawn from what the user has
@@ -859,6 +863,8 @@ Floci follows real Cognito semantics for pools created with `UsernameAttributes`
   email; the email lives in the `email` attribute and in `event.request.userAttributes.email`.
 - Sign-in resolves by the **current** email alias **or** the UUID. `SECRET_HASH` is validated against
   the exact `USERNAME` value sent: `Base64(HMAC-SHA256(USERNAME + clientId, clientSecret))`.
+  `REFRESH_TOKEN_AUTH` sends no `USERNAME`, so its `SECRET_HASH` is computed over the username the
+  refresh token carries, the **UUID**, as on AWS.
 - In `CUSTOM_AUTH` / SRP flows, `ChallengeParameters.USERNAME` echoes the **UUID** (as real AWS does);
   the `RespondToAuthChallenge` `SECRET_HASH` is validated against the `USERNAME` sent that round. That
   `USERNAME` must still resolve to the session's user — the UUID or any of its current aliases — and a
