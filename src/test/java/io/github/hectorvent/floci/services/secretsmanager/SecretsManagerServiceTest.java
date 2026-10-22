@@ -746,6 +746,36 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void batchGetSecretValueReportsAValuelessCurrentVersionInErrors() {
+        // A secret created without a value has nothing GetSecretValue can return, and the batch
+        // reports it the same way instead of as a value with neither SecretString nor SecretBinary.
+        service.createSecret("valued", "value1", null, null, null, null, REGION);
+        service.createSecret("valueless", null, null, null, null, null, REGION);
+
+        SecretsManagerService.BatchGetSecretValueResult result = service.batchGetSecretValue(
+                List.of("valued", "valueless"), REGION);
+
+        assertEquals(List.of("valued"), result.values().stream().map(SecretsManagerService.BatchSecretValue::name).toList());
+        List<SecretsManagerService.BatchGetSecretValueError> errors = result.errors();
+        assertEquals(1, errors.size());
+        assertEquals("valueless", errors.getFirst().secretId());
+        assertEquals("ResourceNotFoundException", errors.getFirst().errorCode());
+        assertEquals("Secrets Manager can't find the specified secret value for staging label: AWSCURRENT",
+                errors.getFirst().message());
+    }
+
+    @Test
+    void batchGetSecretValueByFiltersSkipsAValuelessSecret() {
+        service.createSecret("batch-valued", "value1", null, null, null, null, REGION);
+        service.createSecret("batch-valueless", null, null, null, null, null, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValueByFilters(
+                List.of(new SecretsManagerService.Filter("name", List.of("batch-"))), REGION);
+
+        assertEquals(List.of("batch-valued"), values.stream().map(SecretsManagerService.BatchSecretValue::name).toList());
+    }
+
+    @Test
     void batchGetSecretValueReportsMissingInErrors() {
         service.createSecret("secret1", "value1", null, null, null, null, REGION);
 

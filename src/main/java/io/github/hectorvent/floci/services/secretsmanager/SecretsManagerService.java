@@ -268,7 +268,7 @@ public class SecretsManagerService implements ResourceProvider {
 
         // A rotation's AWSPENDING placeholder is a version without a value yet. AWS reports it as
         // missing, and the rotation function templates rely on that to decide to generate one.
-        if (version.getSecretString() == null && version.getSecretBinary() == null) {
+        if (!hasValue(version)) {
             String selector;
             if (versionStage != null && !versionStage.isEmpty()) {
                 selector = "staging label: " + versionStage;
@@ -633,7 +633,7 @@ public class SecretsManagerService implements ResourceProvider {
         for (Secret secret : allSecrets) {
             if (matchesFilters(secret, filters, region)) {
                 SecretVersion version = findVersionByStage(secret, AWSCURRENT);
-                if (version != null) {
+                if (version != null && hasValue(version)) {
                     result.add(new BatchSecretValue(
                             secret.getArn(),
                             secret.getName(),
@@ -1586,7 +1586,7 @@ public class SecretsManagerService implements ResourceProvider {
                 }
 
                 SecretVersion version = findVersionByStage(secret, AWSCURRENT);
-                if (version == null) {
+                if (version == null || !hasValue(version)) {
                     errors.add(new BatchGetSecretValueError(secretId, "ResourceNotFoundException",
                             "Secrets Manager can't find the specified secret value for staging label: " + AWSCURRENT));
                     continue;
@@ -1855,6 +1855,11 @@ public class SecretsManagerService implements ResourceProvider {
         return store.get(storageKey)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Secrets Manager can't find the specified secret.", 400));
+    }
+
+    /** False for a rotation's AWSPENDING placeholder and for a secret created without a value. */
+    private static boolean hasValue(SecretVersion version) {
+        return version.getSecretString() != null || version.getSecretBinary() != null;
     }
 
     private SecretVersion findVersionByStage(Secret secret, String stage) {

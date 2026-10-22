@@ -156,8 +156,10 @@ aws secretsmanager validate-resource-policy \
   before it calls the rotation function holds no value until the function's `createSecret` step
   stores one. Until then `GetSecretValue` for it fails with `ResourceNotFoundException`, as on AWS,
   which is how the AWS rotation function templates decide to generate the new value. A secret
-  created without `SecretString` or `SecretBinary` reads the same way; floci still lists its empty
-  version in `ListSecretVersionIds`, where AWS lists none.
+  created without `SecretString` or `SecretBinary` reads the same way: `BatchGetSecretValue` lists it
+  under `Errors` with `ResourceNotFoundException` when it is named in `SecretIdList`, and leaves it
+  out of a `Filters` result. floci still lists its empty version in `ListSecretVersionIds`, where
+  AWS lists none.
 - **Replication is synchronous.** Real AWS reports `InProgress` first; floci copies the secret
   immediately, so a replica is `InSync` by the time the call returns. Replicas are read-only and
   track later writes to the primary.
