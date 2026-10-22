@@ -30,6 +30,9 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 
@@ -512,6 +515,58 @@ class EventBridgeInvokerTest {
         String event = "{\"detail\":{}}";
         InputTransformer t = new InputTransformer(Map.of(), "{\"x\":<unknown>}");
         assertEquals("{\"x\":<unknown>}", invoker.applyInputTransformer(t, event));
+    }
+
+    @Test
+    void applyInputTransformer_arrayIndexPath() {
+        InputTransformer t = new InputTransformer(Map.of("r", "$.resources[0]"), "{\"r\":<r>}");
+        assertEquals("{\"r\":\"arn:x\"}", invoker.applyInputTransformer(t, "{\"resources\":[\"arn:x\"]}"));
+    }
+
+    @Test
+    void applyInputTransformer_arrayIndexInsideAPath() {
+        String event = "{\"detail\":{\"resources\":[{\"id\":\"i-1\"},{\"id\":\"i-2\"}]}}";
+        InputTransformer t = new InputTransformer(Map.of("id", "$.detail.resources[1].id"), "\"instance <id>\"");
+        assertEquals("\"instance i-2\"", invoker.applyInputTransformer(t, event));
+    }
+
+    @Test
+    void applyInputTransformer_dashedSlashedAndWildcardPaths() {
+        String event = "{\"detail-type\":\"Object Created\",\"detail\":{\"instance-id\":\"i-1\",\"a/b\":\"x\","
+                + "\"tags\":[{\"k\":\"env\"},{\"k\":\"team\"}]}}";
+        InputTransformer t = new InputTransformer(
+                Map.of("t", "$.detail-type", "i", "$.detail.instance-id", "s", "$.detail.a/b",
+                        "k", "$.detail.tags[*].k"),
+                "{\"t\":<t>,\"i\":<i>,\"s\":<s>,\"k\":<k>}");
+        assertEquals("{\"t\":\"Object Created\",\"i\":\"i-1\",\"s\":\"x\",\"k\":[\"env\",\"team\"]}",
+                invoker.applyInputTransformer(t, event));
+    }
+
+    @Test
+    void applyInputPath_arrayIndex() {
+        assertEquals("arn:x", invoker.applyInputPath("$.resources[0]", "{\"resources\":[\"arn:x\"]}"));
+    }
+
+    @Test
+    void dispatch_inputTransformerResolvesPredefinedVariables() {
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:q", null, null);
+        target.setInputTransformer(new InputTransformer(Map.of(),
+                "{\"arn\":<aws.events.rule-arn>,\"n\":<aws.events.rule-name>,"
+                        + "\"t\":<aws.events.event.ingestion-time>,\"e\":<aws.events.event>,"
+                        + "\"j\":<aws.events.event.json>,\"s\":\"<aws.events.rule-name> triggered\"}"));
+        String event = "{\"id\":\"e-1\",\"source\":\"my.app\",\"detail\":{\"k\":1}}";
+        TargetDispatcher dispatcher = new TargetDispatcher(invoker, sqsService, "http://localhost:4566",
+                Clock.fixed(Instant.parse("2026-10-22T10:15:30Z"), ZoneOffset.UTC), null);
+
+        dispatcher.dispatch("arn:aws:events:us-east-1:000000000000:rule/orders-bus/my-rule", target, event,
+                "us-east-1", () -> List.of(target));
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqsService).sendMessage(anyString(), body.capture(), anyInt(), isNull(), isNull(), eq("us-east-1"));
+        assertEquals("{\"arn\":\"arn:aws:events:us-east-1:000000000000:rule/orders-bus/my-rule\",\"n\":\"my-rule\","
+                + "\"t\":\"2026-10-22T10:15:30Z\",\"e\":{\"id\":\"e-1\",\"source\":\"my.app\"},"
+                + "\"j\":{\"id\":\"e-1\",\"source\":\"my.app\",\"detail\":{\"k\":1}},"
+                + "\"s\":\"my-rule triggered\"}", body.getValue());
     }
 
     @SuppressWarnings("unchecked")

@@ -4,7 +4,15 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.MissingNode;
+import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
+import com.jayway.jsonpath.Configuration;
+import com.jayway.jsonpath.InvalidPathException;
+import com.jayway.jsonpath.JsonPath;
+import com.jayway.jsonpath.PathNotFoundException;
+import com.jayway.jsonpath.spi.json.JacksonJsonNodeJsonProvider;
+import com.jayway.jsonpath.spi.mapper.JacksonMappingProvider;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -45,6 +53,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -77,6 +86,7 @@ public class EventBridgeInvoker {
     private final StepFunctionsService stepFunctionsService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final Configuration jsonPathConfiguration;
     private final String baseUrl;
     private final HttpClient httpClient;
     private final Map<String, RateWindow> rateWindows = new ConcurrentHashMap<>();
@@ -123,6 +133,10 @@ public class EventBridgeInvoker {
         this.stepFunctionsService = stepFunctionsService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.jsonPathConfiguration = Configuration.builder()
+                .jsonProvider(new JacksonJsonNodeJsonProvider(objectMapper))
+                .mappingProvider(new JacksonMappingProvider(objectMapper))
+                .build();
         this.baseUrl = config.baseUrl();
         this.httpClient = httpClient;
     }
@@ -138,6 +152,14 @@ public class EventBridgeInvoker {
     }
 
     public void invokeTarget(Target target, String eventJson, String region) {
+        invokeTarget(target, eventJson, region, null, null);
+    }
+
+    /**
+     * Delivers an event that {@code ruleArn} matched. The rule and {@code ingestionTime} back the
+     * input transformer's predefined {@code aws.events.*} variables; either may be null.
+     */
+    public void invokeTarget(Target target, String eventJson, String region, String ruleArn, Instant ingestionTime) {
         String arn = target.getArn();
         String payload;
         if (target.getInput() != null) {
@@ -145,7 +167,7 @@ public class EventBridgeInvoker {
         } else if (target.getInputPath() != null) {
             payload = applyInputPath(target.getInputPath(), eventJson);
         } else if (target.getInputTransformer() != null) {
-            payload = applyInputTransformer(target.getInputTransformer(), eventJson);
+            payload = applyInputTransformer(target.getInputTransformer(), eventJson, ruleArn, ingestionTime);
         } else {
             payload = eventJson;
         }
@@ -371,14 +393,20 @@ public class EventBridgeInvoker {
     }
 
     String applyInputTransformer(InputTransformer transformer, String eventJson) {
+        return applyInputTransformer(transformer, eventJson, null, null);
+    }
+
+    String applyInputTransformer(InputTransformer transformer, String eventJson, String ruleArn, Instant ingestionTime) {
         String template = transformer.getInputTemplate();
         if (template == null) {
             return eventJson;
         }
+        JsonNode event = parseEvent(eventJson);
         Map<String, JsonNode> resolved = new LinkedHashMap<>();
         for (var e : transformer.getInputPathsMap().entrySet()) {
-            resolved.put(e.getKey(), extractNode(e.getValue(), eventJson));
+            resolved.put(e.getKey(), extractNode(e.getValue(), event));
         }
+        resolved.putAll(predefinedVariables(event, ruleArn, ingestionTime));
         StringBuilder out = new StringBuilder(template.length() + 32);
         boolean inString = false;
         for (int i = 0; i < template.length(); i++) {
@@ -437,20 +465,65 @@ public class EventBridgeInvoker {
         return (backslashes & 1) == 1;
     }
 
-    JsonNode extractNode(String jsonPath, String eventJson) {
-        if (jsonPath == null || eventJson == null) {
+    /**
+     * The reserved variables every input template can use, per
+     * https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-transform-target-input.html.
+     * They take precedence over an InputPathsMap entry of the same name.
+     */
+    private static Map<String, JsonNode> predefinedVariables(JsonNode event, String ruleArn, Instant ingestionTime) {
+        Map<String, JsonNode> variables = new LinkedHashMap<>();
+        if (ruleArn != null) {
+            variables.put("aws.events.rule-arn", TextNode.valueOf(ruleArn));
+            variables.put("aws.events.rule-name", TextNode.valueOf(ruleArn.substring(ruleArn.lastIndexOf('/') + 1)));
+        }
+        if (ingestionTime != null) {
+            variables.put("aws.events.event.ingestion-time",
+                    TextNode.valueOf(ingestionTime.truncatedTo(ChronoUnit.MILLIS).toString()));
+        }
+        if (event instanceof ObjectNode envelope) {
+            ObjectNode withoutDetail = envelope.deepCopy();
+            withoutDetail.remove("detail");
+            variables.put("aws.events.event", withoutDetail);
+            variables.put("aws.events.event.json", envelope);
+        }
+        return variables;
+    }
+
+    private JsonNode parseEvent(String eventJson) {
+        if (eventJson == null) {
             return MissingNode.getInstance();
         }
         try {
-            return objectMapper.readTree(eventJson).at(toPointer(jsonPath));
-        } catch (Exception e) {
-            LOG.warnv("Failed to extract JSONPath {0}: {1}", jsonPath, e.getMessage());
+            return objectMapper.readTree(eventJson);
+        } catch (JsonProcessingException e) {
+            LOG.warnv("Failed to parse event for input transformation: {0}", e.getMessage());
             return MissingNode.getInstance();
         }
     }
 
-    private static String toPointer(String jsonPath) {
-        return (jsonPath.startsWith("$") ? jsonPath.substring(1) : jsonPath).replace('.', '/');
+    JsonNode extractNode(String jsonPath, String eventJson) {
+        if (jsonPath == null || eventJson == null) {
+            return MissingNode.getInstance();
+        }
+        return extractNode(jsonPath, parseEvent(eventJson));
+    }
+
+    private JsonNode extractNode(String jsonPath, JsonNode event) {
+        if (jsonPath == null || event.isMissingNode()) {
+            return MissingNode.getInstance();
+        }
+        try {
+            Object value = JsonPath.using(jsonPathConfiguration).parse(event).read(jsonPath);
+            if (value == null) {
+                return NullNode.getInstance();
+            }
+            return value instanceof JsonNode node ? node : objectMapper.valueToTree(value);
+        } catch (PathNotFoundException e) {
+            return MissingNode.getInstance();
+        } catch (InvalidPathException | IllegalArgumentException e) {
+            LOG.warnv("Failed to extract JSONPath {0}: {1}", jsonPath, e.getMessage());
+            return MissingNode.getInstance();
+        }
     }
 
     String extractJsonPath(String jsonPath, String eventJson) {

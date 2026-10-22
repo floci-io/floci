@@ -103,6 +103,10 @@ A pattern is matched against the whole event envelope, so any top-level field ca
 - When the event value is an array, the field matches if any element matches. A nested pattern over an array of objects matches when a single element matches all of it. An empty array counts as absent for `exists`.
 - `PutRule`, `CreateArchive`, `UpdateArchive` and `TestEventPattern` reject a pattern with `InvalidEventPatternException` when it is not valid JSON, its root is not an object, a field is neither an object nor an array, or a match expression uses an unknown operator or a wrongly shaped operand.
 
+## Input Transformation
+
+A target's `InputPath` and the paths in an `InputTransformer`'s `InputPathsMap` are JSONPath expressions, including array indices such as `$.resources[0]` and wildcards such as `$.detail.items[*].sku`. An `InputTemplate` can also use the predefined variables `<aws.events.rule-arn>`, `<aws.events.rule-name>`, `<aws.events.event.ingestion-time>`, `<aws.events.event>` (the event without `detail`) and `<aws.events.event.json>` (the whole event). A path that matches nothing is substituted as an empty value.
+
 ## Default Event Bus
 
 EventBridge includes a default event bus (`default`) that accepts events from AWS services. Custom buses are for your own application events.
