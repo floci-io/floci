@@ -6470,12 +6470,12 @@ public class S3Service implements Resettable, ResourceProvider {
         if (config.isEventBridgeEnabled() && eventBridgeService != null) {
             try {
                 String detailType = eventName.startsWith("ObjectCreated") ? "Object Created"
-                        : eventName.startsWith("ObjectAnnotation") ? "Object Annotation"
+                        : "ObjectAnnotation:Put".equals(eventName) ? "Object Annotation Created"
+                        : "ObjectAnnotation:Delete".equals(eventName) ? "Object Annotation Removed"
                         : "Object Deleted";
-                Map<String, Object> entry = new java.util.HashMap<>();
-                entry.put("Source", "aws.s3");
-                entry.put("DetailType", detailType);
-                entry.put("Detail", buildS3EventBridgeDetail(bucketName, key, eventName, obj, region));
+                String bucketArn = AwsArnUtils.Arn.global(bucketPartition(bucketName), "s3", "", bucketName).toString();
+                Map<String, Object> entry = EventBridgeService.serviceEventEntry("aws.s3", detailType,
+                        buildS3EventBridgeDetail(bucketName, key, eventName, obj, sequencer), bucketArn);
                 eventBridgeService.putEvents(List.of(entry), region);
                 LOG.debugv("Fired S3 event {0} to EventBridge default bus", eventName);
             } catch (Exception e) {
@@ -6485,12 +6485,13 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private String buildS3EventBridgeDetail(String bucketName, String key, String eventName,
-                                            S3Object obj, String region) {
+                                            S3Object obj, String sequencer) {
         try {
             long size = obj != null ? obj.getSize() : 0;
             String eTag = obj != null && obj.getETag() != null ? obj.getETag().replace("\"", "") : "";
             ObjectNode detail = objectMapper.createObjectNode();
             detail.put("version", "0");
+            detail.put("event-version", "1.2");
             ObjectNode bucketNode = detail.putObject("bucket");
             bucketNode.put("name", bucketName);
             ObjectNode objectNode = detail.putObject("object");
@@ -6500,6 +6501,7 @@ public class S3Service implements Resettable, ResourceProvider {
             if (obj != null && obj.getVersionId() != null) {
                 objectNode.put("version-id", obj.getVersionId());
             }
+            objectNode.put("sequencer", sequencer);
             detail.put("request-id", UUID.randomUUID().toString());
             // A lifecycle deletion is S3's own: "source-ip-address - ... Only present for events
             // triggered by an S3 request."
@@ -6509,7 +6511,10 @@ public class S3Service implements Resettable, ResourceProvider {
                 detail.put("requester", "aws:emulator");
                 detail.put("source-ip-address", "127.0.0.1");
             }
-            detail.put("reason", eventBridgeReason(eventName));
+            String reason = eventBridgeReason(eventName);
+            if (reason != null) {
+                detail.put("reason", reason);
+            }
             String deletionType = eventBridgeDeletionType(eventName);
             if (deletionType != null) {
                 detail.put("deletion-type", deletionType);
@@ -6520,9 +6525,24 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    /** The EventBridge {@code reason}: {@code Lifecycle Expiration} for a deletion by a lifecycle rule. */
+    /**
+     * The EventBridge {@code reason}: the S3 API that made the change, or {@code Lifecycle Expiration}
+     * for a deletion by a lifecycle rule.
+     */
     private static String eventBridgeReason(String eventName) {
-        return isLifecycleEvent(eventName) ? "Lifecycle Expiration" : eventName;
+        if (isLifecycleEvent(eventName)) {
+            return "Lifecycle Expiration";
+        }
+        return switch (eventName) {
+            case "ObjectCreated:Put" -> "PutObject";
+            case "ObjectCreated:Post" -> "POST Object";
+            case "ObjectCreated:Copy" -> "CopyObject";
+            case "ObjectCreated:CompleteMultipartUpload" -> "CompleteMultipartUpload";
+            case "ObjectRemoved:Delete", "ObjectRemoved:DeleteMarkerCreated" -> "DeleteObject";
+            case "ObjectAnnotation:Put" -> "PutObjectAnnotation";
+            case "ObjectAnnotation:Delete" -> "DeleteObjectAnnotation";
+            default -> null;
+        };
     }
 
     private static boolean isLifecycleEvent(String eventName) {

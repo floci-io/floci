@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.s3;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -10,12 +13,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class S3EventBridgeIntegrationTest {
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String EB_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String EB_TARGET = "AWSEvents.";
     private static final String VERSIONED_BUCKET = "eb-s3-versioned-test-bucket";
@@ -368,6 +373,151 @@ class S3EventBridgeIntegrationTest {
                 containsString("\"requester\":\"s3.amazonaws.com\""),
                 not(containsString("source-ip-address"))));
         given().when().delete("/" + VERSIONED_BUCKET + "?lifecycle").then().statusCode(204);
+    }
+
+    @Test
+    @Order(12)
+    void eventBridgeEventNamesTheBucketArnInResources() throws Exception {
+        String bucket = "eb-s3-resources-bucket";
+        String rule = "s3-resources-rule";
+        String ruleQueueUrl = eventBridgeBucketWithRule(bucket, rule,
+                "{\"source\":[\"aws.s3\"],\"resources\":[\"arn:aws:s3:::" + bucket + "\"]}");
+        try {
+            given().contentType("text/plain").body("v1").when().put("/" + bucket + "/a.txt")
+                .then().statusCode(200);
+
+            JsonNode created = receiveEvent(ruleQueueUrl);
+            assertThat(created.path("resources").toString(), equalTo("[\"arn:aws:s3:::" + bucket + "\"]"));
+        } finally {
+            removeEventBridgeBucketWithRule(bucket, rule, ruleQueueUrl, "a.txt");
+        }
+    }
+
+    @Test
+    @Order(13)
+    void eventBridgeDetailNamesTheRequestingApiAndCarriesTheEventVersionAndSequencer() throws Exception {
+        String bucket = "eb-s3-detail-bucket";
+        String rule = "s3-detail-rule";
+        String ruleQueueUrl = eventBridgeBucketWithRule(bucket, rule,
+                "{\"source\":[\"aws.s3\"],\"detail\":{\"bucket\":{\"name\":[\"" + bucket + "\"]}}}");
+        try {
+            given().contentType("text/plain").body("v1").when().put("/" + bucket + "/a.txt")
+                .then().statusCode(200);
+            JsonNode created = receiveEvent(ruleQueueUrl);
+            assertThat(created.path("detail-type").asText(), equalTo("Object Created"));
+            assertThat(created.path("detail").path("reason").asText(), equalTo("PutObject"));
+            assertThat(created.path("detail").path("event-version").asText(), equalTo("1.2"));
+            assertThat(created.path("detail").path("object").path("sequencer").asText(),
+                    matchesPattern("[0-9A-F]+"));
+
+            given().header("x-amz-copy-source", "/" + bucket + "/a.txt").when().put("/" + bucket + "/b.txt")
+                .then().statusCode(200);
+            assertThat(receiveEvent(ruleQueueUrl).path("detail").path("reason").asText(), equalTo("CopyObject"));
+
+            given().body("{}").when().put("/" + bucket + "/a.txt?annotation&annotationName=note")
+                .then().statusCode(200);
+            JsonNode annotated = receiveEvent(ruleQueueUrl);
+            assertThat(annotated.path("detail-type").asText(), equalTo("Object Annotation Created"));
+            assertThat(annotated.path("detail").path("reason").asText(), equalTo("PutObjectAnnotation"));
+
+            given().when().delete("/" + bucket + "/a.txt?annotation&annotationName=note")
+                .then().statusCode(204);
+            JsonNode unannotated = receiveEvent(ruleQueueUrl);
+            assertThat(unannotated.path("detail-type").asText(), equalTo("Object Annotation Removed"));
+            assertThat(unannotated.path("detail").path("reason").asText(), equalTo("DeleteObjectAnnotation"));
+
+            given().when().delete("/" + bucket + "/a.txt").then().statusCode(204);
+            JsonNode deleted = receiveEvent(ruleQueueUrl);
+            assertThat(deleted.path("detail-type").asText(), equalTo("Object Deleted"));
+            assertThat(deleted.path("detail").path("reason").asText(), equalTo("DeleteObject"));
+        } finally {
+            removeEventBridgeBucketWithRule(bucket, rule, ruleQueueUrl, "a.txt", "b.txt");
+        }
+    }
+
+    /** A bucket sending its events to EventBridge, and a rule delivering the ones it matches to a new queue. */
+    private static String eventBridgeBucketWithRule(String bucket, String rule, String eventPattern) {
+        String ruleQueueUrl = createQueue(rule + "-queue");
+        given().when().put("/" + bucket).then().statusCode(200);
+        putRuleTargetingQueue(rule, eventPattern, ruleQueueUrl);
+        given()
+            .contentType("application/xml")
+            .body("<NotificationConfiguration><EventBridgeConfiguration/></NotificationConfiguration>")
+        .when()
+            .put("/" + bucket + "?notification")
+        .then()
+            .statusCode(200);
+        return ruleQueueUrl;
+    }
+
+    private static void removeEventBridgeBucketWithRule(String bucket, String rule, String ruleQueueUrl,
+                                                        String... keys) {
+        given().contentType("application/xml").body("<NotificationConfiguration/>")
+            .when().put("/" + bucket + "?notification");
+        for (String key : keys) {
+            given().when().delete("/" + bucket + "/" + key);
+        }
+        given().when().delete("/" + bucket);
+        given().contentType(EB_CONTENT_TYPE).header("X-Amz-Target", EB_TARGET + "RemoveTargets")
+            .body("{\"Rule\": \"" + rule + "\", \"Ids\": [\"1\"]}").when().post("/");
+        given().contentType(EB_CONTENT_TYPE).header("X-Amz-Target", EB_TARGET + "DeleteRule")
+            .body("{\"Name\": \"" + rule + "\"}").when().post("/");
+        given().contentType("application/x-www-form-urlencoded").formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", ruleQueueUrl).when().post("/");
+    }
+
+    private static String createQueue(String name) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", name)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+    }
+
+    private static void putRuleTargetingQueue(String rule, String eventPattern, String targetQueueUrl) {
+        String queueArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", targetQueueUrl)
+            .formParam("AttributeName.1", "QueueArn")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("**.find { it.Name == 'QueueArn' }.Value");
+        ObjectNode putRule = MAPPER.createObjectNode()
+            .put("Name", rule)
+            .put("EventPattern", eventPattern)
+            .put("State", "ENABLED");
+        given().contentType(EB_CONTENT_TYPE).header("X-Amz-Target", EB_TARGET + "PutRule")
+            .body(putRule.toString()).when().post("/").then().statusCode(200);
+        given().contentType(EB_CONTENT_TYPE).header("X-Amz-Target", EB_TARGET + "PutTargets")
+            .body("{\"Rule\": \"" + rule + "\", \"Targets\": [{\"Id\": \"1\", \"Arn\": \"" + queueArn + "\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("FailedEntryCount", equalTo(0));
+    }
+
+    private static JsonNode receiveEvent(String fromQueueUrl) throws Exception {
+        String body = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", fromQueueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("ReceiveMessageResponse.ReceiveMessageResult.Message.Body");
+        assertThat("no S3 event reached the rule's queue", body, not(emptyOrNullString()));
+        return MAPPER.readTree(body);
     }
 
     @Test
