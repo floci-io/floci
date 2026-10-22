@@ -68,6 +68,7 @@ class SnsCfnProvisionerTest {
             }
             return values;
         });
+        when(engine.resolveNode(any())).thenAnswer(i -> i.getArgument(0));
         ctx = new ProvisionContext(engine, REGION, "000000000000", "my-stack");
     }
 
@@ -344,6 +345,110 @@ class SnsCfnProvisionerTest {
         // createTopic returns the existing topic, so without this a changed scope would be lost.
         verify(sns).setTopicAttributes(TOPIC_ARN, "FifoThroughputScope", "MessageGroup", REGION);
         verify(sns).setTopicAttributes(TOPIC_ARN, "ContentBasedDeduplication", "true", REGION);
+    }
+
+    /** The topic's inline Subscription list is how the Serverless Framework wires an SNS fan-out. */
+    @Test
+    void inlineSubscriptionsAreCreatedWithTheTopic() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub-queue"));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("lambda"), eq("arn:function"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub-function"));
+
+        StackResource r = provision("AWS::SNS::Topic", """
+                {"TopicName": "events", "Subscription": [
+                  {"Protocol": "sqs", "Endpoint": "arn:queue"},
+                  {"Protocol": "lambda", "Endpoint": "arn:function"}]}
+                """);
+
+        verify(sns).subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue"), eq(REGION), anyMap());
+        verify(sns).subscribe(eq(TOPIC_ARN), eq("lambda"), eq("arn:function"), eq(REGION), anyMap());
+        assertEquals(TOPIC_ARN, r.getPhysicalId());
+    }
+
+    /**
+     * An update reconciles the inline list: a pair the template dropped is unsubscribed, a pair it
+     * kept is left in place, and a pair it added is subscribed.
+     */
+    @Test
+    void anUpdateUnsubscribesOnlyTheInlineSubscriptionsTheTemplateDropped() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue-a"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub-a"));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue-b"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub-b"));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue-c"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub-c"));
+        StackResource created = provision("AWS::SNS::Topic", """
+                {"TopicName": "events", "Subscription": [
+                  {"Protocol": "sqs", "Endpoint": "arn:queue-a"},
+                  {"Protocol": "sqs", "Endpoint": "arn:queue-b"}]}
+                """);
+
+        StackResource r = new StackResource();
+        r.setLogicalId("Topic");
+        r.setResourceType("AWS::SNS::Topic");
+        r.setPhysicalId(TOPIC_ARN);
+        r.setAttributes(new HashMap<>(created.getAttributes()));
+        provisioner.provision(r, props("""
+                {"TopicName": "events", "Subscription": [
+                  {"Protocol": "sqs", "Endpoint": "arn:queue-a"},
+                  {"Protocol": "sqs", "Endpoint": "arn:queue-c"}]}
+                """), new ProvisionContext(engine, REGION, "000000000000", "my-stack", TOPIC_ARN));
+
+        verify(sns).unsubscribe("arn:sub-b", REGION);
+        verify(sns, never()).unsubscribe("arn:sub-a", REGION);
+        verify(sns).subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue-c"), eq(REGION), anyMap());
+    }
+
+    /** Dropping the whole property removes every subscription the list created. */
+    @Test
+    void anUpdateWithoutTheSubscriptionPropertyRemovesTheInlineSubscriptions() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub-queue"));
+        StackResource created = provision("AWS::SNS::Topic", """
+                {"TopicName": "events", "Subscription": [{"Protocol": "sqs", "Endpoint": "arn:queue"}]}
+                """);
+
+        StackResource r = new StackResource();
+        r.setLogicalId("Topic");
+        r.setResourceType("AWS::SNS::Topic");
+        r.setPhysicalId(TOPIC_ARN);
+        r.setAttributes(new HashMap<>(created.getAttributes()));
+        provisioner.provision(r, props("""
+                {"TopicName": "events"}
+                """), new ProvisionContext(engine, REGION, "000000000000", "my-stack", TOPIC_ARN));
+
+        verify(sns).unsubscribe("arn:sub-queue", REGION);
+    }
+
+    /**
+     * A subscription the topic's own list never created, such as one an AWS::SNS::Subscription
+     * resource owns, is not the topic's to remove.
+     */
+    @Test
+    void anUpdateLeavesSubscriptionsTheInlineListNeverCreated() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
+
+        provisionUpdate("""
+                {"TopicName": "events"}
+                """);
+
+        verify(sns, never()).unsubscribe(anyString(), anyString());
+    }
+
+    @Test
+    void anInlineSubscriptionWithoutAnEndpointIsRejected() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
+
+        AwsException e = assertThrows(AwsException.class, () -> provision("AWS::SNS::Topic", """
+                {"TopicName": "events", "Subscription": [{"Protocol": "sqs"}]}
+                """));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        verify(sns, never()).subscribe(anyString(), anyString(), any(), anyString(), anyMap());
     }
 
     @Test

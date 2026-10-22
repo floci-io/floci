@@ -8,7 +8,9 @@ import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -23,6 +25,10 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     private static final String TOPIC_POLICY = "AWS::SNS::TopicPolicy";
     private static final int TOPIC_NAME_MAX_LENGTH = 256;
     private static final String FIFO_SUFFIX = ".fifo";
+    // Internal, like the other __Floci attributes: the subscriptions the topic's own Subscription
+    // list created, so an update unsubscribes the ones it dropped without touching a subscription
+    // an AWS::SNS::Subscription resource owns.
+    private static final String INLINE_SUBSCRIPTIONS_ATTR = "__FlociSnsInlineSubscriptions";
 
     private final SnsService snsService;
 
@@ -64,6 +70,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("ValidationError",
                     "Updating FifoTopic requires resource replacement, which is not supported.", 400);
         }
+        List<InlineSubscription> inlineSubscriptions = inlineSubscriptions(props, ctx);
         if (topicName == null || topicName.isBlank()) {
             // ctx.stablePhysicalName does not fit here: the physical id is the topic ARN, so the
             // prior name comes from the attribute recorded at create time. Reusing it keeps an
@@ -110,6 +117,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
             desired.forEach((name, value) ->
                     snsService.setTopicAttributes(topic.getTopicArn(), name, value, ctx.region()));
         }
+        reconcileInlineSubscriptions(r, topic.getTopicArn(), inlineSubscriptions, ctx);
         // Ref returns the topic ARN, which is why the physical id is the ARN and not the name.
         r.setPhysicalId(topic.getTopicArn());
         // TopicArn is the attribute aws-sns-topic.json declares read-only. Arn is kept alongside it
@@ -117,6 +125,60 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("TopicArn", topic.getTopicArn());
         r.getAttributes().put("Arn", topic.getTopicArn());
         r.getAttributes().put("TopicName", topicName);
+    }
+
+    private record InlineSubscription(String protocol, String endpoint) {
+    }
+
+    /** The topic's {@code Subscription} entries, each of which must name a protocol and an endpoint. */
+    private static List<InlineSubscription> inlineSubscriptions(JsonNode props, ProvisionContext ctx) {
+        List<InlineSubscription> subscriptions = new ArrayList<>();
+        if (props == null || !props.hasNonNull("Subscription")) {
+            return subscriptions;
+        }
+        JsonNode resolved = ctx.engine().resolveNode(props.get("Subscription"));
+        if (resolved == null || !resolved.isArray()) {
+            return subscriptions;
+        }
+        for (JsonNode entry : resolved) {
+            String protocol = entry.path("Protocol").asText("");
+            String endpoint = entry.path("Endpoint").asText("");
+            if (protocol.isBlank() || endpoint.isBlank()) {
+                throw new AwsException("ValidationError",
+                        "Each AWS::SNS::Topic Subscription entry requires a Protocol and an Endpoint.", 400);
+            }
+            subscriptions.add(new InlineSubscription(protocol, endpoint));
+        }
+        return subscriptions;
+    }
+
+    /**
+     * Subscribes every declared pair and unsubscribes the ones an earlier provision created that the
+     * template no longer declares. Subscribe is idempotent per protocol and endpoint, so a kept pair
+     * returns the subscription it already had. Deleting the topic removes its subscriptions, so the
+     * delete path needs nothing from here.
+     */
+    private void reconcileInlineSubscriptions(StackResource r, String topicArn,
+                                              List<InlineSubscription> declared, ProvisionContext ctx) {
+        Set<String> current = new LinkedHashSet<>();
+        for (InlineSubscription subscription : declared) {
+            current.add(snsService.subscribe(topicArn, subscription.protocol(), subscription.endpoint(),
+                    ctx.region(), Map.of()).getSubscriptionArn());
+        }
+        String recorded = r.getAttributes().get(INLINE_SUBSCRIPTIONS_ATTR);
+        if (recorded != null && !recorded.isEmpty()) {
+            for (String priorArn : recorded.split("\n")) {
+                if (!current.contains(priorArn)) {
+                    CfnDeletes.safeDelete("inline SNS subscription", priorArn,
+                            () -> snsService.unsubscribe(priorArn, ctx.region()), "NotFound");
+                }
+            }
+        }
+        if (current.isEmpty()) {
+            r.getAttributes().remove(INLINE_SUBSCRIPTIONS_ATTR);
+        } else {
+            r.getAttributes().put(INLINE_SUBSCRIPTIONS_ATTR, String.join("\n", current));
+        }
     }
 
     private void provisionSubscription(StackResource r, JsonNode props, ProvisionContext ctx) {

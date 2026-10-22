@@ -172,7 +172,7 @@ cross-resource references.
 | S3 | `Bucket`, `BucketPolicy` (document stored on the bucket; S3 does not evaluate it) |
 | S3 Vectors | `VectorBucket`, `Index` |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
-| SNS | `Topic`, `Subscription`, `TopicPolicy` |
+| SNS | `Topic` (inline `Subscription` supported; an update unsubscribes the entries it drops), `Subscription`, `TopicPolicy` |
 | SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment) |
 | DynamoDB | `Table` (`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one), `GlobalTable` |
 | Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig` (also what a SAM function's `EventInvokeConfig` expands into), `MicrovmImage`, `NetworkConnector`, `Url`, `WebFunction` (control plane only; the endpoint domain does not serve requests yet), `WebFunctionEndpoint` (`RegionalEndpoints` is not exposed to `Fn::GetAtt` yet), `WebFunctionRevision` (every property is createOnly, so a change mints a new revision). Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
