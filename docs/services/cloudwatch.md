@@ -257,17 +257,24 @@ applies the filter pattern syntax (`?ERROR ?WARN`, `{ $.level = "ERROR" }`, and 
 `FilterLogEvents` and `GetLogEvents` both page, and they signal the end of the results differently
 because the AWS APIs do.
 
-`FilterLogEvents` pages forward only. Its `nextToken` is an `f/<index>` offset into the matched set,
-so the offset counts matches, not stored events: a request narrowed by `--filter-pattern`,
+A token names the event right before the page boundary it marks (by timestamp, ingestion sequence
+and event id), not an offset, so treat tokens as opaque. Paging resumes at that boundary wherever
+the event now sorts, so events that the stored-event ceiling or a retention policy evicts between
+two calls do not shift a reader's place, and neither do events ingested in the meantime.
+
+`FilterLogEvents` pages forward only. Its `nextToken` names the last match returned, and the next
+page starts with the first match after it, so a request narrowed by `--filter-pattern`,
 `--start-time` or `--log-stream-names` pages through only what it matched. A missing token starts
 from the oldest match, and **a response with no `nextToken` means pagination is finished**, so the
-final page omits it. An unrecognized, non-numeric or negative token returns
-`InvalidParameterException` (400). `startFromHead` is not supported, so results always run oldest
-first.
+final page omits it. An unrecognized or malformed token returns `InvalidParameterException` (400).
+`startFromHead` is not supported, so results always run oldest first.
 
-`GetLogEvents` pages in both directions with `f/<index>` and `b/<index>`, and always returns
+`GetLogEvents` pages in both directions with `f/` and `b/` tokens, and always returns
 `nextForwardToken` and `nextBackwardToken`. It signals the end by returning the same token it was
 given rather than by omitting it, which is what its SDK paginators expect.
+
+Offset tokens (`f/<index>` and `b/<index>`) issued by earlier Floci versions are still accepted and
+keep their old meaning.
 
 ### Configuration
 

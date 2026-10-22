@@ -1519,6 +1519,11 @@ class CloudWatchLogsServiceTest {
         service.putLogEvents(group, stream, events, REGION);
     }
 
+    /** The token for the page boundary right after {@code event}: its timestamp, sequence and id. */
+    private static String tokenAfter(String prefix, LogEvent event) {
+        return prefix + event.getTimestamp() + "/" + event.getSequence() + "/" + event.getEventId();
+    }
+
     @Test
     void getLogEventsInitialTokensEncodePosition() {
         service.createLogGroup("/app/logs", null, null, REGION);
@@ -1529,7 +1534,7 @@ class CloudWatchLogsServiceTest {
                 service.getLogEvents("/app/logs", "stream-1", null, null, 100, true, null, REGION);
 
         assertEquals(5, result.events().size());
-        assertEquals("f/5", result.nextForwardToken());
+        assertEquals(tokenAfter("f/", result.events().get(4)), result.nextForwardToken());
         assertEquals("b/0", result.nextBackwardToken());
     }
 
@@ -1544,13 +1549,13 @@ class CloudWatchLogsServiceTest {
                 service.getLogEvents("/app/logs", "stream-1", null, null, 3, true, null, REGION);
         assertEquals(3, page1.events().size());
         assertEquals("msg-0", page1.events().get(0).getMessage());
-        assertEquals("f/3", page1.nextForwardToken());
+        assertEquals(tokenAfter("f/", page1.events().get(2)), page1.nextForwardToken());
 
         CloudWatchLogsService.LogEventsResult page2 =
                 service.getLogEvents("/app/logs", "stream-1", null, null, 3, true, page1.nextForwardToken(), REGION);
         assertEquals(2, page2.events().size());
         assertEquals("msg-3", page2.events().get(0).getMessage());
-        assertEquals("f/5", page2.nextForwardToken());
+        assertEquals(tokenAfter("f/", page2.events().get(1)), page2.nextForwardToken());
     }
 
     @Test
@@ -1591,14 +1596,14 @@ class CloudWatchLogsServiceTest {
         CloudWatchLogsService.LogEventsResult page =
                 unboundedService.getLogEvents("/app/logs", "stream-1", null, null, 0, true, null, REGION);
         assertEquals(3, page.events().size());
-        assertEquals("f/3", page.nextForwardToken());
+        assertEquals(tokenAfter("f/", page.events().get(2)), page.nextForwardToken());
 
         // GetLogEvents echoes its token at the end of the stream, so a paginator always
         // spends one more call on the token it was just handed.
         CloudWatchLogsService.LogEventsResult atEnd = unboundedService.getLogEvents(
                 "/app/logs", "stream-1", null, null, 0, true, page.nextForwardToken(), REGION);
         assertEquals(0, atEnd.events().size());
-        assertEquals("f/3", atEnd.nextForwardToken());
+        assertEquals(page.nextForwardToken(), atEnd.nextForwardToken());
     }
 
     @Test
@@ -1671,8 +1676,12 @@ class CloudWatchLogsServiceTest {
         assertEquals(3, result.events().size());
         assertEquals("msg-2", result.events().get(0).getMessage());
         assertEquals("msg-4", result.events().get(2).getMessage());
-        assertEquals("b/2", result.nextBackwardToken());
-        assertEquals("f/5", result.nextForwardToken());
+        // The backward boundary sits right after msg-1, the event just before this page.
+        LogEvent beforePage = service.getLogEvents("/app/logs", "stream-1", null, null, 2, true, null, REGION)
+                .events().get(1);
+        assertEquals("msg-1", beforePage.getMessage());
+        assertEquals(tokenAfter("b/", beforePage), result.nextBackwardToken());
+        assertEquals(tokenAfter("f/", result.events().get(2)), result.nextForwardToken());
     }
 
     @Test
@@ -1693,24 +1702,25 @@ class CloudWatchLogsServiceTest {
                 "/app/logs", "stream-1", startTime, endTime, 2, true, null, REGION);
         assertEquals(List.of("msg-97", "msg-98"),
                 page1.events().stream().map(LogEvent::getMessage).toList());
-        assertEquals("f/2", page1.nextForwardToken());
+        assertEquals(tokenAfter("f/", page1.events().get(1)), page1.nextForwardToken());
 
         CloudWatchLogsService.LogEventsResult page2 = service.getLogEvents(
                 "/app/logs", "stream-1", startTime, endTime, 2, true, page1.nextForwardToken(), REGION);
         assertEquals(List.of("msg-99", "msg-100"),
                 page2.events().stream().map(LogEvent::getMessage).toList());
-        assertEquals("f/4", page2.nextForwardToken());
+        assertEquals(tokenAfter("f/", page2.events().get(1)), page2.nextForwardToken());
 
         CloudWatchLogsService.LogEventsResult page3 = service.getLogEvents(
                 "/app/logs", "stream-1", startTime, endTime, 2, true, page2.nextForwardToken(), REGION);
         assertEquals(List.of("msg-101", "msg-102"),
                 page3.events().stream().map(LogEvent::getMessage).toList());
-        assertEquals("f/6", page3.nextForwardToken());
+        assertEquals(tokenAfter("f/", page3.events().get(1)), page3.nextForwardToken());
 
         CloudWatchLogsService.LogEventsResult atEnd = service.getLogEvents(
                 "/app/logs", "stream-1", startTime, endTime, 2, true, page3.nextForwardToken(), REGION);
         assertEquals(0, atEnd.events().size());
-        assertEquals("f/6", atEnd.nextForwardToken(), "token must echo back to signal end of the window");
+        assertEquals(page3.nextForwardToken(), atEnd.nextForwardToken(),
+                "token must echo back to signal end of the window");
 
         // startFromHead=false with no token must start from the tail of the *filtered*
         // window, not the tail of the full 200-event stream.
@@ -1718,8 +1728,8 @@ class CloudWatchLogsServiceTest {
                 "/app/logs", "stream-1", startTime, endTime, 2, false, null, REGION);
         assertEquals(List.of("msg-101", "msg-102"),
                 tail.events().stream().map(LogEvent::getMessage).toList());
-        assertEquals("b/4", tail.nextBackwardToken());
-        assertEquals("f/6", tail.nextForwardToken());
+        assertEquals(tokenAfter("b/", page2.events().get(1)), tail.nextBackwardToken());
+        assertEquals(page3.nextForwardToken(), tail.nextForwardToken());
     }
 
     @Test
@@ -1733,7 +1743,7 @@ class CloudWatchLogsServiceTest {
 
         assertEquals(List.of("msg-0", "msg-1", "msg-2"),
                 page1.events().stream().map(f -> f.event().getMessage()).toList());
-        assertEquals("f/3", page1.nextToken());
+        assertEquals(tokenAfter("f/", page1.events().get(2).event()), page1.nextToken());
 
         CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
                 "/app/logs", null, null, null, null, 3, page1.nextToken(), REGION);
@@ -1767,7 +1777,7 @@ class CloudWatchLogsServiceTest {
         CloudWatchLogsService.FilteredLogEventsResult page1 = service.filterLogEvents(
                 "/app/logs", null, null, null, null, 3, null, REGION);
         assertEquals(3, page1.events().size());
-        assertEquals("f/3", page1.nextToken());
+        assertEquals(tokenAfter("f/", page1.events().get(2).event()), page1.nextToken());
 
         CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
                 "/app/logs", null, null, null, null, 3, page1.nextToken(), REGION);
@@ -1836,9 +1846,9 @@ class CloudWatchLogsServiceTest {
         assertEquals(2, page1.events().size());
         assertEquals("ERROR: one", page1.events().get(0).event().getMessage());
         assertEquals("ERROR: two", page1.events().get(1).event().getMessage());
-        // Offset 2 indexes the three matches, not the five stored events. Indexing the raw scan
-        // would land on "ERROR: two" here.
-        assertEquals("f/2", page1.nextToken());
+        // The token names the last match returned, and the next page resumes after it among the
+        // three matches, not among the five stored events.
+        assertEquals(tokenAfter("f/", page1.events().get(1).event()), page1.nextToken());
 
         CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
                 "/app/logs", null, null, null, "ERROR", 2, page1.nextToken(), REGION);
@@ -1864,13 +1874,13 @@ class CloudWatchLogsServiceTest {
                 "/app/logs", null, startTime, endTime, null, 2, null, REGION);
         assertEquals(List.of("msg-97", "msg-98"),
                 page1.events().stream().map(f -> f.event().getMessage()).toList());
-        assertEquals("f/2", page1.nextToken());
+        assertEquals(tokenAfter("f/", page1.events().get(1).event()), page1.nextToken());
 
         CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
                 "/app/logs", null, startTime, endTime, null, 2, page1.nextToken(), REGION);
         assertEquals(List.of("msg-99", "msg-100"),
                 page2.events().stream().map(f -> f.event().getMessage()).toList());
-        assertEquals("f/4", page2.nextToken());
+        assertEquals(tokenAfter("f/", page2.events().get(1).event()), page2.nextToken());
 
         CloudWatchLogsService.FilteredLogEventsResult page3 = service.filterLogEvents(
                 "/app/logs", null, startTime, endTime, null, 2, page2.nextToken(), REGION);
@@ -1899,7 +1909,7 @@ class CloudWatchLogsServiceTest {
                 "/app/logs", null, null, null, "ERROR", 2, null, REGION);
         assertEquals(List.of("stream-1", "stream-2"),
                 page1.events().stream().map(CloudWatchLogsService.FilteredEvent::logStreamName).toList());
-        assertEquals("f/2", page1.nextToken());
+        assertEquals(tokenAfter("f/", page1.events().get(1).event()), page1.nextToken());
 
         CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
                 "/app/logs", null, null, null, "ERROR", 2, page1.nextToken(), REGION);
@@ -1931,9 +1941,9 @@ class CloudWatchLogsServiceTest {
                 "/app/logs", List.of("stream-1"), null, null, null, 2, null, REGION);
         assertEquals(List.of("kept-0", "kept-1"),
                 page1.events().stream().map(f -> f.event().getMessage()).toList());
-        // The excluded stream's events are dropped before the offset is computed, so the cursor
-        // never has to skip over them.
-        assertEquals("f/2", page1.nextToken());
+        // The excluded stream's events are dropped before the cursor is located, so it never has
+        // to skip over them.
+        assertEquals(tokenAfter("f/", page1.events().get(1).event()), page1.nextToken());
 
         CloudWatchLogsService.FilteredLogEventsResult page2 = service.filterLogEvents(
                 "/app/logs", List.of("stream-1"), null, null, null, 2, page1.nextToken(), REGION);
@@ -2022,6 +2032,109 @@ class CloudWatchLogsServiceTest {
             assertEquals("InvalidParameterException", exception.getErrorCode());
             assertEquals(400, exception.getHttpStatus());
             assertEquals("The specified nextToken is invalid.", exception.getMessage());
+        }
+    }
+
+    // ──────────────────────────── Pagination across eviction ────────────────────────────
+
+    private static List<Long> timestampsOf(List<LogEvent> events) {
+        return events.stream().map(LogEvent::getTimestamp).toList();
+    }
+
+    @Test
+    void getLogEventsForwardTokenResumesAfterItsLastEventWhenOlderEventsAreEvicted() {
+        CloudWatchLogsService capped = serviceWithStoredEventCeiling(5);
+        capped.createLogGroup("/app/logs", null, null, REGION);
+        capped.createLogStream("/app/logs", "stream-1", REGION);
+        capped.putLogEvents("/app/logs", "stream-1", eventsAt(1000, 2000, 3000, 4000, 5000), REGION);
+
+        CloudWatchLogsService.LogEventsResult page1 =
+                capped.getLogEvents("/app/logs", "stream-1", null, null, 2, true, null, REGION);
+        assertEquals(List.of(1000L, 2000L), timestampsOf(page1.events()));
+
+        // Reaching the ceiling evicts the two events this reader has already seen.
+        capped.putLogEvents("/app/logs", "stream-1", eventsAt(6000, 7000), REGION);
+
+        CloudWatchLogsService.LogEventsResult page2 = capped.getLogEvents(
+                "/app/logs", "stream-1", null, null, 2, true, page1.nextForwardToken(), REGION);
+        assertEquals(List.of(3000L, 4000L), timestampsOf(page2.events()),
+                "the next page starts right after the last event returned, not at a shifted offset");
+    }
+
+    @Test
+    void getLogEventsBackwardTokenResumesBeforeItsFirstEventWhenOlderEventsAreEvicted() {
+        CloudWatchLogsService capped = serviceWithStoredEventCeiling(5);
+        capped.createLogGroup("/app/logs", null, null, REGION);
+        capped.createLogStream("/app/logs", "stream-1", REGION);
+        capped.putLogEvents("/app/logs", "stream-1", eventsAt(1000, 2000, 3000, 4000, 5000), REGION);
+
+        CloudWatchLogsService.LogEventsResult newest =
+                capped.getLogEvents("/app/logs", "stream-1", null, null, 2, false, null, REGION);
+        assertEquals(List.of(4000L, 5000L), timestampsOf(newest.events()));
+
+        capped.putLogEvents("/app/logs", "stream-1", eventsAt(6000, 7000), REGION);
+
+        CloudWatchLogsService.LogEventsResult older = capped.getLogEvents(
+                "/app/logs", "stream-1", null, null, 2, false, newest.nextBackwardToken(), REGION);
+        assertEquals(List.of(3000L), timestampsOf(older.events()),
+                "the previous page ends right before the first event returned; 1000 and 2000 are gone");
+    }
+
+    @Test
+    void filterLogEventsTokenResumesAfterItsLastMatchWhenOlderEventsAreEvicted() {
+        CloudWatchLogsService capped = serviceWithStoredEventCeiling(5);
+        capped.createLogGroup("/app/logs", null, null, REGION);
+        capped.createLogStream("/app/logs", "stream-1", REGION);
+        capped.putLogEvents("/app/logs", "stream-1", eventsAt(1000, 2000, 3000, 4000, 5000), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult page1 =
+                capped.filterLogEvents("/app/logs", null, null, null, null, 2, null, REGION);
+        assertEquals(List.of(1000L, 2000L),
+                timestampsOf(page1.events().stream().map(CloudWatchLogsService.FilteredEvent::event).toList()));
+
+        capped.putLogEvents("/app/logs", "stream-1", eventsAt(6000, 7000), REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult page2 = capped.filterLogEvents(
+                "/app/logs", null, null, null, null, 2, page1.nextToken(), REGION);
+        assertEquals(List.of(3000L, 4000L),
+                timestampsOf(page2.events().stream().map(CloudWatchLogsService.FilteredEvent::event).toList()),
+                "the next page starts right after the last match returned, not at a shifted offset");
+    }
+
+    @Test
+    void offsetTokensFromEarlierReleasesAreStillAccepted() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 5);
+
+        CloudWatchLogsService.LogEventsResult forward =
+                service.getLogEvents("/app/logs", "stream-1", null, null, 2, true, "f/2", REGION);
+        assertEquals(List.of("msg-2", "msg-3"), forward.events().stream().map(LogEvent::getMessage).toList());
+        CloudWatchLogsService.LogEventsResult backward =
+                service.getLogEvents("/app/logs", "stream-1", null, null, 2, false, "b/2", REGION);
+        assertEquals(List.of("msg-0", "msg-1"), backward.events().stream().map(LogEvent::getMessage).toList());
+        CloudWatchLogsService.FilteredLogEventsResult filtered =
+                service.filterLogEvents("/app/logs", null, null, null, null, 2, "f/2", REGION);
+        assertEquals(List.of("msg-2", "msg-3"),
+                filtered.events().stream().map(f -> f.event().getMessage()).toList());
+    }
+
+    @Test
+    void malformedEventPositionTokensAreRejected() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+        putEvents("/app/logs", "stream-1", System.currentTimeMillis(), 3);
+
+        for (String token : List.of("f/1/2", "f/x/1/id", "b/1/x/id", "f//1/id")) {
+            AwsException exception = assertThrows(AwsException.class, () ->
+                    service.getLogEvents("/app/logs", "stream-1", null, null, 10, true, token, REGION));
+            assertEquals("InvalidParameterException", exception.getErrorCode());
+            assertEquals("The specified nextToken is invalid.", exception.getMessage());
+        }
+        for (String token : List.of("f/1/2", "f/x/1/id")) {
+            AwsException exception = assertThrows(AwsException.class, () ->
+                    service.filterLogEvents("/app/logs", null, null, null, null, 10, token, REGION));
+            assertEquals("InvalidParameterException", exception.getErrorCode());
         }
     }
 

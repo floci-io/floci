@@ -46,6 +46,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
 
 import static io.github.hectorvent.floci.services.cloudwatch.logs.MetricFilterRules.invalid;
@@ -61,12 +62,13 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
      * Orders events by timestamp, then by ingestion sequence so that events sharing the same
      * millisecond timestamp are returned in the order they were ingested (matching CloudWatch Logs).
      * Falls back to {@code eventId} so ordering stays deterministic even for legacy events that
-     * predate {@code sequence} and therefore share the default value of {@code 0}.
+     * predate {@code sequence} and therefore share the default value of {@code 0}. Pagination
+     * tokens are resolved with this same order, including events stored without an id.
      */
     private static final Comparator<LogEvent> EVENT_ORDER =
             Comparator.comparingLong(LogEvent::getTimestamp)
                     .thenComparingLong(LogEvent::getSequence)
-                    .thenComparing(LogEvent::getEventId);
+                    .thenComparing(LogEvent::getEventId, Comparator.nullsFirst(Comparator.naturalOrder()));
 
     private final StorageBackend<String, LogGroup> groupStore;
     private final StorageBackend<String, LogStream> streamStore;
@@ -901,15 +903,13 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         int pageEnd;
 
         if (nextToken != null && nextToken.startsWith("f/")) {
-            int offset = parseTokenIndex(nextToken, 2);
-            pageStart = Math.min(offset, total);
+            pageStart = tokenPosition(nextToken, filtered, Function.identity());
             // Take the window out of what is left rather than adding to the offset, so a
             // max-events cap configured near Integer.MAX_VALUE cannot overflow the end
             // index negative once pagination has moved past the first page.
             pageEnd = pageStart + Math.min(maxEvents, total - pageStart);
         } else if (nextToken != null && nextToken.startsWith("b/")) {
-            int end = parseTokenIndex(nextToken, 2);
-            pageEnd = Math.min(end, total);
+            pageEnd = tokenPosition(nextToken, filtered, Function.identity());
             pageStart = Math.max(pageEnd - maxEvents, 0);
         } else if (nextToken != null) {
             throw invalidNextToken();
@@ -922,7 +922,59 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         }
 
         List<LogEvent> page = filtered.subList(pageStart, pageEnd);
-        return new LogEventsResult(page, "f/" + pageEnd, "b/" + pageStart);
+        // An empty page hands back the token it was given: SDK paginators stop on that repeat.
+        boolean echo = page.isEmpty() && nextToken != null;
+        String forward = echo && nextToken.startsWith("f/")
+                ? nextToken : positionToken("f/", filtered, pageEnd, Function.identity());
+        String backward = echo && nextToken.startsWith("b/")
+                ? nextToken : positionToken("b/", filtered, pageStart, Function.identity());
+        return new LogEventsResult(page, forward, backward);
+    }
+
+    /**
+     * Where a pagination token resumes in {@code sorted}. A token names the event right before its
+     * position by that event's {@link #EVENT_ORDER} key, {@code <timestamp>/<sequence>/<eventId>},
+     * and resumes right after wherever that key now sorts, so events evicted or ingested between
+     * two calls do not move the reader. A bare number counts from the start: {@code 0} is the
+     * head, and any other number is an offset token from a release that issued offsets.
+     */
+    private <T> int tokenPosition(String token, List<T> sorted, Function<T, LogEvent> eventOf) {
+        String[] key = token.substring(2).split("/", 3);
+        if (key.length == 1) {
+            return Math.min(parseTokenIndex(token, 2), sorted.size());
+        }
+        if (key.length != 3) {
+            throw invalidNextToken();
+        }
+        LogEvent boundary = new LogEvent();
+        try {
+            boundary.setTimestamp(Long.parseLong(key[0]));
+            boundary.setSequence(Long.parseLong(key[1]));
+        } catch (NumberFormatException e) {
+            throw invalidNextToken();
+        }
+        boundary.setEventId(key[2].isEmpty() ? null : key[2]);
+        int low = 0;
+        int high = sorted.size();
+        while (low < high) {
+            int mid = (low + high) >>> 1;
+            if (EVENT_ORDER.compare(eventOf.apply(sorted.get(mid)), boundary) <= 0) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
+    }
+
+    /** The token for the position right after {@code sorted[position - 1]}, or {@code <prefix>0} at the head. */
+    private static <T> String positionToken(String prefix, List<T> sorted, int position, Function<T, LogEvent> eventOf) {
+        if (position == 0) {
+            return prefix + "0";
+        }
+        LogEvent event = eventOf.apply(sorted.get(position - 1));
+        return prefix + event.getTimestamp() + "/" + event.getSequence() + "/"
+                + (event.getEventId() == null ? "" : event.getEventId());
     }
 
     private int parseTokenIndex(String token, int prefixLen) {
@@ -987,13 +1039,13 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
                 .sorted(Comparator.comparing(FilteredEvent::event, EVENT_ORDER))
                 .toList();
 
-        // The cursor indexes matches rather than stored events, which is why the window is applied
-        // here instead of folded into the stream as a limit. Forward-only, so one prefix where
-        // GetLogEvents needs two.
+        // The cursor is located among the matches rather than the stored events, which is why the
+        // window is applied here instead of folded into the stream as a limit. Forward-only, so one
+        // prefix where GetLogEvents needs two.
         int total = matches.size();
         int pageStart;
         if (nextToken != null && nextToken.startsWith("f/")) {
-            pageStart = Math.min(parseTokenIndex(nextToken, 2), total);
+            pageStart = tokenPosition(nextToken, matches, FilteredEvent::event);
         } else if (nextToken != null) {
             throw invalidNextToken();
         } else {
@@ -1010,7 +1062,8 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         // FilterLogEvents signals exhaustion by omitting the token, and its paginators keep going
         // while one is present. The second clause refuses a cursor that cannot advance, which a
         // max-events cap of zero would otherwise produce.
-        String pageToken = pageEnd < total && pageEnd > pageStart ? "f/" + pageEnd : null;
+        String pageToken = pageEnd < total && pageEnd > pageStart
+                ? positionToken("f/", matches, pageEnd, FilteredEvent::event) : null;
         return new FilteredLogEventsResult(page, pageToken);
     }
 
