@@ -285,7 +285,8 @@ public class CodeArtifactNpmDataPlane {
                                 }
                                 String backendBaseUrl = readyResult.result();
                                 vertx.<RepublishCheck>executeBlocking(promise ->
-                                                promise.complete(checkRepublish(backendBaseUrl, npmRequest, path)),
+                                                promise.complete(checkRepublish(backendBaseUrl, npmRequest, path,
+                                                        scope)),
                                                 false)
                                         .onComplete(checkResult -> {
                                             if (context.response().closed()) {
@@ -294,7 +295,28 @@ public class CodeArtifactNpmDataPlane {
                                             }
                                             RepublishCheck check = checkResult.succeeded() ? checkResult.result()
                                                     : new RepublishCheck(false, 0L,
-                                                            packageIdentityFromPath(npmRequest.rest()), Map.of());
+                                                            packageIdentityFromPath(npmRequest.rest()), Map.of(),
+                                                            null);
+                                            // Raised by hectorvent's review: a real npm publish to a
+                                            // coordinate updatePackageVersionsStatus/
+                                            // disposePackageVersions left Archived or Disposed must be
+                                            // refused outright, the same way PublishPackageVersion
+                                            // already refuses it for the generic format, not accepted
+                                            // and then have forgetContainerBackedStatusOverride below
+                                            // silently un-block it afterward. Checked ahead of the
+                                            // idempotent-republish shortcut too: that shortcut only
+                                            // ever matches when Verdaccio's own stored content is
+                                            // still byte-identical, which archiving (unlike disposing)
+                                            // never changes, and the User Guide draws no
+                                            // byte-identical exception for either status.
+                                            if (check.blockedMessage() != null) {
+                                                context.response().putHeader("Content-Type", "application/json")
+                                                        .setStatusCode(409)
+                                                        .end("{\"error\":\"forbidden\",\"reason\":\""
+                                                                + check.blockedMessage() + "\"}");
+                                                finish.run();
+                                                return;
+                                            }
                                             if (check.confirmed()) {
                                                 // "ok" is a message string in a real Verdaccio response
                                                 // (e.g. "created new package"), not a boolean; matching
@@ -442,11 +464,18 @@ public class CodeArtifactNpmDataPlane {
      * into {@code ""}, the same empty-string answer pypi's own upload path already records when
      * twine sends no {@code description} field, so a published version without a readme is never
      * mistaken for one that was never published at all.
+     *
+     * <p>{@code blockedMessage} is non-null exactly when some version in the envelope is Archived
+     * or Disposed (see {@link CodeArtifactService#requireContainerBackedVersionNotArchivedOrDisposed}),
+     * found while this check already has every version in hand; the caller refuses the whole
+     * publish on it rather than reaching {@code confirmed} or forwarding anything, since the User
+     * Guide blocks both statuses unconditionally, byte-identical content included.
      */
     private record RepublishCheck(boolean confirmed, long totalAttachmentBytes, PackageIdentity identity,
-            Map<String, String> readmeByVersion) {}
+            Map<String, String> readmeByVersion, String blockedMessage) {}
 
-    private RepublishCheck checkRepublish(String backendBaseUrl, NpmRequest npmRequest, String spoolPath) {
+    private RepublishCheck checkRepublish(String backendBaseUrl, NpmRequest npmRequest, String spoolPath,
+            AuthorizationTokenScope scope) {
         PackageIdentity identity = packageIdentityFromPath(npmRequest.rest());
         NpmPublishEnvelopeScanner.Envelope envelope;
         try (InputStream in = new BufferedInputStream(Files.newInputStream(Path.of(spoolPath)))) {
@@ -454,13 +483,22 @@ public class CodeArtifactNpmDataPlane {
         } catch (IOException e) {
             LOG.debugv(e, "Publish for {0}/{1} is not a confirmable republish: {2}",
                     npmRequest.domain(), npmRequest.repository(), e.getMessage());
-            return new RepublishCheck(false, 0L, identity, Map.of());
+            return new RepublishCheck(false, 0L, identity, Map.of(), null);
         }
         long totalAttachmentBytes = envelope.attachments().values().stream()
                 .mapToLong(NpmPublishEnvelopeScanner.Attachment::size)
                 .sum();
         Map<String, String> readmeByVersion = new HashMap<>();
         envelope.versions().forEach((version, v) -> readmeByVersion.put(version, v.readme()));
+        for (String version : readmeByVersion.keySet()) {
+            try {
+                service.requireContainerBackedVersionNotArchivedOrDisposed(scope.region(), npmRequest.domain(),
+                        scope.owner(), npmRequest.repository(), "npm", identity.namespace(),
+                        identity.packageName(), version);
+            } catch (AwsException e) {
+                return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion, e.getMessage());
+            }
+        }
         Optional<JsonNode> storedDocument;
         try {
             storedDocument = verdaccioClient.fetchPackageDocument(backendBaseUrl, identity.namespace(),
@@ -468,25 +506,25 @@ public class CodeArtifactNpmDataPlane {
         } catch (IllegalStateException e) {
             LOG.warnv(e, "Could not check {0}/{1} for an existing match before publishing: {2}",
                     npmRequest.domain(), npmRequest.repository(), e.getMessage());
-            return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion);
+            return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion, null);
         }
         if (storedDocument.isEmpty() || !isConfirmedRepublish(envelope, storedDocument.get(), identity)) {
-            return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion);
+            return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion, null);
         }
         for (NpmPublishEnvelopeScanner.Version version : envelope.versions().values()) {
             try {
                 Optional<String> stored = verdaccioClient.storedTarballIntegrity(backendBaseUrl,
                         identity.namespace(), identity.packageName(), tarballFilename(version.tarball()));
                 if (stored.isEmpty() || !stored.get().equals(version.integrity())) {
-                    return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion);
+                    return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion, null);
                 }
             } catch (IllegalStateException e) {
                 LOG.warnv(e, "Could not verify the stored tarball of {0}/{1} before publishing: {2}",
                         npmRequest.domain(), npmRequest.repository(), e.getMessage());
-                return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion);
+                return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion, null);
             }
         }
-        return new RepublishCheck(true, totalAttachmentBytes, identity, readmeByVersion);
+        return new RepublishCheck(true, totalAttachmentBytes, identity, readmeByVersion, null);
     }
 
     private static boolean isConfirmedRepublish(NpmPublishEnvelopeScanner.Envelope envelope, JsonNode stored,
@@ -639,6 +677,15 @@ public class CodeArtifactNpmDataPlane {
                                     service.recordPublishedPackageVersionReadme(scope.region(), domain,
                                             scope.owner(), repository, "npm", identity.namespace(),
                                             identity.packageName(), version, readme, fenceSnapshot));
+                            // Found by Qodo review: readmeByVersion's own keys are every version in
+                            // this publish envelope, independent of whether any of them actually
+                            // carried a readme, so reusing it here clears a stale Archived/Disposed
+                            // override for exactly the versions this publish just wrote real content
+                            // for, the same way the Maven/pypi native publish paths now do.
+                            readmeByVersion.keySet().forEach(version ->
+                                    service.forgetContainerBackedStatusOverride(scope.region(), domain,
+                                            scope.owner(), repository, "npm", identity.namespace(),
+                                            identity.packageName(), version));
                         }
                         promise.complete();
                     }, false).onComplete(result -> {

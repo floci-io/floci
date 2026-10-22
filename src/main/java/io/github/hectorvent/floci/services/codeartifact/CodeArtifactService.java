@@ -53,6 +53,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @ApplicationScoped
 public class CodeArtifactService implements Resettable {
@@ -97,6 +99,17 @@ public class CodeArtifactService implements Resettable {
     /** The real {@code PackageVersionOriginType} wire enum. Floci never ingests from an external
      * connection, so every version {@link #listPackageVersions} ever reports is {@code INTERNAL}. */
     private static final Set<String> ORIGIN_TYPES = Set.of("INTERNAL", "EXTERNAL", "UNKNOWN");
+    /** {@code UpdatePackageVersionsStatusRequest.targetStatus}'s own documented valid values:
+     * {@code Unfinished} is deliberately excluded (see {@link #updatePackageVersionsStatus}'s own
+     * javadoc), and {@code Disposed}/{@code Deleted} each have their own separate action instead. */
+    private static final Set<String> UPDATE_TARGET_STATUSES = Set.of("Published", "Unlisted", "Archived");
+    /** {@code UpdatePackageVersionsStatusRequest.expectedStatus}'s own documented valid values. */
+    private static final Set<String> UPDATE_EXPECTED_STATUSES =
+            Set.of("Published", "Unlisted", "Archived", "Unfinished");
+    /** {@code DisposePackageVersionsRequest.expectedStatus}'s own documented valid values: wider
+     * than {@link #UPDATE_EXPECTED_STATUSES} by exactly {@code Disposed} itself. */
+    private static final Set<String> DISPOSE_EXPECTED_STATUSES =
+            Set.of("Published", "Unlisted", "Archived", "Unfinished", "Disposed");
 
     private static final Logger LOG = Logger.getLogger(CodeArtifactService.class);
 
@@ -117,11 +130,13 @@ public class CodeArtifactService implements Resettable {
     // documented 5 GB AWS quota rather than duplicating the constant.
     static final long MAX_ASSET_FILE_SIZE_BYTES = 5L * 1024 * 1024 * 1024;
     private static final int MAX_ASSETS_PER_PACKAGE_VERSION = 350;
-    // AWS's own wire model: CopyPackageVersionsRequest.versions has "Array Members: Maximum
-    // number of 100 items." Applied the same way to versionRevisions, the alternate way of
-    // naming the same set of versions to copy.
-    private static final int MAX_COPY_VERSIONS_PER_CALL = 100;
-    // CopyPackageVersionsRequest.versionRevisions' map value: "Maximum length of 50."
+    // AWS's own wire model: every batch package-version action's own PackageVersionList shape
+    // (CopyPackageVersionsRequest.versions, UpdatePackageVersionsStatusRequest.versions,
+    // DisposePackageVersionsRequest.versions) has "Array Members: Maximum number of 100 items."
+    // Applied the same way to versionRevisions, the alternate way of naming the same set of
+    // versions.
+    private static final int MAX_PACKAGE_VERSIONS_PER_BATCH_CALL = 100;
+    // Each batch action's own versionRevisions map value: "Maximum length of 50."
     private static final int MAX_REVISION_LENGTH = 50;
     private static final int MAX_DOMAINS_PER_ACCOUNT = 10;
     private static final int MAX_REPOSITORIES_PER_DOMAIN = 1000;
@@ -137,10 +152,10 @@ public class CodeArtifactService implements Resettable {
     public record PackageVersionAssetResult(PackageAsset asset, String packageVersionRevision) {}
     public record PackageVersionReadmeResult(String format, String namespace, String packageName, String version,
             String versionRevision, String readme) {}
-    public record PackageVersionCopyOutcome(String revision, String status) {}
-    public record PackageVersionCopyFailure(String errorCode, String errorMessage) {}
-    public record CopyPackageVersionsResult(Map<String, PackageVersionCopyOutcome> successfulVersions,
-                                              Map<String, PackageVersionCopyFailure> failedVersions) {}
+    public record SuccessfulPackageVersionInfo(String revision, String status) {}
+    public record PackageVersionError(String errorCode, String errorMessage) {}
+    public record CopyPackageVersionsResult(Map<String, SuccessfulPackageVersionInfo> successfulVersions,
+                                              Map<String, PackageVersionError> failedVersions) {}
     public record AssetSummary(String name, long size, Map<String, String> hashes) {}
     public record PackageVersionAssetsListResult(String format, String namespace, String packageName,
             String version, String versionRevision, List<AssetSummary> assets, String nextToken) {}
@@ -199,6 +214,41 @@ public class CodeArtifactService implements Resettable {
     // describes would leave it answering for a version that, after a restart, no longer exists
     // anywhere real.
     private final ConcurrentHashMap<String, String> packageVersionReadmes = new ConcurrentHashMap<>();
+    // Keyed the same way as packageVersionReadmes (packageVersionKey), and in memory only for the
+    // identical reason: a container-backed version's status/revision override describes content
+    // that lives in the sidecar container itself (or, once Disposed, used to), which does not
+    // survive a Floci restart either. generic needs no equivalent of this at all; its status and
+    // revision already live directly on its own packageVersions record. Absent here means
+    // "Published" (every container-backed version's implicit starting status; see
+    // describeContainerBackedPackageVersion's own javadoc for why nothing ever lands one in
+    // Unfinished the way a generic publish deliberately can) with its usual synthesized revision,
+    // the same default {@link #listPackageVersions} and {@link #describeContainerBackedPackageVersion}
+    // already assumed before this existed.
+    private final ConcurrentHashMap<String, PackageVersionStatusOverride>
+            containerBackedPackageVersionStatusOverrides = new ConcurrentHashMap<>();
+    // containerBackedPackageVersionStatusOverrides' own keys are each one version's full escaped
+    // packageVersionKey, which namespace/package/version segments containing ':' or '\' make
+    // lossy to split back apart into "does this key belong to package X" (see escapeKeySegment's
+    // own javadoc on why that escaping exists at all). This side index answers that question
+    // directly instead: which raw version strings have an override, kept under the package's own
+    // (version-free) key, so listPackageVersions can still report a version whose real sidecar
+    // content Disposed already deleted (so the sidecar itself no longer lists it at all) without
+    // ever parsing a stored key back into parts.
+    private final ConcurrentHashMap<String, Set<String>> containerBackedOverriddenVersionsByPackage =
+            new ConcurrentHashMap<>();
+
+    /**
+     * {@code publishedEpochSeconds} is carried forward from whichever value was already true for
+     * this version the first time it ever got an override (read from the sidecar's own {@link
+     * RepositorySidecarManager#listPackageVersions} before anything happened to change its
+     * status), not re-derived on every later transition: once {@code Disposed}, the sidecar no
+     * longer has the version at all to ask, and even for {@code Archived}/{@code Unlisted} (whose
+     * assets are not deleted), AWS's own definition of "package version revision" as covering a
+     * version's metadata, not just its bytes, means its original publish time should not appear to
+     * change just because a later status change happened to re-derive it from a sidecar that
+     * coincidentally still has the same files.
+     */
+    private record PackageVersionStatusOverride(String status, String revision, Long publishedEpochSeconds) {}
 
     @Inject
     public CodeArtifactService(StorageFactory storageFactory, RegionResolver regionResolver, EmulatorConfig config,
@@ -453,6 +503,20 @@ public class CodeArtifactService implements Resettable {
                 .filter(k -> k.startsWith(ownerScopedOriginPrefix))
                 .toList()
                 .forEach(packageVersionReadmes::remove);
+        // Same reasoning, same prefix, for the status overrides updatePackageVersionsStatus/
+        // disposePackageVersions write: a repository recreated under this same name must not
+        // inherit a previous Disposed/Archived/Unlisted override for a version with the same
+        // coordinates, and the per-package side index that names which versions have one must be
+        // cleaned up right alongside it so the two never drift apart (see
+        // writeContainerBackedStatusOverride's own javadoc).
+        containerBackedPackageVersionStatusOverrides.keySet().stream()
+                .filter(k -> k.startsWith(ownerScopedOriginPrefix))
+                .toList()
+                .forEach(containerBackedPackageVersionStatusOverrides::remove);
+        containerBackedOverriddenVersionsByPackage.keySet().stream()
+                .filter(k -> k.startsWith(ownerScopedOriginPrefix))
+                .toList()
+                .forEach(containerBackedOverriddenVersionsByPackage::remove);
         return r;
     }
 
@@ -725,7 +789,25 @@ public class CodeArtifactService implements Resettable {
         String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
 
         CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key).orElse(null);
-        if (pv != null && "Published".equals(pv.getStatus())) {
+        // The User Guide draws an explicit, asymmetric line here: Archived ("you cannot use a
+        // package manager or build tool to re-publish an Archived package version because it is
+        // still present in the repository") and Disposed ("the package version can no longer be
+        // used because the assets have been deleted") are both unconditionally blocked, with no
+        // byte-identical exception stated for either — unlike DeletePackageVersions, whose own doc
+        // explicitly says the freed coordinate can be "freely re-published." Without this check,
+        // the fallthrough below would treat either status exactly like a brand new version and
+        // let a publish silently resurrect it, undoing updatePackageVersionsStatus/
+        // disposePackageVersions.
+        if (pv != null && ("Archived".equals(pv.getStatus()) || "Disposed".equals(pv.getStatus()))) {
+            throw conflict("Package version '" + version + "' of package '" + packageName + "' is "
+                    + pv.getStatus() + " and cannot be republished.", version, "package-version");
+        }
+        // Unlisted only hides a version from listings; its assets stay downloadable and the User
+        // Guide never says republishing it is blocked the way it does for Archived/Disposed. Folds
+        // it into the same idempotent-replay rule as Published (reject new content, allow an exact
+        // byte-identical retry) rather than the Unfinished fallthrough below, which would otherwise
+        // let it be rebuilt as though no version existed there at all.
+        if (pv != null && ("Published".equals(pv.getStatus()) || "Unlisted".equals(pv.getStatus()))) {
             // AWS's idempotency rule ("Overwriting package assets" in CodeArtifact's packages
             // overview) is not scoped to Unfinished versions, and the terminal publish call (the
             // one that finishes a version, or a single-shot generic publish that's Published
@@ -735,11 +817,13 @@ public class CodeArtifactService implements Resettable {
             PackageAsset existingAsset = pv.getAssets().get(assetName);
             if (existingAsset == null) {
                 throw conflict("Package version '" + version + "' of package '" + packageName + "' is already "
-                        + "Published; no additional assets can be uploaded to it.", version, "package-version");
+                        + pv.getStatus() + "; no additional assets can be uploaded to it.", version,
+                        "package-version");
             }
-            // Throws on a genuine mismatch; a Published version can never transition to anything
-            // else via republish, so the match/no-stored-hash distinction contentMatchesExisting
-            // returns doesn't matter here the way it does for the Unfinished path below.
+            // Throws on a genuine mismatch; neither Published nor Unlisted can transition to
+            // anything else via republish, so the match/no-stored-hash distinction
+            // contentMatchesExisting returns doesn't matter here the way it does for the
+            // Unfinished path below.
             contentMatchesExisting(existingAsset, assetName, version, packageName, actualSha256);
             // Only rewrites when the actual disk bytes don't check out: an intact retry (the
             // overwhelmingly common case) must stay a true no-op that needs no write capacity at
@@ -896,7 +980,8 @@ public class CodeArtifactService implements Resettable {
                 pageAssets.add(new AssetSummary(assetName, content.length, computeHashes(content)));
             }
             page = new PaginatedResult<>(pageAssets, namePage.nextToken());
-            revision = synthesizeContainerBackedRevision(format, repoId, namespace, packageName, version);
+            revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
+                    packageName, version, repoId).revision();
         } else {
             String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
             CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key)
@@ -992,14 +1077,33 @@ public class CodeArtifactService implements Resettable {
             } finally {
                 manager.endUse(repoId);
             }
-            if (raw.isEmpty() && !hasOriginConfig) {
+            // Disposed deletes a version's real sidecar content, so the sidecar's own listing
+            // (raw, above) stops naming it at all; overridesByVersion is this emulator's only
+            // remaining record that the version ever existed, and AWS's own documented behavior
+            // is that ListPackageVersions still reports a disposed version (status=Disposed) with
+            // status=Disposed, not silently drop it the moment its assets are gone.
+            Map<String, PackageVersionStatusOverride> overridesByVersion = containerBackedOverridesForPackage(owner,
+                    region, domain, repository, format, namespace, packageName);
+            if (raw.isEmpty() && overridesByVersion.isEmpty() && !hasOriginConfig) {
                 throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
             }
-            entries = raw.stream()
-                    .map(v -> new PackageVersionEntry(v.version(),
-                            synthesizeContainerBackedRevision(format, repoId, namespace, packageName, v.version()),
-                            "Published", v.publishedTime() == null ? null : v.publishedTime().getEpochSecond()))
-                    .toList();
+            Set<String> coveredVersions = raw.stream().map(RepositorySidecarManager.PackageVersionTimestamp::version)
+                    .collect(Collectors.toSet());
+            Stream<PackageVersionEntry> fromSidecar = raw.stream().map(v -> {
+                PackageVersionStatusOverride override = overridesByVersion.get(v.version());
+                if (override != null) {
+                    return new PackageVersionEntry(v.version(), override.revision(), override.status(),
+                            override.publishedEpochSeconds());
+                }
+                return new PackageVersionEntry(v.version(),
+                        synthesizeContainerBackedRevision(format, repoId, namespace, packageName, v.version()),
+                        "Published", v.publishedTime() == null ? null : v.publishedTime().getEpochSecond());
+            });
+            Stream<PackageVersionEntry> disposedOnly = overridesByVersion.entrySet().stream()
+                    .filter(e -> !coveredVersions.contains(e.getKey()))
+                    .map(e -> new PackageVersionEntry(e.getKey(), e.getValue().revision(), e.getValue().status(),
+                            e.getValue().publishedEpochSeconds()));
+            entries = Stream.concat(fromSidecar, disposedOnly).toList();
             preferredDisplayVersion = manager.preferredDisplayVersion(repoId, domain, repository, namespace,
                     packageName).orElse(null);
         } else {
@@ -1080,22 +1184,559 @@ public class CodeArtifactService implements Resettable {
                 .orElse(null);
     }
 
+    public record PackageVersionStatusChangeResult(Map<String, SuccessfulPackageVersionInfo> successfulVersions,
+            Map<String, PackageVersionError> failedVersions) {}
+
+    /**
+     * Updates one or more versions of a package to {@code Published}, {@code Unlisted}, or {@code
+     * Archived} (confirmed against the API reference's own restriction on {@code targetStatus}:
+     * {@code Unfinished} is deliberately excluded, matching the User Guide's own note that "once
+     * published, a package version cannot be moved back to the Unfinished state"). To reach {@code
+     * Disposed}, use {@link #disposePackageVersions} instead; this and that one share every other
+     * rule through {@link #applyPackageVersionStatusChange}, confirmed against the User Guide's own
+     * worked examples ("Update package version status", "Disposing of package versions") rather
+     * than assumed from the shared {@code PackageVersionError} error-code enum alone, since that
+     * enum is reused across several batch package-version actions and not every code it lists
+     * applies to these two ({@code ALREADY_EXISTS} is {@code CopyPackageVersions}' own "destination
+     * already has this version" outcome, which neither of these actions has an equivalent of):
+     * <ul>
+     * <li>A requested version that does not exist fails {@code NOT_FOUND}.
+     * <li>{@code versionRevisions}, if given, fails a version whose current revision does not
+     * match with {@code MISMATCHED_REVISION}.
+     * <li>{@code expectedStatus}, if given, fails a version whose current status does not match
+     * with {@code MISMATCHED_STATUS}.
+     * <li>A version whose current status is already {@code Disposed} fails {@code NOT_ALLOWED}:
+     * the User Guide is explicit that "you cannot move a package version from Disposed to
+     * Archived, Unlisted, or Published, ... the only action that can be taken on a package version
+     * that has been disposed is for it to be deleted."
+     * <li>The whole call is all-or-nothing, documented as the current (but not contractually
+     * guaranteed) behavior: "if one or more versions cannot have their status changed, all other
+     * versions will be skipped. ... either all versions are updated successfully or no versions
+     * are updated." Every version that would otherwise have succeeded is reported {@code SKIPPED}
+     * rather than partially applied.
+     * </ul>
+     *
+     * <p>{@code synchronized} for the same reason every other package-mutating method here is: a
+     * concurrent publish, dispose, or another status update racing the same version must never
+     * interleave with this method's own read-then-write.
+     */
+    public synchronized PackageVersionStatusChangeResult updatePackageVersionsStatus(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            List<String> versions, Map<String, String> versionRevisions, String expectedStatus,
+            String targetStatus) {
+        if (targetStatus == null || !UPDATE_TARGET_STATUSES.contains(targetStatus)) {
+            throw validation("targetStatus must be one of " + UPDATE_TARGET_STATUSES + ".");
+        }
+        if (expectedStatus != null && !UPDATE_EXPECTED_STATUSES.contains(expectedStatus)) {
+            throw validation("expectedStatus must be one of " + UPDATE_EXPECTED_STATUSES + ".");
+        }
+        return applyPackageVersionStatusChange(region, domain, domainOwner, repository, format, namespace,
+                packageName, "updating the status of", versions, versionRevisions, expectedStatus, targetStatus,
+                false);
+    }
+
+    /**
+     * Deletes the real assets of one or more versions of a package and sets their status to
+     * {@code Disposed}, sharing every other rule with {@link #updatePackageVersionsStatus} through
+     * {@link #applyPackageVersionStatusChange} (see that method's own javadoc for the full list).
+     * {@code Disposed} has its own, wider valid set for {@code expectedStatus} than {@code
+     * UpdatePackageVersionsStatus} allows (confirmed against the API reference: {@code Archived |
+     * Disposed | Published | Unfinished | Unlisted}, where {@code UpdatePackageVersionsStatusRequest}
+     * has no {@code Disposed} at all) — unlike that action, which can never encounter a version
+     * already at its own target status, disposing one that is already {@code Disposed} is a
+     * meaningful (if pointless) case for a caller to probe for with {@code expectedStatus=Disposed}
+     * before trying again with a different one, even though the attempt itself still fails {@code
+     * NOT_ALLOWED} (disposing something already disposed changes nothing a second deletion could
+     * ever improve on).
+     *
+     * <p>{@code synchronized} for the same reason {@link #updatePackageVersionsStatus} is.
+     */
+    public synchronized PackageVersionStatusChangeResult disposePackageVersions(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            List<String> versions, Map<String, String> versionRevisions, String expectedStatus) {
+        if (expectedStatus != null && !DISPOSE_EXPECTED_STATUSES.contains(expectedStatus)) {
+            throw validation("expectedStatus must be one of " + DISPOSE_EXPECTED_STATUSES + ".");
+        }
+        return applyPackageVersionStatusChange(region, domain, domainOwner, repository, format, namespace,
+                packageName, "disposing", versions, versionRevisions, expectedStatus, "Disposed", true);
+    }
+
+    private PackageVersionStatusChangeResult applyPackageVersionStatusChange(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String action, List<String> versions, Map<String, String> versionRevisions, String expectedStatus,
+            String targetStatus, boolean disposing) {
+        validatePackageCoordinates(format, namespace, packageName, action);
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        if (versions == null || versions.isEmpty()) {
+            throw validation("versions is required and must specify at least one version.");
+        }
+        if (versions.size() > MAX_PACKAGE_VERSIONS_PER_BATCH_CALL) {
+            throw validation("A single call can process at most " + MAX_PACKAGE_VERSIONS_PER_BATCH_CALL
+                    + " versions.");
+        }
+        List<String> requestedVersions = List.copyOf(new LinkedHashSet<>(versions));
+        for (String version : requestedVersions) {
+            validatePackageToken("packageVersion", version);
+        }
+        Map<String, String> revisions = versionRevisions == null ? Map.of() : versionRevisions;
+        for (Map.Entry<String, String> entry : revisions.entrySet()) {
+            String expectedRevision = entry.getValue();
+            if (expectedRevision == null || expectedRevision.length() > MAX_REVISION_LENGTH
+                    || !VERSION_REVISION_VALUE.matcher(expectedRevision).matches()) {
+                throw validation("versionRevisions['" + entry.getKey() + "'] must be 1-" + MAX_REVISION_LENGTH
+                        + " characters with no whitespace.");
+            }
+        }
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+
+        if (CONTAINER_BACKED_FORMATS.contains(format)) {
+            return applyContainerBackedStatusChange(region, domain, owner, repository, format, namespace,
+                    packageName, requestedVersions, revisions, expectedStatus, targetStatus, disposing);
+        }
+        return applyGenericStatusChange(region, domain, owner, repository, format, namespace, packageName,
+                requestedVersions, revisions, expectedStatus, targetStatus, disposing);
+    }
+
+    /**
+     * The one check shared by every requested version in both {@link #updatePackageVersionsStatus}
+     * and {@link #disposePackageVersions}, for either storage branch: {@code null} means the
+     * version is eligible to actually change; a non-null result is the exact failure to report
+     * (and, per the all-or-nothing rule both actions document, the reason every other
+     * otherwise-eligible version in the same call gets downgraded to {@code SKIPPED} instead).
+     */
+    private static PackageVersionError checkStatusTransitionAllowed(String currentStatus, String currentRevision,
+            String version, Map<String, String> revisions, String expectedStatus) {
+        if ("Disposed".equals(currentStatus)) {
+            return new PackageVersionError("NOT_ALLOWED", "Package version " + version + " has already been "
+                    + "disposed and its status can no longer be changed");
+        }
+        String expectedRevision = revisions.get(version);
+        if (expectedRevision != null && !expectedRevision.equals(currentRevision)) {
+            return new PackageVersionError("MISMATCHED_REVISION", "current revision: " + currentRevision
+                    + ", expected revision: " + expectedRevision);
+        }
+        if (expectedStatus != null && !expectedStatus.equals(currentStatus)) {
+            return new PackageVersionError("MISMATCHED_STATUS", "current status: " + currentStatus
+                    + ", expected status: " + expectedStatus);
+        }
+        return null;
+    }
+
+    /**
+     * The {@code generic} branch of {@link #applyPackageVersionStatusChange}: reads and writes
+     * {@code packageVersions} directly, the same store {@link #publishPackageVersion} and {@link
+     * #copyPackageVersions} already use. For {@link #disposePackageVersions}, every asset's bytes
+     * are deleted the same way {@link #deletePackage} already deletes a whole package's worth, and
+     * the version's own {@code assets} map is cleared, before its status and revision are updated
+     * — matching the User Guide's own description of {@code Disposed} ("the assets of the package
+     * version will be permanently deleted") rather than leaving the bytes in place with only the
+     * status changed.
+     */
+    private PackageVersionStatusChangeResult applyGenericStatusChange(String region, String domain, String owner,
+            String repository, String format, String namespace, String packageName, List<String> requestedVersions,
+            Map<String, String> revisions, String expectedStatus, String targetStatus, boolean disposing) {
+        Map<String, PackageVersionError> failures = new LinkedHashMap<>();
+        List<String> pending = new ArrayList<>();
+        Map<String, CodeArtifactPackageVersion> byVersion = new LinkedHashMap<>();
+        for (String version : requestedVersions) {
+            String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+            CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key).orElse(null);
+            if (pv == null) {
+                failures.put(version, new PackageVersionError("NOT_FOUND", "Could not find version " + version));
+                continue;
+            }
+            PackageVersionError failure = checkStatusTransitionAllowed(pv.getStatus(), pv.getRevision(), version,
+                    revisions, expectedStatus);
+            if (failure != null) {
+                failures.put(version, failure);
+                continue;
+            }
+            byVersion.put(version, pv);
+            pending.add(version);
+        }
+        if (!failures.isEmpty()) {
+            for (String version : pending) {
+                failures.put(version, new PackageVersionError("SKIPPED", "Version " + version + " is skipped"));
+            }
+            return new PackageVersionStatusChangeResult(Map.of(), failures);
+        }
+
+        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
+        for (String version : pending) {
+            CodeArtifactPackageVersion pv = byVersion.get(version);
+            String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+            if (disposing) {
+                // Unlike deletePackage's own best-effort cleanup, this record is not removed:
+                // disposePackageVersions keeps it around with a Disposed status for
+                // DescribePackageVersion to keep answering, so a failed delete here must not be
+                // swallowed the way deletePackage's already-unreachable leftover bytes can be —
+                // reporting success while clearing the asset map would permanently orphan bytes
+                // this version's own record can no longer point back to.
+                for (PackageAsset asset : pv.getAssets().values()) {
+                    deleteAssetContent(owner, key, asset.getName());
+                }
+                pv.setAssets(Map.of());
+            }
+            pv.setStatus(targetStatus);
+            pv.setRevision(newRevision());
+            packageVersions.putForAccount(owner, key, pv);
+            successes.put(version, new SuccessfulPackageVersionInfo(pv.getRevision(), pv.getStatus()));
+        }
+        return new PackageVersionStatusChangeResult(successes, Map.of());
+    }
+
+    /**
+     * The container-backed branch of {@link #applyPackageVersionStatusChange}: {@link
+     * RepositorySidecarManager#listPackageVersions} is fetched exactly once up front (rather than
+     * once per requested version) both to check which requested versions are real and to capture
+     * each one's publish time, reused by {@link #currentContainerBackedVersionStatus}'s own default
+     * once this call writes an override for it. For {@link #disposePackageVersions}, every one of
+     * the version's real assets is deleted through {@link RepositorySidecarManager#listPackageVersionAssetNames}/
+     * {@link RepositorySidecarManager#deletePackageVersionAsset}, the only primitives this sidecar
+     * interface exposes for it; no client needed a new method of its own.
+     */
+    private PackageVersionStatusChangeResult applyContainerBackedStatusChange(String region, String domain,
+            String owner, String repository, String format, String namespace, String packageName,
+            List<String> requestedVersions, Map<String, String> revisions, String expectedStatus,
+            String targetStatus, boolean disposing) {
+        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> notFound("Package '" + packageName + "' was not found.", packageName, "package"));
+        List<RepositorySidecarManager.PackageVersionTimestamp> raw;
+        try {
+            raw = manager.listPackageVersions(repoId, domain, repository, namespace, packageName);
+        } catch (UnsupportedOperationException e) {
+            throw new AwsException("InternalServerException", "Changing " + format + " package version status is "
+                    + "not yet supported by this emulator.", 500);
+        }
+        // Built with a plain loop, not Collectors.toMap: a sidecar that could not supply a
+        // timestamp for one of its versions (see listPackageVersions's own handling of this same
+        // possibility) reports a null publishedTime, and Map.merge, which toMap uses internally,
+        // throws NullPointerException on a null value.
+        Map<String, Instant> realPublishedTimes = new LinkedHashMap<>();
+        for (RepositorySidecarManager.PackageVersionTimestamp v : raw) {
+            realPublishedTimes.put(v.version(), v.publishedTime());
+        }
+        Map<String, PackageVersionStatusOverride> overridesByVersion = containerBackedOverridesForPackage(owner,
+                region, domain, repository, format, namespace, packageName);
+
+        Map<String, PackageVersionError> failures = new LinkedHashMap<>();
+        List<String> pending = new ArrayList<>();
+        Map<String, Long> pendingPublishedEpochSeconds = new LinkedHashMap<>();
+        for (String version : requestedVersions) {
+            boolean existsNow = realPublishedTimes.containsKey(version) || overridesByVersion.containsKey(version);
+            if (!existsNow) {
+                failures.put(version, new PackageVersionError("NOT_FOUND", "Could not find version " + version));
+                continue;
+            }
+            PackageVersionStatusOverride override = overridesByVersion.get(version);
+            String currentStatus = override != null ? override.status() : "Published";
+            String currentRevision = override != null ? override.revision()
+                    : synthesizeContainerBackedRevision(format, repoId, namespace, packageName, version);
+            PackageVersionError failure = checkStatusTransitionAllowed(currentStatus, currentRevision, version,
+                    revisions, expectedStatus);
+            if (failure != null) {
+                failures.put(version, failure);
+                continue;
+            }
+            Long publishedEpochSeconds;
+            if (override != null) {
+                publishedEpochSeconds = override.publishedEpochSeconds();
+            } else {
+                Instant publishedTime = realPublishedTimes.get(version);
+                publishedEpochSeconds = publishedTime == null ? null : publishedTime.getEpochSecond();
+            }
+            pendingPublishedEpochSeconds.put(version, publishedEpochSeconds);
+            pending.add(version);
+        }
+        if (!failures.isEmpty()) {
+            for (String version : pending) {
+                failures.put(version, new PackageVersionError("SKIPPED", "Version " + version + " is skipped"));
+            }
+            return new PackageVersionStatusChangeResult(Map.of(), failures);
+        }
+
+        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
+        for (String version : pending) {
+            PackageVersionStatusOverride updated = new PackageVersionStatusOverride(targetStatus, newRevision(),
+                    pendingPublishedEpochSeconds.get(version));
+            // Written before deleting below, not after: a sidecar failing partway through this
+            // version's own asset deletions (the one real way this loop can throw) would otherwise
+            // leave it marked Published with some assets already gone. There is no cheap way to
+            // roll a partial sidecar delete back (unlike copyContainerBackedPackageVersions's own
+            // write path, which can restore a destination's original bytes because it never
+            // deletes more than it is about to replace), so this can't promise every earlier
+            // version in the same batch rolls back too — only that this exact version never reads
+            // as more intact than it now really is.
+            writeContainerBackedStatusOverride(owner, region, domain, repository, format, namespace, packageName,
+                    version, updated);
+            if (disposing) {
+                deleteContainerBackedVersionAssets(manager, repoId, owner, region, domain, repository, format,
+                        namespace, packageName, version);
+            }
+            successes.put(version, new SuccessfulPackageVersionInfo(updated.revision(), updated.status()));
+        }
+        return new PackageVersionStatusChangeResult(successes, Map.of());
+    }
+
+    /**
+     * {@link #disposePackageVersions}'s real deletion for a container-backed version: every asset
+     * name {@link RepositorySidecarManager#listPackageVersionAssetNames} still reports (the version
+     * has not been disposed yet at the point this runs, so these are genuinely all still there) is
+     * fetched (to measure its real size) and then deleted one at a time through {@link
+     * RepositorySidecarManager#deletePackageVersionAsset}, the same primitive {@code
+     * DeletePackageVersionAsset} itself already uses for one asset at a time. The bytes freed are
+     * subtracted from {@link #containerBackedAssetBytes}'s own package-level total, floored at 0:
+     * without this, {@code DescribeDomain}'s {@code assetSizeBytes} would keep counting a disposed
+     * version's bytes forever, the same way {@link #recordContainerBackedAssetBytes} already
+     * accounts for every container-backed publish adding to that same total. This runs inside
+     * {@link #disposePackageVersions}'s own {@code synchronized} call, unlike that method's own
+     * fence-checked accounting, so no separate race guard is needed here. {@link
+     * RepositorySidecarManager#recordVersionDisposed} runs last, once every asset is confirmed
+     * gone, for a sidecar (Maven) whose own native listing can otherwise keep naming a version
+     * whose assets no longer exist.
+     */
+    private void deleteContainerBackedVersionAssets(RepositorySidecarManager manager, String repoId, String owner,
+            String region, String domain, String repository, String format, String namespace, String packageName,
+            String version) {
+        List<String> assetNames;
+        try {
+            assetNames = manager.listPackageVersionAssetNames(repoId, domain, repository, namespace, packageName,
+                    version);
+        } catch (UnsupportedOperationException e) {
+            throw new AwsException("InternalServerException", "Disposing a package version of this format is not "
+                    + "yet supported by this emulator.", 500);
+        }
+        long freedBytes = 0;
+        for (String assetName : assetNames) {
+            freedBytes += manager.fetchPackageVersionAsset(repoId, domain, repository, namespace, packageName,
+                    version, assetName).map(bytes -> (long) bytes.length).orElse(0L);
+            manager.deletePackageVersionAsset(repoId, domain, repository, namespace, packageName, version,
+                    assetName);
+        }
+        manager.recordVersionDisposed(repoId, namespace, packageName, version);
+        if (freedBytes > 0) {
+            String key = ownerScopedKey(owner, packageKey(region, domain, repository, format, namespace,
+                    accountingPackageName(format, packageName)));
+            long freedBytesFinal = freedBytes;
+            containerBackedAssetBytes.computeIfPresent(key, (k, existing) -> Math.max(0, existing - freedBytesFinal));
+        }
+    }
+
+    /**
+     * {@code GetPackageVersionAsset} for a version with a status of {@code Archived} or {@code
+     * Disposed} must 404 even though, for {@code Archived}, the bytes are still physically
+     * present: confirmed against the User Guide's own worked example of an upstream fetch hitting
+     * a package version with one of these two statuses in the upstream repository ("the response
+     * will be 404 (Not Found) because the assets of package versions in those two statuses are
+     * not downloadable"), which states the restriction as a property of the status itself, not
+     * something specific to the upstream path the example happens to illustrate it with. {@code
+     * Unlisted} is deliberately not checked here: the User Guide draws it out explicitly as the
+     * one status that still allows a normal download ("if the Unlisted package version is already
+     * referenced in an npm package-lock.json file, it can still be downloaded and installed").
+     *
+     * <p><b>Known gap, not fixed here (flagged by Qodo review on the PR that added {@code
+     * DisposePackageVersions}):</b> this only guards {@code GetPackageVersionAsset} itself. The
+     * native per-format data planes ({@code CodeArtifactMavenController}'s GAV path, {@code
+     * CodeArtifactNpmDataPlane}'s tarball route, {@code CodeArtifactPypiController}'s raw
+     * filename-only download route, {@code CodeArtifactNuGetController}'s content route) proxy
+     * straight to each sidecar and never consult this override at all, for any purpose, so a
+     * plain {@code pip install}/{@code npm install}/{@code mvn} fetch against an Archived version
+     * can still download it. Fixing this means threading status awareness into four independently
+     * shaped native protocols (pypi's own download route does not even carry a version in its
+     * URL, only a filename, unlike the other three), a feature-family-sized gap closer to Package
+     * Groups than a quick patch — tracked in the private design memo, not silently dropped.
+     */
+    private static void requireAssetDownloadable(String status, String version) {
+        if ("Archived".equals(status) || "Disposed".equals(status)) {
+            throw notFound("Package version '" + version + "' was not found.", version, "package-version");
+        }
+    }
+
+    /**
+     * A container-backed version "exists" if either the sidecar itself still has it, or Floci
+     * holds a status override for it: once {@code DisposePackageVersions} deletes a version's
+     * real sidecar content, {@link RepositorySidecarManager#packageVersionExists} alone would
+     * start reporting it gone, even though AWS's own documented behavior is that a disposed
+     * version keeps answering {@code DescribePackageVersion} (just with a {@code Disposed}
+     * status and no assets) rather than ever reverting to a plain 404 as if it had never existed.
+     *
+     * <p>The override lookup normalizes through {@link #accountingPackageName}, the sidecar call
+     * does not: this mirrors how {@link #recordPublishedPackageVersionReadme} already keys its own
+     * per-version, container-backed-only bookkeeping, so a pypi/nuget package addressed under two
+     * case- or punctuation-equivalent spellings (which the real sidecar itself treats as the same
+     * package) still finds the one override either spelling wrote, while the sidecar call itself
+     * is left to each client's own normalization against the real container.
+     */
+    private boolean containerBackedVersionExists(RepositorySidecarManager manager, String owner, String region,
+            String domain, String repository, String format, String namespace, String packageName, String version,
+            String repoId) {
+        String key = packageVersionKey(region, domain, repository, format, namespace,
+                accountingPackageName(format, packageName), version);
+        return containerBackedPackageVersionStatusOverrides.containsKey(ownerScopedKey(owner, key))
+                || manager.packageVersionExists(repoId, domain, repository, namespace, packageName, version);
+    }
+
+    /**
+     * A container-backed version's current status and revision: whatever {@link
+     * #updatePackageVersionsStatus}/{@link #disposePackageVersions} last recorded for it, or, for
+     * a version neither has ever touched, the implicit {@code Published} status every
+     * container-backed version starts in (nothing here ever lands one in {@code Unfinished} the
+     * way a generic publish deliberately can, since a real {@code mvn deploy}/{@code npm
+     * publish}/{@code twine upload} only ever lands a version by completing it in one shot) with
+     * its usual coordinate-derived {@link #synthesizeContainerBackedRevision}. Callers that also
+     * need to know whether the version exists at all check that separately with {@link
+     * #containerBackedVersionExists} first; this always returns a value either way.
+     */
+    private PackageVersionStatusOverride currentContainerBackedVersionStatus(String owner, String region,
+            String domain, String repository, String format, String namespace, String packageName, String version,
+            String repoId) {
+        String key = packageVersionKey(region, domain, repository, format, namespace,
+                accountingPackageName(format, packageName), version);
+        PackageVersionStatusOverride override =
+                containerBackedPackageVersionStatusOverrides.get(ownerScopedKey(owner, key));
+        if (override != null) {
+            return override;
+        }
+        return new PackageVersionStatusOverride("Published",
+                synthesizeContainerBackedRevision(format, repoId, namespace, packageName, version), null);
+    }
+
+    /**
+     * Writes one version's status override, keeping {@link #containerBackedPackageVersionStatusOverrides}
+     * and its {@link #containerBackedOverriddenVersionsByPackage} side index in sync: every writer
+     * goes through this rather than touching either map directly, so the two can never drift apart.
+     */
+    private void writeContainerBackedStatusOverride(String owner, String region, String domain, String repository,
+            String format, String namespace, String packageName, String version,
+            PackageVersionStatusOverride override) {
+        String accountingName = accountingPackageName(format, packageName);
+        String versionKey = ownerScopedKey(owner,
+                packageVersionKey(region, domain, repository, format, namespace, accountingName, version));
+        containerBackedPackageVersionStatusOverrides.put(versionKey, override);
+        String packageKey = ownerScopedKey(owner, packageKey(region, domain, repository, format, namespace,
+                accountingName));
+        containerBackedOverriddenVersionsByPackage.computeIfAbsent(packageKey, k -> ConcurrentHashMap.newKeySet())
+                .add(version);
+    }
+
+    /**
+     * Removes one version's status override, the counterpart to {@link
+     * #writeContainerBackedStatusOverride}: {@link #copyContainerBackedPackageVersions} calls this
+     * after successfully overwriting a destination version's real content, and {@link
+     * #forgetContainerBackedStatusOverride} exposes it to every native publish path, so a status
+     * an earlier {@link #updatePackageVersionsStatus}/{@link #disposePackageVersions} call
+     * recorded for whatever used to be at that coordinate doesn't keep describing (and, through
+     * {@link #requireAssetDownloadable}, blocking downloads of) the content that just replaced it.
+     * A version with no override to begin with is a no-op, matching every other removal here.
+     */
+    private void clearContainerBackedStatusOverride(String owner, String region, String domain, String repository,
+            String format, String namespace, String packageName, String version) {
+        String accountingName = accountingPackageName(format, packageName);
+        String versionKey = ownerScopedKey(owner,
+                packageVersionKey(region, domain, repository, format, namespace, accountingName, version));
+        containerBackedPackageVersionStatusOverrides.remove(versionKey);
+        String packageKey = ownerScopedKey(owner, packageKey(region, domain, repository, format, namespace,
+                accountingName));
+        Set<String> versions = containerBackedOverriddenVersionsByPackage.get(packageKey);
+        if (versions != null) {
+            versions.remove(version);
+        }
+    }
+
+    /**
+     * Found by Qodo review, as a remaining half of the same finding its own copy-side fix (see
+     * {@link #clearContainerBackedStatusOverride}'s javadoc) only partly closed: {@code
+     * copyContainerBackedPackageVersions} clears a stale override on its own overwrite path, but
+     * nothing cleared one for a <em>native</em> publish — a real {@code mvn deploy}/{@code npm
+     * publish}/twine upload/{@code dotnet nuget push} that successfully republishes a coordinate
+     * an earlier {@link #updatePackageVersionsStatus}/{@link #disposePackageVersions} call left
+     * Archived or Disposed. Each native proxy controller (Maven, npm, pypi, nuget) calls this
+     * right alongside its own existing {@link #recordContainerBackedAssetBytes} call, for the
+     * exact same "a real write just happened" signal, whenever it has a specific version to name;
+     * {@code CodeArtifactMavenController}'s own bare {@code maven-metadata.xml} PUT has none
+     * (see its own GAV-parsing javadoc) and skips this entirely, since that path never represents
+     * one specific version's content changing.
+     */
+    public synchronized void forgetContainerBackedStatusOverride(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName, String version) {
+        String owner = effectiveOwner(domainOwner);
+        clearContainerBackedStatusOverride(owner, region, domain, repository, format, namespace, packageName,
+                version);
+    }
+
+    /**
+     * Raised by hectorvent's review of this same PR: {@link #forgetContainerBackedStatusOverride}
+     * only ever ran <em>after</em> each native proxy controller's real sidecar write already
+     * succeeded, which cleared an Archived/Disposed override once Reposilite/Verdaccio/pypiserver/
+     * BaGetter had already accepted (and written) the republished content — exactly the outcome
+     * {@link #publishPackageVersion}'s own Archived/Disposed block exists to prevent for the
+     * generic format. The User Guide draws no byte-identical exception for either status the way
+     * it does for a plain idempotent retry of a {@code Published}/{@code Unlisted} version (see
+     * {@link #publishPackageVersion}'s own javadoc), so this is unconditional, independent of
+     * whether the incoming content happens to match what is already there.
+     *
+     * <p>Each native proxy controller calls this first, before issuing its own real write, so a
+     * blocked coordinate is refused outright rather than accepted and then silently un-blocked;
+     * {@code CodeArtifactMavenController}'s bare {@code maven-metadata.xml} PUT has no specific
+     * version to check against (see its own GAV-parsing javadoc) and skips this entirely, the same
+     * case {@link #forgetContainerBackedStatusOverride} already skips it for.
+     */
+    public synchronized void requireContainerBackedVersionNotArchivedOrDisposed(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String version) {
+        String owner = effectiveOwner(domainOwner);
+        String key = packageVersionKey(region, domain, repository, format, namespace,
+                accountingPackageName(format, packageName), version);
+        PackageVersionStatusOverride override =
+                containerBackedPackageVersionStatusOverrides.get(ownerScopedKey(owner, key));
+        if (override != null && ("Archived".equals(override.status()) || "Disposed".equals(override.status()))) {
+            throw conflict("Package version '" + version + "' of package '" + packageName + "' is "
+                    + override.status() + " and cannot be republished.", version, "package-version");
+        }
+    }
+
+    /**
+     * Every version of one package that has a status override, by raw version string: the set
+     * {@link #containerBackedOverriddenVersionsByPackage} tracks names the versions, and each is
+     * then looked up individually in {@link #containerBackedPackageVersionStatusOverrides} itself.
+     * Empty for a package nothing has ever called {@link #updatePackageVersionsStatus} or {@link
+     * #disposePackageVersions} on, which is every container-backed package before this existed.
+     */
+    private Map<String, PackageVersionStatusOverride> containerBackedOverridesForPackage(String owner, String region,
+            String domain, String repository, String format, String namespace, String packageName) {
+        String accountingName = accountingPackageName(format, packageName);
+        Set<String> versions = containerBackedOverriddenVersionsByPackage.get(ownerScopedKey(owner,
+                packageKey(region, domain, repository, format, namespace, accountingName)));
+        if (versions == null || versions.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, PackageVersionStatusOverride> result = new LinkedHashMap<>();
+        for (String version : versions) {
+            String versionKey = ownerScopedKey(owner,
+                    packageVersionKey(region, domain, repository, format, namespace, accountingName, version));
+            PackageVersionStatusOverride override = containerBackedPackageVersionStatusOverrides.get(versionKey);
+            if (override != null) {
+                result.put(version, override);
+            }
+        }
+        return result;
+    }
+
     /**
      * Unlike {@code GetPackageVersionAsset}, real CodeArtifact's {@code DescribePackageVersion}
      * response has no asset listing at all (confirmed against the wire model: {@code
      * PackageVersionDescription} has no such member; enumerating a version's files is {@link
      * #listPackageVersionAssets}'s job, a separate action). All this needs
-     * from a sidecar is a yes/no answer to "does this exact version exist," which is cheap for
+     * from a sidecar (beyond the status override {@link #currentContainerBackedVersionStatus}
+     * already resolves) is a yes/no answer to "does this exact version exist," which is cheap for
      * every one of the three: Verdaccio's packument already lists every version it holds,
      * Reposilite's own details API answers directory existence the same way {@link
      * #ensureFormatContainerId}'s readiness probe already relies on, and pypiserver's per-project
      * JSON listing already groups files by version the same way {@code deletePackage} already
      * reads it.
-     *
-     * <p>A sidecar-backed version is always reported {@code Published}: nothing here ever leaves
-     * one in {@code Unfinished}, the way a generic publish deliberately can, since a real {@code
-     * mvn deploy}/{@code npm publish}/{@code twine upload} only ever lands a version by completing
-     * it in one shot.
      *
      * <p>Namespace is validated through the same shared {@link #validatePackageCoordinates} every
      * other package-level operation already uses, rather than a one-off maven-only check: a pypi
@@ -1109,10 +1750,13 @@ public class CodeArtifactService implements Resettable {
         RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
                 .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
                         + "' was not found.", version, "package-version"));
-        if (!manager.packageVersionExists(repoId, domain, repository, namespace, packageName, version)) {
+        if (!containerBackedVersionExists(manager, owner, region, domain, repository, format, namespace, packageName,
+                version, repoId)) {
             throw notFound("Package version '" + version + "' of package '" + packageName
                     + "' was not found.", version, "package-version");
         }
+        PackageVersionStatusOverride state = currentContainerBackedVersionStatus(owner, region, domain, repository,
+                format, namespace, packageName, version, repoId);
         CodeArtifactPackageVersion pv = new CodeArtifactPackageVersion();
         pv.setDomainName(domain);
         pv.setDomainOwner(owner);
@@ -1122,8 +1766,8 @@ public class CodeArtifactService implements Resettable {
         pv.setNamespace(namespace);
         pv.setPackageName(packageName);
         pv.setVersion(version);
-        pv.setStatus("Published");
-        pv.setRevision(synthesizeContainerBackedRevision(format, repoId, namespace, packageName, version));
+        pv.setStatus(state.status());
+        pv.setRevision(state.revision());
         return pv;
     }
 
@@ -1287,6 +1931,14 @@ public class CodeArtifactService implements Resettable {
                     .filter(k -> k.startsWith(ownerScopedReadmePrefix))
                     .toList()
                     .forEach(packageVersionReadmes::remove);
+            // Same prefix, same reasoning, for updatePackageVersionsStatus/disposePackageVersions'
+            // own per-version overrides; the side index is removed outright rather than
+            // prefix-scanned since its own key is exactly ownerScopedKey(owner, accountingKey).
+            containerBackedPackageVersionStatusOverrides.keySet().stream()
+                    .filter(k -> k.startsWith(ownerScopedReadmePrefix))
+                    .toList()
+                    .forEach(containerBackedPackageVersionStatusOverrides::remove);
+            containerBackedOverriddenVersionsByPackage.remove(ownerScopedKey(owner, accountingKey));
         } else {
             List<CodeArtifactPackageVersion> versions = genericPackageVersions(region, domain, owner, repository,
                     format, namespace, packageName);
@@ -1419,6 +2071,7 @@ public class CodeArtifactService implements Resettable {
         CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key)
                 .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
                         + "' was not found.", version, "package-version"));
+        requireAssetDownloadable(pv.getStatus(), version);
         if (packageVersionRevision != null && !packageVersionRevision.equals(pv.getRevision())) {
             throw notFound("Package version '" + version + "' was not found at revision '"
                     + packageVersionRevision + "'.", version, "package-version");
@@ -1443,14 +2096,22 @@ public class CodeArtifactService implements Resettable {
             throw validation("namespace is required when requesting an asset from a maven package version.");
         }
         String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
-        String revision = synthesizeContainerBackedRevision(format, repoId, namespace, packageName, version);
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version"));
+        // No separate existence check needed here the way describeContainerBackedPackageVersion
+        // needs one: fetchPackageVersionAsset's own empty result already 404s a version that never
+        // existed at all (see below), and requireAssetDownloadable below already blocks a version
+        // this emulator knows is Archived/Disposed purely from the override map, with no sidecar
+        // round trip required to tell the two cases apart.
+        PackageVersionStatusOverride state = currentContainerBackedVersionStatus(owner, region, domain, repository,
+                format, namespace, packageName, version, repoId);
+        String revision = state.revision();
         if (packageVersionRevision != null && !packageVersionRevision.equals(revision)) {
             throw notFound("Package version '" + version + "' was not found at revision '"
                     + packageVersionRevision + "'.", version, "package-version");
         }
-        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
-                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
-                        + "' was not found.", version, "package-version"));
+        requireAssetDownloadable(state.status(), version);
         byte[] content = manager.fetchPackageVersionAsset(repoId, domain, repository, namespace, packageName,
                         version, assetName)
                 .orElseThrow(() -> notFound("Asset '" + assetName + "' was not found on package version '"
@@ -1596,8 +2257,8 @@ public class CodeArtifactService implements Resettable {
         // against the raw caller-supplied count, before any deduplication below, so a request
         // that only looks small after collapsing repeats still gets rejected.
         int rawRequestedCount = hasVersions ? versions.size() : versionRevisions.size();
-        if (rawRequestedCount > MAX_COPY_VERSIONS_PER_CALL) {
-            throw validation("A single CopyPackageVersions call can copy at most " + MAX_COPY_VERSIONS_PER_CALL
+        if (rawRequestedCount > MAX_PACKAGE_VERSIONS_PER_BATCH_CALL) {
+            throw validation("A single CopyPackageVersions call can copy at most " + MAX_PACKAGE_VERSIONS_PER_BATCH_CALL
                     + " versions.");
         }
         // A duplicate requested version (whether from a caller-supplied repeat in versions, or
@@ -1641,7 +2302,7 @@ public class CodeArtifactService implements Resettable {
                     hasRevisions, allowOverwrite);
         }
 
-        Map<String, PackageVersionCopyFailure> failures = new LinkedHashMap<>();
+        Map<String, PackageVersionError> failures = new LinkedHashMap<>();
         List<String> pendingCopies = new ArrayList<>();
         Map<String, CodeArtifactPackageVersion> sourceByVersion = new LinkedHashMap<>();
         for (String version : requestedVersions) {
@@ -1649,14 +2310,14 @@ public class CodeArtifactService implements Resettable {
                     version);
             CodeArtifactPackageVersion sourcePv = packageVersions.getForAccount(owner, sourceKey).orElse(null);
             if (sourcePv == null) {
-                failures.put(version, new PackageVersionCopyFailure("NOT_FOUND", "Could not find version "
+                failures.put(version, new PackageVersionError("NOT_FOUND", "Could not find version "
                         + version));
                 continue;
             }
             if (hasRevisions) {
                 String expectedRevision = versionRevisions.get(version);
                 if (!sourcePv.getRevision().equals(expectedRevision)) {
-                    failures.put(version, new PackageVersionCopyFailure("MISMATCHED_REVISION",
+                    failures.put(version, new PackageVersionError("MISMATCHED_REVISION",
                             "current revision: " + sourcePv.getRevision() + ", expected revision: "
                                     + expectedRevision));
                     continue;
@@ -1666,6 +2327,17 @@ public class CodeArtifactService implements Resettable {
                     packageName, version);
             CodeArtifactPackageVersion destPv = packageVersions.getForAccount(owner, destKey).orElse(null);
             if (destPv != null) {
+                // Raised by hectorvent's review, matching copyContainerBackedPackageVersions's own
+                // Disposed-destination guard: applyGenericStatusChange clears a disposed version's
+                // assets but keeps its record around (so DescribePackageVersion keeps answering),
+                // which means packageVersionContentMatches below can never see a match against an
+                // emptied asset map, and without this check the plain-overwrite branch would
+                // resurrect a destination the User Guide says "can no longer be used."
+                if ("Disposed".equals(destPv.getStatus())) {
+                    failures.put(version, new PackageVersionError("NOT_ALLOWED", "Package version " + version
+                            + " has already been disposed at the destination and cannot be republished"));
+                    continue;
+                }
                 if (packageVersionContentMatches(sourcePv, destPv)) {
                     // Identical in both repositories already: AWS's own documented behavior is to
                     // treat this as an already-successful no-op, not copied and not listed in
@@ -1674,7 +2346,7 @@ public class CodeArtifactService implements Resettable {
                     continue;
                 }
                 if (!allowOverwrite) {
-                    failures.put(version, new PackageVersionCopyFailure("ALREADY_EXISTS",
+                    failures.put(version, new PackageVersionError("ALREADY_EXISTS",
                             "Version " + version + " already exists"));
                     continue;
                 }
@@ -1685,7 +2357,7 @@ public class CodeArtifactService implements Resettable {
 
         if (!failures.isEmpty()) {
             for (String version : pendingCopies) {
-                failures.put(version, new PackageVersionCopyFailure("SKIPPED", "Version " + version
+                failures.put(version, new PackageVersionError("SKIPPED", "Version " + version
                         + " was skipped"));
             }
             return new CopyPackageVersionsResult(Map.of(), failures);
@@ -1701,12 +2373,12 @@ public class CodeArtifactService implements Resettable {
             verifiedContentByVersion.put(version, verifyAndReadSourceAssets(owner, sourceByVersion.get(version)));
         }
 
-        Map<String, PackageVersionCopyOutcome> successes = new LinkedHashMap<>();
+        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
         for (String version : pendingCopies) {
             CodeArtifactPackageVersion copied = copyGenericPackageVersionAssets(owner, region, domain,
                     destinationRepository, format, namespace, packageName, version, sourceByVersion.get(version),
                     verifiedContentByVersion.get(version));
-            successes.put(version, new PackageVersionCopyOutcome(copied.getRevision(), copied.getStatus()));
+            successes.put(version, new SuccessfulPackageVersionInfo(copied.getRevision(), copied.getStatus()));
         }
         return new CopyPackageVersionsResult(successes, Map.of());
     }
@@ -1753,7 +2425,7 @@ public class CodeArtifactService implements Resettable {
         String sourceRepoId = ensureFormatContainerId(format, region, domain, owner, sourceRepository);
         String destRepoId = ensureFormatContainerId(format, region, domain, owner, destinationRepository);
 
-        Map<String, PackageVersionCopyFailure> failures = new LinkedHashMap<>();
+        Map<String, PackageVersionError> failures = new LinkedHashMap<>();
         List<String> pendingCopies = new ArrayList<>();
         Map<String, List<String>> sourceAssetNamesByVersion = new LinkedHashMap<>();
         Map<String, List<String>> destAssetNamesByVersion = new LinkedHashMap<>();
@@ -1761,20 +2433,32 @@ public class CodeArtifactService implements Resettable {
             for (String version : requestedVersions) {
                 if (!manager.packageVersionExists(sourceRepoId, domain, sourceRepository, namespace, packageName,
                         version)) {
-                    failures.put(version, new PackageVersionCopyFailure("NOT_FOUND", "Could not find version "
+                    failures.put(version, new PackageVersionError("NOT_FOUND", "Could not find version "
                             + version));
                     continue;
                 }
                 if (hasRevisions) {
                     String expectedRevision = versionRevisions.get(version);
-                    String actualRevision = synthesizeContainerBackedRevision(format, sourceRepoId, namespace,
-                            packageName, version);
+                    String actualRevision = currentContainerBackedVersionStatus(owner, region, domain,
+                            sourceRepository, format, namespace, packageName, version, sourceRepoId).revision();
                     if (!actualRevision.equals(expectedRevision)) {
-                        failures.put(version, new PackageVersionCopyFailure("MISMATCHED_REVISION",
+                        failures.put(version, new PackageVersionError("MISMATCHED_REVISION",
                                 "current revision: " + actualRevision + ", expected revision: "
                                         + expectedRevision));
                         continue;
                     }
+                }
+                // Checked regardless of destExists below: disposing a version deletes its real
+                // sidecar content, so a disposed destination coordinate almost always has
+                // destExists == false by the time anything copies into it again, even though the
+                // User Guide is explicit that Disposed "can no longer be used" and can never move
+                // to Published (the status this copy's own response would otherwise claim for it).
+                PackageVersionStatusOverride destOverride = currentContainerBackedVersionStatus(owner, region,
+                        domain, destinationRepository, format, namespace, packageName, version, destRepoId);
+                if ("Disposed".equals(destOverride.status())) {
+                    failures.put(version, new PackageVersionError("NOT_ALLOWED", "Package version " + version
+                            + " has already been disposed at the destination and cannot be republished"));
+                    continue;
                 }
                 List<String> sourceAssetNames = manager.listPackageVersionAssetNames(sourceRepoId, domain,
                         sourceRepository, namespace, packageName, version);
@@ -1792,7 +2476,7 @@ public class CodeArtifactService implements Resettable {
                         continue;
                     }
                     if (!allowOverwrite) {
-                        failures.put(version, new PackageVersionCopyFailure("ALREADY_EXISTS",
+                        failures.put(version, new PackageVersionError("ALREADY_EXISTS",
                                 "Version " + version + " already exists"));
                         continue;
                     }
@@ -1808,7 +2492,7 @@ public class CodeArtifactService implements Resettable {
 
         if (!failures.isEmpty()) {
             for (String version : pendingCopies) {
-                failures.put(version, new PackageVersionCopyFailure("SKIPPED", "Version " + version
+                failures.put(version, new PackageVersionError("SKIPPED", "Version " + version
                         + " was skipped"));
             }
             return new CopyPackageVersionsResult(Map.of(), failures);
@@ -1832,7 +2516,7 @@ public class CodeArtifactService implements Resettable {
             verifiedContentByVersion.put(version, contentByAsset);
         }
 
-        Map<String, PackageVersionCopyOutcome> successes = new LinkedHashMap<>();
+        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
         for (String version : pendingCopies) {
             List<String> destAssetNames = destAssetNamesByVersion.getOrDefault(version, List.of());
             Map<String, byte[]> originalContent = new LinkedHashMap<>();
@@ -1893,8 +2577,16 @@ public class CodeArtifactService implements Resettable {
             }
             copyCapturedReadmeIfApplicable(region, domain, owner, sourceRepository, destinationRepository, format,
                     namespace, packageName, version);
+            // Drops any status override left over from whatever used to be at this destination
+            // coordinate (an Archived version this copy's allowOverwrite just replaced, most
+            // concretely): the response below reports Published, and a stale override would
+            // otherwise keep describing — and keep requireAssetDownloadable blocking downloads
+            // of — content that no longer matches what is now really there. A destination that
+            // never had an override is an inexpensive no-op (see that method's own javadoc).
+            clearContainerBackedStatusOverride(owner, region, domain, destinationRepository, format, namespace,
+                    packageName, version);
             String revision = synthesizeContainerBackedRevision(format, destRepoId, namespace, packageName, version);
-            successes.put(version, new PackageVersionCopyOutcome(revision, "Published"));
+            successes.put(version, new SuccessfulPackageVersionInfo(revision, "Published"));
         }
         return new CopyPackageVersionsResult(successes, Map.of());
     }
@@ -2173,7 +2865,8 @@ public class CodeArtifactService implements Resettable {
         String owner = effectiveOwner(domainOwner);
         requireRepository(owner, repositoryKey(region, domain, repository), repository);
         String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
-        String revision = synthesizeContainerBackedRevision(format, repoId, namespace, packageName, version);
+        String revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
+                packageName, version, repoId).revision();
         if ("nuget".equals(format)) {
             String readme = sidecarRegistry.forFormat(format)
                     .flatMap(manager -> manager.fetchPackageVersionReadme(repoId, domain, repository, namespace,
@@ -2365,6 +3058,8 @@ public class CodeArtifactService implements Resettable {
         containerBackedAssetBytes.clear();
         containerBackedPackageDeletionFence.clear();
         packageVersionReadmes.clear();
+        containerBackedPackageVersionStatusOverrides.clear();
+        containerBackedOverriddenVersionsByPackage.clear();
         authorizationTokens.clear();
         if (inMemory) {
             memoryAssetStore.clear();
@@ -2596,6 +3291,15 @@ public class CodeArtifactService implements Resettable {
                 .filter(k -> k.startsWith(readmePrefix))
                 .toList()
                 .forEach(packageVersionReadmes::remove);
+        // Same key/prefix, same reasoning: a native unpublish removed this package's real sidecar
+        // content directly, so any status override updatePackageVersionsStatus/
+        // disposePackageVersions previously recorded for one of its versions would otherwise keep
+        // describing a package that, as far as the sidecar is concerned, no longer exists at all.
+        containerBackedPackageVersionStatusOverrides.keySet().stream()
+                .filter(k -> k.startsWith(readmePrefix))
+                .toList()
+                .forEach(containerBackedPackageVersionStatusOverrides::remove);
+        containerBackedOverriddenVersionsByPackage.remove(ownerScopedKey);
     }
 
     /**

@@ -455,6 +455,48 @@ class CodeArtifactAssetPersistenceTest {
         assertEquals("ResourceNotFoundException", gone.getErrorCode());
     }
 
+    /**
+     * Qodo review finding on the PR that added {@code DisposePackageVersions}: unlike {@code
+     * deletePackage} (whose version record is already gone by the time its own best-effort asset
+     * cleanup runs, so a failure there can never be reached again), a disposed version's record
+     * is kept around — {@code DescribePackageVersion} must keep answering for it. The dispose path
+     * used to catch and log a failed delete the same way {@code deletePackage} does, then still
+     * mark the version Disposed and clear its asset map regardless, permanently orphaning bytes
+     * that record could no longer point back to. The same {@link DirectoryNotEmptyException} trick
+     * as {@link #deletingAnAssetsBytesFailingStillRemovesTheVersionRecordAndCleansUpTheOtherAsset}
+     * forces a real delete failure.
+     */
+    @Test
+    void disposePackageVersionsPropagatesAFailedAssetDeletionInsteadOfReportingSuccess(@TempDir Path dir)
+            throws IOException {
+        CodeArtifactService service = newService(dir);
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "v1".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+
+        Path assetFile;
+        try (Stream<Path> paths = Files.walk(dir.resolve("codeartifact-assets"))) {
+            assetFile = paths.filter(Files::isRegularFile).filter(p -> matchesContent(p, content))
+                    .findFirst().orElseThrow();
+        }
+        Files.delete(assetFile);
+        Files.createDirectory(assetFile);
+        Files.createFile(assetFile.resolve("not-empty"));
+
+        UncheckedIOException e = assertThrows(UncheckedIOException.class, () -> service.disposePackageVersions(
+                REGION, "dom", null, "repo", "generic", "ns", "pkg", List.of("1.0.0"), null, null));
+        assertTrue(e.getCause() instanceof DirectoryNotEmptyException, "expected the real delete failure to "
+                + "propagate rather than being swallowed, got cause: " + e.getCause());
+
+        CodeArtifactPackageVersion pv = service.describePackageVersion(REGION, "dom", null, "repo", "generic", "ns",
+                "pkg", "1.0.0");
+        assertEquals("Published", pv.getStatus(), "a failed delete must leave the version exactly as it was, not "
+                + "report Disposed anyway");
+        assertEquals(1, pv.getAssets().size());
+    }
+
     private static boolean matchesContent(Path file, byte[] expected) {
         try {
             return Arrays.equals(Files.readAllBytes(file), expected);

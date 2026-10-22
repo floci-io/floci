@@ -212,6 +212,18 @@ public class CodeArtifactNuGetController {
                         .build();
             }
 
+            // Raised by hectorvent's review: a real dotnet nuget push to a coordinate
+            // updatePackageVersionsStatus/disposePackageVersions left Archived or Disposed must be
+            // refused outright, the same way PublishPackageVersion already refuses it for the
+            // generic format, not accepted and then have forgetContainerBackedStatusOverride below
+            // silently un-block it afterward. Checked before the real write, not after.
+            try {
+                service.requireContainerBackedVersionNotArchivedOrDisposed(handle.region(), domain, handle.owner(),
+                        repository, "nuget", null, packageName, version);
+            } catch (AwsException e) {
+                return Response.status(409).entity(e.getMessage()).build();
+            }
+
             // Snapshotted before the real write, not after: see
             // CodeArtifactService#currentContainerBackedPackageFence's own javadoc for why the
             // order matters.
@@ -223,6 +235,12 @@ public class CodeArtifactNuGetController {
             if (pushSucceeded) {
                 service.recordContainerBackedAssetBytes(handle.region(), domain, handle.owner(), repository,
                         "nuget", null, packageName, nupkgBytes.length, fenceSnapshot);
+                // Found by Qodo review: a real dotnet nuget push that republishes a coordinate an
+                // earlier updatePackageVersionsStatus/disposePackageVersions call left Archived or
+                // Disposed would otherwise still have its fresh content blocked by that stale
+                // override, the same gap closed for Maven/npm/pypi's own native publish paths.
+                service.forgetContainerBackedStatusOverride(handle.region(), domain, handle.owner(), repository,
+                        "nuget", null, packageName, version);
             }
             return response;
         }

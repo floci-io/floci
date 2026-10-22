@@ -36,9 +36,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -2712,6 +2715,31 @@ class CodeArtifactServiceTest {
         assertEquals("ALREADY_EXISTS", result.failedVersions().get("1.0.0").errorCode());
     }
 
+    /**
+     * Raised by hectorvent's review of this PR, matching copyContainerBackedPackageVersions's own
+     * Disposed-destination guard: disposePackageVersions empties a generic version's asset map but
+     * keeps its record (so DescribePackageVersion keeps answering), so without a dedicated check an
+     * allowOverwrite copy would have nothing to compare against, fall through as though the
+     * destination were simply a different version, and resurrect a coordinate the User Guide says
+     * "can no longer be used."
+     */
+    @Test
+    void copyPackageVersionsFailsNotAllowedWhenTheDestinationIsAlreadyDisposed() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        publishGeneric("src", "my-pkg", "1.0.0", "source-bytes".getBytes(StandardCharsets.UTF_8));
+        publishGeneric("dst", "my-pkg", "1.0.0", "different-bytes".getBytes(StandardCharsets.UTF_8));
+        service.disposePackageVersions(REGION, "dom", null, "dst", "generic", "ns", "my-pkg", List.of("1.0.0"), null,
+                null);
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "generic", "ns", "my-pkg", List.of("1.0.0"), null, true, false);
+
+        assertTrue(result.successfulVersions().isEmpty());
+        assertEquals("NOT_ALLOWED", result.failedVersions().get("1.0.0").errorCode());
+    }
+
     @Test
     void copyPackageVersionsOverwritesADifferentExistingVersionWhenAllowOverwriteIsTrue() {
         service.createDomain(REGION, "dom", null, Map.of());
@@ -3623,6 +3651,476 @@ class CodeArtifactServiceTest {
         AwsException badOriginType = assertThrows(AwsException.class, () -> service.listPackageVersions(REGION,
                 "dom", null, "repo", "generic", "ns", "my-pkg", null, null, null, null, "NOT_AN_ORIGIN"));
         assertEquals("ValidationException", badOriginType.getErrorCode());
+    }
+
+    // ------------------------------------- updatePackageVersionsStatus / disposePackageVersions
+
+    @Test
+    void updatePackageVersionsStatusArchivesAGenericVersionAndChangesItsRevision() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+        // Captured as a plain string, not the live CodeArtifactPackageVersion object: the test
+        // storage backend hands back the same mutable instance on every read, so holding onto the
+        // object itself would see it change underneath this assertion once the update below
+        // mutates it in place.
+        String revisionBeforeUpdate = service.describePackageVersion(REGION, "dom", null, "repo", "generic", "ns",
+                "my-pkg", "1.0.0").getRevision();
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.updatePackageVersionsStatus(REGION,
+                "dom", null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null, null, "Archived");
+
+        assertEquals(1, result.successfulVersions().size());
+        assertEquals("Archived", result.successfulVersions().get("1.0.0").status());
+        assertNotEquals(revisionBeforeUpdate, result.successfulVersions().get("1.0.0").revision());
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals("Archived", service.describePackageVersion(REGION, "dom", null, "repo", "generic", "ns",
+                "my-pkg", "1.0.0").getStatus());
+    }
+
+    @Test
+    void updatePackageVersionsStatusSkipsEveryOtherwiseEligibleVersionWhenOneFails() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.updatePackageVersionsStatus(REGION,
+                "dom", null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0", "9.9.9"), null, null, "Archived");
+
+        assertTrue(result.successfulVersions().isEmpty());
+        assertEquals("NOT_FOUND", result.failedVersions().get("9.9.9").errorCode());
+        assertEquals("SKIPPED", result.failedVersions().get("1.0.0").errorCode());
+        // Confirms the all-or-nothing rule actually held: 1.0.0 would have succeeded on its own.
+        assertEquals("Published", service.describePackageVersion(REGION, "dom", null, "repo", "generic", "ns",
+                "my-pkg", "1.0.0").getStatus());
+    }
+
+    @Test
+    void updatePackageVersionsStatusFailsMismatchedRevisionAndMismatchedStatus() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.PackageVersionStatusChangeResult revisionMismatch = service.updatePackageVersionsStatus(
+                REGION, "dom", null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"),
+                Map.of("1.0.0", "not-the-real-revision"), null, "Archived");
+        assertEquals("MISMATCHED_REVISION", revisionMismatch.failedVersions().get("1.0.0").errorCode());
+
+        CodeArtifactService.PackageVersionStatusChangeResult statusMismatch = service.updatePackageVersionsStatus(
+                REGION, "dom", null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null, "Unlisted",
+                "Archived");
+        assertEquals("MISMATCHED_STATUS", statusMismatch.failedVersions().get("1.0.0").errorCode());
+        assertTrue(statusMismatch.failedVersions().get("1.0.0").errorMessage().contains("current status: Published"));
+    }
+
+    @Test
+    void updatePackageVersionsStatusCannotMoveAwayFromDisposed() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+        service.disposePackageVersions(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"),
+                null, null);
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.updatePackageVersionsStatus(REGION,
+                "dom", null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null, null, "Unlisted");
+
+        assertEquals("NOT_ALLOWED", result.failedVersions().get("1.0.0").errorCode());
+    }
+
+    @Test
+    void updatePackageVersionsStatusRejectsUnfinishedDisposedOrDeletedAsTargetStatus() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        for (String badTarget : List.of("Unfinished", "Disposed", "Deleted", "NotAStatus")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.updatePackageVersionsStatus(REGION,
+                    "dom", null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null, null, badTarget));
+            assertEquals("ValidationException", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void updatePackageVersionsStatusRejectsDisposedAsExpectedStatusButDisposeAcceptsIt() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updatePackageVersionsStatus(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null, "Disposed", "Archived"));
+        assertEquals("ValidationException", e.getErrorCode());
+
+        // DisposePackageVersionsRequest.expectedStatus's own wider valid set accepts "Disposed"
+        // itself (confirmed against the API reference): the version isn't actually Disposed yet,
+        // so this still fails, but on the per-version MISMATCHED_STATUS check, not request
+        // validation.
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.disposePackageVersions(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null, "Disposed");
+        assertEquals("MISMATCHED_STATUS", result.failedVersions().get("1.0.0").errorCode());
+    }
+
+    @Test
+    void updatePackageVersionsStatusRequiresVersionsAndCapsAtOneHundred() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException missing = assertThrows(AwsException.class, () -> service.updatePackageVersionsStatus(REGION,
+                "dom", null, "repo", "generic", "ns", "my-pkg", List.of(), null, null, "Archived"));
+        assertEquals("ValidationException", missing.getErrorCode());
+
+        List<String> tooMany = IntStream.range(0, 101).mapToObj(i -> "1.0." + i).toList();
+        AwsException overLimit = assertThrows(AwsException.class, () -> service.updatePackageVersionsStatus(REGION,
+                "dom", null, "repo", "generic", "ns", "my-pkg", tooMany, null, null, "Archived"));
+        assertEquals("ValidationException", overLimit.getErrorCode());
+    }
+
+    @Test
+    void disposePackageVersionsDeletesGenericAssetBytesAndBlocksFurtherDownload() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.disposePackageVersions(REGION, "dom",
+                null, "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null, null);
+
+        assertEquals("Disposed", result.successfulVersions().get("1.0.0").status());
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt", null));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        // DescribePackageVersion still answers for a disposed version (per the User Guide: "To
+        // view information about a disposed package version, use DescribePackageVersion"), it
+        // just reports no assets left.
+        CodeArtifactPackageVersion described = service.describePackageVersion(REGION, "dom", null, "repo", "generic",
+                "ns", "my-pkg", "1.0.0");
+        assertEquals("Disposed", described.getStatus());
+        assertTrue(described.getAssets().isEmpty());
+    }
+
+    /**
+     * A sidecar that cannot supply a timestamp for one of its versions reports it as a {@code
+     * null} {@code publishedTime} (the same possibility {@code listPackageVersions} itself
+     * already handles); building the per-call publish-time lookup with {@code Collectors.toMap}
+     * would throw a {@code NullPointerException} on that null value (it uses {@code Map.merge}
+     * internally, which rejects one), so this must still succeed.
+     */
+    @Test
+    void updatePackageVersionsStatusSucceedsWhenTheSidecarHasNoTimestampForTheVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0", null)));
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.updatePackageVersionsStatus(REGION,
+                "dom", null, "repo", "maven", "com.example", "a", List.of("1.0"), null, null, "Archived");
+
+        assertEquals("Archived", result.successfulVersions().get("1.0").status());
+        assertTrue(result.failedVersions().isEmpty());
+    }
+
+    @Test
+    void updatePackageVersionsStatusArchivesAMavenVersionThroughTheSidecarOverrideAndGetAssetIsBlocked() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a.jar"))).thenReturn(Optional.of("jar-bytes".getBytes(StandardCharsets.UTF_8)));
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.updatePackageVersionsStatus(REGION,
+                "dom", null, "repo", "maven", "com.example", "a", List.of("1.0"), null, null, "Archived");
+        assertEquals("Archived", result.successfulVersions().get("1.0").status());
+
+        CodeArtifactService.ListPackageVersionsResult listed = service.listPackageVersions(REGION, "dom", null,
+                "repo", "maven", "com.example", "a", "Archived", null, null, null, null);
+        assertEquals(1, listed.versions().size());
+        assertEquals("Archived", listed.versions().get(0).status());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION, "dom", null,
+                "repo", "maven", "com.example", "a", "1.0", "a.jar", null));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        verify(reposiliteClient, never()).fetchPackageVersionAsset(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void disposePackageVersionsDeletesEveryRealAssetAndKeepsListingTheVersionAsDisposed() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar", "a-1.0.pom"));
+
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.disposePackageVersions(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", List.of("1.0"), null, null);
+        assertEquals("Disposed", result.successfulVersions().get("1.0").status());
+        verify(reposiliteClient).deletePackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"));
+        verify(reposiliteClient).deletePackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.pom"));
+
+        // The sidecar no longer lists the disposed version at all (its content is gone), yet
+        // ListPackageVersions still reports it, by status=Disposed, from the override alone.
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of());
+        CodeArtifactService.ListPackageVersionsResult listed = service.listPackageVersions(REGION, "dom", null,
+                "repo", "maven", "com.example", "a", "Disposed", null, null, null, null);
+        assertEquals(1, listed.versions().size());
+        assertEquals("1.0", listed.versions().get(0).version());
+        assertEquals("Disposed", listed.versions().get(0).status());
+    }
+
+    @Test
+    void disposePackageVersionsRejectsAnExpectedStatusUpdateDoesNotAllow() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.disposePackageVersions(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", List.of("1.0.0"), null, "NotAStatus"));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    /**
+     * Qodo review finding on this PR: {@code DescribeDomain.assetSizeBytes} kept counting a
+     * container-backed version's bytes forever after disposal, since the per-package running
+     * total was never reduced when its real sidecar assets were deleted.
+     */
+    @Test
+    void disposePackageVersionsReducesTheDomainAssetSizeByTheRealDeletedBytes() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        recordBytes("dom", "repo", "maven", "com.example", "a", 100L);
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(new byte[40]));
+
+        service.disposePackageVersions(REGION, "dom", null, "repo", "maven", "com.example", "a", List.of("1.0"),
+                null, null);
+
+        assertEquals(60L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * Qodo review finding on this PR: {@code ListPackageVersionAssets} and {@code
+     * GetPackageVersionReadme} still computed a container-backed version's revision with the raw,
+     * coordinate-derived {@code synthesizeContainerBackedRevision} formula, disagreeing with the
+     * fresh revision {@code updatePackageVersionsStatus}/{@code DescribePackageVersion}/{@code
+     * ListPackageVersions} report once a status override exists for that version.
+     */
+    @Test
+    void listPackageVersionAssetsAndGetPackageVersionReadmeAgreeWithTheOverrideRevisionAfterArchiving() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", Instant.ofEpochSecond(1000))));
+        when(verdaccioClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"))).thenReturn(true);
+        when(verdaccioClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"))).thenReturn(List.of("my-pkg-1.0.0.tgz"));
+        when(verdaccioClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of("tgz-bytes".getBytes(
+                        StandardCharsets.UTF_8)));
+        recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "hello");
+
+        CodeArtifactService.PackageVersionStatusChangeResult changed = service.updatePackageVersionsStatus(REGION,
+                "dom", null, "repo", "npm", null, "my-pkg", List.of("1.0.0"), null, null, "Archived");
+        String overrideRevision = changed.successfulVersions().get("1.0.0").revision();
+
+        CodeArtifactService.PackageVersionAssetsListResult assets = service.listPackageVersionAssets(REGION, "dom",
+                null, "repo", "npm", null, "my-pkg", "1.0.0", null, null);
+        assertEquals(overrideRevision, assets.versionRevision());
+
+        CodeArtifactService.PackageVersionReadmeResult readme = service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "npm", null, "my-pkg", "1.0.0");
+        assertEquals(overrideRevision, readme.versionRevision());
+    }
+
+    /**
+     * Qodo review finding on this PR: copying new content over a destination version that an
+     * earlier {@code updatePackageVersionsStatus} had archived left the old override in place,
+     * so the fresh content this copy just wrote would still read back as Archived and {@code
+     * GetPackageVersionAsset} would keep 404ing on it, contradicting the copy's own response
+     * (which reports Published).
+     */
+    @Test
+    void copyPackageVersionsClearsAStaleArchivedOverrideAtTheDestinationAndUnblocksDownload() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] newJar = "new-jar-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] oldJar = "old-jar-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJar));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJar));
+        when(reposiliteClient.listPackageVersions(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        service.updatePackageVersionsStatus(REGION, "dom", null, "dst", "maven", "com.example", "a", List.of("1.0"),
+                null, null, "Archived");
+        assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION, "dom", null, "dst", "maven",
+                "com.example", "a", "1.0", "a-1.0.jar", null));
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, true, false);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals("Published", result.successfulVersions().get("1.0").status());
+        PackageVersionAssetResult downloaded = service.getPackageVersionAsset(REGION, "dom", null, "dst", "maven",
+                "com.example", "a", "1.0", "a-1.0.jar", null);
+        assertEquals(oldJar.length, downloaded.asset().getSize());
+    }
+
+    /**
+     * Qodo review's remaining half of the same finding: {@code copyContainerBackedPackageVersions}
+     * clears a stale override on its own overwrite path, but nothing cleared one for a native
+     * publish — every container-backed proxy controller (Maven, npm, pypi, nuget) now calls
+     * {@code forgetContainerBackedStatusOverride} right alongside its existing byte-accounting
+     * call once a native publish actually writes something. This proves the shared primitive those
+     * four call sites all delegate to.
+     */
+    @Test
+    void forgetContainerBackedStatusOverrideClearsItAndUnblocksDownload() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of("jar-bytes".getBytes(
+                        StandardCharsets.UTF_8)));
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "maven", "com.example", "a",
+                List.of("1.0"), null, null, "Archived");
+        assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION, "dom", null, "repo", "maven",
+                "com.example", "a", "1.0", "a-1.0.jar", null));
+
+        service.forgetContainerBackedStatusOverride(REGION, "dom", null, "repo", "maven", "com.example", "a", "1.0");
+
+        PackageVersionAssetResult downloaded = service.getPackageVersionAsset(REGION, "dom", null, "repo", "maven",
+                "com.example", "a", "1.0", "a-1.0.jar", null);
+        assertEquals("jar-bytes".getBytes(StandardCharsets.UTF_8).length, downloaded.asset().getSize());
+    }
+
+    /**
+     * Raised by hectorvent's review of this PR: {@code forgetContainerBackedStatusOverride} above
+     * only ever clears an Archived/Disposed override after a native proxy controller's real
+     * sidecar write already succeeded, which would let a package-manager republish silently
+     * resurrect either status. Every native proxy controller now calls this guard first, before
+     * issuing that write, and must see it refuse exactly the two statuses the User Guide blocks
+     * unconditionally — Published, Unlisted, and a coordinate with no override at all must all
+     * sail through untouched.
+     */
+    @Test
+    void requireContainerBackedVersionNotArchivedOrDisposedBlocksOnlyThoseTwoStatuses() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000)),
+                        new RepositorySidecarManager.PackageVersionTimestamp("2.0", Instant.ofEpochSecond(1000)),
+                        new RepositorySidecarManager.PackageVersionTimestamp("3.0", Instant.ofEpochSecond(1000))));
+
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "maven", "com.example", "a",
+                List.of("1.0"), null, null, "Archived");
+        AwsException archivedError = assertThrows(AwsException.class,
+                () -> service.requireContainerBackedVersionNotArchivedOrDisposed(REGION, "dom", null, "repo",
+                        "maven", "com.example", "a", "1.0"));
+        assertEquals("ConflictException", archivedError.getErrorCode());
+
+        service.disposePackageVersions(REGION, "dom", null, "repo", "maven", "com.example", "a", List.of("2.0"),
+                null, null);
+        AwsException disposedError = assertThrows(AwsException.class,
+                () -> service.requireContainerBackedVersionNotArchivedOrDisposed(REGION, "dom", null, "repo",
+                        "maven", "com.example", "a", "2.0"));
+        assertEquals("ConflictException", disposedError.getErrorCode());
+
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "maven", "com.example", "a",
+                List.of("3.0"), null, null, "Unlisted");
+        assertDoesNotThrow(() -> service.requireContainerBackedVersionNotArchivedOrDisposed(REGION, "dom", null,
+                "repo", "maven", "com.example", "a", "3.0"));
+
+        assertDoesNotThrow(() -> service.requireContainerBackedVersionNotArchivedOrDisposed(REGION, "dom", null,
+                "repo", "maven", "com.example", "a", "4.0-never-touched"));
+    }
+
+    /**
+     * Qodo review finding on this PR: a generic {@code publishPackageVersion} treated every
+     * existing version whose status was not Published (including Disposed and Archived) exactly
+     * like a brand new or Unfinished one, letting a publish silently resurrect a version the
+     * User Guide says can never move back to Published once either status applies.
+     */
+    @Test
+    void publishPackageVersionRejectsRepublishOfADisposedOrArchivedGenericVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "v1".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "archived-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "generic", "ns", "archived-pkg",
+                List.of("1.0.0"), null, null, "Archived");
+        AwsException archivedError = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION,
+                "dom", null, "repo", "generic", "ns", "archived-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content),
+                "false", content));
+        assertEquals("ConflictException", archivedError.getErrorCode());
+
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "disposed-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+        service.disposePackageVersions(REGION, "dom", null, "repo", "generic", "ns", "disposed-pkg",
+                List.of("1.0.0"), null, null);
+        AwsException disposedError = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION,
+                "dom", null, "repo", "generic", "ns", "disposed-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content),
+                "false", content));
+        assertEquals("ConflictException", disposedError.getErrorCode());
+    }
+
+    /**
+     * Unlisted only hides a version from listings, and the User Guide never says republishing it
+     * is blocked the way it does for Archived/Disposed, so this folds into the same
+     * idempotent-replay rule Published already has: an exact byte-identical retry is a no-op, but
+     * genuinely different content is still rejected, rather than silently rebuilding it as though
+     * no version existed there at all (which the Unfinished fallthrough would otherwise do).
+     */
+    @Test
+    void publishPackageVersionReplaysAnUnlistedVersionIdempotentlyButRejectsDifferentContent() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "v1".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "generic", "ns", "pkg", List.of("1.0.0"),
+                null, null, "Unlisted");
+
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+        CodeArtifactPackageVersion pv = service.describePackageVersion(REGION, "dom", null, "repo", "generic", "ns",
+                "pkg", "1.0.0");
+        assertEquals("Unlisted", pv.getStatus());
+
+        byte[] different = "v2".getBytes(StandardCharsets.UTF_8);
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", "ns", "pkg", "1.0.0", "a.txt", Digests.sha256Hex(different), "false", different));
+        assertEquals("ConflictException", e.getErrorCode());
     }
 
     // --------------------------------------------- NuGet revision normalization

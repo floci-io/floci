@@ -237,6 +237,19 @@ public interface RepositorySidecarManager {
     }
 
     /**
+     * Called once per version, after every one of its assets has already been removed through
+     * {@link #deletePackageVersionAsset}, for a sidecar whose own native listing can name a
+     * version somewhere other than the per-version assets {@link #listPackageVersionAssetNames}
+     * already enumerates — Maven's artifact-level {@code maven-metadata.xml}, which {@code
+     * ReposiliteSidecarClient} overrides this to rewrite. Default is a no-op: a sidecar with no
+     * such separate listing (every format {@code DisposePackageVersions} supports besides Maven)
+     * already has nothing left to say the version ever existed once its assets are gone.
+     */
+    default void recordVersionDisposed(String repositoryContainerId, String namespace, String packageName,
+            String version) {
+    }
+
+    /**
      * This format's own preferred "default display" version for a package, independent of publish
      * recency, for {@code ListPackageVersions}' {@code defaultDisplayVersion}. {@code empty()} by
      * default: every sidecar Floci currently backs besides npm has no such separate preference of
