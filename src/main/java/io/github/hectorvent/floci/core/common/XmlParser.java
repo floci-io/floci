@@ -303,6 +303,54 @@ public final class XmlParser {
     }
 
     /**
+     * Like {@link #extractPairs}, but for a body that must be refused rather than read in part: every
+     * pair in document order, a repeated key included, or {@code null} when the document is not
+     * well-formed or a {@code parentElement} block lacks either child.
+     */
+    public static List<Map.Entry<String, String>> extractPairEntries(String xml, String parentElement,
+                                                                     String keyElement, String valueElement) {
+        if (xml == null || xml.isEmpty()) {
+            return null;
+        }
+        try {
+            XMLStreamReader r = FACTORY.createXMLStreamReader(new StringReader(xml));
+            try {
+                List<Map.Entry<String, String>> result = new ArrayList<>();
+                boolean inParent = false;
+                String key = null;
+                String value = null;
+                while (r.hasNext()) {
+                    int event = r.next();
+                    if (event == XMLStreamConstants.START_ELEMENT) {
+                        String local = r.getLocalName();
+                        if (parentElement.equals(local)) {
+                            inParent = true;
+                            key = null;
+                            value = null;
+                        } else if (inParent && keyElement.equals(local)) {
+                            key = r.getElementText();
+                        } else if (inParent && valueElement.equals(local)) {
+                            value = r.getElementText();
+                        }
+                    } else if (event == XMLStreamConstants.END_ELEMENT && parentElement.equals(r.getLocalName())) {
+                        if (key == null || value == null) {
+                            return null;
+                        }
+                        result.add(Map.entry(key, value));
+                        inParent = false;
+                    }
+                }
+                return result;
+            } finally {
+                r.close();
+            }
+        } catch (XMLStreamException e) {
+            LOG.debugv("Refusing malformed XML: {0}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * Extracts every group of elements nested inside a repeating {@code parentElement},
      * returning each group as a {@code Map<localName, List<text>>}.
      *

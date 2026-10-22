@@ -13,7 +13,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.IntStream;
 
 import static io.restassured.RestAssured.given;
@@ -2736,6 +2738,57 @@ class S3IntegrationTest {
             }
             given().when().delete("/" + bucket);
         }
+    }
+
+    @Test
+    @Order(100)
+    void putObjectTaggingRefusesAnInvalidBodyAndKeepsTheTags() {
+        String bucket = "object-tagging-validation-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("v1").when().put("/" + bucket + "/k.txt").then().statusCode(200);
+        given().body(taggingBody("<Tag><Key>keep</Key><Value>me</Value></Tag>"))
+            .when().put("/" + bucket + "/k.txt?tagging").then().statusCode(200);
+        try {
+            StringBuilder elevenTags = new StringBuilder();
+            for (int i = 0; i < 11; i++) {
+                elevenTags.append("<Tag><Key>k").append(i).append("</Key><Value>v</Value></Tag>");
+            }
+            Map<String, String> refusals = new LinkedHashMap<>();
+            refusals.put(taggingBody(elevenTags.toString()), "BadRequest");
+            refusals.put(taggingBody("<Tag><Key>dup</Key><Value>1</Value></Tag><Tag><Key>dup</Key><Value>2</Value></Tag>"),
+                    "InvalidTag");
+            refusals.put(taggingBody("<Tag><Key>" + "k".repeat(129) + "</Key><Value>v</Value></Tag>"), "InvalidTag");
+            refusals.put(taggingBody("<Tag><Key>k</Key><Value>" + "v".repeat(257) + "</Value></Tag>"), "InvalidTag");
+            refusals.put("<Tagging><TagSet><Tag><Key>new</Key><Value>tag</Value></Tag></TagSet>", "MalformedXML");
+            refusals.put(taggingBody("<Tag><Key>no-value</Key></Tag>"), "MalformedXML");
+            refusals.put("<Tagging></Tagging>", "MalformedXML");
+            refusals.forEach((body, code) -> given()
+                .body(body)
+            .when()
+                .put("/" + bucket + "/k.txt?tagging")
+            .then()
+                .statusCode(400)
+                .body("Error.Code", equalTo(code)));
+
+            given().body("v1").when().put("/" + bucket + "/limits.txt").then().statusCode(200);
+            given().body(taggingBody("<Tag><Key>" + "k".repeat(128) + "</Key><Value>" + "v".repeat(256) + "</Value></Tag>"))
+                .when().put("/" + bucket + "/limits.txt?tagging").then().statusCode(200);
+            given()
+            .when()
+                .get("/" + bucket + "/k.txt?tagging")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>keep</Key>"))
+                .body(containsString("<Value>me</Value>"));
+        } finally {
+            given().when().delete("/" + bucket + "/k.txt");
+            given().when().delete("/" + bucket + "/limits.txt");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    private static String taggingBody(String tags) {
+        return "<Tagging><TagSet>" + tags + "</TagSet></Tagging>";
     }
 
     @Test

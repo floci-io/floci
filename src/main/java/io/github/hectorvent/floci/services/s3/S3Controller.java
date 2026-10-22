@@ -2734,8 +2734,43 @@ public class S3Controller {
 
     private Response handlePutObjectTagging(String bucket, String key, String versionId, byte[] body) {
         String xml = new String(body, StandardCharsets.UTF_8);
-        Map<String, String> tags = XmlParser.extractPairs(xml, "Tag", "Key", "Value");
+        List<Map.Entry<String, String>> pairs = XmlParser.extractPairEntries(xml, "Tag", "Key", "Value");
+        if (pairs == null || !"Tagging".equals(XmlParser.rootElementName(xml))
+                || !XmlParser.childElementNames(xml, "Tagging").contains("TagSet")) {
+            throw new AwsException("MalformedXML", "The XML you provided was not well-formed or did not validate"
+                    + " against our published schema", 400);
+        }
+        Map<String, String> tags = objectTagSet(pairs);
         return withVersionId(Response.ok(), s3Service.putObjectTagging(bucket, key, versionId, tags)).build();
+    }
+
+    /**
+     * An object's tag set as S3 limits it: at most 10 tags, refused with the same error as the
+     * {@code x-amz-tagging} header, each key unique, a key of at most 128 and a value of at most 256
+     * Unicode characters.
+     */
+    private static Map<String, String> objectTagSet(List<Map.Entry<String, String>> pairs) {
+        if (pairs.size() > MAX_INLINE_TAGS) {
+            throw new AwsException("BadRequest", "Object tags cannot be greater than " + MAX_INLINE_TAGS, 400);
+        }
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (Map.Entry<String, String> pair : pairs) {
+            String tagKey = pair.getKey();
+            String tagValue = pair.getValue();
+            if (tagKey.codePointCount(0, tagKey.length()) > MAX_TAG_KEY_LENGTH) {
+                throw new AwsException("InvalidTag",
+                        "The TagKey you have provided is too long, max " + MAX_TAG_KEY_LENGTH, 400);
+            }
+            if (tagValue.codePointCount(0, tagValue.length()) > MAX_TAG_VALUE_LENGTH) {
+                throw new AwsException("InvalidTag",
+                        "The TagValue you have provided is too long, max " + MAX_TAG_VALUE_LENGTH, 400);
+            }
+            if (tags.put(tagKey, tagValue) != null) {
+                throw new AwsException("InvalidTag", "Cannot provide multiple Tags with the same key", 400,
+                        Map.of("TagKey", tagKey));
+            }
+        }
+        return tags;
     }
 
     private Response handleGetObjectTagging(String bucket, String key, String versionId) {
@@ -4220,6 +4255,8 @@ public class S3Controller {
 
     private static final int MAX_INLINE_TAGS = 10;
     private static final int MAX_INLINE_TAGGING_HEADER_BYTES = 8 * 1024;
+    private static final int MAX_TAG_KEY_LENGTH = 128;
+    private static final int MAX_TAG_VALUE_LENGTH = 256;
 
     /** The Object Lock settings a PutObject, CopyObject or CreateMultipartUpload asks for in its headers. */
     private record ObjectLockHeaders(String mode, Instant retainUntilDate, String legalHoldStatus) {
