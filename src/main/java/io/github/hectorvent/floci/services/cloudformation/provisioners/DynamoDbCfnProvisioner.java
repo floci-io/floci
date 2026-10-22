@@ -435,7 +435,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         for (GlobalSecondaryIndex index : declared) {
             declaredNames.add(index.getIndexName());
             GlobalSecondaryIndex current = existing.get(index.getIndexName());
-            if (current != null && !indexShape(current).equals(indexShape(index))) {
+            if (current != null && !sameShape(current, index)) {
                 throw new AwsException("InvalidRequest", "Invalid request provided: Cannot update GSI's properties"
                         + " other than Provisioned Throughput and Contributor Insights Specification. You can create"
                         + " a new GSI with a different name.", 400);
@@ -456,15 +456,26 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         return table;
     }
 
-    /** What an index is beyond its name and throughput: its key schema and its projection. */
-    private static List<String> indexShape(GlobalSecondaryIndex index) {
+    /**
+     * Whether the table's index keeps the declared key schema and projection. A projection the
+     * backend does not report is unknown, not different.
+     */
+    private static boolean sameShape(GlobalSecondaryIndex current, GlobalSecondaryIndex declared) {
+        boolean projectionReported = current.getProjectionType() != null;
+        return indexShape(current, projectionReported).equals(indexShape(declared, projectionReported));
+    }
+
+    /** What an index is beyond its name and throughput: its key schema and, when asked, its projection. */
+    private static List<String> indexShape(GlobalSecondaryIndex index, boolean withProjection) {
         List<String> shape = new ArrayList<>();
         for (KeySchemaElement key : index.getKeySchema()) {
             shape.add(key.getAttributeName() + " " + key.getKeyType());
         }
-        shape.add(index.getProjectionType() == null ? "ALL" : index.getProjectionType());
-        if (index.getNonKeyAttributes() != null) {
-            index.getNonKeyAttributes().stream().sorted().forEach(shape::add);
+        if (withProjection) {
+            shape.add(index.getProjectionType() == null ? "ALL" : index.getProjectionType());
+            if (index.getNonKeyAttributes() != null) {
+                index.getNonKeyAttributes().stream().sorted().forEach(shape::add);
+            }
         }
         return shape;
     }

@@ -577,6 +577,34 @@ class DynamoDbLocalBackendTest {
     }
 
     @Test
+    void describeTableReadsIndexProjections() throws Exception {
+        answer("DescribeTable", 200, """
+                {"Table":{"TableName":"orders","TableArn":"%stable/orders",
+                 "GlobalSecondaryIndexes":[
+                   {"IndexName":"byStatus","KeySchema":[{"AttributeName":"status","KeyType":"HASH"}],
+                    "Projection":{"ProjectionType":"KEYS_ONLY"}},
+                   {"IndexName":"byEmail","KeySchema":[{"AttributeName":"email","KeyType":"HASH"}],
+                    "Projection":{"ProjectionType":"INCLUDE","NonKeyAttributes":["name","total"]}}],
+                 "LocalSecondaryIndexes":[
+                   {"IndexName":"byDate","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},
+                     {"AttributeName":"date","KeyType":"RANGE"}],
+                    "Projection":{"ProjectionType":"INCLUDE","NonKeyAttributes":["total"]}}]}}
+                """.formatted(LOCAL));
+
+        TableDefinition table = backend.describeTable(SCOPE, "orders");
+
+        GlobalSecondaryIndex byStatus = table.getGlobalSecondaryIndexes().get(0);
+        GlobalSecondaryIndex byEmail = table.getGlobalSecondaryIndexes().get(1);
+        LocalSecondaryIndex byDate = table.getLocalSecondaryIndexes().get(0);
+        assertEquals("KEYS_ONLY", byStatus.getProjectionType());
+        assertEquals(List.of(), byStatus.getNonKeyAttributes());
+        assertEquals("INCLUDE", byEmail.getProjectionType());
+        assertEquals(List.of("name", "total"), byEmail.getNonKeyAttributes());
+        assertEquals("INCLUDE", byDate.getProjectionType());
+        assertEquals(List.of("total"), byDate.getNonKeyAttributes());
+    }
+
+    @Test
     void findTableAbsentIsEmpty() throws Exception {
         answer("DescribeTable", 400, "{\"__type\":\"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException\","
                 + "\"message\":\"Requested resource not found\"}");

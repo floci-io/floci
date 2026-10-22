@@ -775,6 +775,58 @@ class DynamoDbCfnProvisionerTest {
                 anyList(), any(), anyString());
     }
 
+    private static final String PROJECTED_INDEXES_PROPS = "{\"TableName\":\"orders\","
+            + "\"AttributeDefinitions\":[{\"AttributeName\":\"pk\",\"AttributeType\":\"S\"},"
+            + "{\"AttributeName\":\"status\",\"AttributeType\":\"S\"},"
+            + "{\"AttributeName\":\"email\",\"AttributeType\":\"S\"}],"
+            + "\"KeySchema\":[{\"AttributeName\":\"pk\",\"KeyType\":\"HASH\"}],"
+            + "\"GlobalSecondaryIndexes\":[{\"IndexName\":\"byStatus\","
+            + "\"KeySchema\":[{\"AttributeName\":\"status\",\"KeyType\":\"HASH\"}],"
+            + "\"Projection\":{\"ProjectionType\":\"KEYS_ONLY\"}},"
+            + "{\"IndexName\":\"byEmail\",\"KeySchema\":[{\"AttributeName\":\"email\",\"KeyType\":\"HASH\"}],"
+            + "\"Projection\":{\"ProjectionType\":\"INCLUDE\",\"NonKeyAttributes\":[\"name\",\"total\"]}}],"
+            + "\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}";
+
+    /** A tag change on a table whose KEYS_ONLY and INCLUDE indexes the template keeps as they are. */
+    @Test
+    void anUpdateLeavesUnchangedKeysOnlyAndIncludeIndexesAlone() throws Exception {
+        TableDefinition current = table(false);
+        current.getGlobalSecondaryIndexes().add(new GlobalSecondaryIndex("byStatus",
+                List.of(new KeySchemaElement("status", "HASH")), null, "KEYS_ONLY", List.of()));
+        current.getGlobalSecondaryIndexes().add(new GlobalSecondaryIndex("byEmail",
+                List.of(new KeySchemaElement("email", "HASH")), null, "INCLUDE", List.of("total", "name")));
+        existingTable(current);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props(PROJECTED_INDEXES_PROPS), updateCtx(TABLE_NAME));
+
+        verify(dynamoDb).tagResource(TABLE_ARN, Map.of("env", "prod"), "us-east-1");
+        verify(dynamoDb, never()).updateTable(anyString(), any(), any(), anyList(), anyList(), anyList(), anyList(),
+                anyList(), any(), anyString());
+    }
+
+    /** A backend that reports no projection for an index gives no sign the template changed it. */
+    @Test
+    void anIndexWhoseProjectionIsNotReportedIsNotTreatedAsChanged() throws Exception {
+        TableDefinition current = table(false);
+        for (String hashKey : List.of("status", "email")) {
+            GlobalSecondaryIndex unreported = new GlobalSecondaryIndex();
+            unreported.setIndexName("status".equals(hashKey) ? "byStatus" : "byEmail");
+            unreported.setKeySchema(List.of(new KeySchemaElement(hashKey, "HASH")));
+            current.getGlobalSecondaryIndexes().add(unreported);
+        }
+        existingTable(current);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props(PROJECTED_INDEXES_PROPS), updateCtx(TABLE_NAME));
+
+        verify(dynamoDb).tagResource(TABLE_ARN, Map.of("env", "prod"), "us-east-1");
+        verify(dynamoDb, never()).updateTable(anyString(), any(), any(), anyList(), anyList(), anyList(), anyList(),
+                anyList(), any(), anyString());
+    }
+
     /** BillingMode PAY_PER_REQUEST reaches a table the backend creates provisioned. */
     @Test
     void onDemandBillingIsAppliedOnCreate() throws Exception {

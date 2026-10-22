@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.RecordsPage;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.Shard;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.Stream;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -289,6 +290,48 @@ class DynamoDbLocalBackendIntegrationTest {
             .statusCode(200)
             .body("TimeToLiveDescription.TimeToLiveStatus", equalTo("ENABLED"))
             .body("TimeToLiveDescription.AttributeName", equalTo("expiresAt"));
+    }
+
+    @Test
+    void aStackUpdateKeepsTheKeysOnlyAndIncludeIndexesItCreated() {
+        String table = tableName("projected");
+        String stack = "local-it-projected-" + UUID.randomUUID();
+        String template = """
+            {
+                "Resources": {
+                    "Orders": {
+                        "Type": "AWS::DynamoDB::Table",
+                        "Properties": {
+                            "TableName": "%s",
+                            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                            "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"},
+                                {"AttributeName": "status", "AttributeType": "S"},
+                                {"AttributeName": "email", "AttributeType": "S"}],
+                            "BillingMode": "PAY_PER_REQUEST",
+                            "GlobalSecondaryIndexes": [
+                                {"IndexName": "byStatus", "KeySchema": [{"AttributeName": "status", "KeyType": "HASH"}],
+                                 "Projection": {"ProjectionType": "KEYS_ONLY"}},
+                                {"IndexName": "byEmail", "KeySchema": [{"AttributeName": "email", "KeyType": "HASH"}],
+                                 "Projection": {"ProjectionType": "INCLUDE", "NonKeyAttributes": ["name"]}}],
+                            "Tags": [{"Key": "env", "Value": "%s"}]
+                        }
+                    }
+                }
+            }
+            """;
+
+        cloudFormation(A_EAST, "CreateStack", stack, template.formatted(table, "dev"));
+        created.add(new CreatedTable(A_EAST, table));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, A_EAST.authorization("cloudformation"))
+                .status());
+
+        cloudFormation(A_EAST, "UpdateStack", stack, template.formatted(table, "prod"));
+        CfnStackWaits.StackState updated = CfnStackWaits.awaitTerminal(stack, A_EAST.authorization("cloudformation"));
+
+        assertEquals("UPDATE_COMPLETE", updated.status(), updated.reason());
+        dynamoDb(A_EAST, "ListTagsOfResource", "{\"ResourceArn\": \"" + tableArn(A_EAST, table) + "\"}")
+            .statusCode(200)
+            .body("Tags.Value", contains("prod"));
     }
 
     @Test

@@ -519,7 +519,26 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         table.setStreamViewType(text(spec, "StreamViewType"));
         table.setStreamArn(table.isStreamEnabled() ? text(description, "LatestStreamArn") : null);
         table.setTableId(description.path("TableId").asText());
+        // DescribeTable nests an index's projection, which the model holds as two flat fields.
+        List<GlobalSecondaryIndex> globalIndexes = table.getGlobalSecondaryIndexes();
+        for (int i = 0; i < globalIndexes.size(); i++) {
+            JsonNode projection = description.path("GlobalSecondaryIndexes").path(i).path("Projection");
+            globalIndexes.get(i).setProjectionType(text(projection, "ProjectionType"));
+            globalIndexes.get(i).setNonKeyAttributes(nonKeyAttributes(projection));
+        }
+        List<LocalSecondaryIndex> localIndexes = table.getLocalSecondaryIndexes();
+        for (int i = 0; i < localIndexes.size(); i++) {
+            JsonNode projection = description.path("LocalSecondaryIndexes").path(i).path("Projection");
+            localIndexes.get(i).setProjectionType(text(projection, "ProjectionType"));
+            localIndexes.get(i).setNonKeyAttributes(nonKeyAttributes(projection));
+        }
         return table;
+    }
+
+    private static List<String> nonKeyAttributes(JsonNode projection) {
+        List<String> attributes = new ArrayList<>();
+        projection.path("NonKeyAttributes").forEach(attribute -> attributes.add(attribute.asText()));
+        return attributes;
     }
 
     @Override
