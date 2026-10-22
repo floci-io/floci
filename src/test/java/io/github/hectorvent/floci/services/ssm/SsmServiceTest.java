@@ -783,6 +783,33 @@ class SsmServiceTest {
     }
 
     @Test
+    void putParameterRefusesToEvictALabeledOldestVersion() {
+        String region = "eu-west-1";
+        for (int i = 1; i <= 5; i++) {
+            ssmService.putParameter("/app/pinned", "v" + i, "String", null, i != 1, region);
+        }
+        ssmService.labelParameterVersion("/app/pinned", 1L, List.of("release"), region);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.putParameter("/app/pinned", "v6", "String", null, true, region));
+        assertEquals("ParameterMaxVersionLimitExceeded", ex.getErrorCode());
+        Parameter current = ssmService.getParameter("/app/pinned", region);
+        assertEquals(5, current.getVersion());
+        assertEquals("v5", current.getValue());
+        List<ParameterHistory> kept = ssmService.getParameterHistory("/app/pinned", region);
+        assertEquals(5, kept.size());
+        assertEquals(1, kept.getFirst().getVersion());
+
+        // Moving the label off the oldest version lets it be deleted again.
+        ssmService.labelParameterVersion("/app/pinned", 5L, List.of("release"), region);
+        assertEquals(6, ssmService.putParameter("/app/pinned", "v6", "String", null, true, region));
+        List<ParameterHistory> history = ssmService.getParameterHistory("/app/pinned", region);
+        assertEquals(5, history.size());
+        assertEquals(2, history.getFirst().getVersion());
+        assertEquals(6, history.getLast().getVersion());
+    }
+
+    @Test
     void getDocumentUnknownThrowsInvalidDocument() {
         // The AWS SDK maps this code to its InvalidDocument exception class;
         // LZA's session-manager-settings Lambda branches on it to create the doc.

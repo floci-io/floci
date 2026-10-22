@@ -309,6 +309,10 @@ public class SsmService implements ResourceProvider {
             }
         }
 
+        if (existing != null) {
+            requireOldestVersionsUnlabeled(storageKey, name);
+        }
+
         long version = (existing != null) ? existing.getVersion() + 1 : 1;
 
         Parameter parameter = new Parameter(name, value, type);
@@ -1537,6 +1541,25 @@ public class SsmService implements ResourceProvider {
 
     private static String regionKey(String region, String name) {
         return region + "::" + name;
+    }
+
+    /**
+     * A new version pushes the oldest out of a full history, but AWS never deletes a labeled
+     * version that way: the write fails until the label is moved.
+     */
+    private void requireOldestVersionsUnlabeled(String storageKey, String name) {
+        List<ParameterHistory> history = historyStore.get(storageKey).orElse(List.of());
+        int evicted = Math.min(history.size() + 1 - maxParameterHistory, history.size());
+        for (int i = 0; i < evicted; i++) {
+            ParameterHistory oldest = history.get(i);
+            if (oldest.getLabels() != null && !oldest.getLabels().isEmpty()) {
+                throw new AwsException("ParameterMaxVersionLimitExceeded",
+                        "You attempted to create a new version of " + name + " by calling the PutParameter API "
+                                + "with the overwrite flag. Version " + oldest.getVersion() + ", the oldest version, "
+                                + "can't be deleted because it has a label associated with it. Move the label to "
+                                + "another version of the parameter, and try again.", 400);
+            }
+        }
     }
 
     private void addHistory(String storageKey, Parameter parameter) {
