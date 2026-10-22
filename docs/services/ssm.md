@@ -172,7 +172,9 @@ With IAM enforcement on, a request is checked against the parameters it names, a
 describes. `GetParameters` and `DeleteParameters` are checked against each parameter in `Names`, so a
 `Deny` on any one of them refuses the whole call. `GetParametersByPath` is checked against the ARN of
 the path it requests, `parameter/app` for `/app` and `parameter/` for `/`, not against the parameters
-it returns, so a statement naming `/app/secret` does not limit a query of `/app`.
+it returns, so a statement naming `/app/secret` does not limit a query of `/app`. A `name:version` or
+`name:label` selector, in a name or in a parameter ARN, is checked against the parameter itself:
+`/app/db:3` and `/app/db:prod` are checked against `parameter/app/db`.
 
 ## Parameter Types
 

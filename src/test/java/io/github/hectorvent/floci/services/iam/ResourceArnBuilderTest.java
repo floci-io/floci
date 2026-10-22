@@ -1209,6 +1209,32 @@ class ResourceArnBuilderTest {
                 builder.buildSsmResources("ssm:GetParameter", ctx, "us-east-1", ACCOUNT));
     }
 
+    /** A version or label selector reads a version of the parameter, so it is checked against the parameter. */
+    @Test
+    void ssmChecksAVersionOrLabelSelectorAgainstTheBareParameter() {
+        String bare = "arn:aws:ssm:us-east-1:000000000000:parameter/app/a";
+        for (String name : List.of("/app/a:1", "/app/a:prod", bare + ":3", bare + ":prod")) {
+            setJsonBody("{\"Name\":\"" + name + "\"}");
+            assertEquals(List.of(bare), builder.buildSsmResources("ssm:GetParameter", ctx, "us-east-1", ACCOUNT),
+                    name);
+        }
+        setJsonBody("{\"Name\":\"config-key:2\"}");
+        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/config-key",
+                builder.build("ssm", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @Test
+    void ssmChecksSelectorsInNamesAndPathAgainstTheBareParameter() {
+        setJsonBody("{\"Names\":[\"/app/a:1\",\"/app/a:prod\","
+                + "\"arn:aws:ssm:us-east-1:000000000000:parameter/app/b:2\"]}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/a",
+                        "arn:aws:ssm:us-east-1:000000000000:parameter/app/b"),
+                builder.buildSsmResources("ssm:GetParameters", ctx, "us-east-1", ACCOUNT));
+        setJsonBody("{\"Path\":\"/app:1\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app"),
+                builder.buildSsmResources("ssm:GetParametersByPath", ctx, "us-east-1", ACCOUNT));
+    }
+
     // ── SQS ─────────────────────────────────────────────────────────────────────
 
     @Test

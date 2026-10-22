@@ -1483,12 +1483,27 @@ public class ResourceArnBuilder {
                 : ssmParameterArn(path, region, accountId);
     }
 
+    /**
+     * A {@code :version} or {@code :label} selector reads a version of the parameter, so it is
+     * checked against the parameter itself. A parameter name cannot contain a colon, so the first
+     * one starts the selector.
+     */
     private static String ssmParameterArn(String name, String region, String accountId) {
-        if (AwsArnUtils.isArnFor(name, "ssm")) {
-            return name;
+        Optional<String> arnResource = AwsArnUtils.resourceIfArnFor(name, "ssm");
+        if (arnResource.isPresent()) {
+            String resource = arnResource.get();
+            return resource.startsWith("parameter/")
+                    ? name.substring(0, name.length() - resource.length()) + withoutSsmSelector(resource)
+                    : name;
         }
-        String paramResource = name.startsWith("/") ? "parameter" + name : "parameter/" + name;
+        String bareName = withoutSsmSelector(name);
+        String paramResource = bareName.startsWith("/") ? "parameter" + bareName : "parameter/" + bareName;
         return AwsArnUtils.Arn.of("ssm", region, accountId, paramResource).toString();
+    }
+
+    private static String withoutSsmSelector(String name) {
+        int selector = name.indexOf(':');
+        return selector < 0 ? name : name.substring(0, selector);
     }
 
     // ── KMS ──────────────────────────────────────────────────────────────────────
