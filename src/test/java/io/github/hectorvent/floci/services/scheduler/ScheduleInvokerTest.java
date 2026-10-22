@@ -350,7 +350,8 @@ class ScheduleInvokerTest {
     /** A DelaySeconds that is not a number is no override: the queue's own DelaySeconds still applies. */
     @Test
     void universalSqsSendMessageForwardsOnlyANumericDelaySeconds() {
-        List<String> values = List.of("\"5\"", "\"soon\"", "\"\"", "true", "{}", "[]");
+        List<String> values = List.of("\"5\"", "\"soon\"", "\"\"", "true", "{}", "[]",
+                "4294967296", "4294967301", "5.5");
         for (int i = 0; i < values.size(); i++) {
             Target target = new Target();
             target.setArn("arn:aws:scheduler:::aws-sdk:sqs:sendMessage");

@@ -475,7 +475,8 @@ public class ScheduleInvoker {
             return null;
         }
         if (delaySeconds.isNumber()) {
-            return delaySeconds.asInt();
+            return delaySeconds.isIntegralNumber() && delaySeconds.canConvertToInt()
+                    ? Integer.valueOf(delaySeconds.intValue()) : null;
         }
         String text = delaySeconds.isTextual() ? delaySeconds.asText().trim() : "";
         return text.matches("-?\\d{1,9}") ? Integer.valueOf(text) : null;
