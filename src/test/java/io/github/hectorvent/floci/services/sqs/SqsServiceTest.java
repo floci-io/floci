@@ -1842,6 +1842,115 @@ class SqsServiceTest {
     }
 
     @Test
+    void createQueue_redrivePolicyNamingAMissingQueue_isRejected() {
+        AwsException ex = assertThrows(AwsException.class, () -> sqsService.createQueue("src-no-dlq",
+                Map.of("RedrivePolicy", redrivePolicy(queueArn("never-created-dlq"))), "us-east-1"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Dead letter target does not exist"), ex.getMessage());
+        assertTrue(sqsService.listQueues("src-no-dlq", "us-east-1").isEmpty());
+    }
+
+    @Test
+    void setQueueAttributes_redrivePolicyNamingAMissingQueue_isRejected() {
+        Queue source = sqsService.createQueue("set-src-no-dlq", null, "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> sqsService.setQueueAttributes(
+                source.getQueueUrl(), Map.of("RedrivePolicy", redrivePolicy(queueArn("never-created-dlq"))),
+                "us-east-1"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertFalse(sqsService.getQueueAttributes(source.getQueueUrl(), List.of("All"), "us-east-1")
+                .containsKey("RedrivePolicy"));
+    }
+
+    @Test
+    void createQueue_redrivePolicyNamingAQueueInAnotherRegion_isRejected() {
+        sqsService.createQueue("other-region-dlq", null, "eu-west-1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> sqsService.createQueue("cross-region-src",
+                Map.of("RedrivePolicy", redrivePolicy("arn:aws:sqs:eu-west-1:000000000000:other-region-dlq")),
+                "us-east-1"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "1001", "\"0\"", "\"1001\"", "\"many\""})
+    void redrivePolicyMaxReceiveCountOutsideOneToThousand_isRejected(String maxReceiveCount) {
+        sqsService.createQueue("range-dlq", null, "us-east-1");
+        String policy = "{\"deadLetterTargetArn\":\"" + queueArn("range-dlq") + "\",\"maxReceiveCount\":"
+                + maxReceiveCount + "}";
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.createQueue("range-src", Map.of("RedrivePolicy", policy), "us-east-1"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void fifoQueueWithAStandardDeadLetterQueue_isRejected() {
+        sqsService.createQueue("standard-dlq", null, "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> sqsService.createQueue("fifo-src.fifo",
+                Map.of("FifoQueue", "true", "RedrivePolicy", redrivePolicy(queueArn("standard-dlq"))),
+                "us-east-1"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void standardQueueWithAFifoDeadLetterQueue_isRejected() {
+        sqsService.createQueue("fifo-dlq.fifo", Map.of("FifoQueue", "true"), "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> sqsService.createQueue("standard-src",
+                Map.of("RedrivePolicy", redrivePolicy(queueArn("fifo-dlq.fifo"))), "us-east-1"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void deadLetterQueueWhoseRedriveAllowPolicyDeniesAll_isRejected() {
+        sqsService.createQueue("deny-dlq",
+                Map.of("RedriveAllowPolicy", "{\"redrivePermission\":\"denyAll\"}"), "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> sqsService.createQueue("deny-src",
+                Map.of("RedrivePolicy", redrivePolicy(queueArn("deny-dlq"))), "us-east-1"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void deadLetterQueueRedriveAllowPolicyByQueue_admitsOnlyTheListedSources() {
+        sqsService.createQueue("byqueue-dlq", Map.of("RedriveAllowPolicy",
+                "{\"redrivePermission\":\"byQueue\",\"sourceQueueArns\":[\"" + queueArn("listed-src") + "\"]}"),
+                "us-east-1");
+
+        sqsService.createQueue("listed-src", Map.of("RedrivePolicy", redrivePolicy(queueArn("byqueue-dlq"))),
+                "us-east-1");
+        AwsException ex = assertThrows(AwsException.class, () -> sqsService.createQueue("unlisted-src",
+                Map.of("RedrivePolicy", redrivePolicy(queueArn("byqueue-dlq"))), "us-east-1"));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void deadLetterQueueDeletedAfterConfiguration_leavesMessagesInTheSourceQueue() {
+        String region = "us-east-1";
+        Queue dlq = sqsService.createQueue("deleted-dlq", null, region);
+        Queue source = sqsService.createQueue("deleted-dlq-src",
+                Map.of("RedrivePolicy", redrivePolicy(queueArn("deleted-dlq"))), region);
+        sqsService.sendMessage(source.getQueueUrl(), "keep-me", null, region);
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region).size());
+        sqsService.deleteQueue(dlq.getQueueUrl(), region);
+
+        List<Message> again = sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, region);
+
+        assertEquals(List.of("keep-me"), bodies(again));
+        assertEquals(List.of("keep-me"), bodies(sqsService.peekMessages(source.getQueueUrl(), region)));
+    }
+
+    @Test
     void startMessageMoveTask_sourceIsNotDeadLetterQueue_throwsInvalidParameterValue() {
         sqsService.createQueue("just-a-queue", null, "us-east-1");
         sqsService.createQueue("dest", null, "us-east-1");

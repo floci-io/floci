@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.sqs;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -80,6 +81,8 @@ public class SqsService implements Resettable, ResourceProvider {
     private static final int DEFAULT_MESSAGE_RETENTION_PERIOD_SECONDS = 345600;
     private static final int MIN_MESSAGE_RETENTION_PERIOD_SECONDS = 60;
     private static final int MAX_MESSAGE_RETENTION_PERIOD_SECONDS = 1209600;
+    private static final int MIN_MAX_RECEIVE_COUNT = 1;
+    private static final int MAX_MAX_RECEIVE_COUNT = 1000;
 
     private final StorageBackend<String, Queue> queueStore;
     private final StorageBackend<String, List<Message>> messageStore;
@@ -738,6 +741,7 @@ public class SqsService implements Resettable, ResourceProvider {
 
         validateMaximumMessageSize(attributes);
         attributes = validateMessageRetentionPeriod(attributes);
+        validateRedrivePolicy(attributes, queueName, regionResolver.getAccountId(), hasFifoSuffix, region);
 
         String accountId = regionResolver.getAccountId();
         String queueUrl = buildQueueUrl(region, accountId, queueName);
@@ -1239,6 +1243,111 @@ public class SqsService implements Resettable, ResourceProvider {
                 "Invalid value for the parameter MaximumMessageSize.", 400);
     }
 
+    /**
+     * Reject a RedrivePolicy AWS would refuse, on CreateQueue and SetQueueAttributes alike: the
+     * dead-letter queue must already exist in the source queue's account and region, be of the same
+     * type (FIFO or standard), and admit the source through its RedriveAllowPolicy. An empty value
+     * on SetQueueAttributes removes the policy and is left to the caller.
+     */
+    private void validateRedrivePolicy(Map<String, String> attributes, String queueName, String accountId,
+                                       boolean fifo, String region) {
+        String raw = attributes == null ? null : attributes.get("RedrivePolicy");
+        if (raw == null || raw.isEmpty()) {
+            return;
+        }
+        JsonNode policy;
+        try {
+            policy = POLICY_MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw invalidRedrivePolicy(raw, "Redrive policy is not a valid JSON map");
+        }
+        if (!(policy instanceof ObjectNode)) {
+            throw invalidRedrivePolicy(raw, "Redrive policy is not a valid JSON map");
+        }
+        JsonNode targetArn = policy.get("deadLetterTargetArn");
+        if (targetArn == null || !targetArn.isTextual()) {
+            throw invalidRedrivePolicy(raw, "Redrive policy does not contain mandatory attribute: deadLetterTargetArn");
+        }
+        JsonNode maxReceiveCount = policy.get("maxReceiveCount");
+        if (maxReceiveCount == null) {
+            throw invalidRedrivePolicy(raw, "Redrive policy does not contain mandatory attribute: maxReceiveCount");
+        }
+        int count = maxReceiveCountOf(maxReceiveCount);
+        if (count < MIN_MAX_RECEIVE_COUNT || count > MAX_MAX_RECEIVE_COUNT) {
+            throw invalidRedrivePolicy(raw, "Invalid value for maxReceiveCount: " + maxReceiveCount.asText()
+                    + ", valid values are from " + MIN_MAX_RECEIVE_COUNT + " to " + MAX_MAX_RECEIVE_COUNT
+                    + " both inclusive");
+        }
+        Queue deadLetterQueue = deadLetterQueue(targetArn.asText(), accountId, region);
+        if (deadLetterQueue == null) {
+            throw invalidRedrivePolicy(raw, "Dead letter target does not exist");
+        }
+        if (deadLetterQueue.isFifo() != fifo) {
+            throw invalidRedrivePolicy(raw,
+                    "Dead-letter target must be the same type of queue (FIFO or standard) as the source");
+        }
+        String sourceArn = AwsArnUtils.Arn.of("sqs", region, accountId, queueName).toString();
+        if (!redriveAllowed(deadLetterQueue, sourceArn)) {
+            throw invalidRedrivePolicy(raw,
+                    "The dead-letter target's RedriveAllowPolicy does not allow " + sourceArn + " as a source");
+        }
+    }
+
+    /** maxReceiveCount as AWS accepts it, a JSON number or a numeric string; 0 when it is neither. */
+    private static int maxReceiveCountOf(JsonNode value) {
+        if (value.isIntegralNumber()) {
+            return value.canConvertToInt() ? value.intValue() : 0;
+        }
+        try {
+            return value.isTextual() ? Integer.parseInt(value.asText().trim()) : 0;
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+
+    /** The queue a dead-letter target ARN names, when it exists in the given account and region. */
+    private Queue deadLetterQueue(String deadLetterTargetArn, String accountId, String region) {
+        String dlqUrl = queueUrlFromArn(deadLetterTargetArn, region);
+        if (dlqUrl == null) {
+            return null;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(deadLetterTargetArn);
+        if (!region.equals(arn.region()) || !accountId.equals(arn.accountId())) {
+            return null;
+        }
+        return getQueueByUrl(regionKey(region, dlqUrl), dlqUrl).orElse(null);
+    }
+
+    private static boolean redriveAllowed(Queue deadLetterQueue, String sourceArn) {
+        String raw = deadLetterQueue.getAttributes().get("RedriveAllowPolicy");
+        if (raw == null || raw.isEmpty()) {
+            return true;
+        }
+        JsonNode policy;
+        try {
+            policy = POLICY_MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            LOG.debugv("Ignoring unparseable RedriveAllowPolicy on queue {0}", deadLetterQueue.getQueueUrl());
+            return true;
+        }
+        return switch (policy.path("redrivePermission").asText()) {
+            case "denyAll" -> false;
+            case "byQueue" -> {
+                boolean listed = false;
+                for (JsonNode allowed : policy.path("sourceQueueArns")) {
+                    listed |= sourceArn.equals(allowed.asText());
+                }
+                yield listed;
+            }
+            default -> true;
+        };
+    }
+
+    private static AwsException invalidRedrivePolicy(String raw, String reason) {
+        return new AwsException("InvalidParameterValue",
+                "Value " + raw + " for parameter RedrivePolicy is invalid. Reason: " + reason + ".", 400);
+    }
+
     private static boolean hasKmsMasterKey(Map<String, String> attributes) {
         String keyId = attributes.get("KmsMasterKeyId");
         return keyId != null && !keyId.isEmpty();
@@ -1467,36 +1576,43 @@ public class SqsService implements Resettable, ResourceProvider {
         }
 
         RedrivePolicy rp = getOrParseRedrivePolicy(queue, storageKey);
-        int maxReceiveCount = rp != null ? rp.maxReceiveCount() : -1;
-        String deadLetterTargetArn = rp != null ? rp.deadLetterTargetArn() : null;
+        // A dead-letter queue deleted after the policy was set disables redrive, so messages stay in the source.
+        String dlqStorageKey = rp != null ? existingQueueKeyForArn(rp.deadLetterTargetArn(), region) : null;
+        int maxReceiveCount = dlqStorageKey != null ? rp.maxReceiveCount() : -1;
+        String deadLetterTargetArn = dlqStorageKey != null ? rp.deadLetterTargetArn() : null;
 
         GuardedMessageQueue guardedQueue = unexpiredMessages(storageKey, queue);
         GuardedMessageQueue.ClaimResult claimResult = guardedQueue.claimVisibleMessages(
                 maxMessages, effectiveTimeout, queue.isFifo(), maxReceiveCount, deadLetterTargetArn);
 
-        // Route DLQ candidates to the dead-letter queue only if the destination resolves
-        if (!claimResult.dlqCandidates().isEmpty() && deadLetterTargetArn != null) {
-            String dlqUrl = queueUrlFromArn(deadLetterTargetArn, region);
-            if (dlqUrl != null) {
-                List<Message> dlqCandidates = claimResult.dlqCandidates();
-                guardedQueue.removeMessages(dlqCandidates);
-                for (Message msg : dlqCandidates) {
-                    msg.setVisibleAt(null);
-                    msg.setReceiptHandle(null);
-                    // Remember where the message came from so StartMessageMoveTask
-                    // with no DestinationArn can put it back.
-                    msg.setOriginalSourceQueueUrl(queue.getQueueUrl());
-                    if (queue.isFifo()) {
-                        msg.setRetentionStartTimestamp(Instant.now());
-                    }
+        if (!claimResult.dlqCandidates().isEmpty()) {
+            List<Message> dlqCandidates = claimResult.dlqCandidates();
+            guardedQueue.removeMessages(dlqCandidates);
+            for (Message msg : dlqCandidates) {
+                msg.setVisibleAt(null);
+                msg.setReceiptHandle(null);
+                // Remember where the message came from so StartMessageMoveTask
+                // with no DestinationArn can put it back.
+                msg.setOriginalSourceQueueUrl(queue.getQueueUrl());
+                if (queue.isFifo()) {
+                    msg.setRetentionStartTimestamp(Instant.now());
                 }
-                String dlqStorageKey = regionKey(region, dlqUrl);
-                getOrCreateQueue(dlqStorageKey).addAll(dlqCandidates);
-                LOG.infov("Moved {0} messages to DLQ {1}", dlqCandidates.size(), dlqUrl);
             }
+            getOrCreateQueue(dlqStorageKey).addAll(dlqCandidates);
+            LOG.infov("Moved {0} messages to DLQ {1}", dlqCandidates.size(), deadLetterTargetArn);
         }
 
         return claimResult.claimed();
+    }
+
+    /** The storage key, in the ARN's own region, of the queue an SQS ARN names; null when that queue does not exist. */
+    private String existingQueueKeyForArn(String queueArn, String region) {
+        String queueUrl = queueUrlFromArn(queueArn, region);
+        if (queueUrl == null) {
+            return null;
+        }
+        String queueStorageKey = regionKey(AwsArnUtils.regionOrDefault(queueArn, region), queueUrl);
+        return getQueueByUrl(queueStorageKey, queueUrl).isPresent() ? queueStorageKey : null;
     }
 
     private String queueUrlFromArn(String arn, String region) {
@@ -1635,6 +1751,8 @@ public class SqsService implements Resettable, ResourceProvider {
                         "The specified queue does not exist.", 400));
         validateMaximumMessageSize(attributes);
         attributes = validateMessageRetentionPeriod(attributes);
+        String accountId = queue.getAccountId() != null ? queue.getAccountId() : regionResolver.getAccountId();
+        validateRedrivePolicy(attributes, queue.getQueueName(), accountId, queue.isFifo(), region);
         if (attributes != null) {
             for (Map.Entry<String, String> entry : attributes.entrySet()) {
                 if (entry.getValue() == null || entry.getValue().isEmpty()) {
