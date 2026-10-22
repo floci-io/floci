@@ -143,6 +143,30 @@ class SsmServiceTest {
     }
 
     @Test
+    void putParameterWithoutTypeKeepsTheTypeAndKeyOfTheParameterItOverwrites() {
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/secret", "s1", "SecureString", null, false, null, "alias/app-key",
+                null, null, null, region);
+
+        ssmService.putParameter("/app/secret", "s2", null, null, true, null, null, null, null, null, region);
+
+        Parameter param = ssmService.getParameter("/app/secret", region);
+        assertEquals("s2", param.getValue());
+        assertEquals(2, param.getVersion());
+        assertEquals("SecureString", param.getType());
+        assertEquals("alias/app-key", param.getKeyId());
+    }
+
+    @Test
+    void putParameterWithoutTypeCannotCreateAParameter() {
+        String region = "eu-west-1";
+        AwsException ex = assertThrows(AwsException.class, () ->
+                ssmService.putParameter("/app/untyped", "v", null, null, false, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertThrows(AwsException.class, () -> ssmService.getParameter("/app/untyped", region));
+    }
+
+    @Test
     void getParameterNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
                 ssmService.getParameter("/nonexistent", "eu-west-1"));

@@ -171,6 +171,10 @@ An ECS container secret's `valueFrom` accepts it too.
 
 All AWS parameter types are accepted: `String`, `StringList`, `SecureString`.
 
+As on AWS, `PutParameter` needs a `Type` to create a parameter and fails with
+`ValidationException` without one. An overwrite may leave it out: the parameter keeps its type,
+and a `SecureString` keeps its `KeyId` unless the request sends a new one.
+
 !!! note
     `SecureString` parameters are stored as-is without actual KMS encryption in Floci. The type is preserved and returned correctly, but the value is not encrypted at rest.
 

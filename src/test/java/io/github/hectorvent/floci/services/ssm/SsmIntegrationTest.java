@@ -1778,6 +1778,48 @@ class SsmIntegrationTest {
     }
 
     @Test
+    void putParameterWithoutTypeOverwritesASecureStringAsASecureString() {
+        putFilterFixture("/untyped/secure", "SecureString", ", \"KeyId\": \"alias/custom\"");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/untyped/secure", "Value": "rotated", "Overwrite": true }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Version", equalTo(2));
+
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/untyped/secure"] }] }
+                """)
+            .body("Parameters[0].Type", equalTo("SecureString"))
+            .body("Parameters[0].KeyId", equalTo("alias/custom"));
+    }
+
+    @Test
+    void putParameterWithoutTypeCannotCreateAParameter() {
+        putParameterError("""
+                { "Name": "/untyped/new", "Value": "v" }
+                """, "ValidationException");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/untyped/new" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ParameterNotFound"));
+    }
+
+    @Test
     void putParameterIntelligentTieringResolvesToAdvancedOnlyWhenNeeded() {
         putFilterFixture("/attr-it/small", "String", ", \"Tier\": \"Intelligent-Tiering\"");
         putFilterFixture("/attr-it/policy", "String", ", \"Tier\": \"Intelligent-Tiering\", \"Policies\":"

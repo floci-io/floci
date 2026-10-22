@@ -297,9 +297,21 @@ public class SsmService implements ResourceProvider {
                     400);
         }
 
+        // AWS: a type is optional when updating a parameter and required when creating one.
+        if (type == null) {
+            if (existing == null) {
+                throw new AwsException("ValidationException",
+                        "A parameter type is required when you create a parameter.", 400);
+            }
+            type = existing.getType();
+            if (keyId == null) {
+                keyId = existing.getKeyId();
+            }
+        }
+
         long version = (existing != null) ? existing.getVersion() + 1 : 1;
 
-        Parameter parameter = new Parameter(name, value, type != null ? type : "String");
+        Parameter parameter = new Parameter(name, value, type);
         parameter.setVersion(version);
         parameter.setDescription(description);
         if ("SecureString".equals(parameter.getType())) {
