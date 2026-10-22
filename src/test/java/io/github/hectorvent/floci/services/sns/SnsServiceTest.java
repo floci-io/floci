@@ -267,6 +267,25 @@ class SnsServiceTest {
         assertFalse(attributes.containsKey("RedrivePolicy"), attributes.toString());
     }
 
+    /** AWS documents an empty JSON body as the way to remove a subscription's filter policy. */
+    @Test
+    void setSubscriptionAttribute_emptyJsonFilterPolicyRemovesIt() {
+        Topic topic = snsService.createTopic("my-topic", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "sqs",
+                "http://localhost:4566/000000000000/my-queue", REGION,
+                Map.of("FilterPolicy", "{\"eventType\":[\"created\"]}"));
+
+        snsService.setSubscriptionAttribute(sub.getSubscriptionArn(), "FilterPolicy", "{}", REGION);
+        Map<String, String> afterEmptyBody = snsService.getSubscriptionAttributes(sub.getSubscriptionArn(), REGION);
+        assertFalse(afterEmptyBody.containsKey("FilterPolicy"), afterEmptyBody.toString());
+
+        snsService.setSubscriptionAttribute(sub.getSubscriptionArn(), "FilterPolicy",
+                "{\"eventType\":[\"created\"]}", REGION);
+        snsService.setSubscriptionAttribute(sub.getSubscriptionArn(), "FilterPolicy", " { \n } ", REGION);
+        Map<String, String> afterSpacedBody = snsService.getSubscriptionAttributes(sub.getSubscriptionArn(), REGION);
+        assertFalse(afterSpacedBody.containsKey("FilterPolicy"), afterSpacedBody.toString());
+    }
+
     @Test
     void subscribe_firehoseRequiresValidRoleArn() {
         Topic topic = snsService.createTopic("firehose-topic", null, null, REGION);

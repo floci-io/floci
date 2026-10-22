@@ -220,13 +220,14 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * Writes the declared attributes and puts back the SNS default of each one the previous template
-     * declared and this one dropped. An empty FilterPolicy or RedrivePolicy removes it.
+     * declared and this one dropped. An empty JSON body removes a FilterPolicy and an empty value
+     * removes a RedrivePolicy.
      */
     private void updateSubscriptionAttributes(String subscriptionArn, Map<String, String> declared,
                                               ProvisionContext ctx) {
         Map<String, String> desired = new HashMap<>(declared);
         Map<String, String> defaults = Map.of(
-                "FilterPolicy", "",
+                "FilterPolicy", "{}",
                 "FilterPolicyScope", "MessageAttributes",
                 "RawMessageDelivery", "false",
                 "RedrivePolicy", "");

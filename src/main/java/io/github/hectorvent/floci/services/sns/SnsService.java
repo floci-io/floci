@@ -89,6 +89,8 @@ public class SnsService implements Resettable, ResourceProvider {
     private static final int SANDBOX_PHONE_NUMBER_MAX_LENGTH = 20;
     /** The {@code OTPCode} shape in SNS's model. */
     private static final Pattern ONE_TIME_PASSWORD = Pattern.compile("[0-9]{5,8}");
+
+    private static final Pattern EMPTY_JSON_OBJECT = Pattern.compile("\\s*\\{\\s*}\\s*");
     /** The {@code LanguageCodeString} enum in SNS's model, the languages a verification text can be sent in. */
     private static final Set<String> SANDBOX_LANGUAGE_CODES = Set.of("en-US", "en-GB", "es-419", "es-ES",
             "de-DE", "fr-CA", "fr-FR", "it-IT", "ja-JP", "pt-BR", "kr-KR", "zh-CN", "zh-TW");
@@ -1490,9 +1492,12 @@ public class SnsService implements Resettable, ResourceProvider {
         if ("firehose".equals(sub.getProtocol()) && SUBSCRIPTION_ROLE_ARN.equals(attributeName)) {
             requireFirehoseRoleArn(attributeValue);
         }
-        // An empty filter or redrive policy removes it, so GetSubscriptionAttributes omits it as AWS does.
-        if (("FilterPolicy".equals(attributeName) || SUBSCRIPTION_REDRIVE_POLICY.equals(attributeName))
-                && (attributeValue == null || attributeValue.isEmpty())) {
+        // An empty JSON body removes a filter policy and an empty value removes either policy, so
+        // GetSubscriptionAttributes omits it as AWS does.
+        boolean emptyValue = attributeValue == null || attributeValue.isEmpty();
+        boolean emptyFilterPolicy = "FilterPolicy".equals(attributeName)
+                && (emptyValue || EMPTY_JSON_OBJECT.matcher(attributeValue).matches());
+        if (emptyFilterPolicy || (SUBSCRIPTION_REDRIVE_POLICY.equals(attributeName) && emptyValue)) {
             sub.getAttributes().remove(attributeName);
         } else {
             sub.getAttributes().put(attributeName, attributeValue);

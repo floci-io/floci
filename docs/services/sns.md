@@ -146,8 +146,9 @@ Supported subscription protocols:
 For `FilterPolicyScope=MessageBody`, nested policy objects descend into JSON objects and arrays.
 An object inside an array matches when one array element satisfies the complete nested policy.
 
-`SetSubscriptionAttributes` with an empty `FilterPolicy` or `RedrivePolicy` removes that policy, so
-`GetSubscriptionAttributes` no longer returns it.
+`SetSubscriptionAttributes` with `FilterPolicy` set to an empty JSON body (`{}`), as AWS documents,
+or with an empty `RedrivePolicy` removes that policy, so `GetSubscriptionAttributes` no longer returns
+it. Floci also treats an empty `FilterPolicy` value as removing the filter policy.
 
 For SQS subscriptions, Floci retries a failed delivery up to three times total, with two immediate
 retries. If all attempts fail and the subscription has a `RedrivePolicy` containing a valid

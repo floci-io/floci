@@ -570,7 +570,7 @@ class SnsCfnProvisionerTest {
                 {"TopicArn": "%s", "Protocol": "sqs", "Endpoint": "arn:queue"}
                 """.formatted(TOPIC_ARN));
 
-        verify(sns).setSubscriptionAttribute("arn:sub", "FilterPolicy", "", REGION);
+        verify(sns).setSubscriptionAttribute("arn:sub", "FilterPolicy", "{}", REGION);
         verify(sns).setSubscriptionAttribute("arn:sub", "FilterPolicyScope", "MessageAttributes", REGION);
         verify(sns).setSubscriptionAttribute("arn:sub", "RawMessageDelivery", "false", REGION);
         verify(sns).setSubscriptionAttribute("arn:sub", "RedrivePolicy", "", REGION);
