@@ -1820,7 +1820,7 @@ public class SnsService implements Resettable, ResourceProvider {
         boolean present = actual != null && !actual.isMissingNode() && !actual.isNull();
         String stringValue = present && actual.isTextual() ? actual.asText() : null;
         if (rule.has("prefix")) {
-            return stringValue != null && stringValue.startsWith(rule.get("prefix").asText());
+            return matchesStringOperator("prefix", rule.get("prefix"), stringValue);
         }
         if (rule.has("suffix")) {
             return matchesStringOperator("suffix", rule.get("suffix"), stringValue);
@@ -2058,8 +2058,8 @@ public class SnsService implements Resettable, ResourceProvider {
             boolean shouldExist = rule.get("exists").asBoolean();
             return shouldExist ? actualValue != null : actualValue == null;
         }
-        if (rule.has("prefix") && actualValue != null) {
-            return actualValue.startsWith(rule.get("prefix").asText());
+        if (rule.has("prefix")) {
+            return matchesStringOperator("prefix", rule.get("prefix"), actualValue);
         }
         if (rule.has("suffix")) {
             return matchesStringOperator("suffix", rule.get("suffix"), actualValue);

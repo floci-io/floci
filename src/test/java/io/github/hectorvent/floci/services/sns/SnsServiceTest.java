@@ -731,6 +731,21 @@ class SnsServiceTest {
         assertFalse(snsService.matchesFilterPolicy(sub, body("{\"price\":true}"), null));
     }
 
+    /** A prefix operand that is not a string is not the empty prefix, so it matches nothing. */
+    @Test
+    void filterPolicy_messageBody_prefixWithAnObjectOperandDoesNotMatchEveryValue() {
+        Subscription sub = subscriptionWithPolicy(
+                "{\"name\":[{\"prefix\":{\"equals-ignore-case\":\"foo\"}}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(sub, body("{\"name\":\"bar\"}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageAttributes_prefixWithAnObjectOperandDoesNotMatchEveryValue() {
+        Subscription sub = subscriptionWithPolicy(
+                "{\"name\":[{\"prefix\":{\"equals-ignore-case\":\"foo\"}}]}", null);
+        assertFalse(snsService.matchesFilterPolicy(sub, null, attr("name", "bar", "String")));
+    }
+
     /**
      * suffix, equals-ignore-case, wildcard, and cidr are string operators in the same way prefix
      * is. A missing value or a non-textual body value does not match.
