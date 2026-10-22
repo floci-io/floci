@@ -123,6 +123,12 @@ the field on a source its parameter block does not describe, for example
     at a time, regardless of the configured value. Multi-shard Kinesis polling and real per-shard
     concurrency are tracked as follow-ups.
 
+## SQS Source
+
+- `SqsQueueParameters.BatchSize` (default 10) bounds the messages delivered per poll. The poller
+  reads them in `ReceiveMessage` calls of at most 10 messages each, until the batch is full or the
+  queue has no more visible messages.
+
 ## DynamoDB Streams Source
 
 - `StartingPosition` `TRIM_HORIZON` and `LATEST` are honored. `LATEST` is pinned on the pipe's

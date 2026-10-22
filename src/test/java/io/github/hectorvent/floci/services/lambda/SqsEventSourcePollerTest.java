@@ -19,6 +19,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -616,6 +617,42 @@ class SqsEventSourcePollerTest {
 
         verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
         verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
+    }
+
+    @Test
+    void batchSizeAboveTen_receivesInChunksOfAtMostTenAndInvokesOnceWithTheFullBatch() throws Exception {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esm();
+        esm.setBatchSize(25);
+        esm.setMaximumBatchingWindowInSeconds(5);
+        poller.setClockForTest(() -> 0L); // the window never elapses on its own
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(messages("a", 10))
+                .thenReturn(messages("b", 10))
+                .thenReturn(messages("c", 5))
+                .thenReturn(List.of());
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+
+        awaitPoll(poller.pollAndInvoke(esm));
+
+        // SQS ReceiveMessage accepts at most 10 messages per call.
+        ArgumentCaptor<Integer> maxMessages = ArgumentCaptor.forClass(Integer.class);
+        verify(sqsService, atLeast(1)).receiveMessage(
+                eq(esm.getQueueUrl()), maxMessages.capture(), anyInt(), anyInt(), eq("us-east-1"));
+        assertTrue(maxMessages.getAllValues().stream().allMatch(n -> n >= 1 && n <= 10),
+                "every receive must ask for 1 to 10 messages, asked for " + maxMessages.getAllValues());
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService).invoke(eq(fn), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(25, OBJECT_MAPPER.readTree(payload.getValue()).get("Records").size());
+    }
+
+    private List<Message> messages(String prefix, int count) {
+        List<Message> messages = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            messages.add(message(prefix + i));
+        }
+        return messages;
     }
 
     @Test

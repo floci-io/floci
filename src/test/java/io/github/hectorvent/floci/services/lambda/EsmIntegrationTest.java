@@ -204,6 +204,147 @@ class EsmIntegrationTest {
     }
 
     @Test
+    void createEventSourceMappingRejectsSqsBatchSizeOutsideOneToTenThousand() {
+        for (int batchSize : new int[] {0, 10001}) {
+            given()
+                .contentType("application/json")
+                .body("""
+                    {
+                        "FunctionName": "%s",
+                        "EventSourceArn": "%s",
+                        "BatchSize": %d,
+                        "MaximumBatchingWindowInSeconds": 1
+                    }
+                    """.formatted(FUNCTION_NAME, QUEUE_ARN, batchSize))
+            .when()
+                .post(LAMBDA_BASE + "/event-source-mappings")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
+        }
+    }
+
+    @Test
+    void createEventSourceMappingRejectsFifoBatchSizeAboveTen() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "BatchSize": 11,
+                    "MaximumBatchingWindowInSeconds": 1
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN + ".fifo"))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    void createEventSourceMappingRequiresABatchingWindowForSqsBatchSizeAboveTen() {
+        for (String window : new String[] {"", ", \"MaximumBatchingWindowInSeconds\": 0"}) {
+            given()
+                .contentType("application/json")
+                .body("""
+                    {
+                        "FunctionName": "%s",
+                        "EventSourceArn": "%s",
+                        "BatchSize": 25%s
+                    }
+                    """.formatted(FUNCTION_NAME, QUEUE_ARN, window))
+            .when()
+                .post(LAMBDA_BASE + "/event-source-mappings")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
+        }
+
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "BatchSize": 25,
+                    "MaximumBatchingWindowInSeconds": 1,
+                    "Enabled": false
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("BatchSize", equalTo(25))
+        .extract()
+            .path("UUID");
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    void updateEventSourceMappingValidatesSqsBatchSizeAgainstTheStoredWindow() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "BatchSize": 5,
+                    "Enabled": false
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+        .extract()
+            .path("UUID");
+
+        for (String body : new String[] {
+                "{\"BatchSize\": 10001, \"MaximumBatchingWindowInSeconds\": 1}",
+                "{\"BatchSize\": 0}",
+                "{\"BatchSize\": 25}"}) {
+            given()
+                .contentType("application/json")
+                .body(body)
+            .when()
+                .put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
+        }
+        given()
+        .when()
+            .get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(200)
+            .body("BatchSize", equalTo(5));
+
+        given()
+            .contentType("application/json")
+            .body("{\"BatchSize\": 25, \"MaximumBatchingWindowInSeconds\": 1}")
+        .when()
+            .put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(202)
+            .body("BatchSize", equalTo(25))
+            .body("MaximumBatchingWindowInSeconds", equalTo(1));
+        given()
+            .contentType("application/json")
+            .body("{\"MaximumBatchingWindowInSeconds\": 0}")
+        .when()
+            .put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
     void updateEventSourceMappingReturnsFailureConfig() {
         String streamArn = "arn:aws:dynamodb:us-east-1:000000000000:table/esm-table/stream/2026-01-01T00:00:00.000";
         String destinationArn = "arn:aws:sqs:us-east-1:000000000000:esm-updated-failure-config-dlq";
@@ -448,12 +589,13 @@ class EsmIntegrationTest {
     void updateEventSourceMapping() {
         given()
             .contentType("application/json")
-            .body("{\"BatchSize\": 20, \"Enabled\": true}")
+            .body("{\"BatchSize\": 20, \"MaximumBatchingWindowInSeconds\": 1, \"Enabled\": true}")
         .when()
             .put(LAMBDA_BASE + "/event-source-mappings/" + esmUuid)
         .then()
             .statusCode(202)
             .body("BatchSize", equalTo(20))
+            .body("MaximumBatchingWindowInSeconds", equalTo(1))
             .body("State", equalTo("Enabled"));
     }
 

@@ -1753,6 +1753,7 @@ class SamTransformProcessor {
         }
 
         copyIfPresent(eventProps, "BatchSize", esmProps);
+        copyIfPresent(eventProps, "MaximumBatchingWindowInSeconds", esmProps);
         copyIfPresent(eventProps, "Enabled", esmProps);
 
         esmDef.set("Properties", esmProps);
