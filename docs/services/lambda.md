@@ -341,6 +341,14 @@ function's bind mount through `UpdateFunctionCode`. Lambda's own hot-reload chec
 a stack whose hot-reload path is relative, outside the allow-list, or used while hot-reload is
 disabled fails with Lambda's error as the resource status reason.
 
+The SAM transform expands a function's `SQS`, `Kinesis` and `DynamoDB` events into event source
+mappings, its `Api` events into the implicit REST API, and its `HttpApi` events into routes on the
+`AWS::Serverless::HttpApi` their `ApiId` references. Other event types, such as `S3`, `SNS` or
+`Schedule`, are not expanded: the function deploys without them, each one is logged at `WARN` and
+named on the function's resource event, and with
+`floci.services.cloudformation.allow-stub-unsupported-resource-types` set to `false` the transform
+fails instead. See [SAM function events](cloudformation.md#sam-function-events).
+
 ### Limitations
 
 - The `S3Key` path is interpreted by the **Docker daemon**, not by Floci. When Floci itself runs inside Docker, the path must exist on the Docker host machine, not inside the Floci container.

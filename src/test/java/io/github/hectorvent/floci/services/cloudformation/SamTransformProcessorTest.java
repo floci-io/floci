@@ -7,8 +7,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -2813,6 +2819,229 @@ class SamTransformProcessorTest {
                                 && expected.equals(text(r))),
                 "expected the unexpanded SAM type to be reported at warn, got: "
                         + logged.stream().map(r -> r.getLevel() + " " + text(r)).toList());
+    }
+
+    /**
+     * SAM documents 19 function event types and the transform expands a few. Every other one
+     * deploys nothing, so at debug the function reaches CREATE_COMPLETE with its trigger silently
+     * missing.
+     */
+    @Test
+    void unexpandedFunctionEventTypeWarnsNamingFunctionEventAndType() throws Exception {
+        JsonNode template = objectMapper.readTree(S3_EVENT_TEMPLATE);
+
+        List<String> warnings = warningsLoggedWhileExpanding(template);
+
+        assertTrue(warnings.stream().anyMatch(w -> w.contains(
+                        "SAM event Upload of type S3 on function ThumbnailFunction is not supported by Floci.")),
+                "expected the unexpanded S3 event to be reported at warn, got: " + warnings);
+    }
+
+    /** An Api event bound to an explicit RestApiId is skipped by the implicit-API collector. */
+    @Test
+    void apiEventWithAnExplicitRestApiIdWarns() throws Exception {
+        JsonNode template = objectMapper.readTree(EXPLICIT_REST_API_EVENT_TEMPLATE);
+
+        List<String> warnings = warningsLoggedWhileExpanding(template);
+
+        assertTrue(warnings.stream().anyMatch(w -> w.contains(
+                        "SAM event Get of type Api on function ApiFunction is not supported by Floci")),
+                "expected the RestApiId-bound Api event to be reported at warn, got: " + warnings);
+    }
+
+    /** An HttpApi event with no ApiId asks for SAM's implicit HTTP API, which is not generated. */
+    @Test
+    void httpApiEventWithoutAnApiIdWarns() throws Exception {
+        JsonNode template = objectMapper.readTree(IMPLICIT_HTTP_API_EVENT_TEMPLATE);
+
+        List<String> warnings = warningsLoggedWhileExpanding(template);
+
+        assertTrue(warnings.stream().anyMatch(w -> w.contains(
+                        "SAM event Get of type HttpApi on function HttpFunction is not supported by Floci")),
+                "expected the implicit HttpApi event to be reported at warn, got: " + warnings);
+    }
+
+    /**
+     * With {@code allow-stub-unsupported-resource-types} off, an event the transform cannot expand
+     * fails it, as a resource type with no provisioner fails the stack.
+     */
+    @Test
+    void unexpandedFunctionEventFailsTheTransformInStrictMode() throws Exception {
+        SamTransformProcessor strict = new SamTransformProcessor(objectMapper, false);
+        JsonNode template = objectMapper.readTree(S3_EVENT_TEMPLATE);
+
+        AwsException e = assertThrows(AwsException.class, () -> strict.expandSamTemplate(template));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("SAM event Upload of type S3 on function ThumbnailFunction is not supported by Floci.",
+                e.getMessage());
+    }
+
+    @Test
+    void apiEventWithAnExplicitRestApiIdFailsTheTransformInStrictMode() throws Exception {
+        SamTransformProcessor strict = new SamTransformProcessor(objectMapper, false);
+        JsonNode template = objectMapper.readTree(EXPLICIT_REST_API_EVENT_TEMPLATE);
+
+        AwsException e = assertThrows(AwsException.class, () -> strict.expandSamTemplate(template));
+
+        assertEquals("SAM event Get of type Api on function ApiFunction is not supported by Floci: "
+                + "an Api event that names a RestApiId is not expanded.", e.getMessage());
+    }
+
+    @Test
+    void httpApiEventWithoutAnApiIdFailsTheTransformInStrictMode() throws Exception {
+        SamTransformProcessor strict = new SamTransformProcessor(objectMapper, false);
+        JsonNode template = objectMapper.readTree(IMPLICIT_HTTP_API_EVENT_TEMPLATE);
+
+        AwsException e = assertThrows(AwsException.class, () -> strict.expandSamTemplate(template));
+
+        assertTrue(e.getMessage().startsWith(
+                "SAM event Get of type HttpApi on function HttpFunction is not supported by Floci: "), e.getMessage());
+    }
+
+    /** The events the transform does expand are untouched by strict mode. */
+    @Test
+    void expandedFunctionEventsPassTheTransformInStrictMode() throws Exception {
+        SamTransformProcessor strict = new SamTransformProcessor(objectMapper, false);
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "Queue": {"Type": "AWS::SQS::Queue"},
+                "HttpApi": {"Type": "AWS::Serverless::HttpApi"},
+                "Worker": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs22.x",
+                    "InlineCode": "exports.handler = async () => ({});",
+                    "Events": {
+                      "Jobs": {"Type": "SQS", "Properties": {"Queue": {"Fn::GetAtt": ["Queue", "Arn"]}}},
+                      "Rest": {"Type": "Api", "Properties": {"Path": "/jobs", "Method": "get"}},
+                      "Http": {"Type": "HttpApi",
+                               "Properties": {"ApiId": {"Ref": "HttpApi"}, "Path": "/jobs", "Method": "GET"}}
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = strict.expandSamTemplate(template).path("Resources");
+
+        assertEquals("AWS::Lambda::EventSourceMapping", resources.path("WorkerJobs").path("Type").asText());
+    }
+
+    /** What the stack reports on the function's resource event, one sentence per left-out event. */
+    @Test
+    void unexpandedEventsAreRecordedPerFunction() throws Exception {
+        JsonNode template = objectMapper.readTree(S3_EVENT_TEMPLATE);
+        Map<String, String> unexpanded = new LinkedHashMap<>();
+
+        JsonNode resources = processor.expandSamTemplate(template, Map.of(), unexpanded).path("Resources");
+
+        assertEquals(Map.of("ThumbnailFunction", "SAM event Upload of type S3 on function ThumbnailFunction "
+                + "is not supported by Floci. It was not expanded and nothing was created for it."), unexpanded);
+        assertEquals("AWS::Lambda::Function", resources.path("ThumbnailFunction").path("Type").asText(),
+                "the function itself still deploys");
+    }
+
+    private static final String S3_EVENT_TEMPLATE = """
+        {
+          "Transform": "AWS::Serverless-2016-10-31",
+          "Resources": {
+            "Uploads": {"Type": "AWS::S3::Bucket"},
+            "ThumbnailFunction": {
+              "Type": "AWS::Serverless::Function",
+              "Properties": {
+                "Handler": "index.handler",
+                "Runtime": "nodejs22.x",
+                "InlineCode": "exports.handler = async () => ({});",
+                "Events": {
+                  "Upload": {
+                    "Type": "S3",
+                    "Properties": {"Bucket": {"Ref": "Uploads"}, "Events": "s3:ObjectCreated:*"}
+                  }
+                }
+              }
+            }
+          }
+        }
+        """;
+
+    private static final String EXPLICIT_REST_API_EVENT_TEMPLATE = """
+        {
+          "Transform": "AWS::Serverless-2016-10-31",
+          "Resources": {
+            "MyApi": {"Type": "AWS::Serverless::Api", "Properties": {"StageName": "prod"}},
+            "ApiFunction": {
+              "Type": "AWS::Serverless::Function",
+              "Properties": {
+                "Handler": "index.handler",
+                "Runtime": "nodejs22.x",
+                "InlineCode": "exports.handler = async () => ({});",
+                "Events": {
+                  "Get": {
+                    "Type": "Api",
+                    "Properties": {"RestApiId": {"Ref": "MyApi"}, "Path": "/items", "Method": "get"}
+                  }
+                }
+              }
+            }
+          }
+        }
+        """;
+
+    private static final String IMPLICIT_HTTP_API_EVENT_TEMPLATE = """
+        {
+          "Transform": "AWS::Serverless-2016-10-31",
+          "Resources": {
+            "HttpFunction": {
+              "Type": "AWS::Serverless::Function",
+              "Properties": {
+                "Handler": "index.handler",
+                "Runtime": "nodejs22.x",
+                "InlineCode": "exports.handler = async () => ({});",
+                "Events": {
+                  "Get": {"Type": "HttpApi", "Properties": {"Path": "/items", "Method": "GET"}}
+                }
+              }
+            }
+          }
+        }
+        """;
+
+    /** The text of every record logged at warn or above while the processor expands {@code template}. */
+    private List<String> warningsLoggedWhileExpanding(JsonNode template) {
+        List<LogRecord> logged = new CopyOnWriteArrayList<>();
+        Logger logger = Logger.getLogger(SamTransformProcessor.class.getName());
+        Level original = logger.getLevel();
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord logRecord) {
+                logged.add(logRecord);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(handler);
+        logger.setLevel(Level.ALL);
+        try {
+            processor.expandSamTemplate(template);
+        } finally {
+            logger.setLevel(original);
+            logger.removeHandler(handler);
+        }
+        return logged.stream()
+                .filter(r -> r.getLevel().intValue() >= Level.WARNING.intValue())
+                .map(SamTransformProcessorTest::text)
+                .toList();
     }
 
     /**

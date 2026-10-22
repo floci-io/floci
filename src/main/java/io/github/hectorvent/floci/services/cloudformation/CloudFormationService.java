@@ -155,7 +155,8 @@ public class CloudFormationService implements ResourceProvider {
         this.objectMapper = objectMapper;
         this.config = config;
         this.regionResolver = regionResolver;
-        this.samTransformProcessor = new SamTransformProcessor(objectMapper);
+        this.samTransformProcessor = new SamTransformProcessor(objectMapper,
+                config == null || config.services().cloudformation().allowStubUnsupportedResourceTypes());
         this.awsIncludeProcessor = new AwsIncludeProcessor(objectMapper, s3Service);
         this.clock = clock;
         this.stackBackend = storageFactory.create(
@@ -1946,9 +1947,11 @@ public class CloudFormationService implements ResourceProvider {
 
             // Apply SAM transform if the template declares AWS::Serverless-2016-10-31
             boolean hasSamTransform = samTransformProcessor.hasSamTransform(template);
+            Map<String, String> unexpandedSamEvents = new HashMap<>();
             if (hasSamTransform) {
                 LOG.infov("Applying SAM transform for stack {0}", stack.getStackName());
-                template = samTransformProcessor.expandSamTemplate(template, samTransformParameters(template, params, region));
+                template = samTransformProcessor.expandSamTemplate(template, samTransformParameters(template, params, region),
+                        unexpandedSamEvents);
             }
 
             // Persist the merged/expanded tree, not the raw submitted body, whenever either
@@ -2135,6 +2138,13 @@ public class CloudFormationService implements ResourceProvider {
                         }
                     }
 
+                    // A function whose SAM events were left out reports it the way a stubbed
+                    // resource type does, as the reason on its successful resource event.
+                    String unexpandedSamEvent = unexpandedSamEvents.get(logicalId);
+                    if (unexpandedSamEvent != null && resource.getStatusReason() == null
+                            && resource.getStatus() != null && resource.getStatus().endsWith("_COMPLETE")) {
+                        resource.setStatusReason(unexpandedSamEvent);
+                    }
                     addEvent(stack, logicalId, resource.getPhysicalId(), type,
                             resource.getStatus(), resource.getStatusReason());
 

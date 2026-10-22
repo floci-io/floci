@@ -1978,6 +1978,62 @@ class SamTransformIntegrationTest {
             .body("definition", not(containsString("${TableName}")));
     }
 
+    /**
+     * An event type the transform does not expand still deploys the function, as a stubbed
+     * resource type still deploys, but the function's resource event says the trigger was left
+     * out, so DescribeStackEvents does not read as a fully wired deployment.
+     */
+    @Test
+    void samFunction_withUnexpandedEvent_reportsItOnTheFunction() {
+        String stackName = "sam-unexpanded-event-stack";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            AWSTemplateFormatVersion: '2010-09-09'
+            Transform: AWS::Serverless-2016-10-31
+            Resources:
+              Uploads:
+                Type: AWS::S3::Bucket
+              ThumbnailFunction:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: sam-unexpanded-event-func
+                  Handler: index.handler
+                  Runtime: nodejs22.x
+                  InlineCode: "exports.handler = async () => ({});"
+                  Events:
+                    Upload:
+                      Type: S3
+                      Properties:
+                        Bucket: !Ref Uploads
+                        Events: s3:ObjectCreated:*
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("SAM event Upload of type S3 on function ThumbnailFunction is not "
+                    + "supported by Floci. It was not expanded and nothing was created for it."));
+    }
+
     private static String stackOutputValue(String describeStacksXml, String outputKey) {
         return describeStacksXml
                 .split("<OutputKey>" + outputKey + "</OutputKey>")[1]

@@ -15,6 +15,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -48,9 +49,20 @@ class SamTransformProcessor {
     private static final Pattern ALPHANUMERIC = Pattern.compile("[A-Za-z0-9]+");
 
     private final ObjectMapper objectMapper;
+    private final boolean allowUnexpandedEvents;
 
     SamTransformProcessor(ObjectMapper objectMapper) {
+        this(objectMapper, true);
+    }
+
+    /**
+     * @param allowUnexpandedEvents {@code floci.services.cloudformation.allow-stub-unsupported-resource-types}:
+     *     a function event the transform cannot expand is reported and left out when true, and fails
+     *     the transform when false, as a resource type with no provisioner is stubbed or refused
+     */
+    SamTransformProcessor(ObjectMapper objectMapper, boolean allowUnexpandedEvents) {
         this.objectMapper = objectMapper;
+        this.allowUnexpandedEvents = allowUnexpandedEvents;
     }
 
     boolean hasSamTransform(JsonNode template) {
@@ -82,6 +94,16 @@ class SamTransformProcessor {
      * parameter references against (falling back to each parameter's {@code Default}).
      */
     JsonNode expandSamTemplate(JsonNode template, Map<String, String> parameterValues) {
+        return expandSamTemplate(template, parameterValues, new LinkedHashMap<>());
+    }
+
+    /**
+     * Expands the template as {@link #expandSamTemplate(JsonNode, Map)} does, and records in
+     * {@code unexpandedEvents}, per function logical id, the sentence naming each of its events the
+     * transform left out, for the stack to report on that function's resource.
+     */
+    JsonNode expandSamTemplate(JsonNode template, Map<String, String> parameterValues,
+                               Map<String, String> unexpandedEvents) {
         if (!hasSamTransform(template)) {
             return template;
         }
@@ -136,7 +158,7 @@ class SamTransformProcessor {
             switch (type) {
                 case "AWS::Serverless::Function" -> {
                     expandServerlessFunction(logicalId, mergeGlobals(globals, "Function", properties),
-                            resDef, expanded, expandedResources, parameterValues);
+                            resDef, expanded, expandedResources, parameterValues, unexpandedEvents);
                     copyResourceLevelAttributes(resDef, (ObjectNode) expandedResources.path(logicalId));
                 }
                 case "AWS::Serverless::SimpleTable" -> {
@@ -201,14 +223,10 @@ class SamTransformProcessor {
                     continue;
                 }
                 JsonNode p = ev.path("Properties");
-                JsonNode restApiId = p.path("RestApiId");
-                if (!restApiId.isMissingNode() && !restApiId.isNull()) {
-                    continue; // bound to an explicit API — not an implicit-API route (null == implicit)
+                if (unroutedApiEvent(p) != null) {
+                    continue; // expandFunctionEvent reports it
                 }
                 JsonNode pathNode = p.path("Path");
-                if (!pathNode.isTextual()) {
-                    continue; // implicit routing needs a literal path; skip intrinsics (Ref/Fn::Sub)
-                }
                 JsonNode methodNode = p.path("Method");
                 String method = methodNode.isTextual() ? methodNode.asText() : "ANY";
                 String authorizerName = p.path("Auth").path("Authorizer").asText(null);
@@ -252,14 +270,11 @@ class SamTransformProcessor {
                     continue;
                 }
                 JsonNode p = ev.path("Properties");
-                String apiLogicalId = p.path("ApiId").path("Ref").asText(null);
-                if (apiLogicalId == null) {
-                    continue; // no explicit ApiId (implicit HttpApi) — not handled by this path
+                if (unroutedHttpApiEvent(p) != null) {
+                    continue; // expandFunctionEvent reports it
                 }
+                String apiLogicalId = p.path("ApiId").path("Ref").asText();
                 JsonNode pathNode = p.path("Path");
-                if (!pathNode.isTextual()) {
-                    continue; // needs a literal path; skip intrinsics (Ref/Fn::Sub)
-                }
                 JsonNode methodNode = p.path("Method");
                 String method = methodNode.isTextual() ? methodNode.asText() : "ANY";
                 boolean noAuthorizer = "NONE".equals(p.path("Auth").path("Authorizer").asText(null));
@@ -948,7 +963,8 @@ class SamTransformProcessor {
 
     private void expandServerlessFunction(String logicalId, JsonNode properties, JsonNode source,
                                           ObjectNode template, ObjectNode resources,
-                                          Map<String, String> parameterValues) {
+                                          Map<String, String> parameterValues,
+                                          Map<String, String> unexpandedEvents) {
         resources.remove(logicalId);
         ObjectNode passthrough = passthroughAttributes(source);
 
@@ -975,7 +991,7 @@ class SamTransformProcessor {
             Iterator<Map.Entry<String, JsonNode>> eventFields = events.fields();
             while (eventFields.hasNext()) {
                 Map.Entry<String, JsonNode> entry = eventFields.next();
-                expandFunctionEvent(logicalId, entry.getKey(), entry.getValue(), resources);
+                expandFunctionEvent(logicalId, entry.getKey(), entry.getValue(), resources, unexpandedEvents);
             }
         }
     }
@@ -1712,23 +1728,79 @@ class SamTransformProcessor {
     }
 
     private void expandFunctionEvent(String functionLogicalId, String eventName,
-                                     JsonNode eventDef, ObjectNode resources) {
+                                     JsonNode eventDef, ObjectNode resources,
+                                     Map<String, String> unexpandedEvents) {
         String eventType = eventDef.path("Type").asText("");
         JsonNode eventProps = eventDef.path("Properties");
 
         switch (eventType) {
             case "SQS", "Kinesis", "DynamoDB" ->
                     expandEventSourceMapping(functionLogicalId, eventName, eventProps, resources);
-            case "Api" ->
+            case "Api" -> {
+                String unrouted = unroutedApiEvent(eventProps);
+                if (unrouted != null) {
+                    reportUnexpandedEvent(functionLogicalId, eventName, eventType, unrouted, unexpandedEvents);
+                } else {
                     LOG.debugv("SAM Api event for {0}.{1} — handled by Api resource",
                             functionLogicalId, eventName);
-            case "HttpApi" ->
+                }
+            }
+            case "HttpApi" -> {
+                String unrouted = unroutedHttpApiEvent(eventProps);
+                if (unrouted != null) {
+                    reportUnexpandedEvent(functionLogicalId, eventName, eventType, unrouted, unexpandedEvents);
+                } else {
                     LOG.debugv("SAM HttpApi event for {0}.{1} — handled by HttpApi resource",
                             functionLogicalId, eventName);
-            default ->
-                    LOG.debugv("SAM event type {0} for {1}.{2} not expanded",
-                            eventType, functionLogicalId, eventName);
+                }
+            }
+            default -> reportUnexpandedEvent(functionLogicalId, eventName, eventType, null, unexpandedEvents);
         }
+    }
+
+    /** Why the implicit REST API leaves this Api event out, or null when it routes it. */
+    private static String unroutedApiEvent(JsonNode eventProps) {
+        JsonNode restApiId = eventProps.path("RestApiId");
+        if (!restApiId.isMissingNode() && !restApiId.isNull()) {
+            return "an Api event that names a RestApiId is not expanded";
+        }
+        if (!eventProps.path("Path").isTextual()) {
+            return "an Api event whose Path is not a literal string is not expanded";
+        }
+        return null;
+    }
+
+    /** Why no route is generated for this HttpApi event, or null when one is. */
+    private static String unroutedHttpApiEvent(JsonNode eventProps) {
+        if (eventProps.path("ApiId").path("Ref").asText(null) == null) {
+            return "an HttpApi event without an ApiId that references an AWS::Serverless::HttpApi "
+                    + "(the implicit HTTP API) is not expanded";
+        }
+        if (!eventProps.path("Path").isTextual()) {
+            return "an HttpApi event whose Path is not a literal string is not expanded";
+        }
+        return null;
+    }
+
+    /**
+     * A function event the transform does not expand deploys nothing, so the function alone would
+     * report CREATE_COMPLETE with its trigger missing. Like a resource type with no provisioner, it
+     * fails the transform in strict mode, and is otherwise logged at warn and recorded for the stack
+     * to report on the function's resource.
+     */
+    private void reportUnexpandedEvent(String functionLogicalId, String eventName, String eventType,
+                                       String detail, Map<String, String> unexpandedEvents) {
+        String message = "SAM event " + eventName + " of type " + eventType + " on function "
+                + functionLogicalId + " is not supported by Floci" + (detail == null ? "." : ": " + detail + ".");
+        if (!allowUnexpandedEvents) {
+            throw new AwsException("ValidationError", message, 400);
+        }
+        LOG.warnv("{0} It was not expanded and nothing was created for it. Set floci.services."
+                + "cloudformation.allow-stub-unsupported-resource-types=false to fail the stack instead.",
+                message);
+        unexpandedEvents.merge(functionLogicalId,
+                message + " It was not expanded and nothing was created for it.",
+                (earlier, later) -> earlier + " " + later);
     }
 
     private void expandEventSourceMapping(String functionLogicalId, String eventName,

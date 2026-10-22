@@ -237,7 +237,8 @@ Resource type AWS::Fake::Thing is not supported by Floci. It was stubbed and not
 Set `floci.services.cloudformation.allow-stub-unsupported-resource-types` to `false`
 (`FLOCI_SERVICES_CLOUDFORMATION_ALLOW_STUB_UNSUPPORTED_RESOURCE_TYPES=false`) to fail such a
 resource instead: it reaches `CREATE_FAILED` and the stack rolls back. Use it in a pipeline that
-must not pass over a resource it never got.
+must not pass over a resource it never got. The same setting governs a SAM function event the
+transform cannot expand (see [SAM function events](#sam-function-events)).
 
 ## SES Email Identities
 
@@ -431,6 +432,38 @@ status, named with its stack or by its ARN alone; a `StackName` that names no st
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
 - Hot-reload code (`S3Bucket: hot-reload`) is compared by host path: the same path is a no-op, a different path updates the bind mount in place.
 - `Tags` are applied when the function is created, including a replacement function. On `UpdateStack` the template's tags are applied and only the keys the previous template set and the new one drops are removed, so a tag added outside the template is kept, as in AWS.
+
+## SAM function events
+
+The SAM transform expands these `AWS::Serverless::Function` event types:
+
+| Event type | Expands to |
+|---|---|
+| `SQS`, `Kinesis`, `DynamoDB` | An `AWS::Lambda::EventSourceMapping` for the queue or stream (see [Lambda](lambda.md) for the properties it forwards) |
+| `Api` without `RestApiId` | A route on the implicit REST API the transform generates, when `Path` is a literal string |
+| `HttpApi` whose `ApiId` is a `Ref` to an `AWS::Serverless::HttpApi` | A route on that HTTP API, when `Path` is a literal string |
+
+Every other event is not expanded and nothing is created for it: the other event types (`S3`,
+`SNS`, `Schedule`, `ScheduleV2`, `EventBridgeRule`, `CloudWatchEvent`, `IoTRule`, `CloudWatchLogs`,
+`Cognito`, `MSK`, `MQ`, `SelfManagedKafka`, `DocumentDB`, `AlexaSkill`), an `Api` event that names a
+`RestApiId`, an `HttpApi` event with no `ApiId` (SAM's implicit HTTP API), and an `Api` or `HttpApi`
+event whose `Path` is not a literal string. Such an event is treated like a resource type Floci has
+no provisioner for:
+
+- By default the function still deploys. The event is logged at `WARN`, and the function's
+  resource event in `DescribeStackEvents` carries the reason:
+
+  ```
+  SAM event Upload of type S3 on function ThumbnailFunction is not supported by Floci. It was not expanded and nothing was created for it.
+  ```
+
+- With `floci.services.cloudformation.allow-stub-unsupported-resource-types` set to `false`, the
+  transform fails instead, with a `ValidationError` naming the function, the event and its type,
+  and nothing is deployed: a `CreateStack` ends in `CREATE_FAILED` with that message as the
+  stack's status reason.
+
+Known gap: an `HttpApi` event whose `ApiId` is a `Ref` to something other than an
+`AWS::Serverless::HttpApi` of the same template is not expanded either, and is not reported.
 
 ## SAM published aliases
 

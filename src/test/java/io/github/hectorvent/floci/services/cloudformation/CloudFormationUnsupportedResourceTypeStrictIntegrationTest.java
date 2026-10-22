@@ -11,6 +11,7 @@ import static io.github.hectorvent.floci.services.cloudformation.CloudFormationL
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 
 /**
  * The hard gate a pipeline can set: with
@@ -57,5 +58,42 @@ class CloudFormationUnsupportedResourceTypeStrictIntegrationTest {
             .body(containsString("The following resource(s) failed to create: [MyThing]. Rollback requested by user."));
         assertThat(CfnStackWaits.failedResourceReason(stackName, CFN_AUTH),
                 containsString("Resource type AWS::Fake::Thing is not supported by Floci."));
+    }
+
+    /**
+     * The same gate covers a SAM function event the transform cannot expand: the function alone
+     * would deploy green with its trigger missing, so the transform fails the stack instead.
+     */
+    @Test
+    void strictProfileFailsASamFunctionWhoseEventIsNotExpanded() {
+        String stackName = "cfn-sam-event-strict-" + Long.toString(System.nanoTime(), 36);
+
+        createStack(stackName, """
+                {
+                  "Transform": "AWS::Serverless-2016-10-31",
+                  "Resources": {
+                    "Uploads": {"Type": "AWS::S3::Bucket"},
+                    "ThumbnailFunction": {
+                      "Type": "AWS::Serverless::Function",
+                      "Properties": {
+                        "Handler": "index.handler",
+                        "Runtime": "nodejs22.x",
+                        "InlineCode": "exports.handler = async () => ({});",
+                        "Events": {
+                          "Upload": {
+                            "Type": "S3",
+                            "Properties": {"Bucket": {"Ref": "Uploads"}, "Events": "s3:ObjectCreated:*"}
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """);
+
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName, CFN_AUTH);
+        assertThat(state.status(), equalTo("CREATE_FAILED"));
+        assertThat(state.reason(), containsString(
+                "SAM event Upload of type S3 on function ThumbnailFunction is not supported by Floci."));
     }
 }
