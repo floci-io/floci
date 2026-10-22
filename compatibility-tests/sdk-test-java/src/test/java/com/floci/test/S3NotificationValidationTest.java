@@ -67,7 +67,7 @@ class S3NotificationValidationTest {
                             .skipDestinationValidation(true)
                             .notificationConfiguration(NotificationConfiguration.builder()
                                     .queueConfigurations(queueConfiguration(queueArn),
-                                            queueConfiguration(missingArn)).build()));
+                                            queueConfiguration(missingArn, Event.S3_OBJECT_REMOVED)).build()));
                     assertThat(s3.getBucketNotificationConfiguration(request -> request.bucket(bucket))
                             .queueConfigurations()).extracting(QueueConfiguration::queueArn)
                             .containsExactly(queueArn, missingArn);
@@ -94,6 +94,10 @@ class S3NotificationValidationTest {
     }
 
     private static QueueConfiguration queueConfiguration(String queueArn) {
-        return QueueConfiguration.builder().queueArn(queueArn).events(Event.S3_OBJECT_CREATED).build();
+        return queueConfiguration(queueArn, Event.S3_OBJECT_CREATED);
+    }
+
+    private static QueueConfiguration queueConfiguration(String queueArn, Event event) {
+        return QueueConfiguration.builder().queueArn(queueArn).events(event).build();
     }
 }

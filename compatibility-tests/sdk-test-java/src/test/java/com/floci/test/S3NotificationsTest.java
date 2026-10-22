@@ -113,7 +113,7 @@ class S3NotificationsTest {
     static void cleanup() {
         if (s3 != null) {
             try {
-                s3.deleteObject(DeleteObjectRequest.builder().bucket(bucketName).key("incoming/report.csv").build());
+                s3.deleteObject(DeleteObjectRequest.builder().bucket(bucketName).key("lambda/report.csv").build());
             } catch (Exception ignored) {}
             try {
                 s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucketName).build());
@@ -164,7 +164,7 @@ class S3NotificationsTest {
                                 .id("lambda-filtered")
                                 .lambdaFunctionArn(functionArn)
                                 .events(Event.S3_OBJECT_CREATED_PUT)
-                                .filter(filter("incoming/", ".csv"))
+                                .filter(filter("lambda/", ".csv"))
                                 .build())
                         .build())
                 .build());
@@ -200,7 +200,7 @@ class S3NotificationsTest {
                     assertThat(config.lambdaFunctionArn()).isEqualTo(functionArn);
                     assertThat(config.events()).contains(Event.S3_OBJECT_CREATED_PUT);
                     assertThat(config.filter().key().filterRules())
-                            .anyMatch(rule -> rule.name() == FilterRuleName.PREFIX && "incoming/".equals(rule.value()))
+                            .anyMatch(rule -> rule.name() == FilterRuleName.PREFIX && "lambda/".equals(rule.value()))
                             .anyMatch(rule -> rule.name() == FilterRuleName.SUFFIX && ".csv".equals(rule.value()));
                 });
     }
@@ -210,7 +210,7 @@ class S3NotificationsTest {
         Assumptions.assumeTrue(TestFixtures.isLambdaDispatchAvailable(),
                 "Lambda REQUEST_RESPONSE dispatch unavailable in this environment");
 
-        String key = "incoming/report.csv";
+        String key = "lambda/report.csv";
         String expectedMessage = "[s3-notification] received " + bucketName + "/" + key;
 
         s3.putBucketNotificationConfiguration(PutBucketNotificationConfigurationRequest.builder()
@@ -220,7 +220,7 @@ class S3NotificationsTest {
                                 .id("lambda-filtered")
                                 .lambdaFunctionArn(functionArn)
                                 .events(Event.S3_OBJECT_CREATED_PUT)
-                                .filter(filter("incoming/", ".csv"))
+                                .filter(filter("lambda/", ".csv"))
                                 .build())
                         .build())
                 .build());
