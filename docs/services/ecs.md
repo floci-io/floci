@@ -675,6 +675,12 @@ AWS does, and `aws ecs wait services-stable` on a nonexistent service fails imme
 instead of polling for its full timeout. A reference supplied as an ARN is echoed back
 unchanged.
 
+A service reference resolves only in the requested cluster (`default` when none is named) and
+in the request's region, as on AWS. A service of the same name in another cluster or region
+is not it, so a name or ARN that only matches there is `MISSING` here. A full ARN has to name
+that cluster; the short `service/<name>` form means the requested cluster. The same applies to
+the task set operations and `ListServiceDeployments`, which answer `ServiceNotFoundException`.
+
 ### Task Sets
 
 | Operation | Description |

@@ -228,6 +228,74 @@ class EcsDescribeServicesIntegrationTest {
     }
 
     @Test
+    void aServiceNameIsResolvedOnlyInTheRequestedCluster() {
+        seedClusterAndTaskDef("scope-cluster-a", "scope-td-a");
+        call("CreateCluster", "{\"clusterName\":\"scope-cluster-b\"}");
+        call("CreateService", "{\"cluster\":\"scope-cluster-a\",\"serviceName\":\"scope-web\","
+                + "\"taskDefinition\":\"scope-td-a\",\"desiredCount\":0}");
+
+        describe("scope-cluster-b", "scope-web").then()
+                .body("services", hasSize(0))
+                .body("failures", hasSize(1))
+                .body("failures[0].reason", equalTo("MISSING"))
+                .body("failures[0].arn", endsWith(":service/scope-cluster-b/scope-web"));
+    }
+
+    @Test
+    void aServiceArnOfAnotherClusterIsMissingInTheRequestedOne() {
+        seedClusterAndTaskDef("scope-cluster-c", "scope-td-c");
+        call("CreateCluster", "{\"clusterName\":\"scope-cluster-d\"}");
+        String arn = call("CreateService", "{\"cluster\":\"scope-cluster-c\",\"serviceName\":\"scope-api\","
+                + "\"taskDefinition\":\"scope-td-c\",\"desiredCount\":0}").path("service.serviceArn");
+
+        describe("scope-cluster-d", arn).then()
+                .body("services", hasSize(0))
+                .body("failures", hasSize(1))
+                .body("failures[0].reason", equalTo("MISSING"))
+                .body("failures[0].arn", equalTo(arn));
+    }
+
+    @Test
+    void aServiceNameIsResolvedOnlyInTheRequestRegion() {
+        seedClusterAndTaskDef("scope-cluster-e", "scope-td-e");
+        call("CreateService", "{\"cluster\":\"scope-cluster-e\",\"serviceName\":\"scope-worker\","
+                + "\"taskDefinition\":\"scope-td-e\",\"desiredCount\":0}");
+        given().contentType(CT).header("X-Amz-Target", TARGET + "CreateCluster")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260215/us-west-2"
+                        + "/ecs/aws4_request, SignedHeaders=host, Signature=abc")
+                .body("{\"clusterName\":\"scope-cluster-e\"}")
+                .when().post("/")
+                .then().statusCode(200);
+
+        given().contentType(CT).header("X-Amz-Target", TARGET + "DescribeServices")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260215/us-west-2"
+                        + "/ecs/aws4_request, SignedHeaders=host, Signature=abc")
+                .body("{\"cluster\":\"scope-cluster-e\",\"services\":[\"scope-worker\"]}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("services", hasSize(0))
+                .body("failures[0].reason", equalTo("MISSING"))
+                .body("failures[0].arn", equalTo(
+                        "arn:aws:ecs:us-west-2:000000000000:service/scope-cluster-e/scope-worker"));
+    }
+
+    @Test
+    void aServiceArnInTheLongOrShortFormResolvesInTheRequestedCluster() {
+        seedClusterAndTaskDef("scope-cluster-f", "scope-td-f");
+        String arn = call("CreateService", "{\"cluster\":\"scope-cluster-f\",\"serviceName\":\"scope-batch\","
+                + "\"taskDefinition\":\"scope-td-f\",\"desiredCount\":0}").path("service.serviceArn");
+
+        describe("scope-cluster-f", arn).then()
+                .body("services", hasSize(1))
+                .body("services[0].serviceArn", equalTo(arn))
+                .body("failures", hasSize(0));
+        describe("scope-cluster-f", "arn:aws:ecs:us-east-1:000000000000:service/scope-batch").then()
+                .body("services", hasSize(1))
+                .body("services[0].serviceArn", equalTo(arn))
+                .body("failures", hasSize(0));
+    }
+
+    @Test
     void deletedServiceReportsAnEmptyDeploymentListRatherThanOmittingIt() {
         // AWS's ServicesStable waiter fails an INACTIVE service on status, so an empty list is
         // correct here, but the key must still be present, matching how moto renders it.

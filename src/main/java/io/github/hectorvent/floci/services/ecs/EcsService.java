@@ -5839,12 +5839,22 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return task;
     }
 
+    /**
+     * The service a reference names in the requested cluster and region, never one of the same name
+     * elsewhere. An ARN has to name that service exactly; its short {@code service/<name>} form
+     * means the requested cluster.
+     */
     private EcsServiceModel resolveService(String clusterName, String serviceId, String region) {
-        EcsServiceModel svc = services.get(serviceKey(region, clusterName, serviceId));
-        if (svc != null) { return svc; }
-        return services.values().stream()
-                .filter(s -> s.getServiceArn().equals(serviceId) || s.getServiceName().equals(serviceId))
-                .findFirst().orElse(null);
+        if (serviceId == null || !serviceId.startsWith("arn:")) {
+            return services.get(serviceKey(region, clusterName, serviceId));
+        }
+        EcsServiceModel svc = services.get(serviceKey(region, clusterName, extractServiceName(serviceId)));
+        if (svc == null) {
+            return null;
+        }
+        boolean named = serviceId.equals(svc.getServiceArn())
+                || serviceId.equals(regionResolver.buildArn("ecs", region, "service/" + svc.getServiceName()));
+        return named ? svc : null;
     }
 
     private EcsServiceModel resolveServiceOrThrow(String clusterName, String serviceId, String region) {
