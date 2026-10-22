@@ -703,6 +703,35 @@ class BedrockProxyIntegrationTest {
             """), objectMapper.readTree(received.get().body()).path("messages"));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"converse", "converse-stream"})
+    void nullContentBlockMembersAreTreatedAsUnset(String operation) throws IOException {
+        nextResponseBody.set(operation.equals("converse")
+                ? """
+                    {"choices":[{"finish_reason":"stop","message":{"content":"ok"}}]}
+                    """
+                : """
+                    data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
+
+                    data: [DONE]
+                    """);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"system":[{"text":"Be brief.","cachePoint":null}],
+                 "messages":[{"role":"user","content":[{"text":"hi","image":null}]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+        .then()
+            .statusCode(200);
+        assertEquals(objectMapper.readTree("""
+            [{"role":"system","content":"Be brief."},
+             {"role":"user","content":"hi"}]
+            """), objectMapper.readTree(received.get().body()).path("messages"));
+    }
+
     @Test
     void converse_toolCallsTranslateToToolUse() throws IOException {
         nextResponseBody.set("""

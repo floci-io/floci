@@ -273,17 +273,27 @@ final class BedrockOpenAiTranslator {
 
     /**
      * Requires a content block to set exactly one union member, so a member the proxy cannot
-     * translate is never silently discarded. guardContent is returned as the text or image block it
+     * translate is never silently discarded. A member whose value is null is unset, as on AWS, and
+     * is left out of the returned block. guardContent is returned as the text or image block it
      * wraps: the proxy applies no guardrail, so guarded content is ordinary model input.
      */
     private static JsonNode contentBlock(ObjectMapper mapper, JsonNode block, String unsupportedMessage) {
-        if (!block.isObject() || block.size() != 1) {
+        if (!block.isObject()) {
             throw new AwsException("ValidationException", unsupportedMessage, 400);
         }
-        if (!block.has("guardContent")) {
-            return block;
+        ObjectNode members = mapper.createObjectNode();
+        for (Map.Entry<String, JsonNode> member : block.properties()) {
+            if (!member.getValue().isNull()) {
+                members.set(member.getKey(), member.getValue());
+            }
         }
-        JsonNode guarded = block.path("guardContent");
+        if (members.size() != 1) {
+            throw new AwsException("ValidationException", unsupportedMessage, 400);
+        }
+        if (!members.has("guardContent")) {
+            return members;
+        }
+        JsonNode guarded = members.path("guardContent");
         JsonNode guardedText = guarded.path("text").path("text");
         if (guarded.size() == 1 && guardedText.isTextual()) {
             return mapper.createObjectNode().put("text", guardedText.asText());
