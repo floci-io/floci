@@ -709,6 +709,7 @@ public class KinesisJsonHandler {
     @SuppressWarnings("unchecked")
     private Response handleGetRecords(JsonNode request, String region) {
         String iterator = request.path("ShardIterator").asText();
+        requireIteratorOfStreamArn(request, iterator);
         Integer limit = request.has("Limit") ? request.path("Limit").asInt() : null;
 
         Map<String, Object> result = service.getRecords(iterator, limit, region);
@@ -863,6 +864,22 @@ public class KinesisJsonHandler {
             }
         }
         return token.scope();
+    }
+
+    /**
+     * GetRecords reads the stream its shard iterator was minted for, so a {@code StreamARN} naming
+     * another stream is refused rather than ignored, as {@link #streamNameFromToken} refuses one that a
+     * {@code NextToken} does not belong to.
+     */
+    private void requireIteratorOfStreamArn(JsonNode request, String iterator) {
+        if (!request.hasNonNull("StreamARN")) {
+            return;
+        }
+        String arnStreamName = parseStreamNameFromArn(request.path("StreamARN").asText());
+        if (!service.streamNameOf(iterator).equals(arnStreamName)) {
+            throw new AwsException("InvalidArgumentException",
+                    "The ShardIterator does not belong to the stream named by StreamARN.", 400);
+        }
     }
 
     private static int resumeShardIndex(PaginationToken token, List<KinesisShard> shards) {

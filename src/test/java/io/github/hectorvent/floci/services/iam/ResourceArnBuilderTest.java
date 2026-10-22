@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsProtocolClaimFilter;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.ProtocolClaim;
@@ -9,12 +10,14 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.WireProtocol;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import jakarta.enterprise.inject.Instance;
@@ -990,6 +993,75 @@ class ResourceArnBuilderTest {
         setJsonBody("{\"StreamARN\":\"" + fullArn + "\"}");
         String arn = builder.build("kinesis", ctx, "us-east-1", "000000000000");
         assertEquals(fullArn, arn);
+    }
+
+    // ── GetRecords ───────────────────────────────────────────────────────────────
+
+    /** A builder reading shard iterators with {@code kinesis} and {@code streams}. */
+    private static ResourceArnBuilder backedBy(KinesisService kinesis, DynamoDbStreamService streams) {
+        @SuppressWarnings("unchecked")
+        Instance<KinesisService> kinesisInstance = mock(Instance.class);
+        when(kinesisInstance.get()).thenReturn(kinesis);
+        @SuppressWarnings("unchecked")
+        Instance<DynamoDbStreamService> streamsInstance = mock(Instance.class);
+        when(streamsInstance.get()).thenReturn(streams);
+        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, kinesisInstance, streamsInstance);
+    }
+
+    /**
+     * GetRecords reads nothing but its shard iterator, so the stream that iterator reads is the
+     * resource, whatever stream the body names beside it.
+     */
+    @Test
+    void kinesisGetRecordsIsCheckedAgainstTheStreamItsIteratorReads() {
+        KinesisService kinesis = mock(KinesisService.class);
+        when(kinesis.streamNameOf("orders-iterator")).thenReturn("orders");
+        ResourceArnBuilder backed = backedBy(kinesis, null);
+
+        setJsonBody("{\"ShardIterator\":\"orders-iterator\",\"Limit\":25}");
+        assertEquals(List.of("arn:aws:kinesis:us-east-1:000000000000:stream/orders"),
+                backed.buildGetRecordsResources("kinesis:GetRecords", ctx, "us-east-1", ACCOUNT));
+        setJsonBody("{\"ShardIterator\":\"orders-iterator\",\"StreamName\":\"public\","
+                + "\"StreamARN\":\"arn:aws:kinesis:us-east-1:000000000000:stream/public\"}");
+        assertEquals(List.of("arn:aws:kinesis:us-east-1:000000000000:stream/orders"),
+                backed.buildGetRecordsResources("kinesis:GetRecords", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @Test
+    void dynamoDbStreamsGetRecordsIsCheckedAgainstTheStreamItsIteratorReads() {
+        String streamArn = "arn:aws:dynamodb:us-east-1:000000000000:table/Books/stream/2026-10-22T00:00:00.000";
+        DynamoDbStreamService streams = mock(DynamoDbStreamService.class);
+        when(streams.streamArnOf("books-iterator")).thenReturn(streamArn);
+
+        setJsonBody("{\"ShardIterator\":\"books-iterator\",\"TableName\":\"Public\"}");
+        assertEquals(List.of(streamArn),
+                backedBy(null, streams).buildGetRecordsResources("dynamodb:GetRecords", ctx, "us-east-1", ACCOUNT));
+    }
+
+    /**
+     * An iterator the stream service refuses is refused by GetRecords too, before it reads anything,
+     * and one another DynamoDB engine minted cannot be read here: the request is checked as before.
+     */
+    @Test
+    void getRecordsWithAnIteratorTheStreamServiceCannotReadKeepsItsEarlierResource() {
+        KinesisService kinesis = mock(KinesisService.class);
+        when(kinesis.streamNameOf("garbage"))
+                .thenThrow(new AwsException("InvalidArgumentException", "Invalid shard iterator", 400));
+        DynamoDbStreamService streams = mock(DynamoDbStreamService.class);
+        when(streams.streamArnOf("garbage"))
+                .thenThrow(new AwsException("ValidationException", "Invalid shard iterator", 400));
+        ResourceArnBuilder backed = backedBy(kinesis, streams);
+
+        String streamArn = "arn:aws:kinesis:us-east-1:000000000000:stream/orders";
+        setJsonBody("{\"ShardIterator\":\"garbage\",\"StreamARN\":\"" + streamArn + "\"}");
+        assertEquals(List.of(streamArn),
+                backed.buildGetRecordsResources("kinesis:GetRecords", ctx, "us-east-1", ACCOUNT));
+        setJsonBody("{\"ShardIterator\":\"garbage\",\"StreamName\":\"orders\"}");
+        assertEquals(List.of("arn:aws:kinesis:us-east-1:000000000000:stream/*"),
+                backed.buildGetRecordsResources("kinesis:GetRecords", ctx, "us-east-1", ACCOUNT));
+        setJsonBody("{\"ShardIterator\":\"garbage\",\"TableName\":\"Books\"}");
+        assertEquals(List.of("*"),
+                backed.buildGetRecordsResources("dynamodb:GetRecords", ctx, "us-east-1", ACCOUNT));
     }
 
     // ── Secrets Manager ──────────────────────────────────────────────────────────

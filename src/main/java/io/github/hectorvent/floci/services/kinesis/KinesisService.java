@@ -843,6 +843,11 @@ public class KinesisService implements ResourceProvider {
         return parts;
     }
 
+    /** The name of the stream a shard iterator reads, rejecting a malformed iterator as GetRecords does. */
+    public String streamNameOf(String shardIterator) {
+        return decodeShardIterator(shardIterator)[0];
+    }
+
     /**
      * The sequence-number reference encoded into a freshly-minted shard iterator. For LATEST this
      * is the shard's current tip record's sequence number (or {@code ""} if the shard has no

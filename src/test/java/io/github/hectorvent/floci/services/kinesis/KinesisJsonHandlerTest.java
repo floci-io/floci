@@ -1673,6 +1673,28 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
+    void getRecordsAcceptsAStreamArnThatNamesTheIteratorStreamAndRejectsAnother() {
+        createStream("test-stream");
+        ObjectNode iterReq = MAPPER.createObjectNode();
+        iterReq.put("StreamName", "test-stream");
+        iterReq.put("ShardId", "shardId-000000000000");
+        iterReq.put("ShardIteratorType", "TRIM_HORIZON");
+        String iterator = responseEntity(handler.handle("GetShardIterator", iterReq, REGION))
+                .get("ShardIterator").asText();
+
+        ObjectNode same = MAPPER.createObjectNode();
+        same.put("ShardIterator", iterator);
+        same.put("StreamARN", STREAM_ARN);
+        assertEquals(0, responseEntity(handler.handle("GetRecords", same, REGION)).get("Records").size());
+
+        ObjectNode other = MAPPER.createObjectNode();
+        other.put("ShardIterator", iterator);
+        other.put("StreamARN", "arn:aws:kinesis:us-east-1:123456789012:stream/other-stream");
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("GetRecords", other, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
     void listShardsRejectsAnExpiredNextToken() {
         KinesisJsonHandler zeroTtlHandler = new KinesisJsonHandler(service, MAPPER, 0);
         createStream("test-stream", 3);

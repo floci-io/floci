@@ -100,6 +100,11 @@ DynamoDB Streams are supported via a separate target (`DynamoDBStreams_20120810`
 | `GetShardIterator` | Get a shard iterator |
 | `GetRecords` | Read stream records from a shard |
 
+With IAM enforcement on, `GetRecords` is authorized against the stream its shard iterator reads,
+`table/<table>/stream/<label>`, as AWS authorizes it. Under the
+[DynamoDB Local backend](#dynamodb-local-backend) the iterator is DynamoDB Local's own, which Floci
+cannot read, so `GetRecords` is checked against `*` there.
+
 Redshift zero-ETL integrations can consume these stream records directly. See the
 [Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported target,
 landing table, checkpoint, and retry behavior.

@@ -1464,7 +1464,9 @@ as `dynamodb:GetItem`, is checked item by item, as described under
 `dynamodb:GetItem` on its own table, with its own `dynamodb:LeadingKeys`. A DynamoDB request that
 names an `IndexName` beside its `TableName`, such as a `Query` or `Scan` of a secondary index, is
 checked against the index, `table/<table>/index/<index>`, as AWS checks it, so a statement naming only
-the table does not cover it; `table/<table>/index/*` names every index of a table.
+the table does not cover it; `table/<table>/index/*` names every index of a table. A Kinesis or
+DynamoDB Streams `GetRecords` is checked against the stream its shard iterator reads, whatever
+stream or table its body names beside the iterator.
 
 A Query request is checked against the resource its parameters name, as a JSON body's are: an SQS
 call against the queue its `QueueUrl` or `QueueName` names, and an SNS call against the topic its

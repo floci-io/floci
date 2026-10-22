@@ -359,7 +359,7 @@ public class DynamoDbStreamService {
     }
 
     /** The stream an iterator reads, rejecting a malformed iterator as GetRecords does. */
-    String streamArnOf(String shardIterator) {
+    public String streamArnOf(String shardIterator) {
         return decodeIterator(shardIterator)[0];
     }
 

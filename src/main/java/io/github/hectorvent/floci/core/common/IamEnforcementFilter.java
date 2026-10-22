@@ -1501,11 +1501,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /**
      * Logs and Secrets Manager targets depend on the serving operation and the request's partition, and
-     * SSM targets on the serving operation; Scheduler and Pipes targets on the request's partition, which
-     * those services mint their ARNs in.
+     * SSM and stream GetRecords targets on the serving operation; Scheduler and Pipes targets on the
+     * request's partition, which those services mint their ARNs in.
      */
     private List<String> targetResources(String credentialScope, String action, ContainerRequestContext ctx,
                                          String region, String accountId) {
+        if ("kinesis:GetRecords".equals(action) || "dynamodb:GetRecords".equals(action)) {
+            return arnBuilder.buildGetRecordsResources(action, ctx, region, accountId);
+        }
         if ("logs".equals(credentialScope)) {
             return arnBuilder.buildLogResources(action, ctx, region, accountId, requestPartition());
         }
