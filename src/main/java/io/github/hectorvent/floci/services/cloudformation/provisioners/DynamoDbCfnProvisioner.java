@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess.
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.KinesisStreamingDestination;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.ProvisionedThroughput;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
@@ -27,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -68,6 +70,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     // The Kinesis data stream this resource's KinesisStreamSpecification enabled, so a removed block
     // or a new StreamArn disables that destination and leaves any other the table has alone.
     private static final String KINESIS_STREAM_ATTR = "__FlociDynamoDbKinesisStreamArn";
+    // The ApproximateCreationDateTimePrecision that destination was enabled with, absent for the default,
+    // so a rollback enables it again with the same one.
+    private static final String KINESIS_PRECISION_ATTR = "__FlociDynamoDbKinesisPrecision";
     // The billing the template declared, resolved, when this resource was last provisioned: the
     // previous template's value an update compares with, as CloudFormation does.
     private static final String DECLARED_BILLING_ATTR = "__FlociDynamoDbDeclaredBilling";
@@ -362,31 +367,48 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Brings the destination this resource enabled to {@code desiredArn}: the one it enabled before is
-     * disabled when it is no longer wanted, and the wanted one is enabled unless it is already active.
-     * The record is written after each call, so a failure leaves it naming what the table forwards to.
+     * Brings the destination this resource enabled to {@code desiredArn} and {@code precision}, null
+     * for the default: the one it enabled before is disabled when it is no longer wanted, and the
+     * wanted one is enabled unless it is already active with that precision. An active one with
+     * another precision is disabled and enabled again, since enabling a disabled destination sets its
+     * precision. The record is written after each call, so a failure leaves it naming what the table
+     * forwards to.
      */
     private void reconcileKinesisDestination(StackResource r, Scope scope, String tableName, TableDefinition table,
                                              String desiredArn, String precision) {
         String priorArn = r.getAttributes().get(KINESIS_STREAM_ATTR);
         if (priorArn != null && !priorArn.equals(desiredArn)) {
-            if (kinesisDestinationActive(table, priorArn)) {
+            if (activeKinesisDestination(table, priorArn).isPresent()) {
                 dynamoDb.tables().disableKinesisStreamingDestination(scope, tableName, priorArn);
             }
             r.getAttributes().remove(KINESIS_STREAM_ATTR);
+            r.getAttributes().remove(KINESIS_PRECISION_ATTR);
         }
         if (desiredArn != null) {
-            if (!kinesisDestinationActive(table, desiredArn)) {
+            Optional<KinesisStreamingDestination> active = activeKinesisDestination(table, desiredArn);
+            String wantedPrecision = precision != null ? precision : KinesisStreamingDestination.PRECISION_MILLISECOND;
+            if (active.isPresent() && !wantedPrecision.equals(active.get().getApproximateCreationDateTimePrecision())) {
+                dynamoDb.tables().disableKinesisStreamingDestination(scope, tableName, desiredArn);
+                active = Optional.empty();
+            }
+            if (active.isEmpty()) {
                 dynamoDb.tables().enableKinesisStreamingDestination(scope, tableName, desiredArn, precision);
             }
             r.getAttributes().put(KINESIS_STREAM_ATTR, desiredArn);
+            putOrRemove(r, KINESIS_PRECISION_ATTR, precision);
         }
     }
 
-    private static boolean kinesisDestinationActive(TableDefinition table, String streamArn) {
+    private static Optional<KinesisStreamingDestination> activeKinesisDestination(TableDefinition table,
+                                                                                  String streamArn) {
         return table.findKinesisStreamingDestination(streamArn)
-                .map(destination -> "ACTIVE".equals(destination.getDestinationStatus()))
-                .orElse(false);
+                .filter(destination -> "ACTIVE".equals(destination.getDestinationStatus()));
+    }
+
+    private static String destinationPrecision(TableDefinition table, String streamArn) {
+        return streamArn == null ? null : table.findKinesisStreamingDestination(streamArn)
+                .map(KinesisStreamingDestination::getApproximateCreationDateTimePrecision)
+                .orElse(null);
     }
 
     private static Long capacity(JsonNode throughput, String name) {
@@ -646,6 +668,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         snapshot.put("kinesisStreamArn", r.getAttributes().get(KINESIS_STREAM_ATTR));
+        snapshot.put("kinesisPrecision", r.getAttributes().get(KINESIS_PRECISION_ATTR));
         snapshot.put("declaredBilling", r.getAttributes().get(DECLARED_BILLING_ATTR));
         ArrayNode attributes = snapshot.putArray("attributeDefinitions");
         if (table.getAttributeDefinitions() != null) {
@@ -732,8 +755,12 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         reconcileTimeToLive(scope, tableName, currentTtl, priorTtl);
 
         if (snapshot.has("kinesisStreamArn")) {
-            reconcileKinesisDestination(resource, scope, tableName, table,
-                    snapshot.get("kinesisStreamArn").textValue(), null);
+            String priorArn = snapshot.get("kinesisStreamArn").textValue();
+            // A snapshot taken before the precision was recorded has none; a destination keeps its own
+            // while disabled, and an active one is left with the one it has.
+            String priorPrecision = snapshot.has("kinesisPrecision") ? snapshot.get("kinesisPrecision").textValue()
+                    : destinationPrecision(table, priorArn);
+            reconcileKinesisDestination(resource, scope, tableName, table, priorArn, priorPrecision);
         }
         // The previous template is the stack's again, so the next update compares with its billing.
         if (snapshot.has("declaredBilling")) {

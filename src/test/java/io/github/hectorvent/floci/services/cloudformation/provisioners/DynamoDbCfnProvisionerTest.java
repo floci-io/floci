@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
@@ -19,6 +20,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.ProvisionedThroughput;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -38,6 +40,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -1028,8 +1031,18 @@ class DynamoDbCfnProvisionerTest {
         return "{\"TableName\":\"orders\",\"KinesisStreamSpecification\":{\"StreamArn\":\"" + streamArn + "\"}}";
     }
 
+    private static String kinesisProps(String streamArn, String precision) {
+        return "{\"TableName\":\"orders\",\"KinesisStreamSpecification\":{\"StreamArn\":\"" + streamArn
+                + "\",\"ApproximateCreationDateTimePrecision\":\"" + precision + "\"}}";
+    }
+
     private static TableDefinition forwardingTo(TableDefinition table, String streamArn, String status) {
-        KinesisStreamingDestination destination = new KinesisStreamingDestination(streamArn);
+        return forwardingTo(table, streamArn, status, KinesisStreamingDestination.PRECISION_MILLISECOND);
+    }
+
+    private static TableDefinition forwardingTo(TableDefinition table, String streamArn, String status,
+                                                String precision) {
+        KinesisStreamingDestination destination = new KinesisStreamingDestination(streamArn, precision);
         destination.setDestinationStatus(status);
         table.getKinesisStreamingDestinations().add(destination);
         return table;
@@ -1037,13 +1050,20 @@ class DynamoDbCfnProvisionerTest {
 
     /** The table as an UpdateStack finds it, after a create that enabled {@code streamArn}. */
     private StackResource createdForwardingTo(String streamArn) throws Exception {
+        return createdForwardingTo(streamArn, null);
+    }
+
+    /** As above, with the template declaring {@code precision}, null for none. */
+    private StackResource createdForwardingTo(String streamArn, String precision) throws Exception {
         when(tables.createTable(any(), anyString(), anyList(), anyList(), any(), any(), anyList(), anyList()))
                 .thenReturn(table(false));
         StackResource r = resource("AWS::DynamoDB::Table", "Orders");
-        overTables.provision(r, props(kinesisProps(streamArn)), ctx());
+        overTables.provision(r, props(precision == null ? kinesisProps(streamArn) : kinesisProps(streamArn, precision)),
+                ctx());
         when(tables.createTable(any(), anyString(), anyList(), anyList(), any(), any(), anyList(), anyList()))
                 .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
-        when(tables.describeTable(SCOPE, TABLE_NAME)).thenReturn(forwardingTo(table(false), streamArn, "ACTIVE"));
+        when(tables.describeTable(SCOPE, TABLE_NAME)).thenReturn(forwardingTo(table(false), streamArn, "ACTIVE",
+                precision == null ? KinesisStreamingDestination.PRECISION_MILLISECOND : precision));
         when(tables.timeToLive(SCOPE, TABLE_NAME)).thenReturn(new TimeToLive(false, null));
         return r;
     }
@@ -1095,6 +1115,64 @@ class DynamoDbCfnProvisionerTest {
         assertTrue(overTables.rollbackUpdate(r));
 
         verify(tables, times(2)).enableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A, null);
+    }
+
+    /**
+     * CloudFormation updates the precision without interruption. Enabling a disabled destination sets
+     * its precision, so the destination is turned off and on again with the new one.
+     */
+    @Test
+    void anUpdateThatOnlyChangesThePrecisionReEnablesTheDestinationWithIt() throws Exception {
+        StackResource r = createdForwardingTo(KINESIS_A);
+
+        overTables.provision(r, props(kinesisProps(KINESIS_A, "MICROSECOND")), updateCtx(TABLE_NAME));
+
+        InOrder order = inOrder(tables);
+        order.verify(tables).disableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A);
+        order.verify(tables).enableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A, "MICROSECOND");
+    }
+
+    @Test
+    void rollbackUpdatePutsBackThePrecisionTheFailedUpdateChanged() throws Exception {
+        StackResource r = createdForwardingTo(KINESIS_A);
+        overTables.provision(r, props(kinesisProps(KINESIS_A, "MICROSECOND")), updateCtx(TABLE_NAME));
+        when(tables.describeTable(SCOPE, TABLE_NAME))
+                .thenReturn(forwardingTo(table(false), KINESIS_A, "ACTIVE", "MICROSECOND"));
+
+        assertTrue(overTables.rollbackUpdate(r));
+
+        verify(tables, times(2)).disableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A);
+        verify(tables, times(2)).enableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A, null);
+    }
+
+    /** Re-enabled with the default instead, a MICROSECOND destination would come back as MILLISECOND. */
+    @Test
+    void rollbackUpdateReEnablesTheDestinationWithItsDeclaredPrecision() throws Exception {
+        StackResource r = createdForwardingTo(KINESIS_A, "MICROSECOND");
+        overTables.provision(r, props("{\"TableName\":\"orders\"}"), updateCtx(TABLE_NAME));
+        when(tables.describeTable(SCOPE, TABLE_NAME))
+                .thenReturn(forwardingTo(table(false), KINESIS_A, "DISABLED", "MICROSECOND"));
+
+        assertTrue(overTables.rollbackUpdate(r));
+
+        verify(tables, times(2)).enableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A, "MICROSECOND");
+    }
+
+    /** A snapshot taken before the precision was recorded restores the precision the destination kept. */
+    @Test
+    void rollbackUpdateFromASnapshotWithoutAPrecisionKeepsTheDestinationsOwn() throws Exception {
+        StackResource r = createdForwardingTo(KINESIS_A, "MICROSECOND");
+        overTables.provision(r, props("{\"TableName\":\"orders\"}"), updateCtx(TABLE_NAME));
+        ObjectNode snapshot = (ObjectNode) mapper.readTree(
+                r.getAttributes().get(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR));
+        snapshot.remove("kinesisPrecision");
+        r.getAttributes().put(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+        when(tables.describeTable(SCOPE, TABLE_NAME))
+                .thenReturn(forwardingTo(table(false), KINESIS_A, "DISABLED", "MICROSECOND"));
+
+        assertTrue(overTables.rollbackUpdate(r));
+
+        verify(tables, times(2)).enableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A, "MICROSECOND");
     }
 
     @Test

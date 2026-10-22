@@ -84,6 +84,30 @@ class CloudFormationDynamoDbKinesisDestinationIntegrationTest {
         deleteStack(stack);
     }
 
+    /** CloudFormation documents the precision as updatable without interruption. */
+    @Test
+    void anUpdateThatChangesOnlyThePrecisionAppliesIt() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-kinesis-precision-" + suffix;
+        String stream = "ddb-precision-" + suffix;
+        String table = "kinesis-precision-table-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(stream, table, FORWARDED));
+        CfnStackWaits.StackState created = CfnStackWaits.awaitTerminal(stack, CFN_AUTH);
+        assertEquals("CREATE_COMPLETE", created.status(), created.reason());
+
+        cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(stream, table, FORWARDED.replace("}}",
+                "}, \"ApproximateCreationDateTimePrecision\": \"MICROSECOND\"}")));
+        CfnStackWaits.StackState updated = CfnStackWaits.awaitTerminal(stack, CFN_AUTH);
+
+        assertEquals("UPDATE_COMPLETE", updated.status(), updated.reason());
+        describeKinesisStreamingDestination(table)
+            .body("KinesisDataStreamDestinations.DestinationStatus", contains("ACTIVE"))
+            .body("KinesisDataStreamDestinations.ApproximateCreationDateTimePrecision", contains("MICROSECOND"));
+
+        deleteStack(stack);
+    }
+
     private static String streamArn(String stack) {
         String xml = given()
             .contentType("application/x-www-form-urlencoded")
