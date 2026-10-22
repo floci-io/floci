@@ -65,6 +65,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     private static final String REPLICA_TABLE_NAME_ATTR = "TableName";
     private static final String REPLICA_REGION_ATTR = "__FlociDynamoDbReplicaRegion";
     private static final String REPLICA_SKIP_DELETION_ATTR = "__FlociDynamoDbReplicaSkipDeletion";
+    // The Kinesis data stream this resource's KinesisStreamSpecification enabled, so a removed block
+    // or a new StreamArn disables that destination and leaves any other the table has alone.
+    private static final String KINESIS_STREAM_ATTR = "__FlociDynamoDbKinesisStreamArn";
     private static final int TABLE_NAME_MAX_LENGTH = 255;
 
     private final DynamoDbFacade dynamoDb;
@@ -216,6 +219,11 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         boolean billingDeclared = (billingMode != null && !billingMode.isBlank())
                 || (throughput != null && throughput.isObject());
         boolean onDemand = PAY_PER_REQUEST.equals(billingMode);
+        JsonNode kinesisSpec = props != null ? engine.resolveNode(props.get("KinesisStreamSpecification")) : null;
+        boolean kinesisDeclared = kinesisSpec != null && kinesisSpec.isObject();
+        String kinesisStreamArn = kinesisDeclared ? kinesisSpec.path("StreamArn").asText(null) : null;
+        String kinesisPrecision = kinesisDeclared
+                ? kinesisSpec.path("ApproximateCreationDateTimePrecision").asText(null) : null;
 
         Scope scope = new Scope(ctx.accountId(), region);
         TableDefinition table;
@@ -284,6 +292,11 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
                 reconcileTimeToLive(scope, tableName, currentTtl, desiredTtl);
             }
 
+            // KinesisStreamSpecification is reconciled like the stream: declaring it forwards the
+            // table's changes to the stream, and a removed block or another StreamArn turns off the
+            // destination this resource enabled.
+            reconcileKinesisDestination(r, scope, tableName, table, kinesisStreamArn, kinesisPrecision);
+
             r.setPhysicalId(tableName);
             r.getAttributes().put("Arn", table.getTableArn());
             // Only the global table's registry schema declares TableId read-only; a plain table exposes
@@ -335,6 +348,34 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
                 r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
             }
         }
+    }
+
+    /**
+     * Brings the destination this resource enabled to {@code desiredArn}: the one it enabled before is
+     * disabled when it is no longer wanted, and the wanted one is enabled unless it is already active.
+     * The record is written after each call, so a failure leaves it naming what the table forwards to.
+     */
+    private void reconcileKinesisDestination(StackResource r, Scope scope, String tableName, TableDefinition table,
+                                             String desiredArn, String precision) {
+        String priorArn = r.getAttributes().get(KINESIS_STREAM_ATTR);
+        if (priorArn != null && !priorArn.equals(desiredArn)) {
+            if (kinesisDestinationActive(table, priorArn)) {
+                dynamoDb.tables().disableKinesisStreamingDestination(scope, tableName, priorArn);
+            }
+            r.getAttributes().remove(KINESIS_STREAM_ATTR);
+        }
+        if (desiredArn != null) {
+            if (!kinesisDestinationActive(table, desiredArn)) {
+                dynamoDb.tables().enableKinesisStreamingDestination(scope, tableName, desiredArn, precision);
+            }
+            r.getAttributes().put(KINESIS_STREAM_ATTR, desiredArn);
+        }
+    }
+
+    private static boolean kinesisDestinationActive(TableDefinition table, String streamArn) {
+        return table.findKinesisStreamingDestination(streamArn)
+                .map(destination -> "ACTIVE".equals(destination.getDestinationStatus()))
+                .orElse(false);
     }
 
     private static Long capacity(JsonNode throughput, String name) {
@@ -530,6 +571,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
                 }
             }
         }
+        snapshot.put("kinesisStreamArn", r.getAttributes().get(KINESIS_STREAM_ATTR));
         ArrayNode attributes = snapshot.putArray("attributeDefinitions");
         if (table.getAttributeDefinitions() != null) {
             table.getAttributeDefinitions().forEach(attribute -> attributes.addObject()
@@ -599,6 +641,11 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         TimeToLive currentTtl = dynamoDb.tables().timeToLive(scope, tableName);
         requireTimeToLiveChangeAllowed(currentTtl, priorTtl);
         reconcileTimeToLive(scope, tableName, currentTtl, priorTtl);
+
+        if (snapshot.has("kinesisStreamArn")) {
+            reconcileKinesisDestination(resource, scope, tableName, table,
+                    snapshot.get("kinesisStreamArn").textValue(), null);
+        }
 
         publishStreamArn(resource, table);
         resource.getAttributes().remove(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);

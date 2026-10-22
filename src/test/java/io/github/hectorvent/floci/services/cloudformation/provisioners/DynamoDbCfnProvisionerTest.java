@@ -8,9 +8,13 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess.TimeToLive;
 import io.github.hectorvent.floci.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.KinesisStreamingDestination;
 import io.github.hectorvent.floci.services.dynamodb.model.ProvisionedThroughput;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.Test;
@@ -36,6 +40,7 @@ import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -832,6 +837,87 @@ class DynamoDbCfnProvisionerTest {
 
         verify(dynamoDb).updateTable(TABLE_NAME, null, null, List.of(), List.of("byEmail"), List.of(), List.of(),
                 List.of(), null, "us-east-1");
+    }
+
+    private static final String KINESIS_A = "arn:aws:kinesis:us-east-1:000000000000:stream/changes-a";
+    private static final String KINESIS_B = "arn:aws:kinesis:us-east-1:000000000000:stream/changes-b";
+    private static final Scope SCOPE = new Scope("000000000000", "us-east-1");
+
+    private final DynamoDbTableAccess tables = mock(DynamoDbTableAccess.class);
+    private final DynamoDbCfnProvisioner overTables = new DynamoDbCfnProvisioner(
+            new DynamoDbFacade(backend, tables, new RegionResolver("us-east-1", "000000000000")));
+
+    private static String kinesisProps(String streamArn) {
+        return "{\"TableName\":\"orders\",\"KinesisStreamSpecification\":{\"StreamArn\":\"" + streamArn + "\"}}";
+    }
+
+    private static TableDefinition forwardingTo(TableDefinition table, String streamArn, String status) {
+        KinesisStreamingDestination destination = new KinesisStreamingDestination(streamArn);
+        destination.setDestinationStatus(status);
+        table.getKinesisStreamingDestinations().add(destination);
+        return table;
+    }
+
+    /** The table as an UpdateStack finds it, after a create that enabled {@code streamArn}. */
+    private StackResource createdForwardingTo(String streamArn) throws Exception {
+        when(tables.createTable(any(), anyString(), anyList(), anyList(), any(), any(), anyList(), anyList()))
+                .thenReturn(table(false));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        overTables.provision(r, props(kinesisProps(streamArn)), ctx());
+        when(tables.createTable(any(), anyString(), anyList(), anyList(), any(), any(), anyList(), anyList()))
+                .thenThrow(new AwsException("ResourceInUseException", "Table already exists", 400));
+        when(tables.describeTable(SCOPE, TABLE_NAME)).thenReturn(forwardingTo(table(false), streamArn, "ACTIVE"));
+        when(tables.timeToLive(SCOPE, TABLE_NAME)).thenReturn(new TimeToLive(false, null));
+        return r;
+    }
+
+    @Test
+    void aDeclaredKinesisStreamSpecificationEnablesTheDestination() throws Exception {
+        createdForwardingTo(KINESIS_A);
+
+        verify(tables).enableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A, null);
+    }
+
+    @Test
+    void anUpdateThatDropsTheBlockDisablesTheDestinationItEnabled() throws Exception {
+        StackResource r = createdForwardingTo(KINESIS_A);
+
+        overTables.provision(r, props("{\"TableName\":\"orders\"}"), updateCtx(TABLE_NAME));
+
+        verify(tables).disableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A);
+    }
+
+    @Test
+    void anUpdateToAnotherStreamSwapsTheDestination() throws Exception {
+        StackResource r = createdForwardingTo(KINESIS_A);
+
+        overTables.provision(r, props(kinesisProps(KINESIS_B)), updateCtx(TABLE_NAME));
+
+        verify(tables).disableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A);
+        verify(tables).enableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_B, null);
+    }
+
+    /** An unchanged block leaves an active destination alone; enabling it again would be refused. */
+    @Test
+    void anUnchangedKinesisStreamSpecificationIsNotEnabledAgain() throws Exception {
+        StackResource r = createdForwardingTo(KINESIS_A);
+
+        overTables.provision(r, props(kinesisProps(KINESIS_A)), updateCtx(TABLE_NAME));
+
+        verify(tables).enableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A, null);
+        verify(tables, never()).disableKinesisStreamingDestination(any(), anyString(), anyString());
+    }
+
+    /** A failed update that turned the destination off turns it back on with the rest of the table. */
+    @Test
+    void rollbackUpdateEnablesTheDestinationTheFailedUpdateDisabled() throws Exception {
+        StackResource r = createdForwardingTo(KINESIS_A);
+        overTables.provision(r, props("{\"TableName\":\"orders\"}"), updateCtx(TABLE_NAME));
+        when(tables.describeTable(SCOPE, TABLE_NAME)).thenReturn(forwardingTo(table(false), KINESIS_A, "DISABLED"));
+
+        assertTrue(overTables.rollbackUpdate(r));
+
+        verify(tables, times(2)).enableKinesisStreamingDestination(SCOPE, TABLE_NAME, KINESIS_A, null);
     }
 
     @Test

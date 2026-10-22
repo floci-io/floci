@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.dynamodb.backend;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
@@ -200,6 +201,34 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
             }
             return table;
         });
+    }
+
+    @Override
+    public void enableKinesisStreamingDestination(Scope scope, String tableName, String streamArn,
+                                                  String precision) {
+        ObjectNode body = objectMapper.createObjectNode().put("TableName", tableName).put("StreamArn", streamArn);
+        if (precision != null) {
+            body.putObject("EnableKinesisStreamingConfiguration")
+                    .put("ApproximateCreationDateTimePrecision", precision);
+        }
+        handle(scope, "EnableKinesisStreamingDestination", body);
+    }
+
+    @Override
+    public void disableKinesisStreamingDestination(Scope scope, String tableName, String streamArn) {
+        handle(scope, "DisableKinesisStreamingDestination",
+                objectMapper.createObjectNode().put("TableName", tableName).put("StreamArn", streamArn));
+    }
+
+    /** A call through the native wire handler, which owns that operation's validation. */
+    private void handle(Scope scope, String action, ObjectNode body) {
+        try {
+            RequestScopes.callAsChecked(scope.accountId(), () -> jsonHandler.handle(action, body, scope.region()));
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException(action + " failed for table " + body.path("TableName").asText(), e);
+        }
     }
 
     @Override

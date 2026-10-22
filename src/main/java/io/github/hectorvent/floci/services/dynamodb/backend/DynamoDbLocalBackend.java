@@ -60,6 +60,8 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
     private static final String REPLICAS_UNSUPPORTED = "Replicas are not supported by the DynamoDB Local backend";
     private static final String TABLE_UPDATES_UNSUPPORTED = "Changing the billing mode, provisioned throughput or"
             + " global secondary indexes of an existing table is not supported by the DynamoDB Local backend";
+    private static final String KINESIS_DESTINATIONS_UNSUPPORTED =
+            "Kinesis streaming destinations are not supported by the DynamoDB Local backend";
     private static final Pattern PARTITION = Pattern.compile(AwsArnUtils.PARTITION_REGEX);
     private static final List<String> PUBLIC_ARN_FIELDS = List.of("TableArn", "IndexArn", "LatestStreamArn",
             "StreamArn", "LastEvaluatedStreamArn", "message", "Message");
@@ -451,6 +453,17 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
                                        Long writeCapacity, List<AttributeDefinition> attributeDefinitions,
                                        List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes) {
         throw new AwsException("ValidationException", TABLE_UPDATES_UNSUPPORTED, 400);
+    }
+
+    @Override
+    public void enableKinesisStreamingDestination(Scope scope, String tableName, String streamArn,
+                                                  String precision) {
+        throw new AwsException("ValidationException", KINESIS_DESTINATIONS_UNSUPPORTED, 400);
+    }
+
+    @Override
+    public void disableKinesisStreamingDestination(Scope scope, String tableName, String streamArn) {
+        throw new AwsException("ValidationException", KINESIS_DESTINATIONS_UNSUPPORTED, 400);
     }
 
     @Override

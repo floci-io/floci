@@ -45,6 +45,15 @@ public interface DynamoDbTableAccess {
                                 Long writeCapacity, List<AttributeDefinition> attributeDefinitions,
                                 List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes);
 
+    /**
+     * Turns on forwarding of the table's changes to the Kinesis data stream {@code streamArn}, as
+     * EnableKinesisStreamingDestination does; a null {@code precision} means MILLISECOND.
+     */
+    void enableKinesisStreamingDestination(Scope scope, String tableName, String streamArn, String precision);
+
+    /** Turns off forwarding to {@code streamArn}, as DisableKinesisStreamingDestination does. */
+    void disableKinesisStreamingDestination(Scope scope, String tableName, String streamArn);
+
     TableDefinition enableStream(Scope scope, String tableName, String viewType);
 
     TableDefinition disableStream(Scope scope, String tableName);
