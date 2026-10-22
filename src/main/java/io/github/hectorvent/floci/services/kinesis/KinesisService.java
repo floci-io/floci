@@ -956,6 +956,11 @@ public class KinesisService implements ResourceProvider {
      * more data, so the page carries no NextShardIterator and lists the shard's ChildShards instead. The
      * page that returns the final records still continues: pollers that keep their previous iterator on a
      * null one would otherwise read those records again.
+     *
+     * <p>Every other page also carries the sequence number SubscribeToShard reports as its
+     * ContinuationSequenceNumber: the last record returned, or when none was, the last record before
+     * the position read from (the shard's starting sequence number if there is none). Resuming
+     * AFTER_SEQUENCE_NUMBER it continues exactly where this page stopped.
      */
     private Map<String, Object> recordsPage(KinesisStream stream, KinesisShard shard, String streamName,
                                             List<KinesisRecord> allRecords, int startIndex, Integer limit) {
@@ -980,6 +985,9 @@ public class KinesisService implements ResourceProvider {
         response.put("NextShardIterator",
                 buildContinuationIterator(streamName, shard.getShardId(), allRecords, nextIndex));
         response.put("MillisBehindLatest", computeMillisBehindLatest(allRecords, nextIndex));
+        response.put("ContinuationSequenceNumber", nextIndex > 0
+                ? allRecords.get(nextIndex - 1).getSequenceNumber()
+                : shard.getSequenceNumberRange().startingSequenceNumber());
         return response;
     }
 

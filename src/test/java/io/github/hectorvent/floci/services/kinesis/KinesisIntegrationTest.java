@@ -1308,6 +1308,10 @@ class KinesisIntegrationTest {
         JsonNode event = decodeFirstEventStreamMessage(body);
         assertNotNull(event);
         assertEquals(0, event.path("Records").size());
+        assertTrue(event.path("ContinuationSequenceNumber").isTextual(),
+            "ContinuationSequenceNumber is required even when no records are returned: " + event);
+        assertTrue(event.path("ContinuationSequenceNumber").asText().matches("^(0|[1-9]\\d{0,128})$"),
+            event.path("ContinuationSequenceNumber").asText());
     }
 
     @Test
@@ -1449,6 +1453,95 @@ class KinesisIntegrationTest {
         .then()
             .statusCode(200)
             .body("Tags.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(71)
+    void subscribeToShard_latestWithNoNewRecordsContinuesFromTheShardTip() throws Exception {
+        createStream("efo-latest-stream", 1);
+        String firstSequence = putRecordSequence("efo-latest-stream", "pk1");
+        String consumerArn = registerConsumer("efo-latest-stream", "efo-latest-consumer");
+
+        JsonNode idle = subscribe(consumerArn, "shardId-000000000000", "{\"Type\": \"LATEST\"}");
+        assertEquals(0, idle.path("Records").size());
+        assertEquals(firstSequence, idle.path("ContinuationSequenceNumber").asText());
+
+        String secondSequence = putRecordSequence("efo-latest-stream", "pk2");
+        JsonNode resumed = subscribe(consumerArn, "shardId-000000000000",
+            "{\"Type\": \"AFTER_SEQUENCE_NUMBER\", \"SequenceNumber\": \""
+                + idle.path("ContinuationSequenceNumber").asText() + "\"}");
+        assertEquals(1, resumed.path("Records").size());
+        assertEquals(secondSequence, resumed.path("Records").get(0).path("SequenceNumber").asText());
+    }
+
+    @Test
+    @Order(72)
+    void subscribeToShard_pastTheEndOfASplitParentOmitsContinuationAndListsChildShards() throws Exception {
+        createStream("efo-closed-stream", 1);
+        String lastSequence = putRecordSequence("efo-closed-stream", "pk1");
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.SplitShard")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"efo-closed-stream\", \"ShardToSplit\": \"shardId-000000000000\","
+                + "\"NewStartingHashKey\": \"" + SECOND_SHARD_STARTING_HASH_KEY + "\"}")
+        .when().post("/").then().statusCode(200);
+        String consumerArn = registerConsumer("efo-closed-stream", "efo-closed-consumer");
+
+        JsonNode last = subscribe(consumerArn, "shardId-000000000000", "{\"Type\": \"TRIM_HORIZON\"}");
+        assertEquals(1, last.path("Records").size());
+        assertEquals(lastSequence, last.path("ContinuationSequenceNumber").asText());
+
+        JsonNode end = subscribe(consumerArn, "shardId-000000000000",
+            "{\"Type\": \"AFTER_SEQUENCE_NUMBER\", \"SequenceNumber\": \"" + lastSequence + "\"}");
+        assertEquals(0, end.path("Records").size());
+        assertTrue(end.path("ContinuationSequenceNumber").isMissingNode(),
+            "the shard end carries no continuation: " + end);
+        assertEquals(2, end.path("ChildShards").size(), end.toString());
+        List<String> childIds = new ArrayList<>();
+        for (JsonNode child : end.path("ChildShards")) {
+            childIds.add(child.path("ShardId").asText());
+            assertEquals(1, child.path("ParentShards").size());
+            assertEquals("shardId-000000000000", child.path("ParentShards").get(0).asText());
+            assertTrue(child.path("HashKeyRange").path("StartingHashKey").isTextual(), child.toString());
+            assertTrue(child.path("HashKeyRange").path("EndingHashKey").isTextual(), child.toString());
+        }
+        assertEquals(List.of("shardId-000000000001", "shardId-000000000002"), childIds.stream().sorted().toList());
+    }
+
+    private static String putRecordSequence(String streamName, String partitionKey) {
+        return given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + streamName + "\", \"Data\": \"aGVsbG8=\", \"PartitionKey\": \""
+                + partitionKey + "\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("SequenceNumber");
+    }
+
+    private static String registerConsumer(String streamName, String consumerName) {
+        String streamArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + streamName + "\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("StreamDescriptionSummary.StreamARN");
+        return given()
+            .header("X-Amz-Target", "Kinesis_20131202.RegisterStreamConsumer")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamARN\": \"" + streamArn + "\", \"ConsumerName\": \"" + consumerName + "\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("Consumer.ConsumerARN");
+    }
+
+    private JsonNode subscribe(String consumerArn, String shardId, String startingPosition) throws Exception {
+        byte[] body = given()
+            .header("X-Amz-Target", "Kinesis_20131202.SubscribeToShard")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ConsumerARN\": \"" + consumerArn + "\", \"ShardId\": \"" + shardId + "\","
+                + "\"StartingPosition\": " + startingPosition + "}")
+        .when().post("/")
+        .then().statusCode(200).extract().asByteArray();
+        return decodeFirstEventStreamMessage(body);
     }
 
     private JsonNode decodeFirstEventStreamMessage(byte[] data) throws Exception {

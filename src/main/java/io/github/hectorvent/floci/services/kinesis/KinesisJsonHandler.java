@@ -408,8 +408,8 @@ public class KinesisJsonHandler {
         List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
         long millisBehind = ((Number) result.get("MillisBehindLatest")).longValue();
 
-        String continuationSeqNo = records.isEmpty() ? null
-                : records.get(records.size() - 1).getSequenceNumber();
+        String continuationSeqNo = (String) result.get("ContinuationSequenceNumber");
+        List<KinesisShard> childShards = (List<KinesisShard>) result.get("ChildShards");
 
         ObjectNode eventPayload = objectMapper.createObjectNode();
         ArrayNode recordsNode = eventPayload.putArray("Records");
@@ -426,7 +426,10 @@ public class KinesisJsonHandler {
             eventPayload.put("ContinuationSequenceNumber", continuationSeqNo);
         }
         eventPayload.put("MillisBehindLatest", millisBehind);
-        eventPayload.putArray("ChildShards");
+        ArrayNode childShardsNode = eventPayload.putArray("ChildShards");
+        if (childShards != null) {
+            putChildShards(childShardsNode, childShards);
+        }
 
         try {
             // The Go SDK (and other SDKs) expect an initial-response message before
