@@ -27,6 +27,32 @@ class S3DeleteObjectsIntegrationTest {
     }
 
     @Test
+    void deleteObjects_moreThanOneThousandKeys_returnsMalformedXmlAndDeletesNothing() {
+        String bucket = createBucket();
+        putObject(bucket, "k0000");
+        StringBuilder deleteBody = new StringBuilder("<Delete>");
+        for (int i = 0; i < 1001; i++) {
+            deleteBody.append("<Object><Key>").append(String.format("k%04d", i)).append("</Key></Object>");
+        }
+        deleteBody.append("</Delete>");
+
+        given()
+            .contentType("application/xml")
+            .body(deleteBody.toString())
+        .when()
+            .post("/" + bucket + "?delete")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>MalformedXML</Code>"));
+
+        given()
+        .when()
+            .get("/" + bucket + "/k0000")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void deleteObjects_withKeys_deletesAndReportsResult() {
         String bucket = createBucket();
         putObject(bucket, "keep.txt");

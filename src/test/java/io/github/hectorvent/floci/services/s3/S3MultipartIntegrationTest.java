@@ -1579,6 +1579,41 @@ class S3MultipartIntegrationTest {
         given().when().delete("/" + BUCKET).then().statusCode(204);
     }
 
+    @Test
+    @Order(41)
+    void listPartsReturnsAtMostOneThousandPartsWhenMaxPartsAsksForMore() {
+        String bucket = "multipart-max-parts-bucket";
+        String key = "many-parts.bin";
+        given().when().put("/" + bucket).then().statusCode(200);
+        String manyPartsUploadId = given()
+        .when()
+            .post("/" + bucket + "/" + key + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        try {
+            for (int partNumber = 1; partNumber <= 1001; partNumber++) {
+                given().body("p")
+                .when()
+                    .put("/" + bucket + "/" + key + "?uploadId=" + manyPartsUploadId + "&partNumber=" + partNumber)
+                .then()
+                    .statusCode(200);
+            }
+
+            given()
+            .when()
+                .get("/" + bucket + "/" + key + "?uploadId=" + manyPartsUploadId + "&max-parts=2000")
+            .then()
+                .statusCode(200)
+                .body("ListPartsResult.Part.size()", equalTo(1000))
+                .body("ListPartsResult.IsTruncated", equalTo("true"))
+                .body("ListPartsResult.NextPartNumberMarker", equalTo("1000"));
+        } finally {
+            given().when().delete("/" + bucket + "/" + key + "?uploadId=" + manyPartsUploadId);
+            given().when().delete("/" + bucket);
+        }
+    }
+
     private static String singlePartCompleteXml(String eTag, String checksumElement) {
         return """
                 <CompleteMultipartUpload>

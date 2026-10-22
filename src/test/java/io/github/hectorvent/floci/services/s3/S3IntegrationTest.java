@@ -14,6 +14,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
+import java.util.stream.IntStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -2692,6 +2693,47 @@ class S3IntegrationTest {
             }
         } finally {
             given().when().delete("/" + bucket + "/a.txt");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
+    @Order(100)
+    void listingsReturnAtMostOneThousandKeysWhenMaxKeysAsksForMore() {
+        String bucket = "max-keys-cap-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        List<String> keys = IntStream.range(0, 1001).mapToObj(i -> String.format("k%04d", i)).toList();
+        for (String key : keys) {
+            given().body("x").when().put("/" + bucket + "/" + key).then().statusCode(200);
+        }
+        try {
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2&max-keys=2000")
+            .then()
+                .statusCode(200)
+                .body("ListBucketResult.Contents.size()", equalTo(1000))
+                .body("ListBucketResult.KeyCount", equalTo("1000"))
+                .body("ListBucketResult.IsTruncated", equalTo("true"))
+                .body("ListBucketResult.NextContinuationToken", not(emptyOrNullString()));
+            given()
+            .when()
+                .get("/" + bucket + "?max-keys=2000")
+            .then()
+                .statusCode(200)
+                .body("ListBucketResult.Contents.size()", equalTo(1000))
+                .body("ListBucketResult.IsTruncated", equalTo("true"));
+            given()
+            .when()
+                .get("/" + bucket + "?versions&max-keys=2000")
+            .then()
+                .statusCode(200)
+                .body("ListVersionsResult.Version.size()", equalTo(1000))
+                .body("ListVersionsResult.IsTruncated", equalTo("true"));
+        } finally {
+            for (String key : keys) {
+                given().when().delete("/" + bucket + "/" + key);
+            }
             given().when().delete("/" + bucket);
         }
     }

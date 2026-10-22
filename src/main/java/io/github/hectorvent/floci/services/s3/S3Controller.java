@@ -112,6 +112,12 @@ public class S3Controller {
     /** The errors S3Service answers a read of an object that is not there with. */
     private static final Set<String> MISSING_OBJECT_ERRORS = Set.of("NoSuchBucket", "NoSuchKey", "NoSuchVersion");
 
+    /**
+     * The most keys, versions or parts one listing returns, and the most keys one DeleteObjects
+     * request may name. Internal callers of S3Service list without it.
+     */
+    private static final int MAX_PAGE_ENTRIES = 1000;
+
     private static final Logger LOG = Logger.getLogger(S3Controller.class);
     private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
             .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
@@ -1737,7 +1743,7 @@ public class S3Controller {
     private Response handleDeleteObjects(String bucket, byte[] body, HttpHeaders httpHeaders, UriInfo uriInfo) {
         String xml = new String(body, StandardCharsets.UTF_8);
         List<XmlParser.KeyVersion> entries = XmlParser.extractDeleteObjectEntries(xml);
-        if (entries.isEmpty()) {
+        if (entries.isEmpty() || entries.size() > MAX_PAGE_ENTRIES) {
             throw new AwsException("MalformedXML",
                     "The XML you provided was not well-formed.", 400);
         }
@@ -1928,7 +1934,8 @@ public class S3Controller {
     private Response handleListParts(String bucket, String key, String uploadId,
                                       Integer maxPartsParam, String partNumberMarkerParam) {
         MultipartUpload upload = s3Service.listParts(bucket, key, uploadId);
-        int maxPartsLimit = (maxPartsParam != null && maxPartsParam > 0) ? maxPartsParam : 1000;
+        int maxPartsLimit = (maxPartsParam != null && maxPartsParam > 0)
+                ? Math.min(maxPartsParam, MAX_PAGE_ENTRIES) : MAX_PAGE_ENTRIES;
         int markerValue = 0;
         if (partNumberMarkerParam != null && !partNumberMarkerParam.isBlank()) {
             try {
@@ -3311,8 +3318,12 @@ public class S3Controller {
                                                String objectAttributesHeader, Integer maxParts,
                                                Integer partNumberMarker) {
         Set<ObjectAttributeName> attributes = ObjectAttributeName.parseHeader(objectAttributesHeader);
+        Integer pageMaxParts = maxParts;
+        if (pageMaxParts != null && pageMaxParts > MAX_PAGE_ENTRIES) {
+            pageMaxParts = MAX_PAGE_ENTRIES;
+        }
         GetObjectAttributesResult result = s3Service.getObjectAttributes(bucket, key, versionId,
-                attributes, maxParts, partNumberMarker);
+                attributes, pageMaxParts, partNumberMarker);
 
         XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -4410,13 +4421,14 @@ public class S3Controller {
      * AWS accepts any integer from 0 to {@link Integer#MAX_VALUE} for {@code max-keys} and treats
      * a missing parameter as 1000. Zero is a valid request for an empty page. Anything else,
      * negative, non-numeric or overflowing, is rejected with the same InvalidArgument response.
+     * A listing "will never contain more" than 1,000 keys, so a larger value lists 1,000.
      */
     private static int resolveMaxKeys(String maxKeys) {
         if (maxKeys == null) {
-            return 1000;
+            return MAX_PAGE_ENTRIES;
         }
         if (maxKeys.matches("\\d{1,10}") && Long.parseLong(maxKeys) <= Integer.MAX_VALUE) {
-            return Integer.parseInt(maxKeys);
+            return Math.min(Integer.parseInt(maxKeys), MAX_PAGE_ENTRIES);
         }
         Map<String, Object> detail = new LinkedHashMap<>();
         detail.put("ArgumentName", "maxKeys");
