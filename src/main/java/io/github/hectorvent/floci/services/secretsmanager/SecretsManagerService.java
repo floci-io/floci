@@ -266,6 +266,21 @@ public class SecretsManagerService implements ResourceProvider {
             }
         }
 
+        // A rotation's AWSPENDING placeholder is a version without a value yet. AWS reports it as
+        // missing, and the rotation function templates rely on that to decide to generate one.
+        if (version.getSecretString() == null && version.getSecretBinary() == null) {
+            String selector;
+            if (versionStage != null && !versionStage.isEmpty()) {
+                selector = "staging label: " + versionStage;
+            } else if (versionId != null && !versionId.isEmpty()) {
+                selector = "VersionId: " + versionId;
+            } else {
+                selector = "staging label: " + AWSCURRENT;
+            }
+            throw new AwsException("ResourceNotFoundException",
+                    "Secrets Manager can't find the specified secret value for " + selector, 400);
+        }
+
         version.setLastAccessedDate(Instant.now());
         secret.setLastAccessedDate(Instant.now());
         // Deliberately not persist(): reading a secret is not a change to replicate, and pushing

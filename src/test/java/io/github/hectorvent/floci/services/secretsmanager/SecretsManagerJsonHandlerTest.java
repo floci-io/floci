@@ -1445,7 +1445,7 @@ class SecretsManagerJsonHandlerTest {
 
     @Test
     void getSecretValueStillReportsStagesForACurrentVersion() {
-        createSecret("current-read");
+        service.createSecret("current-read", "current", null, null, null, null, REGION);
         ObjectNode req = MAPPER.createObjectNode();
         req.put("SecretId", "current-read");
         ObjectNode body = (ObjectNode) handler.handle("GetSecretValue", req, REGION).getEntity();

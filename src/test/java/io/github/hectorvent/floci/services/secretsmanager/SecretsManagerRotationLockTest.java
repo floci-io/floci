@@ -27,8 +27,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
@@ -61,16 +61,44 @@ class SecretsManagerRotationLockTest {
     }
 
     @Test
-    void awsPendingStaysReadableWhilePutSecretValueReplacesThePlaceholder() throws Exception {
+    void awsPendingStaysStagedWhilePutSecretValueReplacesThePlaceholder() throws Exception {
         BlockingVersions versions = installBlockingVersions();
         Watched writer = startBlockedPutSecretValue(versions);
 
-        SecretVersion pending = service.getSecretValue(SECRET_NAME, null, "AWSPENDING", REGION);
-        assertNotNull(pending);
-        assertEquals(PENDING_TOKEN, pending.getVersionId());
+        Map<String, List<String>> stages = service.listSecretVersionIds(SECRET_NAME, REGION);
+        assertEquals(List.of("AWSPENDING"), stages.get(PENDING_TOKEN));
 
         versions.release();
         writer.awaitSuccess();
+    }
+
+    @Test
+    void getSecretValueOfTheValuelessAwsPendingPlaceholderIsResourceNotFound() {
+        // The rotation template's createSecret step probes the pending version and only
+        // generates a value when this lookup raises ResourceNotFoundException.
+        AwsException byIdAndStage = assertThrows(AwsException.class,
+                () -> service.getSecretValue(SECRET_NAME, PENDING_TOKEN, "AWSPENDING", REGION));
+        assertEquals("ResourceNotFoundException", byIdAndStage.getErrorCode());
+
+        AwsException byStage = assertThrows(AwsException.class,
+                () -> service.getSecretValue(SECRET_NAME, null, "AWSPENDING", REGION));
+        assertEquals("ResourceNotFoundException", byStage.getErrorCode());
+
+        AwsException byId = assertThrows(AwsException.class,
+                () -> service.getSecretValue(SECRET_NAME, PENDING_TOKEN, null, REGION));
+        assertEquals("ResourceNotFoundException", byId.getErrorCode());
+
+        assertEquals(List.of("AWSPENDING"),
+                service.listSecretVersionIds(SECRET_NAME, REGION).get(PENDING_TOKEN));
+    }
+
+    @Test
+    void awsPendingBecomesReadableOncePutSecretValueFillsThePlaceholder() {
+        service.putSecretValue(SECRET_NAME, "rotated-value", null, PENDING_TOKEN, REGION, List.of("AWSPENDING"));
+
+        SecretVersion pending = service.getSecretValue(SECRET_NAME, PENDING_TOKEN, "AWSPENDING", REGION);
+        assertEquals(PENDING_TOKEN, pending.getVersionId());
+        assertEquals("rotated-value", pending.getSecretString());
     }
 
     @Test
