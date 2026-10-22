@@ -21,6 +21,9 @@ OpenSearch 2.12+ requires an initial admin password even when the security plugi
 !!! note "Docker socket required"
     Real mode starts Docker containers. Mount the Docker socket and set the Docker network so containers can reach each other. For private registry authentication and other Docker settings see [Docker Configuration](../configuration/docker.md).
 
+!!! warning "No Docker daemon reachable"
+    When real mode cannot reach any Docker daemon (Floci in a container without the socket mounted, or a stopped daemon), `CreateDomain` still succeeds instead of failing. The domain reports `Processing: false` and `Created: true` at once, with a synthesized endpoint of the form `search-<domain>-<suffix>.<region>.es.<dns-suffix>` that nothing listens on, the same shape mock mode reports. Floci logs a warning once per outage and does not start a container later, even after a daemon becomes reachable: delete and recreate the domain to get one. A container that fails to start while the daemon is reachable still fails the create.
+
 ```yaml
 services:
   floci:
@@ -127,8 +130,8 @@ services:
 - **Region scope:** as on AWS, a domain name is unique within an account and Region. The same name can exist in two Regions, and every operation that names a domain (describe, describe config, update, upgrade, compatible versions, delete) or lists domains only sees the domains of the request's Region, taken from the SigV4 credential scope. Both the 2021 and the legacy 2015 API behave this way. Domains persisted by earlier Floci versions, which keyed them by name alone, stay readable: the first lookup or write from the Region in the domain's ARN moves the record to its regional key.
 - **ARN format:** `arn:aws:es:{region}:{accountId}:domain/{domainName}`
 - **Domain ID format:** `{accountId}/{domainName}`
-- **`Created` flag:** `true` immediately in mock mode; set to `true` by the readiness poller in real mode once `/_cluster/health` reports `green` or `yellow`.
-- **`Processing` flag:** `false` immediately in mock mode; `true` until the container is ready in real mode.
+- **`Created` flag:** `true` immediately in mock mode and in real mode with no reachable Docker daemon; otherwise set to `true` by the readiness poller once `/_cluster/health` reports `green` or `yellow`.
+- **`Processing` flag:** `false` immediately in mock mode and in real mode with no reachable Docker daemon; otherwise `true` until the container is ready.
 - **State reset:** `POST /_floci/state/reset` (or `/_floci/state/nuke`) wipes the domains of every account, so in real mode it first stops each domain's container, returns its host port to the configured range, and removes its data volume by the same rules as `DeleteDomain`. This happens even with `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN=true`, which only governs shutdown.
 - **Engine version default:** `OpenSearch_2.19`
 - **Supported engine versions:** `OpenSearch_3.6`, `OpenSearch_3.5`, `OpenSearch_3.4`, `OpenSearch_3.3`, `OpenSearch_3.2`, `OpenSearch_3.1`, `OpenSearch_3.0`, `OpenSearch_2.19`, `OpenSearch_2.17`, `OpenSearch_2.15`, `OpenSearch_2.13`, `OpenSearch_2.11`, `OpenSearch_2.9`, `OpenSearch_2.7`, `OpenSearch_2.5`, `OpenSearch_2.3`, `OpenSearch_1.3`, `OpenSearch_1.2`, `Elasticsearch_7.10`, `Elasticsearch_7.9`, `Elasticsearch_7.8`

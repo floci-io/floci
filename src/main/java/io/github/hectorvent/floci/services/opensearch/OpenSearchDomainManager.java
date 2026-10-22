@@ -75,8 +75,9 @@ public class OpenSearchDomainManager {
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). OpenSearch metadata "
-                        + "operations keep working and domains still report Processing=false, but "
-                        + "they have no backing search container until a daemon becomes reachable.",
+                        + "operations keep working and domains created now report Processing=false "
+                        + "with a synthesized endpoint, but they have no backing search container and "
+                        + "none is started later. Recreate them once a daemon is reachable.",
                         e.getMessage());
             }
             return false;
