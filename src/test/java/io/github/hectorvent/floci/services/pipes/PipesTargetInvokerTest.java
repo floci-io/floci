@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -18,6 +19,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -112,6 +114,50 @@ class PipesTargetInvokerTest {
         invoker.invoke(pipe, "{}", "us-east-1");
 
         verify(lambdaService).invoke(eq("us-east-1"), eq("my-fn:PROD"), any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void invoke_lambdaTargetAppliesTheInputTemplateToEachRecordOfTheBatch() {
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.put("InputTemplate", "{\"id\": <$.messageId>}");
+        Pipe pipe = createPipe("arn:aws:lambda:us-east-1:000000000000:function:my-fn", tp);
+        when(lambdaService.invoke(anyString(), anyString(), any(byte[].class), any(InvocationType.class)))
+                .thenReturn(new InvokeResult(200, null, "{}".getBytes(), null, "req"));
+
+        invoker.invoke(pipe, "[{\"messageId\":\"m1\"},{\"messageId\":\"m2\"}]", "us-east-1");
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(eq("us-east-1"), eq("my-fn"), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals("[{\"id\":\"m1\"},{\"id\":\"m2\"}]",
+                new String(payload.getValue(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void invoke_stepFunctionsTargetAppliesTheInputTemplateToEachRecordOfTheBatch() {
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.put("InputTemplate", "{\"id\": <$.messageId>}");
+        String stateMachineArn = "arn:aws:states:us-east-1:000000000000:stateMachine:target";
+        Pipe pipe = createPipe(stateMachineArn, tp);
+
+        invoker.invoke(pipe, "[{\"messageId\":\"m1\"},{\"messageId\":\"m2\"}]", "us-east-1");
+
+        ArgumentCaptor<String> input = ArgumentCaptor.forClass(String.class);
+        verify(stepFunctionsService).startExecution(eq(stateMachineArn), anyString(), input.capture(), eq("us-east-1"));
+        assertEquals("[{\"id\":\"m1\"},{\"id\":\"m2\"}]", input.getValue());
+    }
+
+    @Test
+    void invoke_batchTemplateOutputThatIsNotJsonBecomesAStringRecord() {
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.put("InputTemplate", "<$.count> items");
+        String stateMachineArn = "arn:aws:states:us-east-1:000000000000:stateMachine:target";
+        Pipe pipe = createPipe(stateMachineArn, tp);
+
+        invoker.invoke(pipe, "[{\"count\":42}]", "us-east-1");
+
+        ArgumentCaptor<String> input = ArgumentCaptor.forClass(String.class);
+        verify(stepFunctionsService).startExecution(eq(stateMachineArn), anyString(), input.capture(), eq("us-east-1"));
+        assertEquals("[\"42 items\"]", input.getValue());
     }
 
     @Test
@@ -284,6 +330,24 @@ class PipesTargetInvokerTest {
         verify(lambdaService).invoke(eq(region), eq("enrich-fn"), payloadCaptor.capture(), eq(InvocationType.RequestResponse));
         assertEquals("[{\"body\":\"{}\"}]",
                 new String(payloadCaptor.getValue(), java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void applyEnrichment_appliesTheEnrichmentInputTemplateToEachRecordOfTheBatch() {
+        String region = "us-east-1";
+        Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
+        ObjectNode ep = MAPPER.createObjectNode();
+        ep.put("InputTemplate", "{\"id\": <$.messageId>}");
+        pipe.setEnrichmentParameters(ep);
+        when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, null, "[{}]".getBytes(), null, "req"));
+
+        invoker.applyEnrichment(pipe, "[{\"messageId\":\"m1\"},{\"messageId\":\"m2\"}]", region);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(eq(region), eq("enrich-fn"), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals("[{\"id\":\"m1\"},{\"id\":\"m2\"}]",
+                new String(payload.getValue(), StandardCharsets.UTF_8));
     }
 
     @Test

@@ -95,6 +95,18 @@ Floci emulates EventBridge Pipes with the following supported source and target 
 - Kinesis streams
 - Step Functions state machines
 
+## Delivery to Targets
+
+- **Lambda functions and Step Functions state machines** receive the whole batch in one request (one
+  invocation, or one execution) as a bare JSON array of source records, even when the batch holds a
+  single record, as AWS does. A Lambda handler on an SQS source reads `event[0].body`, not
+  `event.Records[0].body`.
+- **Every other target** (SQS queues, SNS topics, EventBridge event buses) receives one request per
+  record.
+- **`InputTemplate`**, on `TargetParameters` and on `EnrichmentParameters`, is applied to each record
+  of a batch, not to the array as a whole. A template output that is not JSON becomes a string
+  element of the array.
+
 ## ParallelizationFactor
 
 `CreatePipe` and `UpdatePipe` accept a `ParallelizationFactor` integer between 1 and 10 on the
@@ -163,7 +175,10 @@ response becomes the target input.
 - **Empty responses skip the target**, matching AWS: an empty body, `null`, `{}`, or `[]` consumes
   the source records without invoking the target. A non-empty array such as `[{}]` still invokes the
   target (with an empty-payload element).
-- **A Lambda enrichment `FunctionError` fails the batch** — the source records are routed to the
+- **A Lambda or Step Functions target receives the enrichment response as a batch array**: a single
+  JSON object response is wrapped in a one-element array, an array response is forwarded as is.
+  Other targets receive the response unchanged.
+- **A Lambda enrichment `FunctionError` fails the batch**: the source records are routed to the
   pipe's dead-letter queue rather than silently consumed.
 - **Non-Lambda enrichment types** (API destinations, API Gateway, Step Functions Express) are valid
   on AWS but not emulated; a pipe configured with one fails the batch to the DLQ rather than

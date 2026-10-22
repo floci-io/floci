@@ -211,9 +211,8 @@ public class PipesPoller implements Resettable {
             return;
         }
 
-        if (isLambdaTarget(pipe)) {
-            String eventJson = wrapRecords(filtered);
-            boolean delivered = invokeWithDlq(pipe, eventJson, region);
+        if (receivesBatchArray(pipe)) {
+            boolean delivered = invokeWithDlq(pipe, bareArray(filtered), region);
             if (delivered) {
                 for (Message msg : messages) {
                     if (matchedMessageIds.contains(msg.getMessageId())) {
@@ -457,8 +456,8 @@ public class PipesPoller implements Resettable {
             return;
         }
 
-        int failed = isLambdaTarget(pipe)
-                ? deliverKafkaLambdaRecords(pipe, region, deliverable, deliveryRecordsByIdentity, filtered, blockedPartitions)
+        int failed = receivesBatchArray(pipe)
+                ? deliverKafkaBatchRecords(pipe, region, deliverable, deliveryRecordsByIdentity, filtered, blockedPartitions)
                 : deliverKafkaRecords(pipe, region, deliverable, deliveryRecordsByIdentity, filtered, blockedPartitions);
         if (failed == 0) {
             return;
@@ -468,12 +467,12 @@ public class PipesPoller implements Resettable {
                 pipe.getName(), failed);
     }
 
-    private int deliverKafkaLambdaRecords(Pipe pipe,
-                                          String region,
-                                          List<KafkaRecordDto> batch,
-                                          Map<String, JsonNode> deliveryRecordsByIdentity,
-                                          List<JsonNode> filtered,
-                                          Set<KafkaTopicPartition> blockedPartitions) {
+    private int deliverKafkaBatchRecords(Pipe pipe,
+                                         String region,
+                                         List<KafkaRecordDto> batch,
+                                         Map<String, JsonNode> deliveryRecordsByIdentity,
+                                         List<JsonNode> filtered,
+                                         Set<KafkaTopicPartition> blockedPartitions) {
         Set<String> matchedIdentities = new HashSet<>(filtered.size());
         filtered.forEach(record -> matchedIdentities.add(kafkaRecordIdentity(record)));
 
@@ -482,7 +481,7 @@ public class PipesPoller implements Resettable {
         int failed = 0;
 
         for (Map.Entry<KafkaTopicPartition, List<KafkaRecordDto>> entry : recordsByPartition.entrySet()) {
-            int partitionFailed = deliverKafkaLambdaPartition(pipe, region, entry.getKey(), entry.getValue(),
+            int partitionFailed = deliverKafkaBatchPartition(pipe, region, entry.getKey(), entry.getValue(),
                     deliveryRecordsByIdentity, matchedIdentities, offsetsToCommit);
             if (partitionFailed > 0) {
                 blockedPartitions.add(entry.getKey());
@@ -494,13 +493,13 @@ public class PipesPoller implements Resettable {
         return failed;
     }
 
-    private int deliverKafkaLambdaPartition(Pipe pipe,
-                                            String region,
-                                            KafkaTopicPartition partition,
-                                            List<KafkaRecordDto> partitionRecords,
-                                            Map<String, JsonNode> deliveryRecordsByIdentity,
-                                            Set<String> matchedIdentities,
-                                            Map<KafkaTopicPartition, Long> offsetsToCommit) {
+    private int deliverKafkaBatchPartition(Pipe pipe,
+                                           String region,
+                                           KafkaTopicPartition partition,
+                                           List<KafkaRecordDto> partitionRecords,
+                                           Map<String, JsonNode> deliveryRecordsByIdentity,
+                                           Set<String> matchedIdentities,
+                                           Map<KafkaTopicPartition, Long> offsetsToCommit) {
         List<JsonNode> pendingBatch = new ArrayList<>();
         long pendingOffset = -1L;
 
@@ -508,7 +507,7 @@ public class PipesPoller implements Resettable {
             String identity = kafkaRecordIdentity(record);
             if (!matchedIdentities.contains(identity)) {
                 if (!pendingBatch.isEmpty()) {
-                    if (!invokeWithDlq(pipe, wrapRecords(pendingBatch), region)) {
+                    if (!invokeWithDlq(pipe, bareArray(pendingBatch), region)) {
                         return pendingBatch.size();
                     }
                     offsetsToCommit.put(partition, pendingOffset);
@@ -526,7 +525,7 @@ public class PipesPoller implements Resettable {
         }
 
         if (!pendingBatch.isEmpty()) {
-            if (!invokeWithDlq(pipe, wrapRecords(pendingBatch), region)) {
+            if (!invokeWithDlq(pipe, bareArray(pendingBatch), region)) {
                 return pendingBatch.size();
             }
             offsetsToCommit.put(partition, pendingOffset);
@@ -579,8 +578,8 @@ public class PipesPoller implements Resettable {
         // source path (see deliverEnrichedBatch). Kinesis, DynamoDB Streams and Kafka sources
         // deliver the filtered records straight to the target, so a pipe that configures an
         // enrichment on those sources bypasses it — see docs/services/pipes.md.
-        if (isLambdaTarget(pipe)) {
-            return invokeWithDlq(pipe, wrapRecords(records), region) ? 0 : records.size();
+        if (receivesBatchArray(pipe)) {
+            return invokeWithDlq(pipe, bareArray(records), region) ? 0 : records.size();
         }
         int failed = 0;
         for (JsonNode record : records) {
@@ -619,10 +618,9 @@ public class PipesPoller implements Resettable {
         try {
             String enriched = targetInvoker.applyEnrichment(pipe, eventsArray, region);
             if (enriched != null) {
-                // Only a Lambda target expects the batch (JSON array) shape; a Step Functions, SQS,
-                // SNS or EventBridge target must receive the raw enrichment response, matching the
-                // non-enrichment delivery path. Array-wrapping those would corrupt their input.
-                String targetPayload = isLambdaTarget(pipe)
+                // A Lambda or Step Functions target receives the batch as a JSON array; any other
+                // target receives the raw enrichment response, matching the non-enrichment path.
+                String targetPayload = receivesBatchArray(pipe)
                         ? asEventArray(objectMapper, enriched)
                         : enriched;
                 targetInvoker.invoke(pipe, targetPayload, region);
@@ -709,18 +707,6 @@ public class PipesPoller implements Resettable {
             return sp.path(sourceParamKey).path("BatchSize").asInt(DEFAULT_BATCH_SIZE);
         }
         return DEFAULT_BATCH_SIZE;
-    }
-
-    private String wrapRecords(List<JsonNode> records) {
-        try {
-            ArrayNode recordsArray = objectMapper.createArrayNode();
-            records.forEach(recordsArray::add);
-            ObjectNode root = objectMapper.createObjectNode();
-            root.set("Records", recordsArray);
-            return objectMapper.writeValueAsString(root);
-        } catch (Exception e) {
-            return "{\"Records\":[]}";
-        }
     }
 
     // ──────────────────────────── Record Builders ────────────────────────────
@@ -863,9 +849,8 @@ public class PipesPoller implements Resettable {
 
     // ──────────────────────────── Utilities ────────────────────────────
 
-    private static boolean isLambdaTarget(Pipe pipe) {
-        String targetArn = pipe.getTarget();
-        return targetArn.contains(":lambda:") || targetArn.contains(":function:");
+    private static boolean receivesBatchArray(Pipe pipe) {
+        return PipesTargetInvoker.receivesBatchArray(pipe.getTarget());
     }
 
     private static boolean isKafkaSource(String sourceArn) {

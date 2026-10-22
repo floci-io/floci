@@ -175,14 +175,14 @@ class PipesPollerTest {
     }
 
     @Test
-    void pollSqs_enrichmentToNonLambdaTargetForwardsRawResponse() throws Exception {
-        // A non-Lambda target (here Step Functions) must receive the raw enrichment response, not a
-        // one-element batch array — array-wrapping would start the execution with [{...}] instead of {...}.
+    void pollSqs_enrichmentToPerRecordTargetForwardsRawResponse() throws Exception {
+        // A target that takes one event per request (here SQS) receives the raw enrichment response,
+        // not a one-element batch array.
         Pipe pipe = new Pipe();
-        pipe.setName("enrich-sfn");
+        pipe.setName("enrich-sqs");
         pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
         pipe.setEnrichment("arn:aws:lambda:us-east-1:000000000000:function:enrich");
-        pipe.setTarget("arn:aws:states:us-east-1:000000000000:stateMachine:tgt");
+        pipe.setTarget("arn:aws:sqs:us-east-1:000000000000:tgt");
 
         Message msg = new Message("{\"orderId\":\"o1\"}");
         msg.setMessageId("m1");
@@ -198,8 +198,73 @@ class PipesPollerTest {
         verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
         JsonNode delivered = MAPPER.readTree(payload.getValue());
         assertFalse(delivered.isArray(),
-                "non-Lambda target must receive the raw enrichment response, not a batch array");
+                "a per-record target must receive the raw enrichment response, not a batch array");
         assertEquals("S1", delivered.path("systemId").asText());
+    }
+
+    @Test
+    void pollSqs_enrichmentToStepFunctionsTargetWrapsResponseInBatchArray() throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setName("enrich-sfn");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setEnrichment("arn:aws:lambda:us-east-1:000000000000:function:enrich");
+        pipe.setTarget("arn:aws:states:us-east-1:000000000000:stateMachine:tgt");
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(sqsMessages("m", 1));
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                .thenReturn("{\"systemId\":\"S1\"}");
+
+        poller.pollSqs(pipe, "us-east-1");
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        JsonNode delivered = MAPPER.readTree(payload.getValue());
+        assertTrue(delivered.isArray(), "a Step Functions target receives the batch as a JSON array");
+        assertEquals("S1", delivered.path(0).path("systemId").asText());
+    }
+
+    @Test
+    void pollSqs_lambdaTargetReceivesTheBatchAsABareJsonArray() throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setName("sqs-lambda");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setTarget("arn:aws:lambda:us-east-1:000000000000:function:tgt");
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(sqsMessages("m", 2));
+
+        poller.pollSqs(pipe, "us-east-1");
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        JsonNode batch = MAPPER.readTree(payload.getValue());
+        assertTrue(batch.isArray(), "Pipes sends a Lambda target the batch as a JSON array, got " + batch);
+        assertEquals(List.of("m0", "m1"), messageIds(batch));
+        verify(sqsService).deleteMessage(anyString(), eq("rh-m0"), eq("us-east-1"));
+        verify(sqsService).deleteMessage(anyString(), eq("rh-m1"), eq("us-east-1"));
+    }
+
+    @Test
+    void pollSqs_stepFunctionsTargetStartsOneExecutionWithTheBatchArray() throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setName("sqs-sfn");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setTarget("arn:aws:states:us-east-1:000000000000:stateMachine:tgt");
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(sqsMessages("m", 2));
+
+        poller.pollSqs(pipe, "us-east-1");
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker, times(1)).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        JsonNode batch = MAPPER.readTree(payload.getValue());
+        assertTrue(batch.isArray(), "Pipes starts a Step Functions target with the batch as a JSON array");
+        assertEquals(List.of("m0", "m1"), messageIds(batch));
+    }
+
+    private static List<String> messageIds(JsonNode batch) {
+        List<String> ids = new ArrayList<>();
+        batch.forEach(record -> ids.add(record.path("messageId").asText()));
+        return ids;
     }
 
     @Test
@@ -254,7 +319,7 @@ class PipesPollerTest {
                 "every receive must ask for 1 to 10 messages, asked for " + maxMessages.getAllValues());
         ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
         verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
-        assertEquals(25, MAPPER.readTree(payload.getValue()).path("Records").size());
+        assertEquals(25, MAPPER.readTree(payload.getValue()).size());
     }
 
     private static List<Message> sqsMessages(String prefix, int count) {
@@ -401,7 +466,52 @@ class PipesPollerTest {
         assertEquals(2L, singleOffset(offsetsCaptor.getValue(), "orders", 0));
     }
 
+    @Test
+    void pollKafka_stepFunctionsTargetStartsOneExecutionWithTheBatchArray() throws Exception {
+        Pipe pipe = selfManagedKafkaPipe();
+        pipe.setTarget("arn:aws:states:us-east-1:000000000000:stateMachine:orders");
+        KafkaRecordDto first = kafkaRecord("orders", 0, 0L, null,
+                "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8));
+        KafkaRecordDto second = kafkaRecord("orders", 0, 1L, null,
+                "{\"status\":\"active\",\"id\":\"order-2\"}".getBytes(StandardCharsets.UTF_8));
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(first, second));
+        when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
+
+        poller.pollKafka(pipe, "us-east-1");
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker, times(1)).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        JsonNode batch = MAPPER.readTree(payload.getValue());
+        assertTrue(batch.isArray(), "Pipes starts a Step Functions target with the batch as a JSON array");
+        assertEquals(2, batch.size());
+        assertEquals(1L, batch.get(1).path("offset").asLong());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<KafkaOffsetDto>> offsetsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(kafkaConsumerManager).commit(eq(pipe), offsetsCaptor.capture());
+        assertEquals(2L, singleOffset(offsetsCaptor.getValue(), "orders", 0));
+    }
+
     // ──────────────────────────── Kinesis ────────────────────────────
+
+    @Test
+    void kinesisLambdaTargetReceivesTheBatchAsABareJsonArray() throws Exception {
+        Pipe pipe = kinesisPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
+        pipe.setTarget("arn:aws:lambda:us-east-1:000000000000:function:orders-target");
+        when(kinesisService.getShardIteratorForAccount("000000000000", "orders-stream", "shardId-000000000000",
+                "TRIM_HORIZON", null, "us-east-1")).thenReturn("it-0");
+        when(kinesisService.getRecordsForAccount("000000000000", "it-0", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1",
+                        kinesisRecord("{\"n\":1}", "pk-1", "4959001", Instant.now()),
+                        kinesisRecord("{\"n\":2}", "pk-1", "4959002", Instant.now())));
+
+        poller.pollKinesis(pipe, "us-east-1");
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker, times(1)).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        JsonNode batch = MAPPER.readTree(payload.getValue());
+        assertTrue(batch.isArray(), "Pipes sends a Lambda target the batch as a JSON array, got " + batch);
+        assertEquals("shardId-000000000000:4959002", batch.get(1).path("eventID").asText());
+    }
 
     @Test
     void kinesisRecordsAreDeliveredInTheFlatAwsPipesRecordShape() throws Exception {
@@ -682,9 +792,7 @@ class PipesPollerTest {
         verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
         ObjectNode expected = original.deepCopy();
         expected.put("eventSourceARN", STREAM_ARN);
-        ObjectNode event = MAPPER.createObjectNode();
-        event.putArray("Records").add(expected);
-        assertEquals(event, MAPPER.readTree(payload.getValue()));
+        assertEquals(MAPPER.createArrayNode().add(expected), MAPPER.readTree(payload.getValue()));
         assertEquals(original, active.awsRecord(), "the reader's record is never mutated");
     }
 
@@ -707,7 +815,7 @@ class PipesPollerTest {
         ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
         verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
         assertEquals(MAPPER.createObjectNode().put("type", "Service").put("principalId", "dynamodb.amazonaws.com"),
-                MAPPER.readTree(payload.getValue()).path("Records").path(0).path("userIdentity"));
+                MAPPER.readTree(payload.getValue()).path(0).path("userIdentity"));
         assertEquals(original, ttlRemoval.awsRecord(), "the reader's record is never mutated");
     }
 
@@ -826,7 +934,7 @@ class PipesPollerTest {
         List<List<String>> batches = new ArrayList<>();
         for (String payload : payloads.getAllValues()) {
             List<String> batch = new ArrayList<>();
-            for (JsonNode record : MAPPER.readTree(payload).path("Records")) {
+            for (JsonNode record : MAPPER.readTree(payload)) {
                 batch.add(record.path("dynamodb").path("SequenceNumber").asText());
             }
             batches.add(batch);

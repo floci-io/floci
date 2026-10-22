@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.pipes;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -59,12 +62,28 @@ public class PipesTargetInvoker {
         this.baseUrl = config.effectiveBaseUrl();
     }
 
+    /**
+     * Whether the target takes a whole batch in one request as a bare JSON array: Lambda and Step
+     * Functions have no batch API, so AWS sends them the batch array, even for a batch of one. Every
+     * other target is sent one request per record.
+     */
+    static boolean receivesBatchArray(String targetArn) {
+        return targetArn.contains(":lambda:") || targetArn.contains(":function:") || targetArn.contains(":states:");
+    }
+
+    /**
+     * Delivers {@code payload} to the pipe's target: the batch array for a target that
+     * {@link #receivesBatchArray receives one}, a single record for any other.
+     */
     public void invoke(Pipe pipe, String payload, String region) {
         String targetArn = pipe.getTarget();
 
         JsonNode tp = pipe.getTargetParameters();
         if (tp != null && tp.has("InputTemplate")) {
-            payload = applyInputTemplate(tp.get("InputTemplate").asText(), payload);
+            String template = tp.get("InputTemplate").asText();
+            payload = receivesBatchArray(targetArn)
+                    ? applyInputTemplateToEachRecord(template, payload)
+                    : applyInputTemplate(template, payload);
         }
 
         if (targetArn.contains(":lambda:") || targetArn.contains(":function:")) {
@@ -96,7 +115,7 @@ public class PipesTargetInvoker {
         }
         JsonNode ep = pipe.getEnrichmentParameters();
         if (ep != null && ep.path("InputTemplate").isTextual()) {
-            payload = applyInputTemplate(ep.get("InputTemplate").asText(), payload);
+            payload = applyInputTemplateToEachRecord(ep.get("InputTemplate").asText(), payload);
         }
         if (enrichment.contains(":lambda:") || enrichment.contains(":function:")) {
             String fnName = lambdaFunctionName(enrichment);
@@ -213,6 +232,41 @@ public class PipesTargetInvoker {
         String executionName = "pipes-" + UUID.randomUUID();
         stepFunctionsService.startExecution(arn, executionName, payload, sfnRegion);
         LOG.debugv("Pipe delivered to Step Functions: {0}", arn);
+    }
+
+    /**
+     * Applies an input template to each record of a batch array, as AWS transforms a batch record by
+     * record rather than as a whole. A template output that is not JSON becomes a string record.
+     */
+    private String applyInputTemplateToEachRecord(String template, String batch) {
+        JsonNode records;
+        try {
+            records = objectMapper.readTree(batch);
+        } catch (JsonProcessingException e) {
+            LOG.debugv("Pipe batch is not JSON, applying the input template to it whole: {0}", e.getOriginalMessage());
+            return applyInputTemplate(template, batch);
+        }
+        if (records == null || !records.isArray()) {
+            return applyInputTemplate(template, batch);
+        }
+        ArrayNode transformed = objectMapper.createArrayNode();
+        for (JsonNode record : records) {
+            transformed.add(templateOutputNode(applyInputTemplate(template, record.toString())));
+        }
+        return transformed.toString();
+    }
+
+    private JsonNode templateOutputNode(String output) {
+        try {
+            JsonNode node = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(output);
+            if (node != null && !node.isMissingNode()) {
+                return node;
+            }
+        } catch (JsonProcessingException e) {
+            LOG.debugv("Pipe input template output is not JSON, delivering it as a string: {0}",
+                    e.getOriginalMessage());
+        }
+        return TextNode.valueOf(output);
     }
 
     String applyInputTemplate(String template, String payload) {
