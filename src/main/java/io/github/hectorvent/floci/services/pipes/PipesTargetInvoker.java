@@ -94,7 +94,7 @@ public class PipesTargetInvoker {
         if (targetArn.contains(":lambda:") || targetArn.contains(":function:")) {
             invokeLambda(targetArn, payload, region);
         } else if (targetArn.contains(":sqs:")) {
-            invokeSqs(targetArn, payload, region);
+            invokeSqs(targetArn, event, payload, region, tp);
         } else if (targetArn.contains(":sns:")) {
             invokeSns(targetArn, payload, region);
         } else if (targetArn.contains(":events:")) {
@@ -190,9 +190,18 @@ public class PipesTargetInvoker {
         return fi >= 0 ? ref.substring(fi + ":function:".length()) : ref;
     }
 
-    private void invokeSqs(String arn, String payload, String region) {
+    /**
+     * Sends one message with {@code SqsQueueParameters}' group and deduplication ids, which may be JSON
+     * paths into the event. No delay is passed, so the queue's DelaySeconds applies.
+     */
+    private void invokeSqs(String arn, String event, String payload, String region, JsonNode tp) {
         String queueUrl = AwsArnUtils.arnToQueueUrl(arn, baseUrl);
-        sqsService.sendMessage(queueUrl, payload, 0, region);
+        JsonNode sqsParameters = tp == null ? null : tp.path("SqsQueueParameters");
+        String messageGroupId = sqsParameters == null ? null
+                : resolveDynamicParameter(sqsParameters.path("MessageGroupId").asText(null), event);
+        String messageDeduplicationId = sqsParameters == null ? null
+                : resolveDynamicParameter(sqsParameters.path("MessageDeduplicationId").asText(null), event);
+        sqsService.sendMessage(queueUrl, payload, null, messageGroupId, messageDeduplicationId, region);
         LOG.debugv("Pipe delivered to SQS: {0}", arn);
     }
 

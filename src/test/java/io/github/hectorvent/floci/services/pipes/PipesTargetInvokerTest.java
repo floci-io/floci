@@ -76,7 +76,7 @@ class PipesTargetInvokerTest {
         invoker.invoke(pipe, payload, region);
 
         ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), eq(region));
+        verify(sqsService).sendMessage(anyString(), captor.capture(), isNull(), isNull(), isNull(), eq(region));
         String sent = captor.getValue();
         assertEquals("{\"id\": \"msg-123\", \"content\": \"hello world\"}", sent);
     }
@@ -93,7 +93,7 @@ class PipesTargetInvokerTest {
         invoker.invoke(pipe, payload, region);
 
         ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), eq(region));
+        verify(sqsService).sendMessage(anyString(), captor.capture(), isNull(), isNull(), isNull(), eq(region));
         assertEquals("{\"id\": \"\"}", captor.getValue());
     }
 
@@ -106,7 +106,46 @@ class PipesTargetInvokerTest {
 
         invoker.invoke(pipe, payload, region);
 
-        verify(sqsService).sendMessage(anyString(), eq(payload), eq(0), eq(region));
+        verify(sqsService).sendMessage(anyString(), eq(payload), isNull(), isNull(), isNull(), eq(region));
+    }
+
+    @Test
+    void invoke_sqsTargetLeavesTheDelayToTheQueue() {
+        Pipe pipe = createPipe("arn:aws:sqs:us-east-1:000000000000:target", null);
+
+        invoker.invoke(pipe, "{\"messageId\":\"m1\"}", "us-east-1");
+
+        verify(sqsService).sendMessage(eq("http://localhost:4566/000000000000/target"), eq("{\"messageId\":\"m1\"}"),
+                isNull(), isNull(), isNull(), eq("us-east-1"));
+    }
+
+    @Test
+    void invoke_fifoSqsTargetSendsTheMessageGroupAndDeduplicationIds() {
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.putObject("SqsQueueParameters").put("MessageGroupId", "g1").put("MessageDeduplicationId", "d1");
+        Pipe pipe = createPipe("arn:aws:sqs:us-east-1:000000000000:orders.fifo", tp);
+
+        invoker.invoke(pipe, "{\"messageId\":\"m1\"}", "us-east-1");
+
+        verify(sqsService).sendMessage(anyString(), eq("{\"messageId\":\"m1\"}"),
+                isNull(), eq("g1"), eq("d1"), eq("us-east-1"));
+    }
+
+    @Test
+    void invoke_fifoSqsTargetResolvesJsonPathIdsFromTheUntransformedEvent() {
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.putObject("SqsQueueParameters")
+                .put("MessageGroupId", "$.body.customerId")
+                .put("MessageDeduplicationId", "$.messageId");
+        tp.put("InputTemplate", "{\"order\": <$.body.orderId>}");
+        Pipe pipe = createPipe("arn:aws:sqs:us-east-1:000000000000:orders.fifo", tp);
+
+        invoker.invoke(pipe,
+                "{\"messageId\":\"m1\",\"body\":\"{\\\"customerId\\\":\\\"c-7\\\",\\\"orderId\\\":\\\"o-1\\\"}\"}",
+                "us-east-1");
+
+        verify(sqsService).sendMessage(anyString(), eq("{\"order\": \"o-1\"}"),
+                isNull(), eq("c-7"), eq("m1"), eq("us-east-1"));
     }
 
     @Test
@@ -233,7 +272,7 @@ class PipesTargetInvokerTest {
         invoker.invoke(pipe, payload, region);
 
         ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), eq(region));
+        verify(sqsService).sendMessage(anyString(), captor.capture(), isNull(), isNull(), isNull(), eq(region));
         assertEquals("{\"data\": {\"key\":\"value\"}}", captor.getValue());
     }
 
@@ -352,7 +391,7 @@ class PipesTargetInvokerTest {
         invoker.invoke(pipe, payload, region);
 
         ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), eq(region));
+        verify(sqsService).sendMessage(anyString(), captor.capture(), isNull(), isNull(), isNull(), eq(region));
         assertEquals(
                 "{\"message\": \"user registered\", \"messageType\": \"REGISTRATION\"}",
                 captor.getValue());

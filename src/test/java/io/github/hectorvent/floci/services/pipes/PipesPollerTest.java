@@ -49,6 +49,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
@@ -635,7 +636,7 @@ class PipesPollerTest {
         poller.pollDynamoDbStreams(pipe, "us-east-1");
 
         assertEquals(List.of(List.of("001"), List.of("002")), deliveredSequences(pipe));
-        verify(sqsService, times(2)).sendMessage(contains("pipe-dlq"), anyString(), eq(0), eq("us-east-1"));
+        verify(sqsService, times(2)).sendMessage(contains("pipe-dlq"), anyString(), isNull(), eq("us-east-1"));
     }
 
     @Test
@@ -645,7 +646,7 @@ class PipesPollerTest {
         doThrow(new RuntimeException("target down"))
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
         doThrow(new RuntimeException("dlq down"))
-                .when(sqsService).sendMessage(anyString(), anyString(), anyInt(), anyString());
+                .when(sqsService).sendMessage(anyString(), anyString(), isNull(), anyString());
 
         poller.startPolling(pipe);
         poller.pollDynamoDbStreams(pipe, "us-east-1");

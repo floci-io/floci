@@ -7,6 +7,7 @@ import org.junit.jupiter.api.*;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -828,6 +829,108 @@ class PipesPollerIntegrationTest {
             .contentType("application/json")
         .when()
             .delete("/v1/pipes/sqs-to-kinesis-pipe")
+        .then()
+            .statusCode(200);
+    }
+
+    // ──────────────────────────── FIFO SQS Target Tests ────────────────────────────
+
+    @Test
+    @Order(70)
+    void createFifoTargetQueues() {
+        given()
+            .contentType(SQS_CONTENT_TYPE)
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "pipe-fifo-target-source")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        given()
+            .contentType(SQS_CONTENT_TYPE)
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "pipe-fifo-target.fifo")
+            .formParam("Attribute.1.Name", "FifoQueue")
+            .formParam("Attribute.1.Value", "true")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(71)
+    void createPipeToFifoQueueWithSqsQueueParameters() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Source": "arn:aws:sqs:us-east-1:000000000000:pipe-fifo-target-source",
+                    "Target": "arn:aws:sqs:us-east-1:000000000000:pipe-fifo-target.fifo",
+                    "RoleArn": "arn:aws:iam::000000000000:role/pipe-role",
+                    "DesiredState": "RUNNING",
+                    "TargetParameters": {
+                        "SqsQueueParameters": {
+                            "MessageGroupId": "$.body.customerId",
+                            "MessageDeduplicationId": "$.messageId"
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/v1/pipes/fifo-target-pipe")
+        .then()
+            .statusCode(200)
+            .body("CurrentState", equalTo("RUNNING"));
+    }
+
+    @Test
+    @Order(72)
+    void sendMessageForFifoTarget() {
+        given()
+            .contentType(SQS_CONTENT_TYPE)
+            .formParam("Action", "SendMessage")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/pipe-fifo-target-source")
+            .formParam("MessageBody", "{\"customerId\": \"customer-7\", \"orderId\": \"fifo-order-1\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(73)
+    void fifoTargetReceivesTheMessageInTheResolvedGroup() throws Exception {
+        String body = null;
+        for (int i = 0; i < 10; i++) {
+            Thread.sleep(500);
+            body = given()
+                .contentType(SQS_CONTENT_TYPE)
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", "http://localhost:4566/000000000000/pipe-fifo-target.fifo")
+                .formParam("MaxNumberOfMessages", "1")
+                .formParam("AttributeName.1", "MessageGroupId")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().body().asString();
+            if (body.contains("fifo-order-1")) {
+                break;
+            }
+        }
+        assertTrue(body.contains("fifo-order-1"), "the FIFO target should hold the forwarded message, got: " + body);
+        assertTrue(Pattern.compile("<Name>MessageGroupId</Name>\\s*<Value>customer-7</Value>").matcher(body).find(),
+                "the message group is resolved from the event, got: " + body);
+    }
+
+    @Test
+    @Order(74)
+    void cleanupFifoTargetPipe() {
+        given()
+            .contentType("application/json")
+        .when()
+            .delete("/v1/pipes/fifo-target-pipe")
         .then()
             .statusCode(200);
     }

@@ -677,7 +677,7 @@ public class PipesPoller implements Resettable {
         }
         try {
             String queueUrl = AwsArnUtils.arnToQueueUrl(dlqArn, baseUrl);
-            sqsService.sendMessage(queueUrl, payload, 0, region);
+            sqsService.sendMessage(queueUrl, payload, null, region);
             LOG.infov("Pipe {0}: sent failed records to DLQ {1}", pipe.getName(), dlqArn);
             return true;
         } catch (Exception e) {

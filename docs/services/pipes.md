@@ -90,7 +90,10 @@ Floci emulates EventBridge Pipes with the following supported source and target 
 
 **Targets:**
 - Lambda functions
-- SQS queues
+- SQS queues. `TargetParameters.SqsQueueParameters.MessageGroupId` and `MessageDeduplicationId` are
+  sent with each message, so FIFO queue targets work; either can be a JSON path into the event, such
+  as `$.body.customerId`. No per-message delay is set, so the queue's `DelaySeconds` applies, also to
+  records sent to the pipe's dead-letter queue.
 - SNS topics
 - EventBridge event buses
 - Kinesis streams. `TargetParameters.KinesisStreamParameters.PartitionKey` is required, as on AWS, and
