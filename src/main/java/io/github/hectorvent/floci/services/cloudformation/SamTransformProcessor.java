@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -47,6 +48,9 @@ class SamTransformProcessor {
 
     /** What SAM accepts as a logical id. */
     private static final Pattern ALPHANUMERIC = Pattern.compile("[A-Za-z0-9]+");
+
+    /** The OpenAPI operation API Gateway serves for every method of a path. */
+    private static final String ANY_METHOD_OPERATION = "x-amazon-apigateway-any-method";
 
     private final ObjectMapper objectMapper;
     private final boolean allowUnexpandedEvents;
@@ -91,19 +95,35 @@ class SamTransformProcessor {
 
     /**
      * Expands the template with the stack's parameter values, which SAM's translator resolves
-     * parameter references against (falling back to each parameter's {@code Default}).
+     * parameter references against (falling back to each parameter's {@code Default}). Change-set
+     * previews and template comparisons expand through here, so a function event the transform
+     * leaves out is logged at debug.
      */
     JsonNode expandSamTemplate(JsonNode template, Map<String, String> parameterValues) {
-        return expandSamTemplate(template, parameterValues, new LinkedHashMap<>());
+        return expand(template, parameterValues, new LinkedHashMap<>(), false);
     }
 
     /**
-     * Expands the template as {@link #expandSamTemplate(JsonNode, Map)} does, and records in
-     * {@code unexpandedEvents}, per function logical id, the sentence naming each of its events the
-     * transform left out, for the stack to report on that function's resource.
+     * The expansion the stack deploys: as {@link #expandSamTemplate(JsonNode, Map)}, except that a
+     * function event the transform leaves out is logged at warn and recorded in
+     * {@code unexpandedEvents}, per function logical id, as the sentence naming each such event, for
+     * the stack to report on that function's resource.
      */
     JsonNode expandSamTemplate(JsonNode template, Map<String, String> parameterValues,
                                Map<String, String> unexpandedEvents) {
+        return expand(template, parameterValues, unexpandedEvents, true);
+    }
+
+    /**
+     * What reporting a function event the transform leaves out needs: the template's
+     * {@code AWS::Serverless::Api} properties by logical id, where the report is recorded, and
+     * whether this expansion is the one the stack deploys.
+     */
+    private record EventReport(Map<String, JsonNode> serverlessApis, Map<String, String> unexpandedEvents,
+                               boolean deploying) {}
+
+    private JsonNode expand(JsonNode template, Map<String, String> parameterValues,
+                            Map<String, String> unexpandedEvents, boolean deploying) {
         if (!hasSamTransform(template)) {
             return template;
         }
@@ -137,6 +157,15 @@ class SamTransformProcessor {
             }
         });
 
+        Map<String, JsonNode> serverlessApis = new LinkedHashMap<>();
+        for (String logicalId : samLogicalIds) {
+            JsonNode resDef = resources.get(logicalId);
+            if ("AWS::Serverless::Api".equals(resDef.path("Type").asText())) {
+                serverlessApis.put(logicalId, mergeGlobals(globals, "Api", resDef.path("Properties")));
+            }
+        }
+        EventReport eventReport = new EventReport(serverlessApis, unexpandedEvents, deploying);
+
         // Collect implicit-API routes from function Api events before the functions are expanded.
         List<ApiRoute> apiRoutes = collectApiRoutes(samLogicalIds, resources);
 
@@ -158,7 +187,7 @@ class SamTransformProcessor {
             switch (type) {
                 case "AWS::Serverless::Function" -> {
                     expandServerlessFunction(logicalId, mergeGlobals(globals, "Function", properties),
-                            resDef, expanded, expandedResources, parameterValues, unexpandedEvents);
+                            resDef, expanded, expandedResources, parameterValues, eventReport);
                     copyResourceLevelAttributes(resDef, (ObjectNode) expandedResources.path(logicalId));
                 }
                 case "AWS::Serverless::SimpleTable" -> {
@@ -223,8 +252,8 @@ class SamTransformProcessor {
                     continue;
                 }
                 JsonNode p = ev.path("Properties");
-                if (unroutedApiEvent(p) != null) {
-                    continue; // expandFunctionEvent reports it
+                if (isPropertyPresent(p.path("RestApiId")) || !p.path("Path").isTextual()) {
+                    continue; // an explicit API's event, or one expandFunctionEvent reports
                 }
                 JsonNode pathNode = p.path("Path");
                 JsonNode methodNode = p.path("Method");
@@ -964,7 +993,7 @@ class SamTransformProcessor {
     private void expandServerlessFunction(String logicalId, JsonNode properties, JsonNode source,
                                           ObjectNode template, ObjectNode resources,
                                           Map<String, String> parameterValues,
-                                          Map<String, String> unexpandedEvents) {
+                                          EventReport eventReport) {
         resources.remove(logicalId);
         ObjectNode passthrough = passthroughAttributes(source);
 
@@ -991,7 +1020,7 @@ class SamTransformProcessor {
             Iterator<Map.Entry<String, JsonNode>> eventFields = events.fields();
             while (eventFields.hasNext()) {
                 Map.Entry<String, JsonNode> entry = eventFields.next();
-                expandFunctionEvent(logicalId, entry.getKey(), entry.getValue(), resources, unexpandedEvents);
+                expandFunctionEvent(logicalId, entry.getKey(), entry.getValue(), resources, eventReport);
             }
         }
     }
@@ -1729,7 +1758,7 @@ class SamTransformProcessor {
 
     private void expandFunctionEvent(String functionLogicalId, String eventName,
                                      JsonNode eventDef, ObjectNode resources,
-                                     Map<String, String> unexpandedEvents) {
+                                     EventReport eventReport) {
         String eventType = eventDef.path("Type").asText("");
         JsonNode eventProps = eventDef.path("Properties");
 
@@ -1737,9 +1766,9 @@ class SamTransformProcessor {
             case "SQS", "Kinesis", "DynamoDB" ->
                     expandEventSourceMapping(functionLogicalId, eventName, eventProps, resources);
             case "Api" -> {
-                String unrouted = unroutedApiEvent(eventProps);
+                String unrouted = unroutedApiEvent(eventProps, eventReport.serverlessApis());
                 if (unrouted != null) {
-                    reportUnexpandedEvent(functionLogicalId, eventName, eventType, unrouted, unexpandedEvents);
+                    reportUnexpandedEvent(functionLogicalId, eventName, eventType, unrouted, eventReport);
                 } else {
                     LOG.debugv("SAM Api event for {0}.{1} — handled by Api resource",
                             functionLogicalId, eventName);
@@ -1748,26 +1777,59 @@ class SamTransformProcessor {
             case "HttpApi" -> {
                 String unrouted = unroutedHttpApiEvent(eventProps);
                 if (unrouted != null) {
-                    reportUnexpandedEvent(functionLogicalId, eventName, eventType, unrouted, unexpandedEvents);
+                    reportUnexpandedEvent(functionLogicalId, eventName, eventType, unrouted, eventReport);
                 } else {
                     LOG.debugv("SAM HttpApi event for {0}.{1} — handled by HttpApi resource",
                             functionLogicalId, eventName);
                 }
             }
-            default -> reportUnexpandedEvent(functionLogicalId, eventName, eventType, null, unexpandedEvents);
+            default -> reportUnexpandedEvent(functionLogicalId, eventName, eventType, null, eventReport);
         }
     }
 
-    /** Why the implicit REST API leaves this Api event out, or null when it routes it. */
-    private static String unroutedApiEvent(JsonNode eventProps) {
+    /** Why no route serves this Api event, or null when the implicit API or the explicit one it names does. */
+    private String unroutedApiEvent(JsonNode eventProps, Map<String, JsonNode> serverlessApis) {
         JsonNode restApiId = eventProps.path("RestApiId");
-        if (!restApiId.isMissingNode() && !restApiId.isNull()) {
-            return "an Api event that names a RestApiId is not expanded";
+        if (isPropertyPresent(restApiId)) {
+            return unroutedExplicitApiEvent(eventProps, restApiId.path("Ref").asText(null), serverlessApis);
         }
         if (!eventProps.path("Path").isTextual()) {
             return "an Api event whose Path is not a literal string is not expanded";
         }
         return null;
+    }
+
+    /**
+     * Why the explicit API an Api event names has no route for it, or null when it has one or that
+     * cannot be told. The transform adds no route to an explicit API, so its routes are the ones its
+     * definition declares. Only a same-template {@code AWS::Serverless::Api} with an inline
+     * {@code DefinitionBody} can be read here; one loaded from {@code DefinitionUri}, or an API the
+     * template declares another way, is not reported.
+     */
+    private String unroutedExplicitApiEvent(JsonNode eventProps, String apiLogicalId,
+                                            Map<String, JsonNode> serverlessApis) {
+        JsonNode api = apiLogicalId == null ? null : serverlessApis.get(apiLogicalId);
+        if (api == null || isPropertyPresent(api.path("DefinitionUri"))) {
+            return null;
+        }
+        String unrouted = "an Api event's route is not added to an explicit API, and ";
+        JsonNode definitionBody = api.path("DefinitionBody");
+        if (!isPropertyPresent(definitionBody)) {
+            return unrouted + "the AWS::Serverless::Api " + apiLogicalId + " has no DefinitionBody";
+        }
+        JsonNode paths = definitionBody.path("paths");
+        JsonNode path = eventProps.path("Path");
+        JsonNode method = eventProps.path("Method");
+        if (!paths.isObject() || !path.isTextual() || (isPropertyPresent(method) && !method.isTextual())) {
+            return null;
+        }
+        String httpMethod = method.asText("any").toLowerCase(Locale.ROOT);
+        JsonNode operations = paths.path(path.asText());
+        if (operations.has(ANY_METHOD_OPERATION) || operations.has(httpMethod)) {
+            return null;
+        }
+        return unrouted + "the DefinitionBody of the AWS::Serverless::Api " + apiLogicalId + " has no "
+                + httpMethod.toUpperCase(Locale.ROOT) + " " + path.asText() + " operation";
     }
 
     /** Why no route is generated for this HttpApi event, or null when one is. */
@@ -1776,7 +1838,11 @@ class SamTransformProcessor {
             return "an HttpApi event without an ApiId that references an AWS::Serverless::HttpApi "
                     + "(the implicit HTTP API) is not expanded";
         }
-        if (!eventProps.path("Path").isTextual()) {
+        JsonNode path = eventProps.path("Path");
+        if (path.isMissingNode() || path.isNull()) {
+            return "an HttpApi event without a Path (SAM's $default route) is not expanded";
+        }
+        if (!path.isTextual()) {
             return "an HttpApi event whose Path is not a literal string is not expanded";
         }
         return null;
@@ -1785,20 +1851,24 @@ class SamTransformProcessor {
     /**
      * A function event the transform does not expand deploys nothing, so the function alone would
      * report CREATE_COMPLETE with its trigger missing. Like a resource type with no provisioner, it
-     * fails the transform in strict mode, and is otherwise logged at warn and recorded for the stack
-     * to report on the function's resource.
+     * fails the transform in strict mode. Otherwise the expansion the stack deploys logs it at warn
+     * and records it for the stack to report on the function's resource; a preview logs it at debug.
      */
     private void reportUnexpandedEvent(String functionLogicalId, String eventName, String eventType,
-                                       String detail, Map<String, String> unexpandedEvents) {
+                                       String detail, EventReport eventReport) {
         String message = "SAM event " + eventName + " of type " + eventType + " on function "
                 + functionLogicalId + " is not supported by Floci" + (detail == null ? "." : ": " + detail + ".");
         if (!allowUnexpandedEvents) {
             throw new AwsException("ValidationError", message, 400);
         }
+        if (!eventReport.deploying()) {
+            LOG.debugv("{0} It is not expanded.", message);
+            return;
+        }
         LOG.warnv("{0} It was not expanded and nothing was created for it. Set floci.services."
                 + "cloudformation.allow-stub-unsupported-resource-types=false to fail the stack instead.",
                 message);
-        unexpandedEvents.merge(functionLogicalId,
+        eventReport.unexpandedEvents().merge(functionLogicalId,
                 message + " It was not expanded and nothing was created for it.",
                 (earlier, later) -> earlier + " " + later);
     }

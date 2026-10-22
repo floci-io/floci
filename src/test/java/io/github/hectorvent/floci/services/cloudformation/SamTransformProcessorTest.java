@@ -2885,7 +2885,111 @@ class SamTransformProcessorTest {
         AwsException e = assertThrows(AwsException.class, () -> strict.expandSamTemplate(template));
 
         assertEquals("SAM event Get of type Api on function ApiFunction is not supported by Floci: "
-                + "an Api event that names a RestApiId is not expanded.", e.getMessage());
+                + "an Api event's route is not added to an explicit API, and the AWS::Serverless::Api MyApi "
+                + "has no DefinitionBody.", e.getMessage());
+    }
+
+    /**
+     * The explicit API's DefinitionBody keeps its routes, which the REST API provisioner imports, so
+     * an event whose path and method it lists is served.
+     */
+    @Test
+    void apiEventServedByTheExplicitApisDefinitionBodyPassesTheTransformInStrictMode() throws Exception {
+        SamTransformProcessor strict = new SamTransformProcessor(objectMapper, false);
+        JsonNode template = explicitRestApiEventTemplate(
+                "\"DefinitionBody\": {\"swagger\": \"2.0\", \"paths\": {\"/items\": {\"get\": {}}}}");
+        Map<String, String> unexpanded = new LinkedHashMap<>();
+
+        JsonNode resources = strict.expandSamTemplate(template, Map.of(), unexpanded).path("Resources");
+
+        assertEquals(Map.of(), unexpanded);
+        assertEquals("AWS::ApiGateway::RestApi", resources.path("MyApi").path("Type").asText());
+    }
+
+    @Test
+    void apiEventServedByAnAnyMethodOfTheExplicitApiPassesTheTransformInStrictMode() throws Exception {
+        SamTransformProcessor strict = new SamTransformProcessor(objectMapper, false);
+        JsonNode template = explicitRestApiEventTemplate("\"DefinitionBody\": {\"swagger\": \"2.0\", \"paths\":"
+                + " {\"/items\": {\"x-amazon-apigateway-any-method\": {}}}}");
+
+        assertEquals("AWS::ApiGateway::RestApi",
+                strict.expandSamTemplate(template).path("Resources").path("MyApi").path("Type").asText());
+    }
+
+    @Test
+    void apiEventMissingFromTheExplicitApisDefinitionBodyFailsTheTransformInStrictMode() throws Exception {
+        SamTransformProcessor strict = new SamTransformProcessor(objectMapper, false);
+        JsonNode template = explicitRestApiEventTemplate(
+                "\"DefinitionBody\": {\"swagger\": \"2.0\", \"paths\": {\"/items\": {\"post\": {}}}}");
+
+        AwsException e = assertThrows(AwsException.class, () -> strict.expandSamTemplate(template));
+
+        assertEquals("SAM event Get of type Api on function ApiFunction is not supported by Floci: "
+                + "an Api event's route is not added to an explicit API, and the DefinitionBody of the "
+                + "AWS::Serverless::Api MyApi has no GET /items operation.", e.getMessage());
+    }
+
+    /** What an API read from S3 or declared outside SAM routes cannot be told here, so it is not reported. */
+    @Test
+    void apiEventOfAnApiWhoseRoutesCannotBeReadPassesTheTransformInStrictMode() throws Exception {
+        SamTransformProcessor strict = new SamTransformProcessor(objectMapper, false);
+        JsonNode fromS3 = explicitRestApiEventTemplate("\"DefinitionUri\": \"s3://example-bucket/openapi.yaml\"");
+        JsonNode plainRestApi = objectMapper.readTree(EXPLICIT_REST_API_EVENT_TEMPLATE.replace(
+                "{\"Type\": \"AWS::Serverless::Api\", \"Properties\": {\"StageName\": \"prod\"}}",
+                "{\"Type\": \"AWS::ApiGateway::RestApi\", \"Properties\": {\"Name\": \"items\"}}"));
+
+        for (JsonNode template : List.of(fromS3, plainRestApi)) {
+            Map<String, String> unexpanded = new LinkedHashMap<>();
+            strict.expandSamTemplate(template, Map.of(), unexpanded);
+            assertEquals(Map.of(), unexpanded);
+        }
+    }
+
+    /** Change-set previews and comparisons expand the template too; only the deploying run warns. */
+    @Test
+    void anUnexpandedEventIsLoggedAtWarnOnlyWhenTheStackIsDeployed() throws Exception {
+        JsonNode template = objectMapper.readTree(S3_EVENT_TEMPLATE);
+
+        List<String> preview = warningsLoggedWhile(() -> processor.expandSamTemplate(template, Map.of()));
+        List<String> deploy = warningsLoggedWhile(
+                () -> processor.expandSamTemplate(template, Map.of(), new LinkedHashMap<>()));
+
+        assertEquals(List.of(), preview);
+        assertTrue(deploy.stream().anyMatch(w -> w.contains("SAM event Upload of type S3")), deploy.toString());
+    }
+
+    /** SAM routes an HttpApi event with no Path as the API's $default route. */
+    @Test
+    void httpApiEventWithoutAPathIsReportedAsHavingNone() throws Exception {
+        SamTransformProcessor strict = new SamTransformProcessor(objectMapper, false);
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "HttpApi": {"Type": "AWS::Serverless::HttpApi"},
+                "HttpFunction": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs22.x",
+                    "InlineCode": "exports.handler = async () => ({});",
+                    "Events": {"Default": {"Type": "HttpApi", "Properties": {"ApiId": {"Ref": "HttpApi"}}}}
+                  }
+                }
+              }
+            }
+            """);
+
+        AwsException e = assertThrows(AwsException.class, () -> strict.expandSamTemplate(template));
+
+        assertEquals("SAM event Default of type HttpApi on function HttpFunction is not supported by Floci: "
+                + "an HttpApi event without a Path (SAM's $default route) is not expanded.", e.getMessage());
+    }
+
+    /** {@link #EXPLICIT_REST_API_EVENT_TEMPLATE} with {@code definition} added to MyApi's properties. */
+    private JsonNode explicitRestApiEventTemplate(String definition) throws Exception {
+        return objectMapper.readTree(EXPLICIT_REST_API_EVENT_TEMPLATE.replace(
+                "\"Properties\": {\"StageName\": \"prod\"}", "\"Properties\": {\"StageName\": \"prod\", " + definition + "}"));
     }
 
     @Test
@@ -3011,8 +3115,16 @@ class SamTransformProcessorTest {
         }
         """;
 
-    /** The text of every record logged at warn or above while the processor expands {@code template}. */
+    /**
+     * The text of every record logged at warn or above while the processor expands {@code template}
+     * as the run that deploys the stack does.
+     */
     private List<String> warningsLoggedWhileExpanding(JsonNode template) {
+        return warningsLoggedWhile(() -> processor.expandSamTemplate(template, Map.of(), new LinkedHashMap<>()));
+    }
+
+    /** The text of every record logged at warn or above while {@code expansion} runs. */
+    private List<String> warningsLoggedWhile(Runnable expansion) {
         List<LogRecord> logged = new CopyOnWriteArrayList<>();
         Logger logger = Logger.getLogger(SamTransformProcessor.class.getName());
         Level original = logger.getLevel();
@@ -3033,7 +3145,7 @@ class SamTransformProcessorTest {
         logger.addHandler(handler);
         logger.setLevel(Level.ALL);
         try {
-            processor.expandSamTemplate(template);
+            expansion.run();
         } finally {
             logger.setLevel(original);
             logger.removeHandler(handler);

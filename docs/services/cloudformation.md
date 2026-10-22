@@ -441,17 +441,21 @@ The SAM transform expands these `AWS::Serverless::Function` event types:
 |---|---|
 | `SQS`, `Kinesis`, `DynamoDB` | An `AWS::Lambda::EventSourceMapping` for the queue or stream (see [Lambda](lambda.md) for the properties it forwards) |
 | `Api` without `RestApiId` | A route on the implicit REST API the transform generates, when `Path` is a literal string |
+| `Api` whose `RestApiId` names an explicit API | Nothing: the route is the one the explicit API's own definition declares, such as an `x-amazon-apigateway-integration` in its `DefinitionBody` |
 | `HttpApi` whose `ApiId` is a `Ref` to an `AWS::Serverless::HttpApi` | A route on that HTTP API, when `Path` is a literal string |
 
 Every other event is not expanded and nothing is created for it: the other event types (`S3`,
 `SNS`, `Schedule`, `ScheduleV2`, `EventBridgeRule`, `CloudWatchEvent`, `IoTRule`, `CloudWatchLogs`,
-`Cognito`, `MSK`, `MQ`, `SelfManagedKafka`, `DocumentDB`, `AlexaSkill`), an `Api` event that names a
-`RestApiId`, an `HttpApi` event with no `ApiId` (SAM's implicit HTTP API), and an `Api` or `HttpApi`
+`Cognito`, `MSK`, `MQ`, `SelfManagedKafka`, `DocumentDB`, `AlexaSkill`), an `HttpApi` event with no
+`ApiId` (SAM's implicit HTTP API) or no `Path` (SAM's `$default` route), and an `Api` or `HttpApi`
 event whose `Path` is not a literal string. Such an event is treated like a resource type Floci has
-no provisioner for:
+no provisioner for. So is an `Api` event whose `RestApiId` is a `Ref` to an `AWS::Serverless::Api`
+of the same template that has neither `DefinitionBody` nor `DefinitionUri`, or whose inline
+`DefinitionBody` has no operation for the event's path and method, since nothing serves its route:
 
-- By default the function still deploys. The event is logged at `WARN`, and the function's
-  resource event in `DescribeStackEvents` carries the reason:
+- By default the function still deploys. When the stack is deployed the event is logged at `WARN`
+  (change-set previews and template comparisons log it at `DEBUG`), and the function's resource
+  event in `DescribeStackEvents` carries the reason:
 
   ```
   SAM event Upload of type S3 on function ThumbnailFunction is not supported by Floci. It was not expanded and nothing was created for it.
@@ -462,8 +466,11 @@ no provisioner for:
   and nothing is deployed: a `CreateStack` ends in `CREATE_FAILED` with that message as the
   stack's status reason.
 
-Known gap: an `HttpApi` event whose `ApiId` is a `Ref` to something other than an
-`AWS::Serverless::HttpApi` of the same template is not expanded either, and is not reported.
+Known gaps: an `HttpApi` event whose `ApiId` is a `Ref` to something other than an
+`AWS::Serverless::HttpApi` of the same template is not expanded either, and is not reported. An
+`Api` event whose explicit API's routes cannot be read from the template, one loaded from
+`DefinitionUri` or an API not declared as an `AWS::Serverless::Api` of the same template, is not
+reported even when that API has no route for it.
 
 ## SAM published aliases
 

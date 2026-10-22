@@ -12,6 +12,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 
 /**
  * The hard gate a pipeline can set: with
@@ -95,5 +96,72 @@ class CloudFormationUnsupportedResourceTypeStrictIntegrationTest {
         assertThat(state.status(), equalTo("CREATE_FAILED"));
         assertThat(state.reason(), containsString(
                 "SAM event Upload of type S3 on function ThumbnailFunction is not supported by Floci."));
+    }
+
+    /**
+     * An Api event bound to an explicit API whose DefinitionBody lists its path and method is served
+     * by that definition's routes, so the gate lets the stack deploy and nothing is reported.
+     */
+    @Test
+    void strictProfileDeploysAnApiEventServedByTheExplicitApisDefinitionBody() {
+        String stackName = "cfn-sam-explicit-api-strict-" + Long.toString(System.nanoTime(), 36);
+
+        createStack(stackName, """
+                {
+                  "Transform": "AWS::Serverless-2016-10-31",
+                  "Resources": {
+                    "ItemsApi": {
+                      "Type": "AWS::Serverless::Api",
+                      "Properties": {
+                        "StageName": "prod",
+                        "DefinitionBody": {
+                          "swagger": "2.0",
+                          "info": {"title": "items", "version": "1.0"},
+                          "paths": {
+                            "/items": {
+                              "get": {
+                                "x-amazon-apigateway-integration": {
+                                  "type": "aws_proxy",
+                                  "httpMethod": "POST",
+                                  "uri": {"Fn::Sub": "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ItemsFunction.Arn}/invocations"}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "ItemsFunction": {
+                      "Type": "AWS::Serverless::Function",
+                      "Properties": {
+                        "Handler": "index.handler",
+                        "Runtime": "nodejs22.x",
+                        "InlineCode": "exports.handler = async () => ({});",
+                        "Events": {
+                          "Get": {
+                            "Type": "Api",
+                            "Properties": {"RestApiId": {"Ref": "ItemsApi"}, "Path": "/items", "Method": "get"}
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """);
+
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName, CFN_AUTH);
+        assertThat(state.reason(), state.status(), equalTo("CREATE_COMPLETE"));
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackResource")
+            .formParam("StackName", stackName)
+            .formParam("LogicalResourceId", "ItemsFunction")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ResourceStatus>CREATE_COMPLETE</ResourceStatus>"))
+            .body(not(containsString("<ResourceStatusReason>")));
     }
 }
