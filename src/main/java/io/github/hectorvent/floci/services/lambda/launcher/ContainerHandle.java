@@ -19,6 +19,12 @@ public class ContainerHandle {
     private final String executionRoleSessionAccountId;
     private volatile ContainerState state;
     private volatile long lastUsedMs;
+    /**
+     * False while the runtime of a container created {@link ContainerState#COLD} has not yet asked
+     * for its first invocation. That is its Init phase, which AWS bounds separately from the
+     * function timeout.
+     */
+    private volatile boolean initialized;
     private Closeable logStream;
 
     public ContainerHandle(String containerId, String functionName,
@@ -38,6 +44,7 @@ public class ContainerHandle {
         this.functionName = functionName;
         this.runtimeApiServer = runtimeApiServer;
         this.state = state;
+        this.initialized = state != ContainerState.COLD;
         this.hotReload = hotReload;
         this.executionRoleAccessKeyId = executionRoleAccessKeyId;
         this.executionRoleSessionAccountId = executionRoleSessionAccountId;
@@ -56,6 +63,8 @@ public class ContainerHandle {
     public void touchLastUsed(long nowMs) { this.lastUsedMs = nowMs; }
     public ContainerState getState() { return state; }
     public void setState(ContainerState state) { this.state = state; }
+    public boolean isInitialized() { return initialized; }
+    public void markInitialized() { this.initialized = true; }
 
     public Closeable getLogStream() { return logStream; }
     public void setLogStream(Closeable logStream) { this.logStream = logStream; }

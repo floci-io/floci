@@ -231,7 +231,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             awaitRunning(namespace, podName, fn.getFunctionName());
 
             ContainerHandle handle = new ContainerHandle(podName, fn.getFunctionName(),
-                    runtimeApiServer, ContainerState.WARM, false);
+                    runtimeApiServer, ContainerState.COLD, false);
             // Log streaming is non-essential and runs after the pod is already Running,
             // so a failure here (e.g. a missing pods/log RBAC verb) must not tear down a
             // healthy execution environment.

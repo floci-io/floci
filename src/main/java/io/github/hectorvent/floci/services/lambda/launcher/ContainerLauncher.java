@@ -444,7 +444,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         awaitExtensionReadiness(runtimeApiServer, fn.getFunctionName());
 
         ContainerHandle handle = new ContainerHandle(
-                containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload(),
+                containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.COLD, fn.isHotReload(),
                 roleCredentials.map(SessionCreds::accessKeyId).orElse(null),
                 LambdaExecutionRoleCredentials.sessionAccountId(fn));
 

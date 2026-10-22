@@ -548,6 +548,13 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
     finishes or fails. It runs no Lambda code; actual execution environments retain
     their normal shutdown and extension-drain behavior.
 
+!!! note "Init phase on a cold start"
+    A newly started container has up to 10 seconds, or the function timeout when that is
+    longer, plus a 2 second grace, for its runtime to initialize and take the first invocation,
+    as AWS bounds the Init phase separately from the function timeout. The function timeout
+    itself starts when the runtime takes the invocation. A container that has already served an
+    invocation gets the function timeout plus the grace.
+
 !!! note "Bounding warm containers"
     After an invocation the container stays warm so the next call skips the cold start, and is
     reaped only after `container-idle-timeout-seconds` of inactivity. Each function keeps up to

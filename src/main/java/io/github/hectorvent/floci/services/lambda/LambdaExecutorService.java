@@ -50,6 +50,8 @@ public class LambdaExecutorService implements Resettable {
     private static final Logger LOG = Logger.getLogger(LambdaExecutorService.class);
     /** Extra time for a newly started runtime to request its first invocation. */
     private static final int RUNTIME_DISPATCH_GRACE_SECONDS = 2;
+    /** AWS bounds the Init phase, before a new runtime asks for its first invocation, at 10 seconds. */
+    private static final Duration INIT_PHASE_TIMEOUT = Duration.ofSeconds(10);
     /** How long a retry that found the function's concurrency in use waits before asking again. */
     private static final long THROTTLED_RETRY_POLL_MS = 1000;
     /**
@@ -68,6 +70,7 @@ public class LambdaExecutorService implements Resettable {
     private final LambdaService directLambdaService;
     private final Clock clock;
     private final long asyncRetryDelayMs;
+    private final long initPhaseTimeoutSeconds;
     private final boolean dockerExecutor;
     /** Moved on by a reset so that retries still waiting from before it are dropped. */
     private final AtomicLong generation = new AtomicLong();
@@ -88,7 +91,7 @@ public class LambdaExecutorService implements Resettable {
                                  Clock clock,
                                  EmulatorConfig config) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, lambdaServiceInstance, null, clock,
-                Duration.ofSeconds(config.services().lambda().asyncRetryDelaySeconds()),
+                Duration.ofSeconds(config.services().lambda().asyncRetryDelaySeconds()), INIT_PHASE_TIMEOUT,
                 !"kubernetes".equalsIgnoreCase(config.services().lambda().executor().trim()));
     }
 
@@ -98,7 +101,7 @@ public class LambdaExecutorService implements Resettable {
                           AsyncInvokeDestinationRouter destinationRouter,
                           LambdaService directLambdaService) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService,
-                Clock.systemUTC(), Duration.ZERO, true);
+                Clock.systemUTC(), Duration.ZERO, INIT_PHASE_TIMEOUT, true);
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -108,8 +111,21 @@ public class LambdaExecutorService implements Resettable {
                           LambdaService directLambdaService,
                           Clock clock,
                           Duration asyncRetryDelay) {
+        this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, directLambdaService, clock,
+                asyncRetryDelay, INIT_PHASE_TIMEOUT);
+    }
+
+    /** Package-private constructor for testing with a shorter Init phase than AWS's 10 seconds. */
+    LambdaExecutorService(WarmPool warmPool,
+                          ObjectMapper objectMapper,
+                          LambdaConcurrencyLimiter concurrencyLimiter,
+                          AsyncInvokeDestinationRouter destinationRouter,
+                          LambdaService directLambdaService,
+                          Clock clock,
+                          Duration asyncRetryDelay,
+                          Duration initPhaseTimeout) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, null, directLambdaService, clock,
-                asyncRetryDelay, true);
+                asyncRetryDelay, initPhaseTimeout, true);
     }
 
     private LambdaExecutorService(WarmPool warmPool,
@@ -120,6 +136,7 @@ public class LambdaExecutorService implements Resettable {
                                   LambdaService directLambdaService,
                                   Clock clock,
                                   Duration asyncRetryDelay,
+                                  Duration initPhaseTimeout,
                                   boolean dockerExecutor) {
         this.warmPool = warmPool;
         this.objectMapper = objectMapper;
@@ -129,6 +146,7 @@ public class LambdaExecutorService implements Resettable {
         this.directLambdaService = directLambdaService;
         this.clock = clock;
         this.asyncRetryDelayMs = asyncRetryDelay.toMillis();
+        this.initPhaseTimeoutSeconds = initPhaseTimeout.toSeconds();
         this.dockerExecutor = dockerExecutor;
     }
 
@@ -137,7 +155,7 @@ public class LambdaExecutorService implements Resettable {
                           ObjectMapper objectMapper,
                           LambdaConcurrencyLimiter concurrencyLimiter) {
         this(warmPool, objectMapper, concurrencyLimiter, null, (Instance<LambdaService>) null, null,
-                Clock.systemUTC(), Duration.ZERO, true);
+                Clock.systemUTC(), Duration.ZERO, INIT_PHASE_TIMEOUT, true);
     }
 
     LambdaExecutorService(WarmPool warmPool,
@@ -145,7 +163,7 @@ public class LambdaExecutorService implements Resettable {
                           LambdaConcurrencyLimiter concurrencyLimiter,
                           AsyncInvokeDestinationRouter destinationRouter) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter,
-                (Instance<LambdaService>) null, null, Clock.systemUTC(), Duration.ZERO, true);
+                (Instance<LambdaService>) null, null, Clock.systemUTC(), Duration.ZERO, INIT_PHASE_TIMEOUT, true);
     }
 
     public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type) {
@@ -364,9 +382,17 @@ public class LambdaExecutorService implements Resettable {
 
             handle.getRuntimeApiServer().enqueue(invocation);
 
+            // A new runtime first runs its Init phase, which AWS bounds separately from the function timeout;
+            // the handler's own deadline starts when the runtime takes the invocation.
+            long dispatchWaitSeconds = (handle.isInitialized()
+                    ? fn.getTimeout() : Math.max(initPhaseTimeoutSeconds, fn.getTimeout()))
+                    + RUNTIME_DISPATCH_GRACE_SECONDS;
             CompletableFuture.anyOf(
                             invocation.getDispatchedFuture(), invocation.getResultFuture())
-                    .get(fn.getTimeout() + RUNTIME_DISPATCH_GRACE_SECONDS, TimeUnit.SECONDS);
+                    .get(dispatchWaitSeconds, TimeUnit.SECONDS);
+            if (invocation.getDispatchedFuture().isDone()) {
+                handle.markInitialized();
+            }
             InvokeResult result = invocation.getResultFuture().get();
 
             warmPool.release(handle);

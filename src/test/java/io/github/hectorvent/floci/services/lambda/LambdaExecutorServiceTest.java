@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -175,6 +176,71 @@ class LambdaExecutorServiceTest {
         String payload = new String(result.getPayload());
         assertTrue(payload.contains("Function.TimedOut"), "payload should contain error type");
         assertTrue(payload.contains("1 seconds"), "payload should contain timeout value");
+    }
+
+    @Test
+    void coldStart_initLongerThanTheFunctionTimeout_stillRunsWithinTheInitPhase() {
+        // AWS gives the Init phase 10 seconds, however short the function timeout (1 s here) is.
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-cold", "test-fn", rtas, ContainerState.COLD);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            CompletableFuture.delayedExecutor(4, TimeUnit.SECONDS).execute(() -> {
+                pi.prepareForDispatch();
+                pi.markDispatched();
+                pi.getResultFuture().complete(
+                        new InvokeResult(200, null, "{\"ok\":true}".getBytes(), null, pi.getRequestId()));
+            });
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+
+        assertNull(result.getFunctionError(), () -> new String(result.getPayload()));
+        verify(warmPool).release(handle);
+        verify(warmPool, never()).destroyHandle(handle);
+    }
+
+    @Test
+    void coldStart_whoseRuntimeNeverTakesTheInvocation_timesOutAfterTheInitPhase() {
+        LambdaExecutorService shortInit = new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter,
+                null, null, Clock.systemUTC(), Duration.ZERO, Duration.ofSeconds(2));
+        retryExecutors.add(shortInit);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-cold-stuck", "test-fn", rtas, ContainerState.COLD);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        when(rtas.enqueue(any())).thenReturn(new CompletableFuture<>());
+
+        long started = System.nanoTime();
+        InvokeResult result = shortInit.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+        // A warm handle would give up after the 1 s timeout plus the 2 s grace.
+        assertTrue(elapsedMs >= 3900, "waited only " + elapsedMs + " ms for the Init phase");
+        assertTrue(new String(result.getPayload()).contains("Function.TimedOut"));
+        verify(warmPool).destroyHandle(handle);
+        verify(warmPool, never()).release(handle);
+    }
+
+    @Test
+    void coldHandle_isInitializedOnceItsRuntimeTakesAnInvocation() {
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-cold-init", "test-fn", rtas, ContainerState.COLD);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            pi.prepareForDispatch();
+            pi.markDispatched();
+            pi.getResultFuture().complete(new InvokeResult(200, null, "{}".getBytes(), null, pi.getRequestId()));
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+        assertFalse(handle.isInitialized());
+
+        executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+
+        assertTrue(handle.isInitialized(), "a pooled handle must get the warm dispatch window next time");
+        assertTrue(new ContainerHandle("cid-warm", "test-fn", rtas, ContainerState.WARM).isInitialized());
     }
 
     @Test
