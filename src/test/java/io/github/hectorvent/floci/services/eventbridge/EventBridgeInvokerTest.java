@@ -153,7 +153,7 @@ class EventBridgeInvokerTest {
 
         invoker.invokeTarget(target, event, "eu-west-1");
 
-        verify(sqsService).sendMessage(anyString(), eq(event), anyInt(), isNull(), isNull(), eq("eu-west-1"));
+        verify(sqsService).sendMessage(anyString(), eq(event), isNull(), isNull(), isNull(), eq("eu-west-1"));
     }
 
     @Test
@@ -562,7 +562,7 @@ class EventBridgeInvokerTest {
                 "us-east-1", () -> List.of(target));
 
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
-        verify(sqsService).sendMessage(anyString(), body.capture(), anyInt(), isNull(), isNull(), eq("us-east-1"));
+        verify(sqsService).sendMessage(anyString(), body.capture(), isNull(), isNull(), isNull(), eq("us-east-1"));
         assertEquals("{\"arn\":\"arn:aws:events:us-east-1:000000000000:rule/orders-bus/my-rule\",\"n\":\"my-rule\","
                 + "\"t\":\"2026-10-22T10:15:30Z\",\"e\":{\"id\":\"e-1\",\"source\":\"my.app\"},"
                 + "\"j\":{\"id\":\"e-1\",\"source\":\"my.app\",\"detail\":{\"k\":1}},"

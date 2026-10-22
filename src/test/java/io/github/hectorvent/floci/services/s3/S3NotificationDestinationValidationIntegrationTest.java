@@ -208,6 +208,23 @@ class S3NotificationDestinationValidationIntegrationTest {
     }
 
     @Test
+    void queueDelaySecondsWithholdsTheTestEventAndObjectEvents() {
+        String queueArn = createQueue("delayed", Map.of("DelaySeconds", "60"));
+        String queueUrl = queueUrls.getFirst();
+
+        putNotification(notificationConfiguration(queueConfiguration(queueArn)), false).statusCode(200);
+        given().contentType("text/plain").body("payload")
+                .when().put("/" + bucket + "/delayed-object").then().statusCode(200);
+        try {
+            assertTrue(receiveQueueMessage(queueUrl).isEmpty());
+            assertEquals("2", sqsService.getQueueAttributes(queueUrl,
+                    List.of("ApproximateNumberOfMessagesDelayed"), REGION).get("ApproximateNumberOfMessagesDelayed"));
+        } finally {
+            given().when().delete("/" + bucket + "/delayed-object").then().statusCode(204);
+        }
+    }
+
+    @Test
     void failedTestMessageLeavesPreviousConfigurationUntouched() {
         String validQueueArn = createQueue("before-failure", Map.of());
         putNotification(notificationConfiguration(queueConfiguration(validQueueArn)), false)

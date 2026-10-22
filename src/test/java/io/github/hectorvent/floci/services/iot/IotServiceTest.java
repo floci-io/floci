@@ -51,7 +51,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -169,7 +168,7 @@ class IotServiceTest {
     }
 
     private void queueIsMissing() {
-        when(sqs.sendMessage(eq(QUEUE_URL), anyString(), anyInt(), anyString()))
+        when(sqs.sendMessage(eq(QUEUE_URL), anyString(), isNull(), anyString()))
                 .thenThrow(new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist for this wsdl version.", 400));
     }
@@ -199,7 +198,7 @@ class IotServiceTest {
 
         deferred.get(0).run();
 
-        verify(sqs).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), eq(0), eq(REGION));
+        verify(sqs).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), isNull(), eq(REGION));
         verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
     }
 
@@ -209,7 +208,7 @@ class IotServiceTest {
 
         service.publish(TOPIC, "{\"v\":1}".getBytes(StandardCharsets.UTF_8), false, 0, null, null);
 
-        verify(sqs).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), eq(0), eq(REGION));
+        verify(sqs).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), isNull(), eq(REGION));
         verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
     }
 
@@ -226,13 +225,13 @@ class IotServiceTest {
         service.handlePublish("$aws/events/presence/connected/x", "{\"clientId\":\"x\"}".getBytes(StandardCharsets.UTF_8),
                 true, REGION, "x", Runnable::run);
 
-        verify(sqs, never()).sendMessage(eq(everything), anyString(), anyInt(), anyString());
-        verify(sqs, never()).sendMessage(eq(anyPresence), anyString(), anyInt(), anyString());
-        verify(sqs).sendMessage(eq(presence), eq("{\"clientId\":\"x\"}"), eq(0), eq(REGION));
+        verify(sqs, never()).sendMessage(eq(everything), anyString(), any(), anyString());
+        verify(sqs, never()).sendMessage(eq(anyPresence), anyString(), any(), anyString());
+        verify(sqs).sendMessage(eq(presence), eq("{\"clientId\":\"x\"}"), isNull(), eq(REGION));
 
         service.handlePublish("a/b", "{\"v\":1}".getBytes(StandardCharsets.UTF_8), true, REGION, null, Runnable::run);
 
-        verify(sqs).sendMessage(eq(everything), eq("{\"v\":1}"), eq(0), eq(REGION));
+        verify(sqs).sendMessage(eq(everything), eq("{\"v\":1}"), isNull(), eq(REGION));
     }
 
     @Test
@@ -1238,7 +1237,7 @@ class IotServiceTest {
                 json("{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"job:inbound\"}"), REGION);
 
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
-        verify(sqs).sendMessage(eq(SHADOW_QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        verify(sqs).sendMessage(eq(SHADOW_QUEUE_URL), body.capture(), isNull(), eq(REGION));
         JsonNode message = mapper.readTree(body.getValue());
         assertEquals(BUILDING_UPDATE + "/accepted", message.get("topic").asText());
         assertEquals("N/A", message.get("cid").asText());
@@ -1257,7 +1256,7 @@ class IotServiceTest {
         service.updateThingShadow("sensor-13", null, json("{\"state\":{\"desired\":{\"temp\":21}}}"), REGION);
 
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
-        verify(sqs, times(6)).sendMessage(eq(SHADOW_QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        verify(sqs, times(6)).sendMessage(eq(SHADOW_QUEUE_URL), body.capture(), isNull(), eq(REGION));
         List<String> topics = new ArrayList<>();
         for (String message : body.getAllValues()) {
             topics.add(mapper.readTree(message).get("topic").asText());
@@ -1277,7 +1276,7 @@ class IotServiceTest {
         service.updateThingShadow("sensor-1", null, json(inbound), REGION);
         service.updateThingShadow("sensor-1", "other", json(inbound), REGION);
 
-        verify(sqs, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+        verify(sqs, never()).sendMessage(anyString(), anyString(), any(), anyString());
     }
 
     @Test
@@ -1286,10 +1285,10 @@ class IotServiceTest {
         String update = "{\"state\":{\"desired\":{\"temp\":21}}}";
 
         service.updateThingShadow("sensor-1", "building", json(update), REGION);
-        verify(sqs, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+        verify(sqs, never()).sendMessage(anyString(), anyString(), any(), anyString());
 
         service.updateThingShadow("sensor-1", null, json(update), REGION);
-        verify(sqs, times(1)).sendMessage(eq(CLASSIC_QUEUE_URL), anyString(), eq(0), eq(REGION));
+        verify(sqs, times(1)).sendMessage(eq(CLASSIC_QUEUE_URL), anyString(), isNull(), eq(REGION));
     }
 
     @Test
@@ -1298,10 +1297,10 @@ class IotServiceTest {
         String inbound = "{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"job:inbound\"}";
 
         service.updateThingShadow("sensor-1", "building", json(inbound), REGION);
-        verify(sqs, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+        verify(sqs, never()).sendMessage(anyString(), anyString(), any(), anyString());
 
         service.updateThingShadow("sensor-1", "building", json(inbound), "eu-west-1");
-        verify(sqs, times(1)).sendMessage(eq(SHADOW_QUEUE_URL), anyString(), eq(0), eq("eu-west-1"));
+        verify(sqs, times(1)).sendMessage(eq(SHADOW_QUEUE_URL), anyString(), isNull(), eq("eu-west-1"));
     }
 
     @Test
@@ -1479,7 +1478,7 @@ class IotServiceTest {
         assertEquals(3, deferred.size(), "one rule evaluation per event");
         deferred.forEach(Runnable::run);
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
-        verify(sqs).sendMessage(eq(CLASSIC_QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        verify(sqs).sendMessage(eq(CLASSIC_QUEUE_URL), body.capture(), isNull(), eq(REGION));
         assertEquals(json("{\"cid\":\"N/A\",\"topic\":\"$aws/things/sensor-10/shadow/update/accepted\"}"),
                 mapper.readTree(body.getValue()));
     }

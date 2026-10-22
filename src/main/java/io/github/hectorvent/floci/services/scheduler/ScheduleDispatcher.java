@@ -313,7 +313,7 @@ public class ScheduleDispatcher implements Resettable {
 
         String body = delivery.requestBody() != null ? delivery.requestBody() : "{}";
         try {
-            sqsService.sendMessage(AwsArnUtils.arnToQueueUrl(queueArn, baseUrl), body, 0, null, null,
+            sqsService.sendMessage(AwsArnUtils.arnToQueueUrl(queueArn, baseUrl), body, null, null, null,
                     attributes, AwsArnUtils.regionOrDefault(queueArn, regionOf(schedule)));
         } catch (Exception e) {
             LOG.warnv("Dead-letter delivery failed for schedule {0}: {1}", schedule.getArn(), e.getMessage());

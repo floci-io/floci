@@ -89,7 +89,7 @@ class ScheduleDispatcherTest {
 
     private List<Map<String, MessageAttributeValue>> deadLetters(int count) {
         ArgumentCaptor<Map<String, MessageAttributeValue>> attributes = ArgumentCaptor.captor();
-        verify(sqsService, times(count)).sendMessage(eq(DLQ_QUEUE_URL), eq(TARGET_REQUEST), eq(0),
+        verify(sqsService, times(count)).sendMessage(eq(DLQ_QUEUE_URL), eq(TARGET_REQUEST), isNull(),
                 isNull(), isNull(), attributes.capture(), eq("eu-central-1"));
         return attributes.getAllValues();
     }

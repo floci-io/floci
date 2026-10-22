@@ -39,9 +39,9 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -163,7 +163,7 @@ class AsyncInvokeDestinationRouterTest {
 
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
         verify(sqsService).sendMessage(eq("http://localhost:4566/000000000000/quotes-queue"),
-                body.capture(), eq(0), eq("us-east-1"));
+                body.capture(), isNull(), eq("us-east-1"));
 
         JsonNode record = read(body.getValue());
         assertEquals("Success", record.path("requestContext").path("condition").asText());
@@ -211,7 +211,7 @@ class AsyncInvokeDestinationRouterTest {
         router.route(fn, request(), success("{\"rate\":3.5}"), 16);
 
         verify(sqsService).sendMessage(eq("http://localhost:4566/000000000000/quotes-queue"),
-                anyString(), eq(0), eq("us-east-1"));
+                anyString(), isNull(), eq("us-east-1"));
     }
 
     @Test
@@ -400,7 +400,7 @@ class AsyncInvokeDestinationRouterTest {
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<Map<String, MessageAttributeValue>> attrs = ArgumentCaptor.forClass(Map.class);
         String queueUrl = "http://localhost:4566/000000000000/quotes-queue";
-        verify(sqsService).sendMessage(eq(queueUrl), body.capture(), anyInt(), eq(null), eq(null), attrs.capture(), eq("us-east-1"));
+        verify(sqsService).sendMessage(eq(queueUrl), body.capture(), isNull(), eq(null), eq(null), attrs.capture(), eq("us-east-1"));
         assertThat(body.getValue(), containsString("\"amount\":100000"));
         assertThat(attrs.getValue().get("RequestID").getStringValue(), equalTo("req-1"));
         assertThat(attrs.getValue().get("ErrorCode").getDataType(), equalTo("Number"));
@@ -424,7 +424,7 @@ class AsyncInvokeDestinationRouterTest {
 
         router.route(fn, request(), success("{\"ok\":true}"), 0);
 
-        verify(sqsService, never()).sendMessage(anyString(), anyString(), anyInt(), any(), any(), any(), anyString());
+        verify(sqsService, never()).sendMessage(anyString(), anyString(), any(), any(), any(), any(), anyString());
     }
 
     @Test
@@ -454,7 +454,7 @@ class AsyncInvokeDestinationRouterTest {
 
         ArgumentCaptor<Map<String, MessageAttributeValue>> attrs = ArgumentCaptor.forClass(Map.class);
         String queueUrl = "http://localhost:4566/000000000000/quotes-queue";
-        verify(sqsService).sendMessage(eq(queueUrl), anyString(), anyInt(), eq(null), eq(null), attrs.capture(), eq("us-east-1"));
+        verify(sqsService).sendMessage(eq(queueUrl), anyString(), isNull(), eq(null), eq(null), attrs.capture(), eq("us-east-1"));
         assertEquals(1024, attrs.getValue().get("ErrorMessage").getStringValue().getBytes(StandardCharsets.UTF_8).length);
     }
 
@@ -467,7 +467,7 @@ class AsyncInvokeDestinationRouterTest {
 
         verify(snsService).publish(eq(TOPIC_ARN), eq(null), anyString(), eq("Lambda"), eq("us-east-1"));
         String queueUrl = "http://localhost:4566/000000000000/quotes-queue";
-        verify(sqsService, never()).sendMessage(eq(queueUrl), anyString(), anyInt(), any(), any(), any(), anyString());
+        verify(sqsService, never()).sendMessage(eq(queueUrl), anyString(), any(), any(), any(), any(), anyString());
     }
 
     private void configure(String onSuccess, String onFailure) {

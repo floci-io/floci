@@ -4967,7 +4967,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         continue;
                     }
                     if ("sqs".equals(destination.service())) {
-                        sqsService.sendMessage(sqsUrlFromArn(destination.arn()), testEvent, 0,
+                        sqsService.sendMessage(sqsUrlFromArn(destination.arn()), testEvent, null,
                                 destination.region());
                     } else if ("sns".equals(destination.service())) {
                         snsService.publish(destination.arn(), null, testEvent, "Amazon S3 Notification",
@@ -6423,7 +6423,7 @@ public class S3Service implements Resettable, ResourceProvider {
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(key)) {
                 try {
-                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0,
+                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, null,
                             extractRegionFromArn(qn.queueArn()));
                     LOG.debugv("Fired S3 event {0} to SQS {1}", eventName, qn.queueArn());
                 } catch (Exception e) {

@@ -217,7 +217,7 @@ public class TargetDispatcher implements Resettable {
         }
         attributes.put("RETRY_ATTEMPTS", stringAttribute(String.valueOf(delivery.retryAttempts())));
         try {
-            sqsService.sendMessage(AwsArnUtils.arnToQueueUrl(queueArn, baseUrl), delivery.eventJson(), 0, null, null,
+            sqsService.sendMessage(AwsArnUtils.arnToQueueUrl(queueArn, baseUrl), delivery.eventJson(), null, null, null,
                     attributes, delivery.region());
         } catch (RuntimeException e) {
             LOG.warnv("EventBridge rule {0} target {1} dead-letter delivery to {2} failed: {3}",

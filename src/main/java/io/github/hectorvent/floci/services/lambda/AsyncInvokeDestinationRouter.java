@@ -181,7 +181,7 @@ public class AsyncInvokeDestinationRouter {
                 case "sqs" -> {
                     RequestScopes.runAs(destinationAccount, () ->
                             sqsService.get().sendMessage(AwsArnUtils.arnToQueueUrl(arn, baseUrl),
-                                    body, 0, null, null, attributes, region));
+                                    body, null, null, null, attributes, region));
                     yield true;
                 }
                 case "sns" -> {
@@ -302,7 +302,7 @@ public class AsyncInvokeDestinationRouter {
                     }
                     case "sqs" -> {
                         RequestScopes.runAs(accountId, () ->
-                                sqsService.get().sendMessage(AwsArnUtils.arnToQueueUrl(arn, baseUrl), body, 0, region));
+                                sqsService.get().sendMessage(AwsArnUtils.arnToQueueUrl(arn, baseUrl), body, null, region));
                         yield true;
                     }
                     case "sns" -> {

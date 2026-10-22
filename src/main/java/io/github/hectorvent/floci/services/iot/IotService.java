@@ -1802,7 +1802,7 @@ public class IotService {
                     String body = action.path("useBase64").asBoolean(false)
                             ? Base64.getEncoder().encodeToString(payload)
                             : new String(payload, StandardCharsets.UTF_8);
-                    sqsService.sendMessage(queueUrl, body, 0, region);
+                    sqsService.sendMessage(queueUrl, body, null, region);
                 }
             }
             case "sns" -> {

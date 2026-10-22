@@ -128,7 +128,7 @@ public class ScheduleInvoker {
                 String queueUrl = AwsArnUtils.arnToQueueUrl(arn, baseUrl);
                 String messageGroupId = target.getSqsParameters() != null
                         ? target.getSqsParameters().getMessageGroupId() : null;
-                sqsService.sendMessage(queueUrl, payload, 0, messageGroupId, null, targetRegion);
+                sqsService.sendMessage(queueUrl, payload, null, messageGroupId, null, targetRegion);
                 LOG.debugv("Scheduler delivered to SQS: {0}", arn);
             }
             case LAMBDA -> {
@@ -443,8 +443,10 @@ public class ScheduleInvoker {
                 String messageDeduplicationId = text(params, "MessageDeduplicationId");
                 Map<String, MessageAttributeValue> messageAttributes =
                         parseUniversalSqsMessageAttributes(params.path("MessageAttributes"));
-                sqsService.sendMessage(queueUrl, body, 0, messageGroupId, messageDeduplicationId,
-                        messageAttributes, region);
+                JsonNode delaySeconds = params.get("DelaySeconds");
+                sqsService.sendMessage(queueUrl, body,
+                        delaySeconds == null || delaySeconds.isNull() ? null : delaySeconds.asInt(),
+                        messageGroupId, messageDeduplicationId, messageAttributes, region);
                 LOG.debugv("Scheduler delivered to SQS (universal target): {0}", queueUrl);
             }
             case "redshiftdata:executeStatement" -> {
