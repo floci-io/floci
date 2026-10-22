@@ -92,6 +92,10 @@ aws sqs set-queue-attributes \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
+## Message System Attributes
+
+`AWSTraceHeader` is the only message system attribute SQS accepts. `SendMessage` and `SendMessageBatch` store it, return it from `ReceiveMessage` when requested, and answer with `MD5OfMessageSystemAttributes` over it, which SDKs that verify checksums (such as the AWS SDK for Ruby) compare against what they sent. The field is omitted when the request carries no system attributes.
+
 ## Queue Attributes
 
 `GetQueueAttributes` with `--attribute-names All` returns the set AWS returns for a standard queue: `QueueArn`, `CreatedTimestamp`, `LastModifiedTimestamp`, `ApproximateNumberOfMessages`, `ApproximateNumberOfMessagesNotVisible`, `ApproximateNumberOfMessagesDelayed`, `VisibilityTimeout`, `MaximumMessageSize`, `MessageRetentionPeriod`, `DelaySeconds`, `ReceiveMessageWaitTimeSeconds` and `SqsManagedSseEnabled`. `Policy`, `RedrivePolicy` and `KmsMasterKeyId` appear only once set, and FIFO queues also report `FifoQueue` and `ContentBasedDeduplication`.

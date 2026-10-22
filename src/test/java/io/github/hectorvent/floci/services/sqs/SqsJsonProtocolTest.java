@@ -223,7 +223,8 @@ class SqsJsonProtocolTest {
                 + "\"AWSTraceHeader\":{\"DataType\":\"String\",\"StringValue\":\"Root=1-aaa\"}}},"
                 + "{\"Id\":\"b\",\"MessageBody\":\"second\","
                 + "\"MessageSystemAttributes\":{"
-                + "\"AWSTraceHeader\":{\"DataType\":\"String\",\"StringValue\":\"Root=1-bbb\"}}}"
+                + "\"AWSTraceHeader\":{\"DataType\":\"String\",\"StringValue\":\"Root=1-bbb\"}}},"
+                + "{\"Id\":\"c\",\"MessageBody\":\"untraced\"}"
                 + "]}";
 
         given()
@@ -231,7 +232,12 @@ class SqsJsonProtocolTest {
             .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
             .body(batchBody)
         .when().post("/").then().statusCode(200)
-            .body("Successful", hasSize(2));
+            .body("Successful", hasSize(3))
+            .body("Successful.find { it.Id == 'a' }.MD5OfMessageSystemAttributes",
+                    equalTo("94247ab479ef89b697e46f82c8037af1"))
+            .body("Successful.find { it.Id == 'b' }.MD5OfMessageSystemAttributes",
+                    equalTo("8089f1ff2a9ee60457a9de0ea23e0de6"))
+            .body("Successful.find { it.Id == 'c' }", not(hasKey("MD5OfMessageSystemAttributes")));
 
         String receiveBody = "{\"QueueUrl\":\"" + traceQueueUrl + "\","
                 + "\"MaxNumberOfMessages\":10,"
@@ -242,8 +248,35 @@ class SqsJsonProtocolTest {
             .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
             .body(receiveBody)
         .when().post("/").then().statusCode(200)
-            .body("Messages", hasSize(2))
+            .body("Messages", hasSize(3))
             .body("Messages.Attributes.AWSTraceHeader", hasItems("Root=1-aaa", "Root=1-bbb"));
+    }
+
+    @Test
+    @Order(6)
+    void sendMessageReturnsMd5OfMessageSystemAttributesOnlyWhenSent() {
+        String traceQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-single-trace-queue\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessage")
+            .body("{\"QueueUrl\":\"" + traceQueueUrl + "\",\"MessageBody\":\"traced\","
+                    + "\"MessageSystemAttributes\":{"
+                    + "\"AWSTraceHeader\":{\"DataType\":\"String\",\"StringValue\":\"Root=1-json-single\"}}}")
+        .when().post("/").then().statusCode(200)
+            .body("MD5OfMessageSystemAttributes", equalTo("114caccdc36dd19f61bdd0752dc8fc92"));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessage")
+            .body("{\"QueueUrl\":\"" + traceQueueUrl + "\",\"MessageBody\":\"untraced\"}")
+        .when().post("/").then().statusCode(200)
+            .body("$", not(hasKey("MD5OfMessageSystemAttributes")));
     }
 
     @Test

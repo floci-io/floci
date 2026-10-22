@@ -160,6 +160,18 @@ public class Message {
         this.md5OfMessageAttributes = computeMessageAttributesMd5(messageAttributes);
     }
 
+    /**
+     * Digest of the message system attributes a SendMessage carried, encoded like the message attribute
+     * digest. AWSTraceHeader is the only system attribute SQS accepts; null when it was not sent.
+     */
+    public static String computeMessageSystemAttributesMd5(String awsTraceHeader, String dataType) {
+        if (awsTraceHeader == null) {
+            return null;
+        }
+        return computeMessageAttributesMd5(Map.of("AWSTraceHeader",
+                new MessageAttributeValue(awsTraceHeader, dataType != null ? dataType : "String")));
+    }
+
     public static String computeMessageAttributesMd5(Map<String, MessageAttributeValue> messageAttributes) {
         if (messageAttributes == null || messageAttributes.isEmpty()) {
             return null;

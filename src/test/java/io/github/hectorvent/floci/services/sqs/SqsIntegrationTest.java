@@ -758,7 +758,17 @@ class SqsIntegrationTest {
                 .formParam("MessageSystemAttribute.1.Name", "AWSTraceHeader")
                 .formParam("MessageSystemAttribute.1.Value.DataType", "String")
                 .formParam("MessageSystemAttribute.1.Value.StringValue", "Root=1-query-single")
-            .when().post("/").then().statusCode(200);
+            .when().post("/").then().statusCode(200)
+                .body("SendMessageResponse.SendMessageResult.MD5OfMessageSystemAttributes",
+                        equalTo("bbcd629989215d0c147236d7730348a8"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", traceQueueUrl)
+                .formParam("MessageBody", "untraced")
+            .when().post("/").then().statusCode(200)
+                .body(not(containsString("MD5OfMessageSystemAttributes")));
 
             given()
                 .contentType("application/x-www-form-urlencoded")
@@ -823,7 +833,11 @@ class SqsIntegrationTest {
                 .formParam("SendMessageBatchRequestEntry.2.MessageSystemAttribute.1.Name", "AWSTraceHeader")
                 .formParam("SendMessageBatchRequestEntry.2.MessageSystemAttribute.1.Value.DataType", "String")
                 .formParam("SendMessageBatchRequestEntry.2.MessageSystemAttribute.1.Value.StringValue", "Root=1-bbb")
-            .when().post("/").then().statusCode(200);
+            .when().post("/").then().statusCode(200)
+                .body(containsString(
+                        "<MD5OfMessageSystemAttributes>94247ab479ef89b697e46f82c8037af1</MD5OfMessageSystemAttributes>"))
+                .body(containsString(
+                        "<MD5OfMessageSystemAttributes>8089f1ff2a9ee60457a9de0ea23e0de6</MD5OfMessageSystemAttributes>"));
 
             given()
                 .contentType("application/x-www-form-urlencoded")

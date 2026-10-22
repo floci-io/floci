@@ -247,11 +247,13 @@ public class SqsQueryHandler {
         // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
         // capture it (if present) so ReceiveMessage can return it as a system attribute.
         String awsTraceHeader = null;
+        String awsTraceHeaderDataType = null;
         for (int i = 1; ; i++) {
             String name = getParam(params, "MessageSystemAttribute." + i + ".Name");
             if (name == null) break;
             if ("AWSTraceHeader".equals(name)) {
                 awsTraceHeader = getParam(params, "MessageSystemAttribute." + i + ".Value.StringValue");
+                awsTraceHeaderDataType = getParam(params, "MessageSystemAttribute." + i + ".Value.DataType");
                 break;
             }
         }
@@ -265,6 +267,10 @@ public class SqsQueryHandler {
                 .elem("MD5OfMessageBody", msg.getMd5OfBody());
         if (msg.getMd5OfMessageAttributes() != null) {
             xml.elem("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+        }
+        String md5OfSystemAttributes = Message.computeMessageSystemAttributesMd5(awsTraceHeader, awsTraceHeaderDataType);
+        if (md5OfSystemAttributes != null) {
+            xml.elem("MD5OfMessageSystemAttributes", md5OfSystemAttributes);
         }
         if (msg.getSequenceNumber() > 0) {
             xml.elem("SequenceNumber", msg.getSequenceNumber());
@@ -369,7 +375,8 @@ public class SqsQueryHandler {
         XmlBuilder xml = new XmlBuilder();
 
         record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
-                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader,
+                           String md5OfSystemAttributes) {}
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
         int totalSize = 0;
@@ -399,19 +406,23 @@ public class SqsQueryHandler {
             }
 
             String entryAwsTraceHeader = null;
+            String entryAwsTraceHeaderDataType = null;
             for (int k = 1; ; k++) {
                 String name = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageSystemAttribute." + k + ".Name");
                 if (name == null) break;
                 if ("AWSTraceHeader".equals(name)) {
                     entryAwsTraceHeader = getParam(params,
                             "SendMessageBatchRequestEntry." + i + ".MessageSystemAttribute." + k + ".Value.StringValue");
+                    entryAwsTraceHeaderDataType = getParam(params,
+                            "SendMessageBatchRequestEntry." + i + ".MessageSystemAttribute." + k + ".Value.DataType");
                     break;
                 }
             }
 
             totalSize += SqsService.computeMessageSize(body, messageAttributes);
             parsedEntries.add(new ParsedEntry(id, body, delaySeconds, messageGroupId,
-                    messageDeduplicationId, messageAttributes, entryAwsTraceHeader));
+                    messageDeduplicationId, messageAttributes, entryAwsTraceHeader,
+                    Message.computeMessageSystemAttributesMd5(entryAwsTraceHeader, entryAwsTraceHeaderDataType)));
         }
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
@@ -429,6 +440,9 @@ public class SqsQueryHandler {
                    .elem("MD5OfMessageBody", msg.getMd5OfBody());
                 if (msg.getMd5OfMessageAttributes() != null) {
                     xml.elem("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+                }
+                if (parsed.md5OfSystemAttributes() != null) {
+                    xml.elem("MD5OfMessageSystemAttributes", parsed.md5OfSystemAttributes());
                 }
                 if (msg.getSequenceNumber() > 0) {
                     xml.elem("SequenceNumber", msg.getSequenceNumber());

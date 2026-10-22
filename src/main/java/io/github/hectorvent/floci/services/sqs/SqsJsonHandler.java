@@ -226,8 +226,8 @@ public class SqsJsonHandler {
 
         // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
         // capture it (if present) so ReceiveMessage can return it as a system attribute.
-        String awsTraceHeader = request.path("MessageSystemAttributes")
-                .path("AWSTraceHeader").path("StringValue").asText(null);
+        JsonNode traceHeader = request.path("MessageSystemAttributes").path("AWSTraceHeader");
+        String awsTraceHeader = traceHeader.path("StringValue").asText(null);
 
         Message msg = sqsService.sendMessage(queueUrl, messageBody, delaySeconds,
                 messageGroupId, messageDeduplicationId, messageAttributes, awsTraceHeader,
@@ -238,6 +238,11 @@ public class SqsJsonHandler {
         response.put("MD5OfMessageBody", msg.getMd5OfBody());
         if (msg.getMd5OfMessageAttributes() != null) {
             response.put("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+        }
+        String md5OfSystemAttributes = Message.computeMessageSystemAttributesMd5(awsTraceHeader,
+                traceHeader.path("DataType").asText(null));
+        if (md5OfSystemAttributes != null) {
+            response.put("MD5OfMessageSystemAttributes", md5OfSystemAttributes);
         }
         if (msg.getSequenceNumber() > 0) {
             response.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
@@ -373,7 +378,8 @@ public class SqsJsonHandler {
         ArrayNode failed = objectMapper.createArrayNode();
 
         record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
-                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader,
+                           String md5OfSystemAttributes) {}
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
         int totalSize = 0;
@@ -404,13 +410,14 @@ public class SqsJsonHandler {
                 });
             }
 
-            String entryAwsTraceHeader = entry.path("MessageSystemAttributes")
-                    .path("AWSTraceHeader").path("StringValue").asText(null);
+            JsonNode entryTraceHeader = entry.path("MessageSystemAttributes").path("AWSTraceHeader");
+            String entryAwsTraceHeader = entryTraceHeader.path("StringValue").asText(null);
 
             totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
             parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
                     messageGroupId, messageDeduplicationId, messageAttributes,
-                    entryAwsTraceHeader));
+                    entryAwsTraceHeader, Message.computeMessageSystemAttributesMd5(entryAwsTraceHeader,
+                            entryTraceHeader.path("DataType").asText(null))));
         }
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
@@ -428,6 +435,9 @@ public class SqsJsonHandler {
                 success.put("MD5OfMessageBody", msg.getMd5OfBody());
                 if (msg.getMd5OfMessageAttributes() != null) {
                     success.put("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+                }
+                if (parsed.md5OfSystemAttributes() != null) {
+                    success.put("MD5OfMessageSystemAttributes", parsed.md5OfSystemAttributes());
                 }
                 if (msg.getSequenceNumber() > 0) {
                     success.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
