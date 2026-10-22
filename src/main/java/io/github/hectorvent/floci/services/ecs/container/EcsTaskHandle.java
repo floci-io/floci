@@ -34,6 +34,11 @@ public class EcsTaskHandle {
     /** Per-container {@code stopTimeout}, so teardown waits as long as the task definition asked. */
     private final Map<String, Integer> stopTimeouts;
     /**
+     * The containers whose exit stops the task, captured at launch so a task definition
+     * deregistered later cannot change the answer.
+     */
+    private final Set<String> essentialContainers;
+    /**
      * When each container finished, read during teardown. Docker forgets a container once it is
      * removed, so the time has to be kept here for the caller that stamps the task's containers.
      */
@@ -63,10 +68,20 @@ public class EcsTaskHandle {
                 networkInterfaceId, region, stopTimeouts, Set.of());
     }
 
+    /** Every container counts as essential, which is what ECS assumes when a definition omits the flag. */
     public EcsTaskHandle(String taskArn, Map<String, String> containerIds,
                          Map<String, Closeable> logStreamsByContainerId,
                          String firelensVolumeName, String networkInterfaceId, String region,
                          Map<String, Integer> stopTimeouts, Set<String> taskVolumeNames) {
+        this(taskArn, containerIds, logStreamsByContainerId, firelensVolumeName,
+                networkInterfaceId, region, stopTimeouts, taskVolumeNames, containerIds.keySet());
+    }
+
+    public EcsTaskHandle(String taskArn, Map<String, String> containerIds,
+                         Map<String, Closeable> logStreamsByContainerId,
+                         String firelensVolumeName, String networkInterfaceId, String region,
+                         Map<String, Integer> stopTimeouts, Set<String> taskVolumeNames,
+                         Set<String> essentialContainers) {
         this.taskArn = taskArn;
         this.containerIds = new LinkedHashMap<>(containerIds);
         this.logStreamsByContainerId = new LinkedHashMap<>(logStreamsByContainerId);
@@ -75,6 +90,7 @@ public class EcsTaskHandle {
         this.region = region;
         this.taskVolumeNames = new LinkedHashSet<>(taskVolumeNames);
         this.stopTimeouts = new LinkedHashMap<>(stopTimeouts);
+        this.essentialContainers = new LinkedHashSet<>(essentialContainers);
     }
 
     public String getTaskArn() { return taskArn; }
@@ -97,6 +113,11 @@ public class EcsTaskHandle {
     public int stopTimeoutFor(String containerName) {
         Integer configured = stopTimeouts.get(containerName);
         return configured != null ? configured : DEFAULT_STOP_TIMEOUT_SECONDS;
+    }
+
+    /** Whether the container's exit stops every other container of the task. */
+    public boolean isEssential(String containerName) {
+        return essentialContainers.contains(containerName);
     }
 
     /** Notes when a container finished. A null is ignored, so a failed read leaves no entry. */

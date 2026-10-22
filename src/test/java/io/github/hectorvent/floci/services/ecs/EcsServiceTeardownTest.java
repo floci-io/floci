@@ -20,6 +20,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.Closeable;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,6 +40,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -416,6 +418,98 @@ class EcsServiceTeardownTest {
     }
 
     @Test
+    void essentialContainerExitStopsTheRemainingContainersThroughTheStopPath() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        Map<String, String> containerIds = new LinkedHashMap<>();
+        containerIds.put("app", "app-id");
+        containerIds.put("sidecar", "sidecar-id");
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", containerIds, Map.of());
+        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            task.setContainers(List.of(runningContainer("app"), runningContainer("sidecar")));
+            return handle;
+        });
+        when(containerManager.getExitCodeIfStopped("app-id")).thenReturn(1);
+        when(containerManager.getExitCodeIfStopped("sidecar-id")).thenReturn(null);
+        when(containerManager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
+            handle.recordContainerRemoved("app");
+            handle.recordContainerRemoved("sidecar");
+            Map<String, Integer> codes = new LinkedHashMap<>();
+            codes.put("app", handle.getRecordedExitCode("app"));
+            codes.put("sidecar", 137);
+            return codes;
+        });
+
+        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"),
+                containerManager, config, mock(EcsLoadBalancerRegistrar.class),
+                new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        service.registerTaskDefinition("essential-exit", List.of(definition("app"), definition("sidecar")),
+                null, null, null, null, null, List.of(), REGION);
+        String taskArn = service.runTask(null, "essential-exit", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION).getFirst().getTaskArn();
+
+        service.reconcile();
+
+        EcsTask task = service.describeTasks(null, List.of(taskArn), REGION).getFirst();
+        assertEquals("STOPPED", task.getLastStatus());
+        assertEquals("EssentialContainerExited", task.getStopCode());
+        assertEquals("Essential container in task exited", task.getStoppedReason());
+        assertEquals(1, task.getContainers().get(0).getExitCode());
+        assertEquals(137, task.getContainers().get(1).getExitCode());
+        verify(containerManager).stopTaskAndCollectExitCodes(handle);
+        verify(containerManager, never()).cleanupStoppedTask(handle);
+        service.stopManagedContainers();
+    }
+
+    @Test
+    void nonEssentialContainerExitIsReportedWhileTheTaskKeepsRunning() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        Map<String, String> containerIds = new LinkedHashMap<>();
+        containerIds.put("app", "app-id");
+        containerIds.put("sidecar", "sidecar-id");
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", containerIds, Map.of(), null, null, REGION,
+                Map.of(), Set.of(), Set.of("app"));
+        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            task.setContainers(List.of(runningContainer("app"), runningContainer("sidecar")));
+            return handle;
+        });
+        when(containerManager.getExitCodeIfStopped("app-id")).thenReturn(null);
+        when(containerManager.getExitCodeIfStopped("sidecar-id")).thenReturn(3);
+
+        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"),
+                containerManager, config, mock(EcsLoadBalancerRegistrar.class),
+                new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        ContainerDefinition sidecar = definition("sidecar");
+        sidecar.setEssential(false);
+        service.registerTaskDefinition("non-essential-exit", List.of(definition("app"), sidecar),
+                null, null, null, null, null, List.of(), REGION);
+        String taskArn = service.runTask(null, "non-essential-exit", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION).getFirst().getTaskArn();
+
+        service.reconcile();
+
+        EcsTask task = service.describeTasks(null, List.of(taskArn), REGION).getFirst();
+        assertEquals("RUNNING", task.getLastStatus());
+        assertNull(task.getStopCode());
+        assertEquals("RUNNING", task.getContainers().get(0).getLastStatus());
+        assertNull(task.getContainers().get(0).getExitCode());
+        assertEquals("STOPPED", task.getContainers().get(1).getLastStatus());
+        assertEquals(3, task.getContainers().get(1).getExitCode());
+        verify(containerManager, never()).stopTaskAndCollectExitCodes(any());
+        verify(containerManager, never()).cleanupStoppedTask(any());
+        service.stopManagedContainers();
+    }
+
+    @Test
     void concurrentStopsTeardownTheTaskOnlyOnce() throws Exception {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false);
@@ -591,6 +685,20 @@ class EcsServiceTeardownTest {
 
         service.reconcile();
         verify(containerManager, times(2)).stopTaskAndCollectExitCodes(handle);
+    }
+
+    private static ContainerDefinition definition(String name) {
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName(name);
+        definition.setImage(name + ":latest");
+        return definition;
+    }
+
+    private static Container runningContainer(String name) {
+        Container container = new Container();
+        container.setName(name);
+        container.setLastStatus("RUNNING");
+        return container;
     }
 
     private static final class SingleUseStorageFactory extends StorageFactory {

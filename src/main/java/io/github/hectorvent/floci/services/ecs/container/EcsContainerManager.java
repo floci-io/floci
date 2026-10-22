@@ -343,9 +343,13 @@ public class EcsContainerManager {
         }
 
         Map<String, Integer> stopTimeouts = new LinkedHashMap<>();
+        Set<String> essentialContainers = new LinkedHashSet<>();
         for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
             if (def.getStopTimeout() != null) {
                 stopTimeouts.put(def.getName(), def.getStopTimeout());
+            }
+            if (def.isEssential()) {
+                essentialContainers.add(def.getName());
             }
         }
 
@@ -595,7 +599,7 @@ public class EcsContainerManager {
             EcsTaskHandle partial = new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
                     firelensVolumeName,
                     protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region,
-                    stopTimeouts, taskVolumeNames);
+                    stopTimeouts, taskVolumeNames, essentialContainers);
             cleanupStoppedTask(partial);
             if (protectedNetwork != null) {
                 releaseTaskNetwork(task, region);
@@ -637,7 +641,7 @@ public class EcsContainerManager {
         return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
                 firelensVolumeName,
                 protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region,
-                stopTimeouts, taskVolumeNames);
+                stopTimeouts, taskVolumeNames, essentialContainers);
     }
 
     private String taskVolumeName(EcsTask task, Volume volume) {

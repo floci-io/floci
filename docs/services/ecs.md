@@ -129,6 +129,13 @@ on teardown; a container that does not ask for one gets 5 seconds rather than AW
 `StopTask` here answers synchronously and most containers ignore SIGTERM as PID 1. A container
 still running when its grace period is up is killed, so its exit code is always reported.
 
+When a container marked `essential` (the default) exits, the task stops with stop code
+`EssentialContainerExited` and the reason `Essential container in task exited`, even while its
+other containers are still running: they are stopped the way `StopTask` stops them, each given its
+`stopTimeout`, and the exited container keeps its own exit code. A container marked
+`"essential": false` that exits is reported `STOPPED` with its exit code while the task keeps
+running. Which containers are essential is taken from the task definition when the task starts.
+
 A container's `linuxParameters` reach Docker as ECS documents them. `initProcessEnabled` runs an
 init process as PID 1 (`docker run --init`) that forwards signals and reaps orphaned processes;
 `capabilities` are added and dropped (`--cap-add`, `--cap-drop`); each of `devices` is exposed

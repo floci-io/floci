@@ -174,6 +174,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public static final String HEALTH_STATUS_UNHEALTHY = "UNHEALTHY";
     public static final String STOP_CODE_TASK_FAILED_TO_START = "TaskFailedToStart";
     public static final String STOP_CODE_ESSENTIAL_CONTAINER_EXITED = "EssentialContainerExited";
+    private static final String ESSENTIAL_CONTAINER_EXITED_REASON = "Essential container in task exited";
     public static final String STOP_CODE_USER_INITIATED = "UserInitiated";
     public static final String STOP_CODE_SERVICE_SCHEDULER_INITIATED = "ServiceSchedulerInitiated";
     public static final String PROPAGATE_TAGS_SERVICE = "SERVICE";
@@ -4911,20 +4912,36 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
         updateHealth(task, handle);
 
-        // Inspect every container; abort if any are still running. A container that exited on its
-        // own has a finish time of its own, read here while the daemon still remembers it.
+        // Inspect every container. A container that exited on its own has a finish time of its
+        // own, read here while the daemon still remembers it.
         Map<String, Integer> exitCodes = new LinkedHashMap<>();
         Map<String, Instant> finishedAt = new LinkedHashMap<>();
+        boolean anyRunning = false;
+        boolean essentialExited = false;
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
             Integer code = containerManager.getExitCodeIfStopped(entry.getValue());
             if (code == null) {
-                return;
+                anyRunning = true;
+                continue;
             }
             exitCodes.put(entry.getKey(), code);
+            essentialExited |= handle.isEssential(entry.getKey());
             Instant finished = containerManager.getFinishedAtIfStopped(entry.getValue());
             if (finished != null) {
                 finishedAt.put(entry.getKey(), finished);
             }
+        }
+
+        if (anyRunning) {
+            exitCodes.forEach(handle::recordExitCode);
+            finishedAt.forEach(handle::recordFinishedAt);
+            markContainersExited(task, exitCodes, finishedAt);
+            // The others are stopped the way StopTask stops them, each given its stopTimeout.
+            if (essentialExited) {
+                stopTaskLocked(task, ESSENTIAL_CONTAINER_EXITED_REASON, STOP_CODE_ESSENTIAL_CONTAINER_EXITED,
+                        taskRegion(task));
+            }
+            return;
         }
 
         // All containers have exited. Atomically claim the handle to avoid
@@ -4957,7 +4974,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         task.setStoppingAt(Instant.now());
         task.setStoppedAt(Instant.now());
         task.setExecutionStoppedAt(Instant.now());
-        task.setStoppedReason("Essential container in task exited");
+        task.setStoppedReason(ESSENTIAL_CONTAINER_EXITED_REASON);
         task.setStopCode(STOP_CODE_ESSENTIAL_CONTAINER_EXITED);
         task.bumpVersion();
 
@@ -4971,6 +4988,30 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         containerManager.releaseTaskNetwork(task, region);
         if (eventPublisher != null) {
             eventPublisher.emitTaskLadder(task, TaskStatus.RUNNING, TaskStatus.STOPPED, region);
+        }
+    }
+
+    /** Reports the containers that exited while their task keeps running as STOPPED, with their exit codes. */
+    private void markContainersExited(EcsTask task, Map<String, Integer> exitCodes, Map<String, Instant> finishedAt) {
+        if (task.getContainers() == null) {
+            return;
+        }
+        boolean changed = false;
+        for (Container container : task.getContainers()) {
+            Integer code = exitCodes.get(container.getName());
+            if (code == null || "STOPPED".equals(container.getLastStatus())) {
+                continue;
+            }
+            container.setLastStatus("STOPPED");
+            container.setExitCode(code);
+            Instant finished = finishedAt.get(container.getName());
+            if (finished != null) {
+                container.setFinishedAt(finished);
+            }
+            changed = true;
+        }
+        if (changed) {
+            task.bumpVersion();
         }
     }
 

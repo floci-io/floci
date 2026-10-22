@@ -13,9 +13,14 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
@@ -35,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -216,6 +222,44 @@ class EcsContainerManagerLifecycleTest {
         assertTrue(handle.hasOpenLogStreams());
         assertSame(retainedLogStream, handle.getLogStreamsByContainerId().get("running-id"));
         assertFalse(handle.getLogStreamsByContainerId().containsKey("stopped-id"));
+    }
+
+    @Test
+    void startedTaskHandleKnowsWhichContainersAreEssential() {
+        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+        when(containerBuilder.newContainer(anyString())).thenReturn(mock(ContainerBuilder.Builder.class, RETURNS_SELF));
+        when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.resolveImageForLaunch(any(), any()))
+                .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
+        when(lifecycleManager.createAndStart(any()))
+                .thenReturn(new ContainerInfo("app-id", Map.of()), new ContainerInfo("sidecar-id", Map.of()));
+        LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
+        when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
+        EcrRegistryManager ecrRegistryManager = mock(EcrRegistryManager.class);
+        when(ecrRegistryManager.rewriteImageUri(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
+        EcsContainerManager manager = new EcsContainerManager(containerBuilder, lifecycleManager,
+                mock(ContainerLogStreamer.class), mock(ContainerDetector.class),
+                mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), mock(RegionResolver.class), awsEnv,
+                mock(SsmService.class), mock(SecretsManagerService.class), mock(S3Service.class),
+                ecrRegistryManager, mock(HostVolumePolicy.class));
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+        ContainerDefinition sidecar = new ContainerDefinition();
+        sidecar.setName("sidecar");
+        sidecar.setImage("sidecar:latest");
+        sidecar.setEssential(false);
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("essential-family");
+        taskDef.setContainerDefinitions(List.of(app, sidecar));
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+
+        EcsTaskHandle handle = manager.startTask(task, taskDef, null, "us-east-1");
+
+        assertTrue(handle.isEssential("app"));
+        assertFalse(handle.isEssential("sidecar"));
     }
 
     @Test
