@@ -743,11 +743,6 @@ public class StsQueryHandler {
     }
 
     /**
-     * Validates the optional {@code DurationSeconds} parameter against {@code minSeconds}/{@code maxSeconds}.
-     * Returns {@code null} when the parameter is absent or valid; otherwise a {@code ValidationError} (out of
-     * range) or {@code InvalidParameterValue} (not an integer) response, matching AWS's own wire behavior.
-     */
-    /**
      * AWS refuses a session longer than the role's {@code MaxSessionDuration}, and longer than an
      * hour when the caller signs with credentials of another role session (role chaining).
      * Called after {@link #validateDurationSeconds}, so the value parses.
@@ -775,6 +770,11 @@ public class StsQueryHandler {
         return null;
     }
 
+    /**
+     * Validates the optional {@code DurationSeconds} parameter against {@code minSeconds}/{@code maxSeconds}.
+     * Returns {@code null} when the parameter is absent or valid; otherwise a {@code ValidationError} (out of
+     * range) or {@code InvalidParameterValue} (not an integer) response, matching AWS's own wire behavior.
+     */
     private Response validateDurationSeconds(MultivaluedMap<String, String> params, int minSeconds, int maxSeconds) {
         String value = params.getFirst("DurationSeconds");
         if (value == null) {

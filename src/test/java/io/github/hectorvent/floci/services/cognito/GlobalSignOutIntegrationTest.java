@@ -38,6 +38,7 @@ class GlobalSignOutIntegrationTest {
 
     private static final String USERNAME = "bob";
     private static final String PASSWORD  = "Password123!";
+    private static final int SAME_SECOND_ATTEMPTS = 5;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -272,15 +273,25 @@ class GlobalSignOutIntegrationTest {
                 {"UserPoolId":"%s","Username":"%s","Password":"%s","Permanent":true}
                 """.formatted(poolId, username, PASSWORD)).then().statusCode(200);
 
-        awaitStartOfSecond();
-        String before = passwordSignIn(username);
-        cognitoAction("GlobalSignOut", """
-                {"AccessToken":"%s"}
-                """.formatted(before)).then().statusCode(200);
-        String after = passwordSignIn(username);
+        // A slow run can let the three calls straddle a second, which proves nothing either way,
+        // so the sequence is repeated until both tokens share the sign-out's second.
+        String before = null;
+        String after = null;
+        for (int attempt = 0; attempt < SAME_SECOND_ATTEMPTS; attempt++) {
+            awaitStartOfSecond();
+            before = passwordSignIn(username);
+            cognitoAction("GlobalSignOut", """
+                    {"AccessToken":"%s"}
+                    """.formatted(before)).then().statusCode(200);
+            after = passwordSignIn(username);
+            if (issuedAt(before) == issuedAt(after)) {
+                break;
+            }
+        }
 
         assertEquals(issuedAt(before), issuedAt(after),
-                "both access tokens must be minted in the sign-out's second");
+                "both access tokens must be minted in the sign-out's second, in one of "
+                        + SAME_SECOND_ATTEMPTS + " attempts");
         JsonNode rejected = cognitoJsonAny("GetUser", """
                 {"AccessToken":"%s"}
                 """.formatted(before));

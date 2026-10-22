@@ -96,10 +96,13 @@ coercion/upper-bound handling are not a complete document-schema implementation.
 | `FLOCI_STORAGE_SERVICES_SSM_MODE` | *(global default)* | Storage mode override for SSM (`memory`, `persistent`, `hybrid`, `wal`) |
 | `FLOCI_STORAGE_SERVICES_SSM_FLUSH_INTERVAL_MS` | `5000` | Flush interval for `hybrid`/`wal` storage modes (milliseconds) |
 
-AWS keeps 100 versions of a parameter; Floci keeps `FLOCI_SERVICES_SSM_MAX_PARAMETER_HISTORY`. Once
+AWS keeps 100 versions of a parameter; Floci keeps 5 by default, configurable with
+`FLOCI_SERVICES_SSM_MAX_PARAMETER_HISTORY` (`floci.services.ssm.max-parameter-history`). Once
 that many exist, a `PutParameter` overwrite deletes the oldest version, except that, as on AWS, a
 labeled oldest version is never deleted: the overwrite fails with
-`ParameterMaxVersionLimitExceeded` until the label is moved to another version.
+`ParameterMaxVersionLimitExceeded` until the label is moved to another version. With the default
+of 5, a labeled version therefore blocks overwrites after 4 newer versions, far earlier than the
+100 versions it takes on AWS; raise the setting to 100 to match AWS.
 
 ## Examples
 
