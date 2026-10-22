@@ -33,10 +33,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 
 @ApplicationScoped
 public class OpenSearchService implements ResourceProvider {
@@ -115,7 +117,7 @@ public class OpenSearchService implements ResourceProvider {
         OpenSearchVersions.validate(engineVersion);
         validateOptions(options);
 
-        if (domainStore.get(domainName).isPresent()) {
+        if (findDomain(domainName, region).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
                     "Domain with name " + domainName + " already exists.", 409);
         }
@@ -160,7 +162,7 @@ public class OpenSearchService implements ResourceProvider {
             }
         }
 
-        domainStore.put(domainName, domain);
+        putDomain(domain);
         LOG.infov("Created OpenSearch domain: {0}", domainName);
         return domain;
     }
@@ -183,38 +185,37 @@ public class OpenSearchService implements ResourceProvider {
                 + AwsRegions.dnsSuffixFor(region);
     }
 
-    public Domain describeDomain(String domainName) {
-        return domainStore.get(domainName)
+    public Domain describeDomain(String domainName, String region) {
+        return findDomain(domainName, region)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Domain not found: " + domainName, 409));
     }
 
-    public List<Domain> describeDomains(List<String> domainNames) {
+    public List<Domain> describeDomains(List<String> domainNames, String region) {
         return domainNames.stream()
-                .map(name -> domainStore.get(name)
-                        .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                                "Domain not found: " + name, 409)))
+                .map(name -> describeDomain(name, region))
                 .toList();
     }
 
-    public List<Domain> listDomainNames(String engineType) {
+    public List<Domain> listDomainNames(String engineType, String region) {
         return domainStore.scan(k -> true).stream()
                 .filter(d -> !d.isDeleted())
+                .filter(d -> region.equals(regionOf(d)))
                 .filter(d -> engineType == null || engineType.isBlank()
                         || matchesEngineType(d.getEngineVersion(), engineType))
                 .toList();
     }
 
     public Domain updateDomainConfig(String domainName, String engineVersion,
-                                      ClusterConfig clusterConfig, EbsOptions ebsOptions) {
+                                      ClusterConfig clusterConfig, EbsOptions ebsOptions, String region) {
         return updateDomainConfig(domainName, engineVersion, clusterConfig, ebsOptions, null,
-                DomainOptions.EMPTY);
+                DomainOptions.EMPTY, region);
     }
 
     public Domain updateDomainConfig(String domainName, String engineVersion,
                                       ClusterConfig clusterConfig, EbsOptions ebsOptions,
-                                      String accessPolicies, DomainOptions options) {
-        Domain domain = describeDomain(domainName);
+                                      String accessPolicies, DomainOptions options, String region) {
+        Domain domain = describeDomain(domainName, region);
         OpenSearchVersions.validate(engineVersion);
         validateOptions(options);
 
@@ -228,7 +229,7 @@ public class OpenSearchService implements ResourceProvider {
         applyEbsOptions(domain.getEbsOptions(), ebsOptions);
         applyDomainOptions(domain, options);
 
-        domainStore.put(domainName, domain);
+        putDomain(domain);
         return domain;
     }
 
@@ -267,14 +268,14 @@ public class OpenSearchService implements ResourceProvider {
         }
     }
 
-    public Domain deleteDomain(String domainName) {
-        Domain domain = describeDomain(domainName);
+    public Domain deleteDomain(String domainName, String region) {
+        Domain domain = describeDomain(domainName, region);
         domain.setDeleted(true);
         if (!config.services().opensearch().mock()) {
             domainManager.stopDomain(domain);
             domainManager.removeDomainStorage(domain);
         }
-        domainStore.delete(domainName);
+        deleteStoredDomain(domain);
         LOG.infov("Deleted OpenSearch domain: {0}", domainName);
         return domain;
     }
@@ -282,7 +283,7 @@ public class OpenSearchService implements ResourceProvider {
     public void addTags(String arn, Map<String, String> tags) {
         Domain domain = findByArn(arn);
         domain.getTags().putAll(tags);
-        domainStore.put(domain.getDomainName(), domain);
+        putDomain(domain);
     }
 
     public Map<String, String> listTags(String arn) {
@@ -292,18 +293,18 @@ public class OpenSearchService implements ResourceProvider {
     public void removeTags(String arn, List<String> tagKeys) {
         Domain domain = findByArn(arn);
         tagKeys.forEach(domain.getTags()::remove);
-        domainStore.put(domain.getDomainName(), domain);
+        putDomain(domain);
     }
 
-    public Domain upgradeDomain(String domainName, String targetVersion) {
-        Domain domain = describeDomain(domainName);
+    public Domain upgradeDomain(String domainName, String targetVersion, String region) {
+        Domain domain = describeDomain(domainName, region);
         if (targetVersion == null || targetVersion.isBlank()) {
             throw new AwsException("ValidationException",
                     "TargetVersion is required for UpgradeDomain.", 400);
         }
         OpenSearchVersions.validateUpgrade(domain.getEngineVersion(), targetVersion);
         domain.setEngineVersion(targetVersion);
-        domainStore.put(domainName, domain);
+        putDomain(domain);
         return domain;
     }
 
@@ -415,19 +416,67 @@ public class OpenSearchService implements ResourceProvider {
         return domainStore.scan(k -> true);
     }
 
-    private void putDomain(Domain domain) {
-        if (domain.getAccountId() != null && domainStore instanceof AccountAwareStorageBackend<Domain> aware) {
-            aware.putForAccount(domain.getAccountId(), domain.getDomainName(), domain);
-        } else {
-            domainStore.put(domain.getDomainName(), domain);
+    /**
+     * Domains are stored under {@code region::name}, since a domain name is unique only within an
+     * account and Region. Records written before the key carried the Region sit under the bare name;
+     * a lookup moves such a record to its regional key when its ARN names this account and Region.
+     */
+    private Optional<Domain> findDomain(String domainName, String region) {
+        String key = domainKey(region, domainName);
+        if (domainStore instanceof AccountAwareStorageBackend<Domain> aware) {
+            String accountId = aware.accountId();
+            return aware.getForAccountMigratingLegacyKeys(accountId, key, List.of(domainName),
+                    ownedBy(accountId, region, domainName));
         }
+        return domainStore.get(key);
+    }
+
+    /** Also drops the legacy name-only key when it still holds this domain, so a scan never sees it twice. */
+    private void putDomain(Domain domain) {
+        String region = regionOf(domain);
+        String key = domainKey(region, domain.getDomainName());
+        if (domainStore instanceof AccountAwareStorageBackend<Domain> aware) {
+            String accountId = accountOf(domain);
+            aware.getForAccountMigratingLegacyKeys(accountId, key, List.of(domain.getDomainName()),
+                    ownedBy(accountId, region, domain.getDomainName()));
+            aware.putForAccount(accountId, key, domain);
+        } else {
+            domainStore.put(key, domain);
+        }
+    }
+
+    private void deleteStoredDomain(Domain domain) {
+        String key = domainKey(regionOf(domain), domain.getDomainName());
+        if (domainStore instanceof AccountAwareStorageBackend<Domain> aware) {
+            aware.deleteForAccount(accountOf(domain), key);
+        } else {
+            domainStore.delete(key);
+        }
+    }
+
+    private static String domainKey(String region, String domainName) {
+        return region + "::" + domainName;
+    }
+
+    private Predicate<Domain> ownedBy(String accountId, String region, String domainName) {
+        return domain -> domainName.equals(domain.getDomainName())
+                && accountId.equals(accountOf(domain))
+                && region.equals(regionOf(domain));
+    }
+
+    private String regionOf(Domain domain) {
+        return AwsArnUtils.regionOrDefault(domain.getArn(), regionResolver.getDefaultRegion());
+    }
+
+    private String accountOf(Domain domain) {
+        return AwsArnUtils.accountOrDefault(domain.getArn(), regionResolver.getDefaultAccountId());
     }
 
     @Override
     public List<ExplorerResource> getResources() {
         List<ExplorerResource> resources = new ArrayList<>();
-        for (Domain domain : listDomainNames(null)) {
-            if (domain.getArn() == null) {
+        for (Domain domain : domainStore.scan(k -> true)) {
+            if (domain.isDeleted() || domain.getArn() == null) {
                 continue;
             }
             AwsArnUtils.Arn parsed = AwsArnUtils.parse(domain.getArn());

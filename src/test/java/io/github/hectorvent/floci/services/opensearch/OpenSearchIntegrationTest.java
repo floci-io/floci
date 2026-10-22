@@ -15,6 +15,9 @@ class OpenSearchIntegrationTest {
 
     private static final String DOMAIN_NAME = "test-domain";
     private static final String AUTH_HEADER = "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/es/aws4_request";
+    private static final String WEST_AUTH_HEADER = "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/es/aws4_request";
+    private static final String SHARED_NAME = "region-dup";
+    private static final String EAST_ONLY = "east-only";
 
     // ── Domain CRUD ──────────────────────────────────────────────────────────
 
@@ -476,5 +479,201 @@ class OpenSearchIntegrationTest {
             .delete("/2021-01-01/opensearch/domain/" + DOMAIN_NAME)
         .then()
             .statusCode(409);
+    }
+
+    // ── Region scoping ────────────────────────────────────────────────────────
+
+    @Test
+    @Order(40)
+    void sameDomainNameCanBeCreatedInTwoRegions() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"DomainName\":\"" + SHARED_NAME + "\",\"EngineVersion\":\"OpenSearch_2.11\"}")
+        .when()
+            .post("/2021-01-01/opensearch/domain")
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.ARN", containsString(":us-east-1:"));
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", WEST_AUTH_HEADER)
+            .body("{\"DomainName\":\"" + SHARED_NAME + "\",\"EngineVersion\":\"OpenSearch_2.11\"}")
+        .when()
+            .post("/2021-01-01/opensearch/domain")
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.ARN", containsString(":us-west-2:"));
+    }
+
+    @Test
+    @Order(41)
+    void domainInAnotherRegionIsNotFound() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"DomainName\":\"" + EAST_ONLY + "\",\"EngineVersion\":\"OpenSearch_2.11\"}")
+        .when()
+            .post("/2021-01-01/opensearch/domain")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", WEST_AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/opensearch/domain/" + EAST_ONLY)
+        .then()
+            .statusCode(409)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", WEST_AUTH_HEADER)
+            .body("{\"DomainNames\":[\"" + EAST_ONLY + "\"]}")
+        .when()
+            .post("/2021-01-01/opensearch/domain-info")
+        .then()
+            .statusCode(409)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        given()
+            .header("Authorization", WEST_AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/opensearch/domain/" + EAST_ONLY + "/config")
+        .then()
+            .statusCode(409)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", WEST_AUTH_HEADER)
+            .body("{\"ClusterConfig\":{\"InstanceCount\":4}}")
+        .when()
+            .post("/2021-01-01/opensearch/domain/" + EAST_ONLY + "/config")
+        .then()
+            .statusCode(409)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", WEST_AUTH_HEADER)
+            .body("{\"DomainName\":\"" + EAST_ONLY + "\",\"TargetVersion\":\"OpenSearch_2.13\"}")
+        .when()
+            .post("/2021-01-01/opensearch/upgradeDomain")
+        .then()
+            .statusCode(409)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        given()
+            .header("Authorization", WEST_AUTH_HEADER)
+            .queryParam("domainName", EAST_ONLY)
+        .when()
+            .get("/2021-01-01/opensearch/compatibleVersions")
+        .then()
+            .statusCode(409)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        given()
+            .header("Authorization", WEST_AUTH_HEADER)
+        .when()
+            .delete("/2021-01-01/opensearch/domain/" + EAST_ONLY)
+        .then()
+            .statusCode(409)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/opensearch/domain/" + EAST_ONLY)
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.EngineVersion", equalTo("OpenSearch_2.11"))
+            .body("DomainStatus.ClusterConfig.InstanceCount", equalTo(1));
+    }
+
+    @Test
+    @Order(42)
+    void listDomainNamesIsScopedToTheRequestRegion() {
+        given()
+            .header("Authorization", WEST_AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/domain")
+        .then()
+            .statusCode(200)
+            .body("DomainNames.DomainName", hasItem(SHARED_NAME))
+            .body("DomainNames.DomainName", not(hasItem(EAST_ONLY)));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/domain")
+        .then()
+            .statusCode(200)
+            .body("DomainNames.DomainName", hasItems(SHARED_NAME, EAST_ONLY));
+    }
+
+    @Test
+    @Order(43)
+    void domainsSharingANameInTwoRegionsChangeIndependently() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", WEST_AUTH_HEADER)
+            .body("{\"ClusterConfig\":{\"InstanceCount\":5}}")
+        .when()
+            .post("/2021-01-01/opensearch/domain/" + SHARED_NAME + "/config")
+        .then()
+            .statusCode(200)
+            .body("DomainConfig.ClusterConfig.Options.InstanceCount", equalTo(5));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/opensearch/domain/" + SHARED_NAME)
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.ARN", containsString(":us-east-1:"))
+            .body("DomainStatus.ClusterConfig.InstanceCount", equalTo(1));
+
+        given()
+            .header("Authorization", WEST_AUTH_HEADER)
+        .when()
+            .delete("/2021-01-01/opensearch/domain/" + SHARED_NAME)
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.ARN", containsString(":us-west-2:"));
+
+        given()
+            .header("Authorization", WEST_AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/opensearch/domain/" + SHARED_NAME)
+        .then()
+            .statusCode(409);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/opensearch/domain/" + SHARED_NAME)
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.ARN", containsString(":us-east-1:"));
+    }
+
+    @Test
+    @Order(44)
+    void deleteRegionScopedDomains() {
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .delete("/2021-01-01/opensearch/domain/" + SHARED_NAME)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .delete("/2021-01-01/opensearch/domain/" + EAST_ONLY)
+        .then()
+            .statusCode(200);
     }
 }

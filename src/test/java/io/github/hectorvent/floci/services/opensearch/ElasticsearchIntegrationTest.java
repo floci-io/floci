@@ -16,6 +16,7 @@ class ElasticsearchIntegrationTest {
 
     private static final String DOMAIN_NAME = "legacy-es-domain";
     private static final String AUTH_HEADER = "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/es/aws4_request";
+    private static final String WEST_AUTH_HEADER = "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/es/aws4_request";
 
     private static String arn;
 
@@ -100,6 +101,49 @@ class ElasticsearchIntegrationTest {
             .body("DomainNames.DomainName", hasItem(DOMAIN_NAME))
             .body("DomainNames.find { it.DomainName == '" + DOMAIN_NAME + "' }.EngineType",
                     equalTo("Elasticsearch"));
+    }
+
+    @Test
+    @Order(5)
+    void domainIsNotVisibleFromAnotherRegion() {
+        given()
+            .header("Authorization", WEST_AUTH_HEADER)
+        .when()
+            .get("/2015-01-01/es/domain/" + DOMAIN_NAME)
+        .then()
+            .statusCode(409)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", WEST_AUTH_HEADER)
+            .body("{\"DomainNames\":[\"" + DOMAIN_NAME + "\"]}")
+        .when()
+            .post("/2015-01-01/es/domain-info")
+        .then()
+            .statusCode(409);
+
+        given()
+            .header("Authorization", WEST_AUTH_HEADER)
+        .when()
+            .get("/2015-01-01/es/domain/" + DOMAIN_NAME + "/config")
+        .then()
+            .statusCode(409);
+
+        given()
+            .header("Authorization", WEST_AUTH_HEADER)
+        .when()
+            .get("/2015-01-01/domain")
+        .then()
+            .statusCode(200)
+            .body("DomainNames.DomainName", not(hasItem(DOMAIN_NAME)));
+
+        given()
+            .header("Authorization", WEST_AUTH_HEADER)
+        .when()
+            .delete("/2015-01-01/es/domain/" + DOMAIN_NAME)
+        .then()
+            .statusCode(409);
     }
 
     @Test

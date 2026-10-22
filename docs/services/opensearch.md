@@ -45,7 +45,7 @@ services:
 | `DescribeDomainConfig` | `GET /2021-01-01/opensearch/domain/{name}/config` | Get domain configuration |
 | `UpdateDomainConfig` | `POST /2021-01-01/opensearch/domain/{name}/config` | Update cluster config, EBS options, engine version, access policies |
 | `DeleteDomain` | `DELETE /2021-01-01/opensearch/domain/{name}` | Delete a domain |
-| `ListDomainNames` | `GET /2021-01-01/domain` | List all domains (supports `?engineType=` filter) |
+| `ListDomainNames` | `GET /2021-01-01/domain` | List the domains in the request's Region (supports `?engineType=` filter) |
 
 ### Tags
 
@@ -124,6 +124,7 @@ services:
 ## Emulation Behaviour
 
 - **Domain name validation:** 3–28 characters, must start with a lowercase letter, only lowercase letters, digits, and hyphens.
+- **Region scope:** as on AWS, a domain name is unique within an account and Region. The same name can exist in two Regions, and every operation that names a domain (describe, describe config, update, upgrade, compatible versions, delete) or lists domains only sees the domains of the request's Region, taken from the SigV4 credential scope. Both the 2021 and the legacy 2015 API behave this way. Domains persisted by earlier Floci versions, which keyed them by name alone, stay readable: the first lookup or write from the Region in the domain's ARN moves the record to its regional key.
 - **ARN format:** `arn:aws:es:{region}:{accountId}:domain/{domainName}`
 - **Domain ID format:** `{accountId}/{domainName}`
 - **`Created` flag:** `true` immediately in mock mode; set to `true` by the readiness poller in real mode once `/_cluster/health` reports `green` or `yellow`.
