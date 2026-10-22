@@ -188,6 +188,35 @@ class CloudFormationEventsRuleTargetIntegrationTest {
         }
     }
 
+    /**
+     * The resource schema types EventPattern as ["string", "object"], so a template can build the
+     * pattern as text, for example with Fn::Sub. The rule stores the JSON the string holds.
+     */
+    @Test
+    void anEventPatternGivenAsAStringIsStoredAsTheJsonItHolds() {
+        String template = """
+                {"Parameters": {"Src": {"Type": "String", "Default": "cfn.rule.pattern.string"}},
+                 "Resources": {"Rule": {"Type": "AWS::Events::Rule", "Properties": {
+                   "Name": "cfn-rule-pattern-string",
+                   "EventPattern": {"Fn::Sub": "{\\"source\\":[\\"${Src}\\"]}"}}}}}
+                """;
+        given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", "cfn-rule-pattern-string")
+                .formParam("TemplateBody", template)
+                .when().post("/").then().statusCode(200);
+        try {
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal("cfn-rule-pattern-string").status());
+            given().contentType(EB_CT)
+                    .header("X-Amz-Target", "AWSEvents.DescribeRule")
+                    .body("{\"Name\":\"cfn-rule-pattern-string\"}")
+                    .when().post("/").then().statusCode(200)
+                    .body("EventPattern", equalTo("{\"source\":[\"cfn.rule.pattern.string\"]}"));
+        } finally {
+            deleteStack("cfn-rule-pattern-string");
+        }
+    }
+
     /** An Fn::If that chooses the whole Targets list is resolved before the targets are read. */
     @Test
     void targetsAnFnIfChoosesAreProvisioned() {

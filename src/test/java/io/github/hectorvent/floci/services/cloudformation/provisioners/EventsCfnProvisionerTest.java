@@ -58,6 +58,7 @@ class EventsCfnProvisionerTest {
             return node == null ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolveJsonAttribute(any())).thenCallRealMethod();
         when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.omitNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.resolveStringList(any())).thenAnswer(inv -> {
@@ -123,6 +124,34 @@ class EventsCfnProvisionerTest {
         assertEquals("orders", r.getPhysicalId());
         assertEquals(RULE_ARN, r.getAttributes().get("Arn"));
         assertEquals("orders", r.getAttributes().get("RuleName"));
+    }
+
+    // ── the event pattern reaches PutRule as JSON ────────────────────────────
+
+    /** The resource schema types EventPattern as an object or as a string holding the JSON. */
+    @Test
+    void anEventPatternGivenAsAStringReachesPutRuleAsTheJsonItHolds() {
+        stubPutRule();
+        ObjectNode props = mapper.createObjectNode()
+                .put("Name", "orders")
+                .put("EventPattern", "{\"source\":[\"my.app\"]}");
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"), props, ctx(null));
+
+        verify(events).putRule(eq("orders"), any(), eq("{\"source\":[\"my.app\"]}"), any(), any(), any(), any(),
+                any(), anyString());
+    }
+
+    @Test
+    void anEventPatternGivenAsAnObjectReachesPutRuleAsJson() {
+        stubPutRule();
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders");
+        props.putObject("EventPattern").putArray("source").add("my.app");
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"), props, ctx(null));
+
+        verify(events).putRule(eq("orders"), any(), eq("{\"source\":[\"my.app\"]}"), any(), any(), any(), any(),
+                any(), anyString());
     }
 
     // ── targets are driven to the template's desired state ───────────────────

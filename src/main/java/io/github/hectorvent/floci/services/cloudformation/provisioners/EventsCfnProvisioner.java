@@ -138,10 +138,12 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         String roleArn = ctx.resolveOptional(props, "RoleArn");
         String scheduleExpression = ctx.resolveOptional(props, "ScheduleExpression");
 
-        String eventPattern = null;
-        if (props != null && props.has("EventPattern") && !props.get("EventPattern").isNull()) {
-            JsonNode patternNode = ctx.engine().resolveNode(props.get("EventPattern"));
-            eventPattern = patternNode.toString();
+        // The schema types EventPattern as an object or a string holding the JSON; a blank can only
+        // be AWS::NoValue, which the engine resolves to an empty string.
+        String eventPattern = props == null ? null
+                : ctx.engine().resolveJsonAttribute(props.path("EventPattern"));
+        if (eventPattern != null && eventPattern.isBlank()) {
+            eventPattern = null;
         }
 
         String stateStr = ctx.resolveOptional(props, "State");
