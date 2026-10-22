@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -493,6 +494,65 @@ class KinesisServiceTest {
         Map<String, Object> openPage = kinesisService.getRecords(openChild, 10, REGION);
         assertNotNull(openPage.get("NextShardIterator"), "an open shard at its tip keeps returning an iterator");
         assertTrue(((List<KinesisShard>) openPage.getOrDefault("ChildShards", List.of())).isEmpty());
+    }
+
+    /**
+     * Runs {@code afterSnapshot} once, right after its records are snapshotted: the window in which a
+     * GetRecords reader, which holds no stream lock, can be overtaken by a producer and a split.
+     */
+    private static final class InterleavingShard extends KinesisShard {
+        private Runnable afterSnapshot;
+
+        InterleavingShard(KinesisShard original) {
+            super(original.getShardId(), original.getHashKeyRange().startingHashKey(),
+                    original.getHashKeyRange().endingHashKey(),
+                    original.getSequenceNumberRange().startingSequenceNumber());
+        }
+
+        @Override
+        public RecordsSnapshot snapshotRecords() {
+            RecordsSnapshot snapshot = super.snapshotRecords();
+            Runnable action = afterSnapshot;
+            afterSnapshot = null;
+            if (action != null) {
+                action.run();
+            }
+            return snapshot;
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @SuppressWarnings("unchecked")
+    void getRecordsDoesNotEndAShardThatGainedARecordWhileItWasBeingRead(boolean forAccount) {
+        kinesisService.createStream("my-stream", 1, REGION);
+        KinesisStream stream = kinesisService.describeStream("my-stream", REGION);
+        InterleavingShard shard = new InterleavingShard(stream.getShards().getFirst());
+        stream.getShards().set(0, shard);
+        String first = kinesisService.putRecord("my-stream", "first".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        String iterator = kinesisService.getShardIterator("my-stream", "shardId-000000000000",
+                "AFTER_SEQUENCE_NUMBER", first, REGION);
+
+        // The reader snapshots only "first"; a producer then appends "second" and a split closes the shard.
+        shard.afterSnapshot = () -> {
+            kinesisService.putRecord("my-stream", "second".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+            kinesisService.splitShard("my-stream", "shardId-000000000000",
+                    "170141183460469231731687303715884105728", REGION);
+        };
+
+        List<String> read = new ArrayList<>();
+        for (int call = 0; call < 5 && iterator != null; call++) {
+            Map<String, Object> page = forAccount
+                    ? kinesisService.getRecordsForAccount("000000000000", iterator, 10, REGION)
+                    : kinesisService.getRecords(iterator, 10, REGION);
+            for (KinesisRecord record : (List<KinesisRecord>) page.get("Records")) {
+                read.add(new String(record.getData(), StandardCharsets.UTF_8));
+            }
+            iterator = (String) page.get("NextShardIterator");
+        }
+
+        assertEquals(List.of("second"), read, "a record appended before the shard closed must still be read");
+        assertNull(iterator, "the shard ends once its final record has been read");
     }
 
     @Test

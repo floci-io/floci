@@ -20,7 +20,7 @@ public class KinesisShard {
     private final Object recordsMonitor = new Object();
     private List<KinesisRecord> records = new ArrayList<>();
     private long prunedRecordCount;
-    private boolean closed = false;
+    private volatile boolean closed = false;
     private Instant creationTimestamp = Instant.now();
 
     public KinesisShard() {}

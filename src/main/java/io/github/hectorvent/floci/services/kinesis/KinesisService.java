@@ -944,6 +944,9 @@ public class KinesisService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
         pruneExpiredRecords(stream, shard);
 
+        // Read before the snapshot: a shard is closed only after its final append, under the same
+        // lock, so a shard already closed here cannot gain a record the snapshot misses.
+        boolean closed = shard.isClosed();
         KinesisShard.RecordsSnapshot snapshot = shard.snapshotRecords();
         List<KinesisRecord> allRecords = snapshot.records();
         int startIndex = 0;
@@ -990,24 +993,26 @@ public class KinesisService implements ResourceProvider {
             }
         }
 
-        return recordsPage(stream, shard, streamName, allRecords, startIndex, limit);
+        return recordsPage(stream, shard, closed, streamName, allRecords, startIndex, limit);
     }
 
     /**
      * One GetRecords page from {@code startIndex}. A closed shard read from past its last record has no
      * more data, so the page carries no NextShardIterator and lists the shard's ChildShards instead. The
      * page that returns the final records still continues: pollers that keep their previous iterator on a
-     * null one would otherwise read those records again.
+     * null one would otherwise read those records again. {@code closed} must be the shard's state read
+     * before {@code allRecords} was snapshotted.
      *
      * <p>Every other page also carries the sequence number SubscribeToShard reports as its
      * ContinuationSequenceNumber: the last record returned, or when none was, the last record before
      * the position read from (the shard's starting sequence number if there is none). Resuming
      * AFTER_SEQUENCE_NUMBER it continues exactly where this page stopped.
      */
-    private Map<String, Object> recordsPage(KinesisStream stream, KinesisShard shard, String streamName,
-                                            List<KinesisRecord> allRecords, int startIndex, Integer limit) {
+    private Map<String, Object> recordsPage(KinesisStream stream, KinesisShard shard, boolean closed,
+                                            String streamName, List<KinesisRecord> allRecords, int startIndex,
+                                            Integer limit) {
         Map<String, Object> response = new HashMap<>();
-        if (shard.isClosed() && startIndex >= allRecords.size()) {
+        if (closed && startIndex >= allRecords.size()) {
             response.put("Records", List.of());
             response.put("NextShardIterator", null);
             response.put("MillisBehindLatest", 0L);
@@ -1233,6 +1238,8 @@ public class KinesisService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
         pruneExpiredRecords(stream, shard);
 
+        // Read before the snapshot, as in getRecords.
+        boolean closed = shard.isClosed();
         KinesisShard.RecordsSnapshot snapshot = shard.snapshotRecords();
         List<KinesisRecord> allRecords = snapshot.records();
         int startIndex = 0;
@@ -1263,7 +1270,7 @@ public class KinesisService implements ResourceProvider {
             }
         }
 
-        return recordsPage(stream, shard, streamName, allRecords, startIndex, limit);
+        return recordsPage(stream, shard, closed, streamName, allRecords, startIndex, limit);
     }
 
     private KinesisShard selectShard(KinesisStream stream, String partitionKey, String explicitHashKey) {
