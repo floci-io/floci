@@ -4662,6 +4662,19 @@ public class S3Service implements Resettable, ResourceProvider {
     public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
                                             Map<Integer, String> partETags, Map<Integer, S3Checksum> partChecksums,
                                             String checksumType, S3Checksum expectedChecksum, Long expectedObjectSize) {
+        return completeMultipartUpload(bucket, key, uploadId, partNumbers, partETags, partChecksums,
+                checksumType, expectedChecksum, expectedObjectSize, null, null);
+    }
+
+    /**
+     * Completes an upload whose {@code If-Match} / {@code If-None-Match} conditions are checked under the
+     * bucket lock as the object is stored, as for PutObject, so of two conditional writes the first to
+     * finish wins and the other fails with 412, leaving its upload in place for a retry or an abort.
+     */
+    public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers,
+                                            Map<Integer, String> partETags, Map<Integer, S3Checksum> partChecksums,
+                                            String checksumType, S3Checksum expectedChecksum, Long expectedObjectSize,
+                                            String ifMatch, String ifNoneMatch) {
         S3Object completed = withMultipartOperationLock(bucket, uploadId, () -> {
             MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
 
@@ -4755,7 +4768,9 @@ public class S3Service implements Resettable, ResourceProvider {
                                     .withObjectLockMode(upload.getObjectLockMode())
                                     .withRetainUntilDate(upload.getRetainUntilDate())
                                     .withLegalHoldStatus(upload.getLegalHoldStatus())
-                                    .withTagging(upload.getTagging()),
+                                    .withTagging(upload.getTagging())
+                                    .withIfMatch(ifMatch)
+                                    .withIfNoneMatch(ifNoneMatch),
                             compositeETag,
                             upload.getInitiatorAccountId() != null ? upload.getInitiatorAccountId() : ownerId());
                 } finally {

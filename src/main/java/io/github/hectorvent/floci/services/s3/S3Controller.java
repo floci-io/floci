@@ -1702,7 +1702,7 @@ public class S3Controller {
                 S3Checksum expectedChecksum = extractChecksum(httpHeaders);
                 S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
                         completedPartETags(completedParts), completedPartChecksums(completedParts), checksumType,
-                        expectedChecksum, multipartObjectSize(httpHeaders, uriInfo));
+                        expectedChecksum, multipartObjectSize(httpHeaders, uriInfo), ifMatch, ifNoneMatch);
                 String baseUrl = uriInfo.getBaseUri().toString();
                 if (baseUrl.endsWith("/")) {
                     baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
