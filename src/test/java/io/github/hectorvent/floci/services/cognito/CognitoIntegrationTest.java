@@ -2398,6 +2398,124 @@ class CognitoIntegrationTest {
         assertEquals("CONFIRMED", userRespConfirmed.path("UserStatus").asText());
     }
 
+    @Test
+    @Order(114)
+    void caseInsensitivePoolResolvesAndReservesUsernamesInAnyCase() throws Exception {
+        String insensitivePoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "CaseInsensitivePool", "UsernameConfiguration": { "CaseSensitive": false } }
+                """).path("UserPool").path("Id").asText();
+        String insensitiveClientId = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "case-insensitive-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+                }
+                """.formatted(insensitivePoolId)).path("UserPoolClient").path("ClientId").asText();
+        createUserWithPassword(insensitivePoolId, "Alice");
+
+        JsonNode found = cognitoJson("AdminGetUser", """
+                { "UserPoolId": "%s", "Username": "alice" }
+                """.formatted(insensitivePoolId));
+        assertEquals("Alice", found.path("Username").asText(), "the stored username keeps its case");
+
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "ALICE", "PASSWORD": "%s" }
+                }
+                """.formatted(insensitiveClientId, PASSWORD))
+                .then()
+                .statusCode(200)
+                .body("AuthenticationResult.AccessToken", notNullValue());
+
+        cognitoAction("AdminCreateUser", """
+                { "UserPoolId": "%s", "Username": "alice" }
+                """.formatted(insensitivePoolId))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("UsernameExistsException"));
+        cognitoAction("SignUp", """
+                { "ClientId": "%s", "Username": "aLiCe", "Password": "%s" }
+                """.formatted(insensitiveClientId, PASSWORD))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("UsernameExistsException"));
+    }
+
+    @Test
+    @Order(115)
+    void caseInsensitivePoolMatchesTheEmailUsernameInAnyCase() throws Exception {
+        String emailPoolId = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "CaseInsensitiveEmailPool",
+                  "UsernameAttributes": ["email"],
+                  "UsernameConfiguration": { "CaseSensitive": false }
+                }
+                """).path("UserPool").path("Id").asText();
+        String emailClientId = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "case-insensitive-email-client",
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+                }
+                """.formatted(emailPoolId)).path("UserPoolClient").path("ClientId").asText();
+        createUserWithPassword(emailPoolId, "Bob@Example.com");
+
+        cognitoJson("AdminGetUser", """
+                { "UserPoolId": "%s", "Username": "BOB@EXAMPLE.COM" }
+                """.formatted(emailPoolId));
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "bob@example.COM", "PASSWORD": "%s" }
+                }
+                """.formatted(emailClientId, PASSWORD))
+                .then()
+                .statusCode(200);
+        cognitoAction("AdminCreateUser", """
+                { "UserPoolId": "%s", "Username": "bob@example.com" }
+                """.formatted(emailPoolId))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("UsernameExistsException"));
+    }
+
+    @Test
+    @Order(116)
+    void defaultPoolKeepsUsernamesCaseSensitive() throws Exception {
+        String sensitivePoolId = cognitoJson("CreateUserPool", """
+                { "PoolName": "CaseSensitivePool" }
+                """).path("UserPool").path("Id").asText();
+        createUserWithPassword(sensitivePoolId, "Carol");
+
+        cognitoAction("AdminGetUser", """
+                { "UserPoolId": "%s", "Username": "carol" }
+                """.formatted(sensitivePoolId))
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("UserNotFoundException"));
+        cognitoAction("AdminCreateUser", """
+                { "UserPoolId": "%s", "Username": "carol" }
+                """.formatted(sensitivePoolId))
+                .then()
+                .statusCode(200);
+    }
+
+    private static void createUserWithPassword(String userPoolId, String username) {
+        cognitoAction("AdminCreateUser", """
+                { "UserPoolId": "%s", "Username": "%s" }
+                """.formatted(userPoolId, username))
+                .then()
+                .statusCode(200);
+        cognitoAction("AdminSetUserPassword", """
+                { "UserPoolId": "%s", "Username": "%s", "Password": "%s", "Permanent": true }
+                """.formatted(userPoolId, username, PASSWORD))
+                .then()
+                .statusCode(200);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────
 
     private static Response oauthToken(String oauthClientId, String oauthClientSecret) {
