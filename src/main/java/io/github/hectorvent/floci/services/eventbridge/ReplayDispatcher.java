@@ -23,6 +23,9 @@ public class ReplayDispatcher {
 
     private static final Logger LOG = Logger.getLogger(ReplayDispatcher.class);
 
+    /** Entry key naming the replay that sent an event; no archive receives such an event. */
+    static final String REPLAY_NAME = "ReplayName";
+
     private final Vertx vertx;
     private final ConcurrentHashMap<String, AtomicBoolean> cancelFlags = new ConcurrentHashMap<>();
 
@@ -79,6 +82,7 @@ public class ReplayDispatcher {
                     entry.put("Detail", event.getDetail() != null ? event.getDetail() : "{}");
                     entry.put("Time", event.getEventTime());
                     entry.put("EventBusName", destBusName);
+                    entry.put(REPLAY_NAME, replayName);
                     eventSender.accept(List.of(entry));
                     progressUpdater.accept(event.getEventTime());
                 }

@@ -921,7 +921,9 @@ public class EventBridgeService implements ResourceProvider {
                 }
             }
 
-            captureToArchives(entry, envelope, busStoreKey, eventId, eventTime, region, accountId);
+            if (!(entry.get(ReplayDispatcher.REPLAY_NAME) instanceof String)) {
+                captureToArchives(entry, envelope, busStoreKey, eventId, eventTime, region, accountId);
+            }
 
             Map<String, String> successEntry = new HashMap<>();
             successEntry.put("EventId", eventId);

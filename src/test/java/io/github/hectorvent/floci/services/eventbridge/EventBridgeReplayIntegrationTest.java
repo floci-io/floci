@@ -22,6 +22,9 @@ class EventBridgeReplayIntegrationTest {
     private static String queueUrl;
     private static String queueArn;
     private static long beforePut;
+    private static String timeBusArn;
+    private static String timeArchiveArn;
+    private static String timeQueueUrl;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -372,21 +375,21 @@ class EventBridgeReplayIntegrationTest {
     @Test
     @Order(17)
     void replayedEventKeepsItsOriginalTime() throws InterruptedException {
-        String timeBusArn = given()
+        timeBusArn = given()
                 .contentType(EB_CT)
                 .header("X-Amz-Target", "AWSEvents.CreateEventBus")
                 .body("{\"Name\":\"replay-time-bus\"}")
                 .when().post("/")
                 .then().statusCode(200)
                 .extract().jsonPath().getString("EventBusArn");
-        String timeArchiveArn = given()
+        timeArchiveArn = given()
                 .contentType(EB_CT)
                 .header("X-Amz-Target", "AWSEvents.CreateArchive")
                 .body("{\"ArchiveName\":\"replay-time-archive\",\"EventSourceArn\":\"" + timeBusArn + "\"}")
                 .when().post("/")
                 .then().statusCode(200)
                 .extract().jsonPath().getString("ArchiveArn");
-        String timeQueueUrl = given()
+        timeQueueUrl = given()
                 .contentType(SQS_CT)
                 .header("X-Amz-Target", "AmazonSQS.CreateQueue")
                 .body("{\"QueueName\":\"replay-time-queue\"}")
@@ -462,6 +465,37 @@ class EventBridgeReplayIntegrationTest {
                 .body("Messages", hasSize(1))
                 .body("Messages[0].Body", containsString("\"orderId\":\"t-1\""))
                 .body("Messages[0].Body", containsString("\"time\":\"2015-11-11T21:29:54Z\""));
+    }
+
+    @Test
+    @Order(18)
+    void replayedEventsAreNotArchivedAgain() throws InterruptedException {
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.StartReplay")
+                .body("""
+                        {"ReplayName": "replay-time-replay-again", "EventSourceArn": "%s",
+                         "EventStartTime": 1447277000, "EventEndTime": 1447278000,
+                         "Destination": {"Arn": "%s"}}
+                        """.formatted(timeArchiveArn, timeBusArn))
+                .when().post("/")
+                .then().statusCode(200);
+        awaitReplayCompleted("replay-time-replay-again");
+
+        given()
+                .contentType(SQS_CT)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body("{\"QueueUrl\":\"" + timeQueueUrl + "\",\"MaxNumberOfMessages\":10,\"WaitTimeSeconds\":2}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Messages", hasSize(1));
+        given()
+                .contentType(EB_CT)
+                .header("X-Amz-Target", "AWSEvents.DescribeArchive")
+                .body("{\"ArchiveName\":\"replay-time-archive\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("EventCount", equalTo(1));
     }
 
     private static void awaitReplayCompleted(String replayName) throws InterruptedException {

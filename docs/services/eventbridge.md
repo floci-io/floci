@@ -232,7 +232,7 @@ aws events put-targets \
 
 ## Current Behavior
 
-- An entry's `Time` (epoch seconds, or an ISO 8601 string) becomes the event's `time`; without one, the time of the `PutEvents` call is used. Event times have whole-second precision, as in AWS. An archive records that time, `StartReplay` selects archived events by it, and a replayed event keeps its original `time`. Floci does not add the `replay-name` field that AWS adds to a replayed event.
+- An entry's `Time` (epoch seconds, or an ISO 8601 string) becomes the event's `time`; without one, the time of the `PutEvents` call is used. Event times have whole-second precision, as in AWS. An archive records that time, `StartReplay` selects archived events by it, and a replayed event keeps its original `time` and is not archived again, as in AWS. Floci does not add the `replay-name` field that AWS adds to a replayed event.
 - `PutEvents` reports success once the source bus accepts an event. Target delivery failures are retried and dead-lettered as described above, and otherwise surface only as a `WARN` in the Floci logs.
 - A `Detail` forwarded to an event bus must be a JSON object, as in AWS; anything else is dropped, including an `InputPath` selecting a scalar such as `$.detail.orderId` or an envelope carrying `"detail": null`.
 - A bus ARN naming another account is forwarded under that account, so the target bus and its rules resolve there.
