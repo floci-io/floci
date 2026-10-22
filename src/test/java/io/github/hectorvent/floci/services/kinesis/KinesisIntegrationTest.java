@@ -905,6 +905,63 @@ class KinesisIntegrationTest {
             .body("ShardId", equalTo(expectedShardId));
     }
 
+    @Test
+    @Order(48)
+    void getRecordsReachesTheEndOfASplitParentWithANullIteratorAndItsChildShards() {
+        createStream("closed-shard-end-test", 1);
+        for (int i = 0; i < 3; i++) {
+            given()
+                .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+                .contentType(KINESIS_CONTENT_TYPE)
+                .body("{\"StreamName\": \"closed-shard-end-test\", \"Data\": \"dGVzdA==\", \"PartitionKey\": \"pk-" + i + "\"}")
+            .when().post("/").then().statusCode(200);
+        }
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.SplitShard")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"closed-shard-end-test\", \"ShardToSplit\": \"shardId-000000000000\","
+                + "\"NewStartingHashKey\": \"" + SECOND_SHARD_STARTING_HASH_KEY + "\"}")
+        .when().post("/").then().statusCode(200);
+
+        String iterator = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"closed-shard-end-test\", \"ShardId\": \"shardId-000000000000\","
+                + "\"ShardIteratorType\": \"TRIM_HORIZON\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+
+        int recordsRead = 0;
+        Response last = null;
+        for (int call = 0; call < 10 && iterator != null; call++) {
+            last = given()
+                .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+                .contentType(KINESIS_CONTENT_TYPE)
+                .body("{\"ShardIterator\": \"" + iterator + "\", \"Limit\": 2}")
+            .when().post("/")
+            .then().statusCode(200).extract().response();
+            recordsRead += last.jsonPath().getList("Records").size();
+            iterator = last.jsonPath().getString("NextShardIterator");
+        }
+
+        assertNull(iterator, "a closed shard read past its last record must return a null NextShardIterator");
+        assertEquals(3, recordsRead);
+        last.then()
+            .body("Records.size()", equalTo(0))
+            .body("ChildShards.size()", equalTo(2))
+            .body("ChildShards.ShardId", containsInAnyOrder("shardId-000000000001", "shardId-000000000002"))
+            .body("ChildShards[0].ParentShards", contains("shardId-000000000000"))
+            .body("ChildShards[1].ParentShards", contains("shardId-000000000000"))
+            .body("ChildShards.find { it.ShardId == 'shardId-000000000001' }.HashKeyRange.StartingHashKey",
+                equalTo(MIN_HASH_KEY))
+            .body("ChildShards.find { it.ShardId == 'shardId-000000000001' }.HashKeyRange.EndingHashKey",
+                equalTo(FIRST_SHARD_ENDING_HASH_KEY))
+            .body("ChildShards.find { it.ShardId == 'shardId-000000000002' }.HashKeyRange.StartingHashKey",
+                equalTo(SECOND_SHARD_STARTING_HASH_KEY))
+            .body("ChildShards.find { it.ShardId == 'shardId-000000000002' }.HashKeyRange.EndingHashKey",
+                equalTo(MAX_HASH_KEY));
+    }
+
     private static void updateShardCount(String streamName, int targetShardCount) {
         given()
             .header("X-Amz-Target", "Kinesis_20131202.UpdateShardCount")

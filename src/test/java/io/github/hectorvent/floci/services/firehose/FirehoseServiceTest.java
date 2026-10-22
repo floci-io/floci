@@ -721,6 +721,29 @@ class FirehoseServiceTest {
     }
 
     @Test
+    void kinesisSourceNeitherRereadsASplitShardNorMissesItsChildren() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "first".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        kinesisService.splitShard("src-stream", "shardId-000000000000",
+                "170141183460469231731687303715884105728", "us-east-1");
+        firehoseService.pollKinesisSources();
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        kinesisService.putRecord("src-stream", "second".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service, Mockito.times(2)).putObject(anyString(), anyString(), body.capture(), anyString(),
+                anyMap(), any(PutObjectOptions.class));
+        assertEquals(List.of("first\n", "second\n"),
+                body.getAllValues().stream().map(b -> new String(b, StandardCharsets.UTF_8)).toList());
+    }
+
+    @Test
     void kinesisSourceDoesNotBackfillRecordsFromBeforeDeliveryStart() {
         kinesisService.createStream("src-stream", 1, "us-east-1");
         kinesisService.putRecord("src-stream", "old".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");

@@ -462,6 +462,40 @@ class KinesisServiceTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void getRecordsPastTheEndOfAMergedParentReturnsNullIteratorAndTheMergedChild() {
+        kinesisService.createStream("my-stream", 2, REGION);
+        kinesisService.putRecordWithShardId("my-stream", "a".getBytes(StandardCharsets.UTF_8), "pk", "0", REGION);
+        kinesisService.mergeShards("my-stream", "shardId-000000000000", "shardId-000000000001", REGION);
+
+        String iterator = kinesisService.getShardIterator("my-stream", "shardId-000000000000", "TRIM_HORIZON",
+                null, REGION);
+        Map<String, Object> lastPage = kinesisService.getRecords(iterator, 10, REGION);
+        assertEquals(1, ((List<KinesisRecord>) lastPage.get("Records")).size());
+        String next = (String) lastPage.get("NextShardIterator");
+        assertNotNull(next, "the page that returns the final records still continues");
+
+        Map<String, Object> end = kinesisService.getRecordsForAccount("000000000000", next, 10, REGION);
+        assertTrue(((List<KinesisRecord>) end.get("Records")).isEmpty());
+        assertNull(end.get("NextShardIterator"));
+        List<KinesisShard> children = (List<KinesisShard>) end.get("ChildShards");
+        assertEquals(List.of("shardId-000000000002"), children.stream().map(KinesisShard::getShardId).toList());
+        assertEquals("shardId-000000000000", children.getFirst().getParentShardId());
+        assertEquals("shardId-000000000001", children.getFirst().getAdjacentParentShardId());
+
+        String emptyParent = kinesisService.getShardIterator("my-stream", "shardId-000000000001", "TRIM_HORIZON",
+                null, REGION);
+        assertNull(kinesisService.getRecords(emptyParent, 10, REGION).get("NextShardIterator"),
+                "an empty closed shard ends at once");
+
+        String openChild = kinesisService.getShardIterator("my-stream", "shardId-000000000002", "TRIM_HORIZON",
+                null, REGION);
+        Map<String, Object> openPage = kinesisService.getRecords(openChild, 10, REGION);
+        assertNotNull(openPage.get("NextShardIterator"), "an open shard at its tip keeps returning an iterator");
+        assertTrue(((List<KinesisShard>) openPage.getOrDefault("ChildShards", List.of())).isEmpty());
+    }
+
+    @Test
     void updateShardCountScalesUpToDouble() {
         kinesisService.createStream("my-stream", 2, REGION);
 

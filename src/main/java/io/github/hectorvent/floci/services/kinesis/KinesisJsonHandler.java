@@ -725,9 +725,32 @@ public class KinesisJsonHandler {
                 rNode.put("ApproximateArrivalTimestamp", epochSeconds(rec.getApproximateArrivalTimestamp()));
             }
         }
-        response.put("NextShardIterator", (String) result.get("NextShardIterator"));
+        String nextIterator = (String) result.get("NextShardIterator");
+        if (nextIterator != null) {
+            response.put("NextShardIterator", nextIterator);
+        }
         response.put("MillisBehindLatest", ((Number) result.get("MillisBehindLatest")).longValue());
+        List<KinesisShard> childShards = (List<KinesisShard>) result.get("ChildShards");
+        if (childShards != null) {
+            putChildShards(response.putArray("ChildShards"), childShards);
+        }
         return Response.ok(response).build();
+    }
+
+    /** ChildShard entries: the shard id, its parent (and adjacent parent, for a merge) and its hash key range. */
+    private static void putChildShards(ArrayNode array, List<KinesisShard> childShards) {
+        for (KinesisShard child : childShards) {
+            ObjectNode node = array.addObject();
+            node.put("ShardId", child.getShardId());
+            ArrayNode parents = node.putArray("ParentShards");
+            parents.add(child.getParentShardId());
+            if (child.getAdjacentParentShardId() != null) {
+                parents.add(child.getAdjacentParentShardId());
+            }
+            node.putObject("HashKeyRange")
+                    .put("StartingHashKey", child.getHashKeyRange().startingHashKey())
+                    .put("EndingHashKey", child.getHashKeyRange().endingHashKey());
+        }
     }
 
     private Response handleIncreaseStreamRetentionPeriod(JsonNode request, String region) {

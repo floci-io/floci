@@ -948,6 +948,26 @@ public class KinesisService implements ResourceProvider {
             }
         }
 
+        return recordsPage(stream, shard, streamName, allRecords, startIndex, limit);
+    }
+
+    /**
+     * One GetRecords page from {@code startIndex}. A closed shard read from past its last record has no
+     * more data, so the page carries no NextShardIterator and lists the shard's ChildShards instead. The
+     * page that returns the final records still continues: pollers that keep their previous iterator on a
+     * null one would otherwise read those records again.
+     */
+    private Map<String, Object> recordsPage(KinesisStream stream, KinesisShard shard, String streamName,
+                                            List<KinesisRecord> allRecords, int startIndex, Integer limit) {
+        Map<String, Object> response = new HashMap<>();
+        if (shard.isClosed() && startIndex >= allRecords.size()) {
+            response.put("Records", List.of());
+            response.put("NextShardIterator", null);
+            response.put("MillisBehindLatest", 0L);
+            response.put("ChildShards", childShards(stream, shard.getShardId()));
+            return response;
+        }
+
         int max = limit != null ? Math.min(limit, 1000) : 1000;
         List<KinesisRecord> result = new ArrayList<>();
         int nextIndex = startIndex;
@@ -956,13 +976,18 @@ public class KinesisService implements ResourceProvider {
             nextIndex = i + 1;
         }
 
-        String nextIterator = buildContinuationIterator(streamName, shardId, allRecords, nextIndex);
-
-        Map<String, Object> response = new HashMap<>();
         response.put("Records", result);
-        response.put("NextShardIterator", nextIterator);
+        response.put("NextShardIterator",
+                buildContinuationIterator(streamName, shard.getShardId(), allRecords, nextIndex));
         response.put("MillisBehindLatest", computeMillisBehindLatest(allRecords, nextIndex));
         return response;
+    }
+
+    /** The shards a split or merge of {@code shardId} created. */
+    private static List<KinesisShard> childShards(KinesisStream stream, String shardId) {
+        return stream.getShards().stream()
+                .filter(s -> shardId.equals(s.getParentShardId()) || shardId.equals(s.getAdjacentParentShardId()))
+                .toList();
     }
 
     public record PeekedRecord(String shardId, KinesisRecord record) {}
@@ -1188,20 +1213,7 @@ public class KinesisService implements ResourceProvider {
             }
         }
 
-        int max = limit != null ? Math.min(limit, 1000) : 1000;
-        List<KinesisRecord> result = new ArrayList<>();
-        int nextIndex = startIndex;
-        for (int i = startIndex; i < allRecords.size() && result.size() < max; i++) {
-            result.add(allRecords.get(i));
-            nextIndex = i + 1;
-        }
-
-        String nextIterator = buildContinuationIterator(streamName, shardId, allRecords, nextIndex);
-        Map<String, Object> response = new HashMap<>();
-        response.put("Records", result);
-        response.put("NextShardIterator", nextIterator);
-        response.put("MillisBehindLatest", computeMillisBehindLatest(allRecords, nextIndex));
-        return response;
+        return recordsPage(stream, shard, streamName, allRecords, startIndex, limit);
     }
 
     private KinesisShard selectShard(KinesisStream stream, String partitionKey, String explicitHashKey) {
