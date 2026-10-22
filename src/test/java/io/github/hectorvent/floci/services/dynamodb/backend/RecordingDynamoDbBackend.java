@@ -107,6 +107,13 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
     }
 
     @Override
+    public TableDefinition updateTable(Scope scope, String tableName, String billingMode, Long readCapacity,
+                                       Long writeCapacity, List<AttributeDefinition> attributeDefinitions,
+                                       List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes) {
+        return record("updateTable", scope);
+    }
+
+    @Override
     public TableDefinition enableStream(Scope scope, String tableName, String viewType) {
         return record("enableStream", scope);
     }

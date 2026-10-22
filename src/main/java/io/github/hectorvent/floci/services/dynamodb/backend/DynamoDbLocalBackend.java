@@ -58,6 +58,8 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
     private static final Duration READINESS_BUDGET = Duration.ofSeconds(30);
     private static final Scope PROBE = new Scope("000000000000", "us-east-1"); // partition-literal: readiness probe namespace, Local accepts any region
     private static final String REPLICAS_UNSUPPORTED = "Replicas are not supported by the DynamoDB Local backend";
+    private static final String TABLE_UPDATES_UNSUPPORTED = "Changing the billing mode, provisioned throughput or"
+            + " global secondary indexes of an existing table is not supported by the DynamoDB Local backend";
     private static final Pattern PARTITION = Pattern.compile(AwsArnUtils.PARTITION_REGEX);
     private static final List<String> PUBLIC_ARN_FIELDS = List.of("TableArn", "IndexArn", "LatestStreamArn",
             "StreamArn", "LastEvaluatedStreamArn", "message", "Message");
@@ -442,6 +444,13 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
             call(scope, "UpdateTable", body(tableName, "DeletionProtectionEnabled", false));
         }
         call(scope, "DeleteTable", body(tableName));
+    }
+
+    @Override
+    public TableDefinition updateTable(Scope scope, String tableName, String billingMode, Long readCapacity,
+                                       Long writeCapacity, List<AttributeDefinition> attributeDefinitions,
+                                       List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes) {
+        throw new AwsException("ValidationException", TABLE_UPDATES_UNSUPPORTED, 400);
     }
 
     @Override

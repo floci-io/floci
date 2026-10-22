@@ -182,6 +182,26 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
         RequestScopes.runAs(scope.accountId(), () -> dynamoDbService.deleteTable(tableName, scope.region()));
     }
 
+    /** The billing mode is applied after the table update and persisted, as UpdateTable applies it. */
+    @Override
+    public TableDefinition updateTable(Scope scope, String tableName, String billingMode, Long readCapacity,
+                                       Long writeCapacity, List<AttributeDefinition> attributeDefinitions,
+                                       List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes) {
+        return RequestScopes.callAs(scope.accountId(), () -> {
+            TableDefinition table = dynamoDbService.updateTable(tableName, readCapacity, writeCapacity,
+                    gsiCreates, gsiDeletes, attributeDefinitions, List.of(), List.of(), billingMode, scope.region());
+            if (billingMode != null) {
+                table.setBillingMode(billingMode);
+                if ("PAY_PER_REQUEST".equals(billingMode)) {
+                    table.getProvisionedThroughput().setReadCapacityUnits(0L);
+                    table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+                }
+                dynamoDbService.persistTable(table.getTableName(), table, scope.region());
+            }
+            return table;
+        });
+    }
+
     @Override
     public TableDefinition enableStream(Scope scope, String tableName, String viewType) {
         return RequestScopes.callAs(scope.accountId(),

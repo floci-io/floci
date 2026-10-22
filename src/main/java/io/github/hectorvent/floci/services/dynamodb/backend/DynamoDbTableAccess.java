@@ -34,6 +34,17 @@ public interface DynamoDbTableAccess {
      */
     void deleteTable(Scope scope, String tableName);
 
+    /**
+     * UpdateTable with a billing mode and table throughput, or with the global secondary indexes to
+     * create and delete; a null billing mode or capacity, or an empty list, leaves that part as it
+     * is. As on UpdateTable, one call does not change an index and the capacity together, and creates
+     * or deletes at most one index; {@code attributeDefinitions} defines the key attributes of every
+     * index it creates.
+     */
+    TableDefinition updateTable(Scope scope, String tableName, String billingMode, Long readCapacity,
+                                Long writeCapacity, List<AttributeDefinition> attributeDefinitions,
+                                List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes);
+
     TableDefinition enableStream(Scope scope, String tableName, String viewType);
 
     TableDefinition disableStream(Scope scope, String tableName);

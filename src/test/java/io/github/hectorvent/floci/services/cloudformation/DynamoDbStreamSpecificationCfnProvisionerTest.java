@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.model.ProvisionedThroughput;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,8 +57,12 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
         TableDefinition created = new TableDefinition();
         created.setTableName(TABLE);
         created.setTableArn(TABLE_ARN);
+        created.setProvisionedThroughput(new ProvisionedThroughput(5, 5));
         when(dynamoDbService.createTable(anyString(), anyList(), anyList(), any(), any(),
                 anyList(), anyList(), anyString())).thenReturn(created);
+        // A template billing on demand has UpdateTable apply that to the table the service creates.
+        when(dynamoDbService.updateTable(anyString(), any(), any(), anyList(), anyList(), anyList(), anyList(),
+                anyList(), any(), anyString())).thenReturn(created);
     }
 
     /** Make provisioning take the update path: the table already exists, with a live stream. */

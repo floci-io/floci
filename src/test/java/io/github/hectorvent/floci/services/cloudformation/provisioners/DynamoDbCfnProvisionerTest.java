@@ -9,8 +9,12 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.dynamodb.backend.NativeDynamoDbBackend;
+import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.ProvisionedThroughput;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -27,6 +31,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -694,6 +699,139 @@ class DynamoDbCfnProvisionerTest {
         verify(dynamoDb).updateTimeToLive(TABLE_NAME, "expiresAt", false, "us-east-1");
         assertEquals(STREAM_ARN, r.getAttributes().get("StreamArn"));
         assertFalse(r.getAttributes().containsKey(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    private static final String BY_EMAIL_PROPS = "{\"TableName\":\"orders\","
+            + "\"AttributeDefinitions\":[{\"AttributeName\":\"pk\",\"AttributeType\":\"S\"},"
+            + "{\"AttributeName\":\"email\",\"AttributeType\":\"S\"}],"
+            + "\"KeySchema\":[{\"AttributeName\":\"pk\",\"KeyType\":\"HASH\"}],"
+            + "\"GlobalSecondaryIndexes\":[{\"IndexName\":\"byEmail\","
+            + "\"KeySchema\":[{\"AttributeName\":\"email\",\"KeyType\":\"HASH\"}],"
+            + "\"Projection\":{\"ProjectionType\":\"ALL\"}}]}";
+
+    private static GlobalSecondaryIndex index(String name, String hashKey) {
+        return new GlobalSecondaryIndex(name, List.of(new KeySchemaElement(hashKey, "HASH")), null, "ALL", List.of());
+    }
+
+    /** UpdateTable is answered with the table it was asked to change. */
+    private void updateTableAnswers(TableDefinition table) {
+        when(dynamoDb.updateTable(anyString(), any(), any(), anyList(), anyList(), anyList(), anyList(), anyList(),
+                any(), anyString())).thenReturn(table);
+    }
+
+    /** Adding a global secondary index on update creates it in place, as on AWS. */
+    @Test
+    void anUpdateCreatesTheIndexTheTemplateAdds() throws Exception {
+        TableDefinition current = table(false);
+        existingTable(current);
+        updateTableAnswers(current);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props(BY_EMAIL_PROPS), updateCtx(TABLE_NAME));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<GlobalSecondaryIndex>> creates = ArgumentCaptor.forClass(List.class);
+        verify(dynamoDb).updateTable(eq(TABLE_NAME), isNull(), isNull(), creates.capture(), eq(List.of()), anyList(),
+                eq(List.of()), eq(List.of()), isNull(), eq("us-east-1"));
+        assertEquals(List.of("byEmail"), creates.getValue().stream().map(GlobalSecondaryIndex::getIndexName).toList());
+    }
+
+    @Test
+    void anUpdateDeletesTheIndexTheTemplateDrops() throws Exception {
+        TableDefinition current = table(false);
+        current.getGlobalSecondaryIndexes().add(index("byEmail", "email"));
+        existingTable(current);
+        updateTableAnswers(current);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\"}"), updateCtx(TABLE_NAME));
+
+        verify(dynamoDb).updateTable(TABLE_NAME, null, null, List.of(), List.of("byEmail"), List.of(), List.of(),
+                List.of(), null, "us-east-1");
+    }
+
+    /** An index keeps its key schema; a different one needs a new index name, as on AWS. */
+    @Test
+    void anIndexWhoseKeySchemaChangedIsRefused() throws Exception {
+        TableDefinition current = table(false);
+        current.getGlobalSecondaryIndexes().add(index("byEmail", "pk"));
+        existingTable(current);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        JsonNode props = props(BY_EMAIL_PROPS);
+        ProvisionContext update = updateCtx(TABLE_NAME);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, update));
+
+        assertEquals("InvalidRequest", e.getErrorCode());
+        verify(dynamoDb, never()).updateTable(anyString(), any(), any(), anyList(), anyList(), anyList(), anyList(),
+                anyList(), any(), anyString());
+    }
+
+    /** BillingMode PAY_PER_REQUEST reaches a table the backend creates provisioned. */
+    @Test
+    void onDemandBillingIsAppliedOnCreate() throws Exception {
+        TableDefinition created = table(false);
+        created.setProvisionedThroughput(new ProvisionedThroughput(5, 5));
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenReturn(created);
+        updateTableAnswers(created);
+
+        provisioner.provision(resource("AWS::DynamoDB::Table", "Orders"),
+                props("{\"TableName\":\"orders\",\"BillingMode\":\"PAY_PER_REQUEST\"}"), ctx());
+
+        verify(dynamoDb).createTable(eq(TABLE_NAME), anyList(), anyList(), isNull(), isNull(), anyList(), anyList(),
+                eq("us-east-1"));
+        verify(dynamoDb).updateTable(TABLE_NAME, null, null, List.of(), List.of(), List.of(), List.of(), List.of(),
+                "PAY_PER_REQUEST", "us-east-1");
+    }
+
+    @Test
+    void provisionedThroughputIsPassedOnCreateAndChangedOnUpdate() throws Exception {
+        TableDefinition created = table(false);
+        created.setProvisionedThroughput(new ProvisionedThroughput(3, 4));
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenReturn(created);
+        String provisioned = "{\"TableName\":\"orders\",\"BillingMode\":\"PROVISIONED\","
+                + "\"ProvisionedThroughput\":{\"ReadCapacityUnits\":%d,\"WriteCapacityUnits\":%d}}";
+
+        provisioner.provision(resource("AWS::DynamoDB::Table", "Orders"), props(provisioned.formatted(3, 4)), ctx());
+
+        verify(dynamoDb).createTable(eq(TABLE_NAME), anyList(), anyList(), eq(3L), eq(4L), anyList(), anyList(),
+                eq("us-east-1"));
+        // The table already has the declared throughput, so nothing is updated.
+        verify(dynamoDb, never()).updateTable(anyString(), any(), any(), anyList(), anyList(), anyList(), anyList(),
+                anyList(), any(), anyString());
+
+        existingTable(created);
+        updateTableAnswers(created);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        provisioner.provision(r, props(provisioned.formatted(6, 4)), updateCtx(TABLE_NAME));
+
+        verify(dynamoDb).updateTable(TABLE_NAME, 6L, 4L, List.of(), List.of(), List.of(), List.of(), List.of(),
+                "PROVISIONED", "us-east-1");
+    }
+
+    /** A failed update takes back the index it created, with the rest of the table's prior state. */
+    @Test
+    void rollbackUpdateDeletesTheIndexTheFailedUpdateCreated() throws Exception {
+        TableDefinition current = table(false);
+        existingTable(current);
+        updateTableAnswers(current);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        provisioner.provision(r, props(BY_EMAIL_PROPS), updateCtx(TABLE_NAME));
+        TableDefinition afterUpdate = table(false);
+        afterUpdate.getGlobalSecondaryIndexes().add(index("byEmail", "email"));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(afterUpdate);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(dynamoDb).updateTable(TABLE_NAME, null, null, List.of(), List.of("byEmail"), List.of(), List.of(),
+                List.of(), null, "us-east-1");
     }
 
     @Test

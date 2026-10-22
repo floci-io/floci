@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
@@ -14,6 +15,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.ProvisionedThroughput;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -22,6 +24,7 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -56,6 +59,8 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     private static final Logger LOG = Logger.getLogger(DynamoDbCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TimeToLive TIME_TO_LIVE_OFF = new TimeToLive(false, null);
+    private static final String PAY_PER_REQUEST = "PAY_PER_REQUEST";
+    private static final String PROVISIONED = "PROVISIONED";
 
     private static final String REPLICA_TABLE_NAME_ATTR = "TableName";
     private static final String REPLICA_REGION_ATTR = "__FlociDynamoDbReplicaRegion";
@@ -202,11 +207,22 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             attrDefs.add(new AttributeDefinition("id", "S"));
         }
 
+        // BillingMode defaults to PROVISIONED, which takes the table's ProvisionedThroughput. A
+        // template that declares neither leaves the billing as the backend creates it.
+        String billingMode = ctx.resolveOptional(props, "BillingMode");
+        JsonNode throughput = props != null ? engine.resolveNode(props.get("ProvisionedThroughput")) : null;
+        Long readCapacity = capacity(throughput, "ReadCapacityUnits");
+        Long writeCapacity = capacity(throughput, "WriteCapacityUnits");
+        boolean billingDeclared = (billingMode != null && !billingMode.isBlank())
+                || (throughput != null && throughput.isObject());
+        boolean onDemand = PAY_PER_REQUEST.equals(billingMode);
+
         Scope scope = new Scope(ctx.accountId(), region);
         TableDefinition table;
         boolean created = false;
         try {
-            table = dynamoDb.tables().createTable(scope, tableName, keySchema, attrDefs, null, null, gsis, lsis);
+            table = dynamoDb.tables().createTable(scope, tableName, keySchema, attrDefs,
+                    onDemand ? null : readCapacity, onDemand ? null : writeCapacity, gsis, lsis);
             created = true;
         } catch (AwsException e) {
             if (!"ResourceInUseException".equals(e.getErrorCode())) {
@@ -233,6 +249,16 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
 
             reconcileTags(scope, table.getTableArn(), currentTags,
                     parseCfnTags(props != null ? props.get("Tags") : null, engine));
+
+            // Both update with no interruption. An adopted table that is not this resource's is left
+            // as it is, and a table this attempt created already carries the declared indexes.
+            if (billingDeclared && (created || inPlaceUpdate)) {
+                table = reconcileBilling(scope, tableName, table, onDemand ? PAY_PER_REQUEST : PROVISIONED,
+                        readCapacity, writeCapacity);
+            }
+            if (inPlaceUpdate) {
+                table = reconcileGlobalSecondaryIndexes(scope, tableName, table, gsis, attrDefs);
+            }
 
             // A template that declares StreamSpecification wants a stream. Unlike the DynamoDB API,
             // the CloudFormation property carries no StreamEnabled flag: declaring the block IS the
@@ -311,6 +337,97 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    private static Long capacity(JsonNode throughput, String name) {
+        if (throughput == null || !throughput.hasNonNull(name)) {
+            return null;
+        }
+        return throughput.get(name).asLong();
+    }
+
+    /**
+     * Whether the table bills on demand. DescribeTable reports an on-demand table's throughput as
+     * zero, and a provisioned table has at least one unit of each, so zero reads as on-demand where
+     * the billing mode itself is not reported.
+     */
+    private static boolean onDemand(TableDefinition table) {
+        ProvisionedThroughput throughput = table.getProvisionedThroughput();
+        return PAY_PER_REQUEST.equals(table.getBillingMode()) || (throughput != null
+                && throughput.getReadCapacityUnits() == 0 && throughput.getWriteCapacityUnits() == 0);
+    }
+
+    /**
+     * Calls UpdateTable only when the billing differs from the table's, since DynamoDB refuses an
+     * update that changes nothing. A provisioned billing without both capacities is left alone.
+     */
+    private TableDefinition reconcileBilling(Scope scope, String tableName, TableDefinition table,
+                                             String desiredMode, Long readCapacity, Long writeCapacity) {
+        ProvisionedThroughput current = table.getProvisionedThroughput();
+        boolean currentlyOnDemand = onDemand(table);
+        if (PAY_PER_REQUEST.equals(desiredMode)) {
+            return currentlyOnDemand ? table : dynamoDb.tables().updateTable(scope, tableName, PAY_PER_REQUEST,
+                    null, null, List.of(), List.of(), List.of());
+        }
+        if (readCapacity == null || writeCapacity == null) {
+            return table;
+        }
+        boolean unchanged = !currentlyOnDemand && current != null
+                && current.getReadCapacityUnits() == readCapacity
+                && current.getWriteCapacityUnits() == writeCapacity;
+        return unchanged ? table : dynamoDb.tables().updateTable(scope, tableName, PROVISIONED,
+                readCapacity, writeCapacity, List.of(), List.of(), List.of());
+    }
+
+    /**
+     * Brings the table's global secondary indexes to {@code declared}, by name: an index no longer
+     * declared is deleted and a declared one the table lacks is created, one UpdateTable call each, as
+     * DynamoDB runs one index operation at a time. An index whose key schema or projection changed
+     * cannot be updated in place, so that fails before anything changes.
+     */
+    private TableDefinition reconcileGlobalSecondaryIndexes(Scope scope, String tableName, TableDefinition table,
+                                                            List<GlobalSecondaryIndex> declared,
+                                                            List<AttributeDefinition> attributeDefinitions) {
+        Map<String, GlobalSecondaryIndex> existing = new LinkedHashMap<>();
+        if (table.getGlobalSecondaryIndexes() != null) {
+            table.getGlobalSecondaryIndexes().forEach(index -> existing.put(index.getIndexName(), index));
+        }
+        Set<String> declaredNames = new LinkedHashSet<>();
+        for (GlobalSecondaryIndex index : declared) {
+            declaredNames.add(index.getIndexName());
+            GlobalSecondaryIndex current = existing.get(index.getIndexName());
+            if (current != null && !indexShape(current).equals(indexShape(index))) {
+                throw new AwsException("InvalidRequest", "Invalid request provided: Cannot update GSI's properties"
+                        + " other than Provisioned Throughput and Contributor Insights Specification. You can create"
+                        + " a new GSI with a different name.", 400);
+            }
+        }
+        for (String indexName : existing.keySet()) {
+            if (!declaredNames.contains(indexName)) {
+                table = dynamoDb.tables().updateTable(scope, tableName, null, null, null, List.of(), List.of(),
+                        List.of(indexName));
+            }
+        }
+        for (GlobalSecondaryIndex index : declared) {
+            if (!existing.containsKey(index.getIndexName())) {
+                table = dynamoDb.tables().updateTable(scope, tableName, null, null, null, attributeDefinitions,
+                        List.of(index), List.of());
+            }
+        }
+        return table;
+    }
+
+    /** What an index is beyond its name and throughput: its key schema and its projection. */
+    private static List<String> indexShape(GlobalSecondaryIndex index) {
+        List<String> shape = new ArrayList<>();
+        for (KeySchemaElement key : index.getKeySchema()) {
+            shape.add(key.getAttributeName() + " " + key.getKeyType());
+        }
+        shape.add(index.getProjectionType() == null ? "ALL" : index.getProjectionType());
+        if (index.getNonKeyAttributes() != null) {
+            index.getNonKeyAttributes().stream().sorted().forEach(shape::add);
+        }
+        return shape;
+    }
+
     private static void publishStreamArn(StackResource r, TableDefinition table) {
         if (table.isStreamEnabled() && table.getStreamArn() != null) {
             r.getAttributes().put("StreamArn", table.getStreamArn());
@@ -378,9 +495,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Keeps the tags, stream setting and TTL setting the table has before an in-place update
-     * changes them, with the account and region that address it, so {@link #rollbackUpdate} can
-     * put all three back.
+     * Keeps the tags, stream setting, TTL setting, billing and global secondary indexes the table
+     * has before an in-place update changes them, with the account and region that address it, so
+     * {@link #rollbackUpdate} can put them back.
      */
     private static void snapshotBeforeUpdate(StackResource r, Scope scope, String tableName, TableDefinition table,
                                              Map<String, String> tags, TimeToLive ttl) {
@@ -394,6 +511,31 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         snapshot.put("streamViewType", table.getStreamViewType());
         snapshot.put("ttlEnabled", ttl.enabled());
         snapshot.put("ttlAttributeName", ttl.attributeName());
+        snapshot.put("billingMode", onDemand(table) ? PAY_PER_REQUEST : PROVISIONED);
+        if (table.getProvisionedThroughput() != null) {
+            snapshot.put("readCapacity", table.getProvisionedThroughput().getReadCapacityUnits());
+            snapshot.put("writeCapacity", table.getProvisionedThroughput().getWriteCapacityUnits());
+        }
+        ArrayNode indexes = snapshot.putArray("globalSecondaryIndexes");
+        if (table.getGlobalSecondaryIndexes() != null) {
+            for (GlobalSecondaryIndex index : table.getGlobalSecondaryIndexes()) {
+                ObjectNode indexNode = indexes.addObject().put("indexName", index.getIndexName())
+                        .put("projectionType", index.getProjectionType());
+                ArrayNode keys = indexNode.putArray("keySchema");
+                index.getKeySchema().forEach(key -> keys.addObject()
+                        .put("attributeName", key.getAttributeName()).put("keyType", key.getKeyType()));
+                ArrayNode nonKeyAttributes = indexNode.putArray("nonKeyAttributes");
+                if (index.getNonKeyAttributes() != null) {
+                    index.getNonKeyAttributes().forEach(nonKeyAttributes::add);
+                }
+            }
+        }
+        ArrayNode attributes = snapshot.putArray("attributeDefinitions");
+        if (table.getAttributeDefinitions() != null) {
+            table.getAttributeDefinitions().forEach(attribute -> attributes.addObject()
+                    .put("attributeName", attribute.getAttributeName())
+                    .put("attributeType", attribute.getAttributeType()));
+        }
         r.getAttributes().put(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
     }
 
@@ -437,6 +579,15 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         reconcileTags(scope, table.getTableArn(),
                 dynamoDb.tables().listTagsOfResource(scope, table.getTableArn()), tags);
 
+        // A snapshot an earlier release took has no indexes or billing; that update changed neither.
+        if (snapshot.has("globalSecondaryIndexes")) {
+            table = reconcileGlobalSecondaryIndexes(scope, tableName, table,
+                    snapshotIndexes(snapshot), snapshotAttributeDefinitions(snapshot));
+            table = reconcileBilling(scope, tableName, table, snapshot.path("billingMode").asText(PROVISIONED),
+                    snapshot.hasNonNull("readCapacity") ? snapshot.get("readCapacity").asLong() : null,
+                    snapshot.hasNonNull("writeCapacity") ? snapshot.get("writeCapacity").asLong() : null);
+        }
+
         if (snapshot.path("streamEnabled").asBoolean()) {
             table = dynamoDb.tables().enableStream(scope, tableName, snapshot.path("streamViewType").textValue());
         } else if (table.isStreamEnabled()) {
@@ -452,6 +603,27 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         publishStreamArn(resource, table);
         resource.getAttributes().remove(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);
         return true;
+    }
+
+    private static List<GlobalSecondaryIndex> snapshotIndexes(JsonNode snapshot) {
+        List<GlobalSecondaryIndex> indexes = new ArrayList<>();
+        for (JsonNode index : snapshot.path("globalSecondaryIndexes")) {
+            List<KeySchemaElement> keySchema = new ArrayList<>();
+            index.path("keySchema").forEach(key -> keySchema.add(
+                    new KeySchemaElement(key.path("attributeName").asText(), key.path("keyType").asText())));
+            List<String> nonKeyAttributes = new ArrayList<>();
+            index.path("nonKeyAttributes").forEach(attribute -> nonKeyAttributes.add(attribute.asText()));
+            indexes.add(new GlobalSecondaryIndex(index.path("indexName").asText(), keySchema, null,
+                    index.path("projectionType").textValue(), nonKeyAttributes));
+        }
+        return indexes;
+    }
+
+    private static List<AttributeDefinition> snapshotAttributeDefinitions(JsonNode snapshot) {
+        List<AttributeDefinition> attributes = new ArrayList<>();
+        snapshot.path("attributeDefinitions").forEach(attribute -> attributes.add(new AttributeDefinition(
+                attribute.path("attributeName").asText(), attribute.path("attributeType").asText())));
+        return attributes;
     }
 
     /**
