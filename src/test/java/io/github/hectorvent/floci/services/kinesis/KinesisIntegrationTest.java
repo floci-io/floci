@@ -13,7 +13,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -860,7 +863,7 @@ class KinesisIntegrationTest {
 
     @Test
     @Order(46)
-    void putRecordPreservesShardForNegativeHashCode() {
+    void putRecordPreservesShardForNegativeHashCode() throws Exception {
         given()
             .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
             .contentType(KINESIS_CONTENT_TYPE)
@@ -869,6 +872,7 @@ class KinesisIntegrationTest {
                 """)
         .when().post("/").then().statusCode(200);
 
+        String expectedShardId = openShardCoveringPartitionKey("negative-hash-partition-key-test", "negative-hash");
         given()
             .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
             .contentType(KINESIS_CONTENT_TYPE)
@@ -879,7 +883,54 @@ class KinesisIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ShardId", equalTo("shardId-000000000002"));
+            .body("ShardId", equalTo(expectedShardId));
+    }
+
+    @Test
+    @Order(47)
+    void putRecordAfterReshardingRoutesToTheOpenShardCoveringTheMd5HashKey() throws Exception {
+        createStream("md5-reshard-test", 1);
+        updateShardCount("md5-reshard-test", 2);
+        updateShardCount("md5-reshard-test", 4);
+
+        String expectedShardId = openShardCoveringPartitionKey("md5-reshard-test", "key-4");
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"md5-reshard-test\", \"Data\": \"dGVzdA==\", \"PartitionKey\": \"key-4\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ShardId", equalTo(expectedShardId));
+    }
+
+    private static void updateShardCount(String streamName, int targetShardCount) {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.UpdateShardCount")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + streamName + "\", \"TargetShardCount\": " + targetShardCount
+                + ", \"ScalingType\": \"UNIFORM_SCALING\"}")
+        .when().post("/").then().statusCode(200);
+    }
+
+    /** The open shard whose hash key range holds MD5(partitionKey), read from ListShards. */
+    private static String openShardCoveringPartitionKey(String streamName, String partitionKey) throws Exception {
+        BigInteger hashKey = new BigInteger(1,
+                MessageDigest.getInstance("MD5").digest(partitionKey.getBytes(StandardCharsets.UTF_8)));
+        JsonNode shards = MAPPER.readTree(listShardsPage(streamName, null, null)
+                .then().statusCode(200).extract().asString()).path("Shards");
+        List<String> covering = new ArrayList<>();
+        for (JsonNode shard : shards) {
+            boolean open = shard.path("SequenceNumberRange").path("EndingSequenceNumber").isMissingNode();
+            BigInteger start = new BigInteger(shard.path("HashKeyRange").path("StartingHashKey").asText());
+            BigInteger end = new BigInteger(shard.path("HashKeyRange").path("EndingHashKey").asText());
+            if (open && hashKey.compareTo(start) >= 0 && hashKey.compareTo(end) <= 0) {
+                covering.add(shard.path("ShardId").asText());
+            }
+        }
+        assertEquals(1, covering.size(), "exactly one open shard must cover " + partitionKey + ": " + covering);
+        return covering.getFirst();
     }
 
     // --- AT_TIMESTAMP iterator coverage ---

@@ -18,6 +18,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -634,6 +635,69 @@ class KinesisServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> kinesisService.updateShardCount(streamName, 129, "UNIFORM_SCALING", REGION));
         assertEquals("LimitExceededException", ex.getErrorCode());
+    }
+
+    @Test
+    void putRecordRoutesEachPartitionKeyToTheShardCoveringItsMd5HashKey() throws Exception {
+        kinesisService.createStream("md5-stream", 4, REGION);
+        KinesisStream stream = kinesisService.describeStream("md5-stream", REGION);
+
+        for (int i = 0; i < 50; i++) {
+            String partitionKey = "pk-" + i;
+            String shardId = kinesisService.putRecordWithShardId("md5-stream", new byte[]{1}, partitionKey, REGION)
+                    .shardId();
+            assertEquals(openShardCovering(stream, md5HashKey(partitionKey)), shardId, partitionKey);
+        }
+    }
+
+    @Test
+    void putRecordRoutesToAnOpenShardCoveringTheMd5HashKeyAfterResharding() throws Exception {
+        kinesisService.createStream("md5-stream", 1, REGION);
+        kinesisService.updateShardCount("md5-stream", 2, "UNIFORM_SCALING", REGION);
+        kinesisService.updateShardCount("md5-stream", 4, "UNIFORM_SCALING", REGION);
+        KinesisStream stream = kinesisService.describeStream("md5-stream", REGION);
+
+        for (int i = 0; i < 50; i++) {
+            String partitionKey = "key-" + i;
+            String shardId = kinesisService.putRecordWithShardId("md5-stream", new byte[]{1}, partitionKey, REGION)
+                    .shardId();
+            assertEquals(openShardCovering(stream, md5HashKey(partitionKey)), shardId, partitionKey);
+        }
+    }
+
+    @Test
+    void putRecordRepartitionsLegacyFullSpanShardsBeforeRoutingByPartitionKey() throws Exception {
+        kinesisService.createStream("legacy-stream", 4, REGION);
+        KinesisStream stream = kinesisService.describeStream("legacy-stream", REGION);
+        for (KinesisShard shard : stream.getShards()) {
+            shard.setHashKeyRange(new KinesisShard.HashKeyRange("0", "340282366920938463463374607431768211455"));
+        }
+
+        Set<String> used = new HashSet<>();
+        for (int i = 0; i < 50; i++) {
+            String partitionKey = "pk-" + i;
+            String shardId = kinesisService.putRecordWithShardId("legacy-stream", new byte[]{1}, partitionKey, REGION)
+                    .shardId();
+            assertEquals(openShardCovering(stream, md5HashKey(partitionKey)), shardId, partitionKey);
+            used.add(shardId);
+        }
+        assertEquals(4, used.size(), "keys must spread over every repartitioned shard: " + used);
+    }
+
+    private static BigInteger md5HashKey(String partitionKey) throws Exception {
+        return new BigInteger(1, MessageDigest.getInstance("MD5")
+                .digest(partitionKey.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String openShardCovering(KinesisStream stream, BigInteger hashKey) {
+        List<String> covering = stream.getShards().stream()
+                .filter(shard -> !shard.isClosed())
+                .filter(shard -> hashKey.compareTo(new BigInteger(shard.getHashKeyRange().startingHashKey())) >= 0
+                        && hashKey.compareTo(new BigInteger(shard.getHashKeyRange().endingHashKey())) <= 0)
+                .map(KinesisShard::getShardId)
+                .toList();
+        assertEquals(1, covering.size(), "exactly one open shard must cover " + hashKey + ": " + covering);
+        return covering.getFirst();
     }
 
     @Test

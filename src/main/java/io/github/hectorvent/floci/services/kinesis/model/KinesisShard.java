@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.kinesis.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.math.BigInteger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -14,6 +15,7 @@ public class KinesisShard {
     private String parentShardId;
     private String adjacentParentShardId;
     private HashKeyRange hashKeyRange;
+    private volatile ParsedHashKeyRange parsedHashKeyRange;
     private SequenceNumberRange sequenceNumberRange;
     private final Object recordsMonitor = new Object();
     private List<KinesisRecord> records = new ArrayList<>();
@@ -40,6 +42,21 @@ public class KinesisShard {
 
     public HashKeyRange getHashKeyRange() { return hashKeyRange; }
     public void setHashKeyRange(HashKeyRange range) { this.hashKeyRange = range; }
+
+    /**
+     * Whether {@code hashKey} falls inside this shard's hash key range, both ends inclusive. The
+     * range is parsed once per {@link HashKeyRange} instance, because routing tests every open
+     * shard on every put.
+     */
+    public boolean coversHashKey(BigInteger hashKey) {
+        ParsedHashKeyRange parsed = parsedHashKeyRange;
+        if (parsed == null || parsed.source() != hashKeyRange) {
+            parsed = new ParsedHashKeyRange(hashKeyRange, new BigInteger(hashKeyRange.startingHashKey()),
+                    new BigInteger(hashKeyRange.endingHashKey()));
+            parsedHashKeyRange = parsed;
+        }
+        return hashKey.compareTo(parsed.start()) >= 0 && hashKey.compareTo(parsed.end()) <= 0;
+    }
 
     public SequenceNumberRange getSequenceNumberRange() { return sequenceNumberRange; }
     public void setSequenceNumberRange(SequenceNumberRange range) { this.sequenceNumberRange = range; }
@@ -138,6 +155,8 @@ public class KinesisShard {
 
     @RegisterForReflection
     public record HashKeyRange(String startingHashKey, String endingHashKey) {}
+
+    private record ParsedHashKeyRange(HashKeyRange source, BigInteger start, BigInteger end) {}
 
     @RegisterForReflection
     public record SequenceNumberRange(String startingSequenceNumber, String endingSequenceNumber) {}
