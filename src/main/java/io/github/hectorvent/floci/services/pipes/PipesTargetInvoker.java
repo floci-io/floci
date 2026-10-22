@@ -22,6 +22,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -77,9 +78,11 @@ public class PipesTargetInvoker {
 
     /**
      * Delivers {@code payload} to the pipe's target: the batch array for a target that
-     * {@link #receivesBatchArray receives one}, a single record for any other.
+     * {@link #receivesBatchArray receives one}, a single record for any other. Returns the
+     * {@code itemIdentifier}s a Lambda target reported in a {@code batchItemFailures} response, empty
+     * when the whole payload was delivered; a malformed response throws, failing the whole batch.
      */
-    public void invoke(Pipe pipe, String payload, String region) {
+    public List<String> invoke(Pipe pipe, String payload, String region) {
         String targetArn = pipe.getTarget();
         String event = payload;
 
@@ -92,7 +95,7 @@ public class PipesTargetInvoker {
         }
 
         if (targetArn.contains(":lambda:") || targetArn.contains(":function:")) {
-            invokeLambda(targetArn, payload, region);
+            return invokeLambda(targetArn, payload, region);
         } else if (targetArn.contains(":sqs:")) {
             invokeSqs(targetArn, event, payload, region, tp);
         } else if (targetArn.contains(":sns:")) {
@@ -109,6 +112,7 @@ public class PipesTargetInvoker {
             throw new AwsException("InternalException",
                     "Pipe " + pipe.getName() + " uses a target type that is not emulated: " + targetArn, 500);
         }
+        return List.of();
     }
 
     /**
@@ -163,7 +167,7 @@ public class PipesTargetInvoker {
                         + "emulated): " + enrichment, 500);
     }
 
-    private void invokeLambda(String arn, String payload, String region) {
+    private List<String> invokeLambda(String arn, String payload, String region) {
         String fnName = lambdaFunctionName(arn);
         String fnRegion = extractRegionFromArn(arn, region);
         InvokeResult result = lambdaService.invoke(
@@ -175,6 +179,44 @@ public class PipesTargetInvoker {
                     "Pipe target Lambda " + fnName + " returned an error: " + result.getFunctionError(), 500);
         }
         LOG.debugv("Pipe delivered to Lambda: {0}", arn);
+        return batchItemFailures(fnName, result.getPayload());
+    }
+
+    /**
+     * The {@code itemIdentifier}s of a partial batch response. No response, one that is not a JSON
+     * object, or a missing, null or empty {@code batchItemFailures} list is a complete success; a list
+     * that is not an array, or an entry whose {@code itemIdentifier} is missing, null or empty, fails
+     * the whole batch, as AWS treats it.
+     */
+    private List<String> batchItemFailures(String fnName, byte[] response) {
+        if (response == null || response.length == 0) {
+            return List.of();
+        }
+        JsonNode failures;
+        try {
+            failures = objectMapper.readTree(response).get("batchItemFailures");
+        } catch (IOException e) {
+            LOG.debugv("Pipe target Lambda {0} response is not JSON, so it reports no failures: {1}",
+                    fnName, e.getMessage());
+            return List.of();
+        }
+        if (failures == null || failures.isNull()) {
+            return List.of();
+        }
+        if (!failures.isArray()) {
+            throw new AwsException("InternalException",
+                    "Pipe target Lambda " + fnName + " returned a batchItemFailures that is not an array", 500);
+        }
+        List<String> identifiers = new ArrayList<>(failures.size());
+        for (JsonNode failure : failures) {
+            JsonNode identifier = failure.get("itemIdentifier");
+            if (identifier == null || identifier.isNull() || identifier.asText().isEmpty()) {
+                throw new AwsException("InternalException", "Pipe target Lambda " + fnName
+                        + " returned a batchItemFailures entry without an itemIdentifier", 500);
+            }
+            identifiers.add(identifier.asText());
+        }
+        return identifiers;
     }
 
     /**

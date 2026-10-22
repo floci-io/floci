@@ -117,6 +117,14 @@ pipe's dead-letter queue, or stays in the source to be retried, instead of being
 - **`InputTemplate`**, on `TargetParameters` and on `EnrichmentParameters`, is applied to each record
   of a batch, not to the array as a whole. A template output that is not JSON becomes a string
   element of the array.
+- **Partial batch failures**: a Lambda target can return
+  `{"batchItemFailures":[{"itemIdentifier":"<id>"}]}`, where the id is the record's `messageId` (SQS)
+  or `eventID` (Kinesis, DynamoDB Streams). For an SQS source only the reported messages stay in the
+  queue for redelivery. For a stream source the pipe resumes at the first reported record, so it and
+  the records after it are delivered again. A `batchItemFailures` that is not an array, or an entry
+  whose `itemIdentifier` is empty, null, missing or not in the batch, fails the whole batch. A Step
+  Functions target is started asynchronously, so it cannot report partial failures, and partial
+  failures are not read after an enrichment or for Kafka sources.
 
 ## ParallelizationFactor
 

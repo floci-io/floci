@@ -216,16 +216,14 @@ public class PipesPoller implements Resettable {
         }
 
         if (receivesBatchArray(pipe)) {
-            boolean delivered = invokeWithDlq(pipe, bareArray(filtered), region);
-            if (delivered) {
-                for (Message msg : messages) {
-                    if (matchedMessageIds.contains(msg.getMessageId())) {
-                        try {
-                            sqsService.deleteMessage(queueUrl, msg.getReceiptHandle(), region);
-                        } catch (Exception e) {
-                            LOG.warnv("Pipe {0}: failed to delete SQS message {1}: {2}",
-                                    pipe.getName(), msg.getMessageId(), e.getMessage());
-                        }
+            Set<String> retried = deliverBatch(pipe, filtered, "messageId", region);
+            for (Message msg : messages) {
+                if (matchedMessageIds.contains(msg.getMessageId()) && !retried.contains(msg.getMessageId())) {
+                    try {
+                        sqsService.deleteMessage(queueUrl, msg.getReceiptHandle(), region);
+                    } catch (Exception e) {
+                        LOG.warnv("Pipe {0}: failed to delete SQS message {1}: {2}",
+                                pipe.getName(), msg.getMessageId(), e.getMessage());
                     }
                 }
             }
@@ -297,10 +295,16 @@ public class PipesPoller implements Resettable {
                 LOG.infov("Pipe {0}: received {1} Kinesis record(s)", pipe.getName(), records.size());
                 List<ObjectNode> recordNodes = buildKinesisRecordNodes(records, pipe, KINESIS_SHARD_ID, region);
                 List<JsonNode> filtered = filterKinesisRecords(pipe, recordNodes, records);
-                if (!filtered.isEmpty() && deliverRecords(pipe, filtered, region) > 0) {
+                int firstRetried = firstIndexOf(recordNodes,
+                        filtered.isEmpty() ? Set.of() : deliverStreamRecords(pipe, filtered, region));
+                if (firstRetried == 0) {
                     LOG.warnv("Pipe {0}: Kinesis batch was neither delivered nor sent to a DLQ, retrying it next poll",
                             pipe.getName());
                     return;
+                }
+                if (firstRetried > 0) {
+                    nextIterator = kinesisIteratorAfter(streamName, region, pipeAccountId,
+                            records.get(firstRetried - 1).getSequenceNumber());
                 }
             }
             if (nextIterator != null) {
@@ -346,6 +350,24 @@ public class PipesPoller implements Resettable {
                             streamName, KINESIS_SHARD_ID, type, null, null, region);
         } catch (Exception e) {
             LOG.warnv("Failed to get Kinesis shard iterator for {0}: {1}", streamName, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * An iterator just after {@code sequenceNumber}, where a batch whose later records failed resumes; null
+     * when it cannot be opened, so the whole batch is read again.
+     */
+    private String kinesisIteratorAfter(String streamName, String region, String accountId, String sequenceNumber) {
+        try {
+            return (accountId != null)
+                    ? kinesisService.getShardIteratorForAccount(
+                            accountId, streamName, KINESIS_SHARD_ID, "AFTER_SEQUENCE_NUMBER", sequenceNumber, region)
+                    : kinesisService.getShardIterator(
+                            streamName, KINESIS_SHARD_ID, "AFTER_SEQUENCE_NUMBER", sequenceNumber, null, region);
+        } catch (Exception e) {
+            LOG.warnv("Failed to get Kinesis shard iterator for {0} after {1}, rereading the batch: {2}",
+                    streamName, sequenceNumber, e.getMessage());
             return null;
         }
     }
@@ -434,13 +456,15 @@ public class PipesPoller implements Resettable {
             recordNodes.add(node);
         }
         List<JsonNode> filtered = filterMatcher.applyFilterCriteria(recordNodes, pipe.getSourceParameters());
-        // ponytail: a partially delivered non-Lambda batch is redelivered whole (at-least-once).
-        if (!filtered.isEmpty() && deliverRecords(pipe, filtered, region) > 0) {
+        int firstRetried = firstIndexOf(recordNodes,
+                filtered.isEmpty() ? Set.of() : deliverStreamRecords(pipe, filtered, region));
+        if (firstRetried == 0) {
             LOG.warnv("Pipe {0}: DynamoDB Stream batch on {1} was neither delivered nor sent to a DLQ, "
                     + "retrying it next poll", pipe.getName(), shardId);
             return;
         }
-        committed.put(shardId, records.get(records.size() - 1).sequenceNumber());
+        int lastDisposed = (firstRetried > 0 ? firstRetried : records.size()) - 1;
+        committed.put(shardId, records.get(lastDisposed).sequenceNumber());
     }
 
     void pollKafka(Pipe pipe, String region) {
@@ -616,21 +640,72 @@ public class PipesPoller implements Resettable {
 
     // ──────────────────────────── Invocation & DLQ ────────────────────────────
 
-    private int deliverRecords(Pipe pipe, List<JsonNode> records, String region) {
+    /**
+     * Delivers filtered stream records and returns the eventIDs to read again: the ones a Lambda target
+     * reported in {@code batchItemFailures}, every record when the delivery failed with no DLQ to take it,
+     * and none otherwise. A batch only partly delivered to a per-record target is read again whole
+     * (at-least-once).
+     */
+    private Set<String> deliverStreamRecords(Pipe pipe, List<JsonNode> records, String region) {
         // Enrichment (source → filter → ENRICHMENT → target) is currently applied only on the SQS
         // source path (see deliverEnrichedBatch). Kinesis, DynamoDB Streams and Kafka sources
         // deliver the filtered records straight to the target, so a pipe that configures an
         // enrichment on those sources bypasses it — see docs/services/pipes.md.
         if (receivesBatchArray(pipe)) {
-            return invokeWithDlq(pipe, bareArray(records), region) ? 0 : records.size();
+            return deliverBatch(pipe, records, "eventID", region);
         }
-        int failed = 0;
+        boolean failed = false;
         for (JsonNode record : records) {
             if (!invokeWithDlq(pipe, record.toString(), region)) {
-                failed++;
+                failed = true;
             }
         }
-        return failed;
+        return failed ? idsOf(records, "eventID") : Set.of();
+    }
+
+    /**
+     * Delivers a batch to a Lambda or Step Functions target and returns the {@code idField} values of the
+     * records to retry: the ones the target reported in {@code batchItemFailures}, or every record when the
+     * delivery failed, or the target named an item outside the batch, and no DLQ took the batch.
+     */
+    private Set<String> deliverBatch(Pipe pipe, List<JsonNode> records, String idField, String region) {
+        Set<String> ids = idsOf(records, idField);
+        String batch = bareArray(records);
+        try {
+            List<String> reported = targetInvoker.invoke(pipe, batch, region);
+            if (ids.containsAll(reported)) {
+                if (!reported.isEmpty()) {
+                    LOG.infov("Pipe {0}: target reported {1} of {2} record(s) as failed, retrying them",
+                            pipe.getName(), reported.size(), records.size());
+                }
+                return new HashSet<>(reported);
+            }
+            LOG.warnv("Pipe {0}: target reported a batchItemFailures item that is not in the batch, "
+                    + "failing the whole batch", pipe.getName());
+        } catch (Exception e) {
+            LOG.warnv("Pipe {0}: delivery failed: {1} ({2})",
+                    pipe.getName(), e.getMessage(), e.getClass().getSimpleName());
+        }
+        return sendToDeadLetterQueue(pipe, batch, region) ? Set.of() : ids;
+    }
+
+    private static Set<String> idsOf(List<JsonNode> records, String idField) {
+        Set<String> ids = new HashSet<>(records.size());
+        records.forEach(record -> ids.add(record.path(idField).asText()));
+        return ids;
+    }
+
+    /** The position of the first record whose eventID is in {@code eventIds}, or -1 when there is none. */
+    private static int firstIndexOf(List<? extends JsonNode> records, Set<String> eventIds) {
+        if (eventIds.isEmpty()) {
+            return -1;
+        }
+        for (int i = 0; i < records.size(); i++) {
+            if (eventIds.contains(records.get(i).path("eventID").asText())) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private boolean invokeWithDlq(Pipe pipe, String eventJson, String region) {

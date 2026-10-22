@@ -10,12 +10,18 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
+import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
+import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,7 +58,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
@@ -80,6 +85,10 @@ class PipesPollerTest {
     @Mock private PipesKafkaConsumerManager kafkaConsumerManager;
     @Mock private PipesTargetInvoker targetInvoker;
     @Mock private EmulatorConfig config;
+    @Mock private LambdaService lambdaService;
+    @Mock private SnsService snsService;
+    @Mock private EventBridgeService eventBridgeService;
+    @Mock private StepFunctionsService stepFunctionsService;
 
     private FakeStreamReader streams;
     private PipesPoller poller;
@@ -262,6 +271,84 @@ class PipesPollerTest {
         assertEquals(List.of("m0", "m1"), messageIds(batch));
     }
 
+    @Test
+    void pollSqs_lambdaBatchItemFailuresLeaveOnlyTheFailedMessagesInTheQueue() throws Exception {
+        Pipe pipe = sqsToLambdaPipe();
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(sqsMessages("m", 2));
+        when(lambdaService.invoke(eq("us-east-1"), eq("tgt"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(lambdaResponse("{\"batchItemFailures\":[{\"itemIdentifier\":\"m1\"}]}"));
+
+        pollerWithRealTargetInvoker().pollSqs(pipe, "us-east-1");
+
+        verify(sqsService).deleteMessage(anyString(), eq("rh-m0"), eq("us-east-1"));
+        verify(sqsService, never()).deleteMessage(anyString(), eq("rh-m1"), anyString());
+    }
+
+    @Test
+    void pollSqs_lambdaBatchItemFailureWithAnEmptyIdentifierFailsTheWholeBatch() throws Exception {
+        Pipe pipe = sqsToLambdaPipe();
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(sqsMessages("m", 2));
+        when(lambdaService.invoke(eq("us-east-1"), eq("tgt"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(lambdaResponse("{\"batchItemFailures\":[{\"itemIdentifier\":\"\"}]}"));
+
+        pollerWithRealTargetInvoker().pollSqs(pipe, "us-east-1");
+
+        verify(sqsService, never()).deleteMessage(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void pollSqs_lambdaBatchItemFailureNamingAnUnknownMessageFailsTheWholeBatch() throws Exception {
+        Pipe pipe = sqsToLambdaPipe();
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(sqsMessages("m", 2));
+        when(lambdaService.invoke(eq("us-east-1"), eq("tgt"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(lambdaResponse("{\"batchItemFailures\":[{\"itemIdentifier\":\"not-in-batch\"}]}"));
+
+        pollerWithRealTargetInvoker().pollSqs(pipe, "us-east-1");
+
+        verify(sqsService, never()).deleteMessage(anyString(), anyString(), anyString());
+    }
+
+    private static Pipe sqsToLambdaPipe() {
+        Pipe pipe = new Pipe();
+        pipe.setName("sqs-lambda");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setTarget("arn:aws:lambda:us-east-1:000000000000:function:tgt");
+        return pipe;
+    }
+
+    /** A poller whose target invoker is real, delivering to the mocked target services. */
+    private PipesPoller pollerWithRealTargetInvoker() {
+        PipesTargetInvoker invoker = new PipesTargetInvoker(lambdaService, sqsService, snsService,
+                eventBridgeService, stepFunctionsService, kinesisService, MAPPER, config);
+        return new PipesPoller(vertx, sqsService, kinesisService, streams, kafkaConsumerManager, invoker,
+                new PipesFilterMatcher(MAPPER), MAPPER, config);
+    }
+
+    private static InvokeResult lambdaResponse(String payload) {
+        return new InvokeResult(200, null, payload.getBytes(StandardCharsets.UTF_8), null, "req");
+    }
+
+    /** Each batch the target Lambda was invoked with, in invocation order. */
+    private List<JsonNode> lambdaBatches() throws Exception {
+        ArgumentCaptor<byte[]> payloads = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService, atLeastOnce()).invoke(anyString(), anyString(), payloads.capture(),
+                any(InvocationType.class));
+        List<JsonNode> batches = new ArrayList<>();
+        for (byte[] payload : payloads.getAllValues()) {
+            batches.add(MAPPER.readTree(payload));
+        }
+        return batches;
+    }
+
+    private static List<String> fieldOfEach(JsonNode batch, String field) {
+        List<String> values = new ArrayList<>();
+        batch.forEach(record -> values.add(record.at(field).asText()));
+        return values;
+    }
+
     private static List<String> messageIds(JsonNode batch) {
         List<String> ids = new ArrayList<>();
         batch.forEach(record -> ids.add(record.path("messageId").asText()));
@@ -390,7 +477,7 @@ class PipesPollerTest {
 
         when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(first, second));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
-        doNothing()
+        doReturn(List.of())
                 .doThrow(new RuntimeException("boom"))
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
@@ -418,7 +505,7 @@ class PipesPollerTest {
         when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(first, second));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
         doThrow(new RuntimeException("boom"))
-                .doNothing()
+                .doReturn(List.of())
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
         poller.pollKafka(pipe, "us-east-1");
@@ -455,7 +542,7 @@ class PipesPollerTest {
 
         when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(first, skipped, failing));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
-        doNothing()
+        doReturn(List.of())
                 .doThrow(new RuntimeException("boom"))
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
@@ -580,7 +667,7 @@ class PipesPollerTest {
                 .thenReturn(kinesisPage("it-1", kinesisRecord("{\"n\":1}", "pk-1", "4959001", Instant.now())));
         lenient().when(kinesisService.getRecordsForAccount("000000000000", "it-1", 10, "us-east-1"))
                 .thenReturn(kinesisPage("it-1"));
-        doThrow(new RuntimeException("target down")).doNothing()
+        doThrow(new RuntimeException("target down")).doReturn(List.of())
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
         poller.startPolling(pipe);
@@ -663,6 +750,41 @@ class PipesPollerTest {
         verify(targetInvoker, times(1)).invoke(eq(pipe), anyString(), eq("us-east-1"));
     }
 
+    @Test
+    void kinesisLambdaBatchItemFailureResumesAtTheFirstFailedRecord() throws Exception {
+        Pipe pipe = kinesisPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
+        pipe.setTarget("arn:aws:lambda:us-east-1:000000000000:function:orders-target");
+        when(kinesisService.getShardIteratorForAccount("000000000000", "orders-stream", "shardId-000000000000",
+                "TRIM_HORIZON", null, "us-east-1")).thenReturn("it-0");
+        when(kinesisService.getRecordsForAccount("000000000000", "it-0", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1",
+                        kinesisRecord("{\"n\":1}", "pk-1", "4959001", Instant.now()),
+                        kinesisRecord("{\"n\":2}", "pk-1", "4959002", Instant.now()),
+                        kinesisRecord("{\"n\":3}", "pk-1", "4959003", Instant.now())));
+        lenient().when(kinesisService.getShardIteratorForAccount("000000000000", "orders-stream",
+                "shardId-000000000000", "AFTER_SEQUENCE_NUMBER", "4959001", "us-east-1")).thenReturn("it-retry");
+        lenient().when(kinesisService.getRecordsForAccount("000000000000", "it-retry", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1",
+                        kinesisRecord("{\"n\":2}", "pk-1", "4959002", Instant.now()),
+                        kinesisRecord("{\"n\":3}", "pk-1", "4959003", Instant.now())));
+        lenient().when(kinesisService.getRecordsForAccount("000000000000", "it-1", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1"));
+        when(lambdaService.invoke(eq("us-east-1"), eq("orders-target"), any(byte[].class),
+                eq(InvocationType.RequestResponse)))
+                .thenReturn(lambdaResponse(
+                        "{\"batchItemFailures\":[{\"itemIdentifier\":\"shardId-000000000000:4959002\"}]}"))
+                .thenReturn(lambdaResponse("{}"));
+        PipesPoller realInvokerPoller = pollerWithRealTargetInvoker();
+
+        realInvokerPoller.startPolling(pipe);
+        realInvokerPoller.pollKinesis(pipe, "us-east-1");
+        realInvokerPoller.pollKinesis(pipe, "us-east-1");
+
+        List<JsonNode> batches = lambdaBatches();
+        assertEquals(2, batches.size(), "the failed record and the ones after it are delivered again");
+        assertEquals(List.of("4959002", "4959003"), fieldOfEach(batches.get(1), "/sequenceNumber"));
+    }
+
     /** Starts the pipe and runs one tick of its poll timer, which polls on a pipes-poller thread. */
     private void runOneTimerTick(Pipe pipe) {
         poller.startPolling(pipe);
@@ -705,7 +827,7 @@ class PipesPollerTest {
     void targetFailureWithoutDlqRereadsTheSameDynamoDbRecordsNextPoll() throws Exception {
         Pipe pipe = dynamoDbPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
         streams.shard.add(ddbRecord("001", "active"));
-        doThrow(new RuntimeException("target down")).doNothing()
+        doThrow(new RuntimeException("target down")).doReturn(List.of())
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
         poller.startPolling(pipe);
@@ -753,7 +875,7 @@ class PipesPollerTest {
         Pipe pipe = dynamoDbPipe("{\"BatchSize\":1}");
         streams.shard.add(ddbRecord("001", "active"));
         streams.shard.add(ddbRecord("002", "active"));
-        doThrow(new RuntimeException("target down")).doNothing()
+        doThrow(new RuntimeException("target down")).doReturn(List.of())
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
         poller.startPolling(pipe);
@@ -762,6 +884,29 @@ class PipesPollerTest {
         poller.pollDynamoDbStreams(pipe, "us-east-1");
 
         assertEquals(List.of(List.of("001"), List.of("001"), List.of("002")), deliveredSequences(pipe));
+    }
+
+    @Test
+    void dynamoDbLambdaBatchItemFailureResumesAtTheFirstFailedRecord() throws Exception {
+        Pipe pipe = dynamoDbPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
+        streams.shard.add(ddbRecord("001", "active"));
+        streams.shard.add(ddbRecord("002", "active"));
+        streams.shard.add(ddbRecord("003", "active"));
+        when(lambdaService.invoke(eq("us-east-1"), eq("orders-target"), any(byte[].class),
+                eq(InvocationType.RequestResponse)))
+                .thenReturn(lambdaResponse("{\"batchItemFailures\":[{\"itemIdentifier\":\"event-002\"}]}"))
+                .thenReturn(lambdaResponse("{\"batchItemFailures\":[]}"));
+        PipesPoller realInvokerPoller = pollerWithRealTargetInvoker();
+
+        realInvokerPoller.startPolling(pipe);
+        realInvokerPoller.pollDynamoDbStreams(pipe, "us-east-1");
+        realInvokerPoller.pollDynamoDbStreams(pipe, "us-east-1");
+        realInvokerPoller.pollDynamoDbStreams(pipe, "us-east-1");
+
+        List<JsonNode> batches = lambdaBatches();
+        assertEquals(2, batches.size(), "the batch after the failure is the last one delivered");
+        assertEquals(List.of("001", "002", "003"), fieldOfEach(batches.get(0), "/dynamodb/SequenceNumber"));
+        assertEquals(List.of("002", "003"), fieldOfEach(batches.get(1), "/dynamodb/SequenceNumber"));
     }
 
     @Test
@@ -819,7 +964,7 @@ class PipesPollerTest {
         doAnswer(invocation -> {
             delivering.countDown();
             release.await(5, TimeUnit.SECONDS);
-            return null;
+            return List.of();
         }).when(targetInvoker).invoke(any(), anyString(), eq("us-east-1"));
         poller.startPolling(pipe);
         CompletableFuture<Void> inFlight =

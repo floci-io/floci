@@ -514,6 +514,43 @@ class PipesTargetInvokerTest {
     }
 
     @Test
+    void invoke_lambdaTargetReturnsTheReportedBatchItemFailures() {
+        Pipe pipe = createPipe("arn:aws:lambda:us-east-1:000000000000:function:my-fn", null);
+        when(lambdaService.invoke(eq("us-east-1"), eq("my-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, null,
+                        "{\"batchItemFailures\":[{\"itemIdentifier\":\"m2\"},{\"itemIdentifier\":\"m3\"}]}"
+                                .getBytes(StandardCharsets.UTF_8), null, "req"));
+
+        assertEquals(List.of("m2", "m3"), invoker.invoke(pipe, "[{\"messageId\":\"m1\"}]", "us-east-1"));
+    }
+
+    @Test
+    void invoke_lambdaTargetResponseWithoutFailuresIsACompleteSuccess() {
+        Pipe pipe = createPipe("arn:aws:lambda:us-east-1:000000000000:function:my-fn", null);
+        for (String response : new String[]{"", "null", "{}", "\"done\"", "{\"batchItemFailures\":null}",
+                "{\"batchItemFailures\":[]}"}) {
+            when(lambdaService.invoke(eq("us-east-1"), eq("my-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                    .thenReturn(new InvokeResult(200, null, response.getBytes(StandardCharsets.UTF_8), null, "req"));
+
+            assertEquals(List.of(), invoker.invoke(pipe, "[]", "us-east-1"), "response " + response);
+        }
+    }
+
+    @Test
+    void invoke_lambdaTargetMalformedBatchItemFailuresFailTheWholeBatch() {
+        Pipe pipe = createPipe("arn:aws:lambda:us-east-1:000000000000:function:my-fn", null);
+        for (String response : new String[]{"{\"batchItemFailures\":{}}",
+                "{\"batchItemFailures\":[{\"itemIdentifier\":\"\"}]}",
+                "{\"batchItemFailures\":[{\"itemIdentifier\":null}]}",
+                "{\"batchItemFailures\":[{\"messageId\":\"m1\"}]}"}) {
+            when(lambdaService.invoke(eq("us-east-1"), eq("my-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                    .thenReturn(new InvokeResult(200, null, response.getBytes(StandardCharsets.UTF_8), null, "req"));
+
+            assertThrows(AwsException.class, () -> invoker.invoke(pipe, "[]", "us-east-1"), "response " + response);
+        }
+    }
+
+    @Test
     void invoke_lambdaTargetFunctionErrorThrows() {
         // A target Lambda that returns a FunctionError is a failed delivery — invoke must throw so the
         // poller routes the source record to the DLQ instead of silently deleting it.
