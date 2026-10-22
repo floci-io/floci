@@ -443,9 +443,7 @@ public class ScheduleInvoker {
                 String messageDeduplicationId = text(params, "MessageDeduplicationId");
                 Map<String, MessageAttributeValue> messageAttributes =
                         parseUniversalSqsMessageAttributes(params.path("MessageAttributes"));
-                JsonNode delaySeconds = params.get("DelaySeconds");
-                sqsService.sendMessage(queueUrl, body,
-                        delaySeconds == null || delaySeconds.isNull() ? null : delaySeconds.asInt(),
+                sqsService.sendMessage(queueUrl, body, numericDelaySeconds(params.get("DelaySeconds")),
                         messageGroupId, messageDeduplicationId, messageAttributes, region);
                 LOG.debugv("Scheduler delivered to SQS (universal target): {0}", queueUrl);
             }
@@ -466,6 +464,21 @@ public class ScheduleInvoker {
             default -> throw new UnsupportedOperationException(
                     "Scheduler: unsupported universal target action: " + serviceAction);
         }
+    }
+
+    /**
+     * A per-message DelaySeconds overrides the queue's, so anything that is not a number or numeric
+     * text is forwarded as absent rather than read as an explicit 0.
+     */
+    private static Integer numericDelaySeconds(JsonNode delaySeconds) {
+        if (delaySeconds == null) {
+            return null;
+        }
+        if (delaySeconds.isNumber()) {
+            return delaySeconds.asInt();
+        }
+        String text = delaySeconds.isTextual() ? delaySeconds.asText().trim() : "";
+        return text.matches("-?\\d{1,9}") ? Integer.valueOf(text) : null;
     }
 
     // The shared dispatcher thread must never wait for a statement to finish.

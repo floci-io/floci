@@ -347,6 +347,26 @@ class ScheduleInvokerTest {
                 isNull(), argThat(attrs -> attrs == null || attrs.isEmpty()), eq("us-east-1"));
     }
 
+    /** A DelaySeconds that is not a number is no override: the queue's own DelaySeconds still applies. */
+    @Test
+    void universalSqsSendMessageForwardsOnlyANumericDelaySeconds() {
+        List<String> values = List.of("\"5\"", "\"soon\"", "\"\"", "true", "{}", "[]");
+        for (int i = 0; i < values.size(); i++) {
+            Target target = new Target();
+            target.setArn("arn:aws:scheduler:::aws-sdk:sqs:sendMessage");
+            target.setRoleArn("arn:aws:iam::000000000000:role/x");
+            target.setInput("{\"QueueUrl\":\"http://localhost:4566/000000000000/q" + i + "\","
+                    + "\"MessageBody\":\"hi\",\"DelaySeconds\":" + values.get(i) + "}");
+
+            invoke(target, "us-east-1");
+
+            Integer expectedDelay = i == 0 ? 5 : null;
+            verify(sqsService).sendMessage(eq("http://localhost:4566/000000000000/q" + i), eq("hi"),
+                    eq(expectedDelay), isNull(), isNull(),
+                    argThat(attrs -> attrs == null || attrs.isEmpty()), eq("us-east-1"));
+        }
+    }
+
     @Test
     void universalSqsSendMessageForwardsStringAndBinaryMessageAttributesWithoutBase64Decoding() {
         String queueUrl = "http://localhost:4566/000000000000/q.fifo";
