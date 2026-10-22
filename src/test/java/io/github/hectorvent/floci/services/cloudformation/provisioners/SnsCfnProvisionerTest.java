@@ -515,6 +515,94 @@ class SnsCfnProvisionerTest {
         assertEquals("MessageBody", attrs.getValue().get("FilterPolicyScope"));
     }
 
+    /** A firehose subscription cannot be created without the role SNS assumes to write to the stream. */
+    @Test
+    void subscriptionRoleArnIsForwarded() {
+        ArgumentCaptor<Map<String, String>> attrs = ArgumentCaptor.forClass(Map.class);
+        when(sns.subscribe(anyString(), anyString(), anyString(), anyString(), attrs.capture()))
+                .thenReturn(subscription("arn:sub"));
+
+        provision("AWS::SNS::Subscription", """
+                {"TopicArn": "t", "Protocol": "firehose", "Endpoint": "arn:stream",
+                 "SubscriptionRoleArn": "arn:aws:iam::000000000000:role/sns-firehose"}
+                """);
+
+        assertEquals("arn:aws:iam::000000000000:role/sns-firehose",
+                attrs.getValue().get("SubscriptionRoleArn"));
+    }
+
+    /**
+     * Only Endpoint, Protocol and TopicArn are createOnly, so a changed filter is an in-place update.
+     * Subscribe hands an existing subscription back unchanged, so the update has to write it.
+     */
+    @Test
+    void anUpdateWritesTheDeclaredAttributesToTheExistingSubscription() {
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub"));
+
+        StackResource r = provisionSubscriptionUpdate("""
+                {"TopicArn": "%s", "Protocol": "sqs", "Endpoint": "arn:queue",
+                 "FilterPolicy": {"k": ["v1"]}}
+                """.formatted(TOPIC_ARN), """
+                {"TopicArn": "%s", "Protocol": "sqs", "Endpoint": "arn:queue",
+                 "FilterPolicy": {"k": ["v2"]}, "RawMessageDelivery": "true"}
+                """.formatted(TOPIC_ARN));
+
+        verify(sns).setSubscriptionAttribute("arn:sub", "FilterPolicy", "{\"k\":[\"v2\"]}", REGION);
+        verify(sns).setSubscriptionAttribute("arn:sub", "RawMessageDelivery", "true", REGION);
+        assertEquals("arn:sub", r.getPhysicalId());
+    }
+
+    /**
+     * A property the previous template declared and the new one drops goes back to the SNS default:
+     * no filter, no redrive policy, wrapped delivery, attribute-scoped filtering.
+     */
+    @Test
+    void anUpdateResetsTheAttributesTheTemplateDropped() {
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub"));
+
+        provisionSubscriptionUpdate("""
+                {"TopicArn": "%s", "Protocol": "sqs", "Endpoint": "arn:queue",
+                 "FilterPolicy": {"k": ["v1"]}, "FilterPolicyScope": "MessageBody",
+                 "RawMessageDelivery": "true", "RedrivePolicy": {"deadLetterTargetArn": "arn:dlq"}}
+                """.formatted(TOPIC_ARN), """
+                {"TopicArn": "%s", "Protocol": "sqs", "Endpoint": "arn:queue"}
+                """.formatted(TOPIC_ARN));
+
+        verify(sns).setSubscriptionAttribute("arn:sub", "FilterPolicy", "", REGION);
+        verify(sns).setSubscriptionAttribute("arn:sub", "FilterPolicyScope", "MessageAttributes", REGION);
+        verify(sns).setSubscriptionAttribute("arn:sub", "RawMessageDelivery", "false", REGION);
+        verify(sns).setSubscriptionAttribute("arn:sub", "RedrivePolicy", "", REGION);
+    }
+
+    /** An attribute set outside the stack is left alone while neither template declares it. */
+    @Test
+    void anUpdateLeavesAttributesNeitherTemplateDeclared() {
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub"));
+
+        provisionSubscriptionUpdate("""
+                {"TopicArn": "%s", "Protocol": "sqs", "Endpoint": "arn:queue"}
+                """.formatted(TOPIC_ARN), """
+                {"TopicArn": "%s", "Protocol": "sqs", "Endpoint": "arn:queue"}
+                """.formatted(TOPIC_ARN));
+
+        verify(sns, never()).setSubscriptionAttribute(anyString(), anyString(), anyString(), anyString());
+    }
+
+    /** Provisions an existing subscription again, the way UpdateStack re-invokes the provisioner. */
+    private StackResource provisionSubscriptionUpdate(String priorJson, String json) {
+        StackResource r = new StackResource();
+        r.setLogicalId("Sub");
+        r.setResourceType("AWS::SNS::Subscription");
+        r.setPhysicalId("arn:sub");
+        r.setAttributes(new HashMap<>(Map.of("Arn", "arn:sub")));
+        provisioner.provision(r, props(json), new ProvisionContext(engine, REGION, "000000000000",
+                "my-stack", "arn:sub", event -> { }, props(priorJson)));
+        return r;
+    }
+
     @Test
     void absentPolicyAttributesAreOmittedEntirely() {
         ArgumentCaptor<Map<String, String>> attrs = ArgumentCaptor.forClass(Map.class);

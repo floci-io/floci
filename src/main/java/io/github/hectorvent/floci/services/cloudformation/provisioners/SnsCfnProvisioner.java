@@ -202,10 +202,41 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         if (props.has("RedrivePolicy") && !props.path("RedrivePolicy").isNull()) {
             attributes.put("RedrivePolicy", ctx.engine().resolveJsonAttribute(props.path("RedrivePolicy")));
         }
+        // SNS refuses a firehose subscription without the role it assumes to write to the stream.
+        String subscriptionRoleArn = ctx.resolveOptional(props, "SubscriptionRoleArn");
+        if (subscriptionRoleArn != null && !subscriptionRoleArn.isBlank()) {
+            attributes.put("SubscriptionRoleArn", subscriptionRoleArn);
+        }
 
         Subscription sub = snsService.subscribe(topicArn, protocol, endpoint, ctx.region(), attributes);
+        // Only Endpoint, Protocol and TopicArn are createOnly, so the same subscription coming back
+        // is an in-place update. Subscribe returns it unchanged, so the attributes are written here.
+        if (ctx.isUpdate() && sub.getSubscriptionArn().equals(ctx.priorPhysicalId())) {
+            updateSubscriptionAttributes(sub.getSubscriptionArn(), attributes, ctx);
+        }
         r.setPhysicalId(sub.getSubscriptionArn());
         r.getAttributes().put("Arn", sub.getSubscriptionArn());
+    }
+
+    /**
+     * Writes the declared attributes and puts back the SNS default of each one the previous template
+     * declared and this one dropped. A blank FilterPolicy or RedrivePolicy is how SNS reads "none".
+     */
+    private void updateSubscriptionAttributes(String subscriptionArn, Map<String, String> declared,
+                                              ProvisionContext ctx) {
+        Map<String, String> desired = new HashMap<>(declared);
+        Map<String, String> defaults = Map.of(
+                "FilterPolicy", "",
+                "FilterPolicyScope", "MessageAttributes",
+                "RawMessageDelivery", "false",
+                "RedrivePolicy", "");
+        defaults.forEach((name, value) -> {
+            if (!desired.containsKey(name) && ctx.previouslyDeclared(name)) {
+                desired.put(name, value);
+            }
+        });
+        desired.forEach((name, value) ->
+                snsService.setSubscriptionAttribute(subscriptionArn, name, value, ctx.region()));
     }
 
     /**
