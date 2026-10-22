@@ -120,6 +120,32 @@ class SnsTopicPolicyEnforcementIntegrationTest {
         publish(publisher, topicArn).statusCode(200);
     }
 
+    /** Every AWS SDK publishes over the Query protocol, naming the topic in a form body. */
+    @Test
+    void aSameAccountTopicPolicyGrantsAQueryProtocolPublishOnItsOwn() {
+        String topicArn = createTopic(OWNER, "query-grant-" + suffix());
+        String userName = "query-granted-" + suffix();
+        String publisher = createUser(OWNER, userName, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListAllMyBuckets","Resource":"*"}]}""");
+        setTopicPolicy(OWNER, topicArn, """
+                {"Version":"2012-10-17","Statement":[{
+                  "Effect":"Allow","Principal":{"AWS":"arn:aws:iam::%s:user/%s"},"Action":"sns:Publish",
+                  "Resource":"%s"}]}""".formatted(OWNER, userName, topicArn));
+
+        queryPublish(publisher, topicArn).statusCode(200);
+    }
+
+    @Test
+    void aQueryProtocolPublishToAnotherAccountsTopicNeedsItsTopicPolicy() {
+        String topicArn = createTopic(OWNER, "query-foreign-" + suffix());
+        String publisher = createUser(OTHER, "query-publisher-" + suffix(), """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"sns:Publish","Resource":"*"}]}""");
+
+        queryPublish(publisher, topicArn).statusCode(403);
+    }
+
     /**
      * IAM User Guide, "AWS JSON policy elements: NotPrincipal": a Deny's NotPrincipal naming a user
      * without its account "might deny access to the entire account", and it "will always deny any IAM
@@ -179,16 +205,25 @@ class SnsTopicPolicyEnforcementIntegrationTest {
         return UUID.randomUUID().toString().substring(0, 8);
     }
 
-    /**
-     * Publishes through SNS's JSON protocol, whose body the request filter reads the topic from. A
-     * Query-protocol request carries the topic in its form body, which the filter does not read yet.
-     */
+    /** Publishes through SNS's JSON protocol, which Floci serves beside the Query protocol. */
     private static ValidatableResponse publish(String accessKeyId, String topicArn) {
         return given()
                 .header("Authorization", EnforcementFixtures.auth(accessKeyId, "sns"))
                 .header("X-Amz-Target", "SNS_20100331.Publish")
                 .contentType("application/x-amz-json-1.0")
                 .body("{\"TopicArn\":\"" + topicArn + "\",\"Message\":\"hello\"}")
+        .when()
+                .post("/")
+        .then();
+    }
+
+    private static ValidatableResponse queryPublish(String accessKeyId, String topicArn) {
+        return given()
+                .header("Authorization", EnforcementFixtures.auth(accessKeyId, "sns"))
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "Publish")
+                .formParam("TopicArn", topicArn)
+                .formParam("Message", "hello")
         .when()
                 .post("/")
         .then();

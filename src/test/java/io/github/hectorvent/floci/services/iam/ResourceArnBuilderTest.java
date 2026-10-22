@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsProtocolClaimFilter;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.ProtocolClaim;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.WireProtocol;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -1084,11 +1087,49 @@ class ResourceArnBuilderTest {
         assertEquals("arn:aws:sqs:us-east-1:000000000000:order-queue", arn);
     }
 
+    /** A Query GET carries its parameters in the query string, which is what the controller dispatches. */
     @Test
     void sqsBuildsArnFromQueryParam() {
+        when(ctx.getMethod()).thenReturn("GET");
+        contextProperties.put(AwsProtocolClaimFilter.CLAIM_PROPERTY,
+                new ProtocolClaim(WireProtocol.AWS_QUERY, null, "SendMessage", null));
         queryParams.putSingle("QueueUrl", "http://localhost:4566/000000000000/my-queue");
         String arn = builder.build("sqs", ctx, "us-east-1", "000000000000");
         assertEquals("arn:aws:sqs:us-east-1:000000000000:my-queue", arn);
+    }
+
+    /** Issue 4898: Java SDK v1 and older botocore send SQS calls as a Query form body. */
+    @Test
+    void sqsBuildsArnFromAQueryProtocolFormBody() {
+        when(ctx.getMethod()).thenReturn("POST");
+        setFormBody("Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2Fmy-queue"
+                + "&MessageBody=x");
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:my-queue",
+                builder.build("sqs", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @Test
+    void sqsBuildsArnFromTheQueueNameOfAQueryProtocolCreateOrLookup() {
+        when(ctx.getMethod()).thenReturn("POST");
+        for (String action : List.of("CreateQueue", "GetQueueUrl")) {
+            setFormBody("Action=" + action + "&QueueName=orders.fifo");
+            assertEquals("arn:aws:sqs:us-east-1:000000000000:orders.fifo",
+                    builder.build("sqs", ctx, "us-east-1", ACCOUNT), action);
+        }
+    }
+
+    /**
+     * The handler of a Query POST reads its form body and takes the first value of a repeated
+     * parameter, so a queue named in the query string, or after the first, is not the one it acts on.
+     */
+    @Test
+    void sqsNamesTheQueueTheHandlerReadsFromAQueryProtocolFormBody() {
+        when(ctx.getMethod()).thenReturn("POST");
+        queryParams.putSingle("QueueUrl", "http://localhost:4566/000000000000/allowed");
+        setFormBody("Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2Ftarget"
+                + "&MessageBody=x&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2Fappended");
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:target",
+                builder.build("sqs", ctx, "us-east-1", ACCOUNT));
     }
 
     // ── SNS ─────────────────────────────────────────────────────────────────────
@@ -1099,6 +1140,27 @@ class ResourceArnBuilderTest {
         setJsonBody("{\"TopicArn\":\"" + topicArn + "\"}");
         String arn = builder.build("sns", ctx, "us-east-1", "000000000000");
         assertEquals(topicArn, arn);
+    }
+
+    /** Every AWS SDK sends SNS calls as a Query form body. */
+    @Test
+    void snsBuildsArnFromAQueryProtocolFormBody() {
+        when(ctx.getMethod()).thenReturn("POST");
+        setFormBody("Action=Publish&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A000000000000%3Aalerts&Message=x");
+        assertEquals("arn:aws:sns:us-east-1:000000000000:alerts", builder.build("sns", ctx, "us-east-1", ACCOUNT));
+    }
+
+    /** CreateTopic is authorized against the topic it creates; other actions' Name is not a topic. */
+    @Test
+    void snsBuildsTheArnOfTheTopicACreateTopicNames() {
+        when(ctx.getMethod()).thenReturn("POST");
+        setFormBody("Action=CreateTopic&Name=alerts.fifo&Attributes.entry.1.key=FifoTopic"
+                + "&Attributes.entry.1.value=true");
+        assertEquals("arn:aws:sns:us-east-1:000000000000:alerts.fifo",
+                builder.build("sns", ctx, "us-east-1", ACCOUNT));
+
+        setFormBody("Action=CreatePlatformApplication&Name=mobile&Platform=GCM");
+        assertEquals("arn:aws:sns:us-east-1:000000000000:*", builder.build("sns", ctx, "us-east-1", ACCOUNT));
     }
 
     // ── S3 ──────────────────────────────────────────────────────────────────────

@@ -1463,6 +1463,12 @@ as `dynamodb:GetItem`, is checked item by item, as described under
 [Condition keys floci populates](#condition-keys-floci-populates): each `Get` as
 `dynamodb:GetItem` on its own table, with its own `dynamodb:LeadingKeys`.
 
+A Query request is checked against the resource its parameters name, as a JSON body's are: an SQS
+call against the queue its `QueueUrl` or `QueueName` names, and an SNS call against the topic its
+`TopicArn` names, or for `CreateTopic` the topic its `Name` would create. The parameter is read
+where the Query handler reads it, the first occurrence in the form body of a POST or in the query
+string of a Query GET, so a queue named in the query string of a POST decides nothing.
+
 ### Resource-based policies
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries registered `ResourcePolicyProvider` SPI implementations (such as S3 bucket policies) during request authorization:
@@ -1474,7 +1480,7 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries regi
 - A statement that names the caller only through its account, by its id, its root ARN or its S3 canonical user ID, delegates to the account, as the IAM User Guide's "AWS account principals" describes: across accounts it is the resource owner's half of the grant, and within the account it grants nothing on its own, so the caller's identity policies have to allow the request. A statement naming the user, role or role session itself, or `"*"`, grants on its own within the account.
 - For detailed S3 bucket policy behavior and configuration, see [S3 Bucket Policy Enforcement](s3.md#bucket-policy-enforcement).
 - Lambda function policies, the statements `AddPermission` adds, take part the same way. An invoke of another account's function by ARN runs it in that account, so its function policy has to allow the caller as well; see [Function policies under IAM enforcement](lambda.md#function-policies-under-iam-enforcement).
-- SNS topic policies take part the same way for a request that names the topic in a JSON-protocol body; a topic with no policy set has the default one AWS gives a new topic. See [SNS](sns.md).
+- SNS topic policies take part the same way for a request that names the topic, over the Query protocol every AWS SDK uses or over JSON; a topic with no policy set has the default one AWS gives a new topic. See [SNS](sns.md).
 - SQS queue and API Gateway REST API policies are stored but not evaluated.
 - A call an AWS service makes to another service's resource on its own behalf, such as SES publishing an event or a notification to an SNS topic, has no IAM principal, so the target's resource policy decides it alone and has to allow the calling service, through `{"Service": "<service>.amazonaws.com"}` or `{"AWS": "*"}`. A target with no policy refuses it. Its request context holds `aws:PrincipalIsAWSService` (`true`), `aws:PrincipalServiceName` and `aws:PrincipalServiceNamesList`, `aws:SourceArn` and `aws:SourceAccount` for the resource whose configuration triggered the call, `aws:ResourceAccount` and `aws:RequestedRegion`, and none of the keys that describe an IAM principal. A publish to an SNS topic from SES also carries `aws:SourceOwner`, the key the SNS Developer Guide lists SES among the services setting, which is what the default topic policy checks, so that policy admits SES acting for the topic owner's account and no other. SES is the one service checked this way so far; see [SES IAM enforcement](ses.md#iam-enforcement).
 

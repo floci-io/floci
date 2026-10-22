@@ -1078,12 +1078,12 @@ public class ResourceArnBuilder {
 
     // ── SQS ─────────────────────────────────────────────────────────────────────
     private String buildSqsArn(ContainerRequestContext ctx, String region, String accountId) {
-        String queueUrl = ctx.getUriInfo().getQueryParameters().getFirst("QueueUrl");
+        String queueUrl = RequestBodyReader.formField(ctx, "QueueUrl");
         if (queueUrl == null) {
-            // Try form param for Query-protocol
-            queueUrl = firstFormParam(ctx, "QueueUrl");
-        }
-        if (queueUrl == null) {
+            String formQueueName = RequestBodyReader.formField(ctx, "QueueName");
+            if (formQueueName != null && !formQueueName.isEmpty()) {
+                return AwsArnUtils.Arn.of("sqs", region, accountId, formQueueName).toString();
+            }
             JsonNode json = readJsonBody(ctx);
             if (json != null && json.isObject()) {
                 if (json.hasNonNull("QueueUrl")) {
@@ -1105,7 +1105,13 @@ public class ResourceArnBuilder {
 
     // ── SNS ─────────────────────────────────────────────────────────────────────
     private String buildSnsArn(ContainerRequestContext ctx, String region, String accountId) {
-        String topicArn = firstFormParam(ctx, "TopicArn");
+        String topicArn = RequestBodyReader.formField(ctx, "TopicArn");
+        if (topicArn == null && "CreateTopic".equals(RequestBodyReader.formField(ctx, "Action"))) {
+            String name = RequestBodyReader.formField(ctx, "Name");
+            if (name != null && !name.isEmpty()) {
+                return AwsArnUtils.Arn.of("sns", region, accountId, name).toString();
+            }
+        }
         if (topicArn == null) {
             JsonNode json = readJsonBody(ctx);
             if (json != null && json.isObject() && json.hasNonNull("TopicArn")) {
@@ -1419,11 +1425,5 @@ public class ResourceArnBuilder {
         // take only the first segment (stop at next /)
         int slash = after.indexOf('/');
         return slash > 0 ? after.substring(0, slash) : after;
-    }
-
-    private String firstFormParam(ContainerRequestContext ctx, String name) {
-        // Form params are typically available as query params in REST-Assured / JAX-RS
-        String v = ctx.getUriInfo().getQueryParameters().getFirst(name);
-        return v;
     }
 }
