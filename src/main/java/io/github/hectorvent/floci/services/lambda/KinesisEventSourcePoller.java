@@ -53,6 +53,8 @@ public class KinesisEventSourcePoller implements Resettable {
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
     private final Set<String> stopped = ConcurrentHashMap.newKeySet();
+    /** {@code uuid:shardId} of closed shards a mapping read to their end; re-derived from committed progress. */
+    private final Set<String> finishedShards = ConcurrentHashMap.newKeySet();
     private final ExecutorService pollExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "kinesis-esm-poller");
         t.setDaemon(true);
@@ -97,6 +99,7 @@ public class KinesisEventSourcePoller implements Resettable {
         timerIds.clear();
         activePolls.clear();
         stopped.clear();
+        finishedShards.clear();
     }
 
     public synchronized void startPolling(EventSourceMapping esm) {
@@ -121,6 +124,7 @@ public class KinesisEventSourcePoller implements Resettable {
         stopped.add(uuid);
         Long timerId = timerIds.remove(uuid);
         if (timerId != null) vertx.cancelTimer(timerId);
+        finishedShards.removeIf(k -> k.startsWith(uuid + ":"));
     }
 
     /**
@@ -173,10 +177,18 @@ public class KinesisEventSourcePoller implements Resettable {
                 KinesisStream stream = kinesisService.describeStreamForAccount(
                         esm.getAccountId(), streamName, esm.getRegion());
 
+                Set<String> listed = new HashSet<>();
+                for (KinesisShard shard : stream.getShards()) {
+                    listed.add(shard.getShardId());
+                }
                 for (KinesisShard shard : stream.getShards()) {
                     if (isStopped(esm)) {
                         LOG.debugv("Kinesis ESM {0} was stopped or deleted, ending its poll", esm.getUuid());
                         return;
+                    }
+                    if (finishedShards.contains(finishedShardKey(esm.getUuid(), shard.getShardId()))
+                            || !parentsFinished(esm.getUuid(), shard, listed)) {
+                        continue;
                     }
                     String lastSeq = esm.getShardSequenceNumbers().get(shard.getShardId());
                     String iterator;
@@ -198,6 +210,9 @@ public class KinesisEventSourcePoller implements Resettable {
                     List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
 
                     if (records.isEmpty()) {
+                        if (shard.isClosed()) {
+                            finishedShards.add(finishedShardKey(esm.getUuid(), shard.getShardId()));
+                        }
                         continue;
                     }
 
@@ -252,6 +267,24 @@ public class KinesisEventSourcePoller implements Resettable {
                 activePolls.remove(esm.getUuid());
             }
         });
+    }
+
+    /**
+     * A shard created by a split or merge is read only once every parent it came from is read to its
+     * end, or is no longer listed, so records of one partition key stay in order across a reshard.
+     */
+    private boolean parentsFinished(String uuid, KinesisShard shard, Set<String> listed) {
+        return parentFinished(uuid, shard.getParentShardId(), listed)
+                && parentFinished(uuid, shard.getAdjacentParentShardId(), listed);
+    }
+
+    private boolean parentFinished(String uuid, String parentShardId, Set<String> listed) {
+        return parentShardId == null || !listed.contains(parentShardId)
+                || finishedShards.contains(finishedShardKey(uuid, parentShardId));
+    }
+
+    private static String finishedShardKey(String uuid, String shardId) {
+        return uuid + ":" + shardId;
     }
 
     private String buildKinesisEvent(List<KinesisRecord> records, EventSourceMapping esm, String shardId) {

@@ -585,6 +585,73 @@ class KinesisEventSourcePollerTest {
         assertTrue(esm.getShardSequenceNumbers().isEmpty());
     }
 
+    /**
+     * Polls until {@code count} records were delivered (or 10 s passed) and returns the delivered sequence numbers in
+     * delivery order. Polls of one mapping never overlap, so each kick either starts the next poll or is a no-op.
+     */
+    private List<String> pollUntilDelivered(KinesisEventSourcePoller p, EventSourceMapping esm, int count)
+            throws InterruptedException {
+        List<String> delivered = new CopyOnWriteArrayList<>();
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenAnswer(inv -> {
+            for (JsonNode rec : deliveredRecords(inv.getArgument(1))) {
+                delivered.add(rec.path("kinesis").path("sequenceNumber").asText());
+            }
+            return new InvokeResult();
+        });
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (delivered.size() < count && System.currentTimeMillis() < deadline) {
+            p.pollAndInvoke(esm);
+            Thread.sleep(20);
+        }
+        return delivered;
+    }
+
+    @Test
+    void childShardIsReadOnlyAfterItsParentIsDrained() throws Exception {
+        KinesisService kinesis = realKinesis();
+        String r1 = put(kinesis, "r1");
+        String r2 = put(kinesis, "r2");
+        String r3 = put(kinesis, "r3");
+        kinesis.splitShard("s", SHARD, "170141183460469231731687303715884105728", REGION);
+        String r4 = put(kinesis, "r4");
+        stubFunction();
+        EventSourceMapping esm = esm();
+        esm.setBatchSize(1);
+
+        List<String> delivered = pollUntilDelivered(pollerOver(kinesis, esmStore), esm, 4);
+
+        assertEquals(List.of(r1, r2, r3, r4), delivered);
+    }
+
+    @Test
+    void mergedShardIsReadOnlyAfterBothParentsAreDrained() throws Exception {
+        KinesisService kinesis = realKinesis();
+        kinesis.createStream("m", 2, REGION);
+        String maxHashKey = "340282366920938463463374607431768211455";
+        String parentRecord = putTo(kinesis, "m", "0", "p1");
+        String adjacentFirst = putTo(kinesis, "m", maxHashKey, "a1");
+        String adjacentSecond = putTo(kinesis, "m", maxHashKey, "a2");
+        kinesis.mergeShards("m", "shardId-000000000000", "shardId-000000000001", REGION);
+        String merged = putTo(kinesis, "m", "0", "c1");
+        stubFunction();
+        EventSourceMapping esm = esm();
+        esm.setEventSourceArn("arn:aws:kinesis:us-east-1:000000000000:stream/m");
+        esm.setBatchSize(1);
+
+        List<String> delivered = pollUntilDelivered(pollerOver(kinesis, esmStore), esm, 4);
+
+        assertEquals(4, delivered.size(), "delivered " + delivered);
+        assertEquals(List.of(parentRecord, adjacentFirst, adjacentSecond),
+                delivered.stream().filter(seq -> !seq.equals(merged)).toList());
+        assertEquals(merged, delivered.get(3), "the merged shard's record comes after both parents', delivered "
+                + delivered);
+    }
+
+    private static String putTo(KinesisService kinesis, String stream, String explicitHashKey, String data) {
+        return kinesis.putRecordWithShardId(stream, data.getBytes(StandardCharsets.UTF_8), "pk", explicitHashKey,
+                REGION).sequenceNumber();
+    }
+
     @Test
     void mappingDeletedDuringASuccessfulInvokeIsNotRecreatedAndNoFurtherShardIsInvoked() {
         EsmStore store = new EsmStore(new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT));
