@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.firehose;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -173,7 +174,7 @@ public class FirehoseJsonHandler {
             }
             case "PutRecord" -> {
                 String name = getDeliveryStreamName(request);
-                Record record = mapper.treeToValue(request.get("Record"), Record.class);
+                Record record = readRecord(request.get("Record"), "record");
                 firehoseService.putRecord(name, record);
                 yield Response.ok(Map.of("RecordId", UUID.randomUUID().toString())).build();
             }
@@ -182,7 +183,7 @@ public class FirehoseJsonHandler {
                 List<Record> records = new ArrayList<>();
                 requireListSize(request.get("Records"), "Records", 1, 500);
                 for (JsonNode recordNode : request.get("Records")) {
-                    records.add(mapper.treeToValue(recordNode, Record.class));
+                    records.add(readRecord(recordNode, "records." + (records.size() + 1) + ".member"));
                 }
                 firehoseService.putRecordBatch(name, records);
                 List<Map<String, String>> responses = records.stream()
@@ -285,6 +286,20 @@ public class FirehoseJsonHandler {
             s3.setProcessingConfiguration(null);
         }
     }
+
+    /** The Record shape: Data is required and holds 0 to 1,024,000 bytes. */
+    private Record readRecord(JsonNode node, String member) throws JsonProcessingException {
+        Record record = node == null || node.isNull() ? null : mapper.treeToValue(node, Record.class);
+        FirehoseService.requireRecordData(record, member);
+        if (record.getData().length > MAX_RECORD_DATA_BYTES) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value at '" + member
+                    + ".data' failed to satisfy constraint: Member must have length less than or equal to "
+                    + MAX_RECORD_DATA_BYTES, 400);
+        }
+        return record;
+    }
+
+    private static final int MAX_RECORD_DATA_BYTES = 1_024_000;
 
     /** DeliveryStreamType values the 2015-08-04 model enumerates. */
     private static final java.util.Set<String> DELIVERY_STREAM_TYPES = java.util.Set.of(

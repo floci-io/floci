@@ -976,10 +976,12 @@ public class FirehoseService implements ResourceProvider {
     }
 
     public void putRecord(String streamName, Record record) {
+        requireRecordData(record, "record");
         putRecordBatch(scopedKey(streamName), streamName, List.of(record), null);
     }
 
     public void putRecord(String accountId, String region, String streamName, Record record) {
+        requireRecordData(record, "record");
         putRecordBatch(scopedKey(accountId, region, streamName), streamName, List.of(record), null);
     }
 
@@ -996,6 +998,9 @@ public class FirehoseService implements ResourceProvider {
      *                          or null for records that are not read from a source stream.
      */
     private void putRecordBatch(String streamKey, String streamName, List<Record> records, Runnable checkpointAdvance) {
+        for (int i = 0; i < records.size(); i++) {
+            requireRecordData(records.get(i), "records." + (i + 1) + ".member");
+        }
         DeliveryStreamDescription stream = describeDeliveryStreamByKey(streamKey);
         List<byte[]> buffer = buffers.computeIfAbsent(
                 streamKey, k -> Collections.synchronizedList(new ArrayList<>()));
@@ -1020,6 +1025,24 @@ public class FirehoseService implements ResourceProvider {
                 || bufferedBytes >= bufferingSizeLimitBytes(stream)) {
             flush(streamKey, stream);
         }
+    }
+
+    /**
+     * Data is a required member of the Record shape. A record without it is refused before
+     * anything is buffered: once in the buffer it would fail every flush and be re-queued forever.
+     */
+    static void requireRecordData(Record record, String member) {
+        if (record == null) {
+            throw nullMember(member);
+        }
+        if (record.getData() == null) {
+            throw nullMember(member + ".data");
+        }
+    }
+
+    private static AwsException nullMember(String member) {
+        return new AwsException("ValidationException", "1 validation error detected: Value null at '"
+                + member + "' failed to satisfy constraint: Member must not be null", 400);
     }
 
     private static long bufferingSizeLimitBytes(DeliveryStreamDescription stream) {

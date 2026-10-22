@@ -626,6 +626,35 @@ class FirehoseServiceTest {
     }
 
 
+    @Test
+    void putRecordWithoutDataIsRejectedAndLaterRecordsStillDeliver() {
+        firehoseService.createDeliveryStream("guarded-stream", null);
+
+        AwsException noData = assertThrows(AwsException.class,
+                () -> firehoseService.putRecord("guarded-stream", new Record(null)));
+        assertEquals("ValidationException", noData.getErrorCode());
+        AwsException noRecord = assertThrows(AwsException.class,
+                () -> firehoseService.putRecord("guarded-stream", null));
+        assertEquals("ValidationException", noRecord.getErrorCode());
+
+        firehoseService.putRecord("guarded-stream", new Record("ok".getBytes(StandardCharsets.UTF_8)));
+        firehoseService.flushDueBuffers(clock.instant().plusSeconds(300));
+
+        assertEquals("ok\n", delivered("floci-firehose-results").text());
+    }
+
+    @Test
+    void putRecordBatchWithAnEntryWithoutDataBuffersNothing() {
+        firehoseService.createDeliveryStream("guarded-stream", null);
+
+        AwsException e = assertThrows(AwsException.class, () -> firehoseService.putRecordBatch("guarded-stream",
+                List.of(new Record("first".getBytes(StandardCharsets.UTF_8)), new Record(null))));
+        assertEquals("ValidationException", e.getErrorCode());
+
+        firehoseService.flush("guarded-stream");
+        verifyNothingDelivered();
+    }
+
     // --- Kinesis stream as source -------------------------------------------------
     //
     // A KinesisStreamAsSource delivery stream is never given records by PutRecord: on
