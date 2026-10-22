@@ -469,6 +469,58 @@ class EsmIntegrationTest {
     }
 
     @Test
+    void createLatestKinesisMappingStartsAfterTheNewestRecord() {
+        String streamName = "esm-latest-" + UUID.randomUUID();
+        kinesis("Kinesis_20131202.CreateStream", """
+                {"StreamName": "%s", "ShardCount": 1}
+                """.formatted(streamName));
+        String newestSequence = null;
+        for (String data : List.of("YmVmb3JlLTE=", "YmVmb3JlLTI=")) {
+            newestSequence = kinesis("Kinesis_20131202.PutRecord", """
+                    {"StreamName": "%s", "Data": "%s", "PartitionKey": "pk"}
+                    """.formatted(streamName, data)).getString("SequenceNumber");
+        }
+        String streamArn = "arn:aws:kinesis:" + REGION + ":" + ACCOUNT_ID + ":stream/" + streamName;
+
+        // Disabled so nothing polls: only the starting point captured at creation is under test.
+        String uuid = given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "FunctionName": "%s",
+                          "EventSourceArn": "%s",
+                          "StartingPosition": "LATEST",
+                          "Enabled": false
+                        }
+                        """.formatted(FUNCTION_NAME, streamArn))
+                .when()
+                .post(LAMBDA_BASE + "/event-source-mappings/")
+                .then()
+                .statusCode(202)
+                .extract()
+                .path("UUID");
+
+        assertEquals(newestSequence, esmStore.getForAccount(ACCOUNT_ID, uuid).orElseThrow()
+                .getShardSequenceNumbers().get("shardId-000000000000"));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+        kinesis("Kinesis_20131202.DeleteStream", "{\"StreamName\": \"%s\"}".formatted(streamName));
+    }
+
+    private static JsonPath kinesis(String target, String body) {
+        return given()
+                .header("X-Amz-Target", target)
+                .contentType("application/x-amz-json-1.1")
+                .body(body.getBytes(StandardCharsets.UTF_8))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .jsonPath();
+    }
+
+    @Test
     void createEventSourceMappingRejectsMaximumRecordAgeBelowMinimum() {
         given()
                 .contentType("application/json")

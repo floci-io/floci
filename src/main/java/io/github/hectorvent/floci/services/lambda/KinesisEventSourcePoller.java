@@ -115,6 +115,36 @@ public class KinesisEventSourcePoller implements Resettable {
         if (timerId != null) vertx.cancelTimer(timerId);
     }
 
+    /**
+     * Pins a new LATEST mapping after each shard's newest record, so only later writes are delivered.
+     * A shard with no records stays unpinned and is read from its start, as is a shard created by a
+     * later reshard. A stream that does not exist yet has nothing to skip.
+     */
+    public void initializeStartingPosition(EventSourceMapping esm) {
+        if (!"LATEST".equals(esm.getStartingPosition()) || !esm.getShardSequenceNumbers().isEmpty()) {
+            return;
+        }
+        KinesisStream stream;
+        try {
+            stream = kinesisService.describeStreamForAccount(esm.getAccountId(),
+                    streamNameFromArn(esm.getEventSourceArn()), esm.getRegion());
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("Kinesis ESM {0}: stream {1} does not exist yet, so LATEST is not pinned",
+                    esm.getUuid(), esm.getEventSourceArn());
+            return;
+        }
+        for (KinesisShard shard : stream.getShards()) {
+            List<KinesisRecord> records = shard.getRecords();
+            if (!records.isEmpty()) {
+                esm.getShardSequenceNumbers().put(shard.getShardId(),
+                        records.get(records.size() - 1).getSequenceNumber());
+            }
+        }
+    }
+
     /** Package-private (not private) only so unit tests can drive a single poll directly. */
     void pollAndInvoke(EventSourceMapping esm) {
         if (activePolls.putIfAbsent(esm.getUuid(), Boolean.TRUE) != null) return;
@@ -130,7 +160,12 @@ public class KinesisEventSourcePoller implements Resettable {
                 for (KinesisShard shard : stream.getShards()) {
                     String lastSeq = esm.getShardSequenceNumbers().get(shard.getShardId());
                     String iterator;
-                    if (lastSeq == null) {
+                    if (lastSeq == null && "AT_TIMESTAMP".equals(esm.getStartingPosition())
+                            && esm.getStartingPositionTimestamp() != null) {
+                        iterator = kinesisService.getShardIteratorForAccount(esm.getAccountId(), streamName,
+                                shard.getShardId(), "AT_TIMESTAMP", null, esm.getStartingPositionTimestamp(),
+                                esm.getRegion());
+                    } else if (lastSeq == null) {
                         iterator = kinesisService.getShardIteratorForAccount(esm.getAccountId(),
                                 streamName, shard.getShardId(), "TRIM_HORIZON", null, esm.getRegion());
                     } else {

@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
@@ -23,12 +26,14 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -468,6 +473,109 @@ class KinesisEventSourcePollerTest {
         verify(kinesisService, never()).describeStream(anyString(), anyString());
         verify(kinesisService, never()).getShardIterator(anyString(), anyString(), anyString(), any(), anyString());
         verify(kinesisService, never()).getRecords(anyString(), anyInt(), anyString());
+    }
+
+    /** An in-memory Kinesis service holding the one-shard stream {@code s} the mappings here read. */
+    private static KinesisService realKinesis() {
+        Map<String, AccountAwareStorageBackend<?>> backends = new HashMap<>();
+        StorageFactory factory = mock(StorageFactory.class);
+        when(factory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> backends.computeIfAbsent(
+                        inv.getArgument(0) + "/" + inv.getArgument(1),
+                        k -> AccountAwareStorageBackend.inMemory(ACCOUNT)));
+        KinesisService kinesis = new KinesisService(factory, new RegionResolver(REGION, ACCOUNT));
+        kinesis.createStream("s", 1, REGION);
+        return kinesis;
+    }
+
+    private KinesisEventSourcePoller pollerOver(KinesisService kinesis, EsmStore store) {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambdaConfig = mock(EmulatorConfig.LambdaServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.lambda()).thenReturn(lambdaConfig);
+        when(lambdaConfig.pollIntervalMs()).thenReturn(1000L);
+        return new KinesisEventSourcePoller(mock(Vertx.class), kinesis, executorService,
+                new LambdaTargetResolver(functionStore, aliasStore), store, config, MAPPER, new PipesFilterMatcher(MAPPER));
+    }
+
+    private static String put(KinesisService kinesis, String data) {
+        return kinesis.putRecord("s", data.getBytes(StandardCharsets.UTF_8), "pk", REGION);
+    }
+
+    @Test
+    void atTimestampMappingStartsAtTheFirstRecordWrittenAtOrAfterTheTimestamp() throws Exception {
+        KinesisService kinesis = realKinesis();
+        put(kinesis, "before");
+        Thread.sleep(5);
+        String after = put(kinesis, "after");
+        List<KinesisRecord> written = kinesis.describeStream("s", REGION).getShards().get(0).getRecords();
+        stubFunction();
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
+        EventSourceMapping esm = esm();
+        esm.setStartingPosition("AT_TIMESTAMP");
+        esm.setStartingPositionTimestamp(written.get(1).getApproximateArrivalTimestamp().toEpochMilli());
+
+        pollerOver(kinesis, esmStore).pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        JsonNode records = deliveredRecords(payload.getValue());
+        assertEquals(1, records.size());
+        assertEquals(after, records.get(0).path("kinesis").path("sequenceNumber").asText());
+    }
+
+    @Test
+    void latestMappingDeliversOnlyRecordsWrittenAfterItWasCreated() {
+        KinesisService kinesis = realKinesis();
+        put(kinesis, "before");
+        KinesisEventSourcePoller latestPoller = pollerOver(kinesis, esmStore);
+        EventSourceMapping esm = esm();
+        esm.setStartingPosition("LATEST");
+        latestPoller.initializeStartingPosition(esm);
+        String after = put(kinesis, "after");
+        stubFunction();
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
+
+        latestPoller.pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        JsonNode records = deliveredRecords(payload.getValue());
+        assertEquals(1, records.size());
+        assertEquals(after, records.get(0).path("kinesis").path("sequenceNumber").asText());
+    }
+
+    @Test
+    void latestMappingLeavesAnEmptyShardUnpinnedSoItsFirstRecordIsDelivered() {
+        KinesisService kinesis = realKinesis();
+        KinesisEventSourcePoller latestPoller = pollerOver(kinesis, esmStore);
+        EventSourceMapping esm = esm();
+        esm.setStartingPosition("LATEST");
+        latestPoller.initializeStartingPosition(esm);
+        String first = put(kinesis, "first");
+        stubFunction();
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
+
+        latestPoller.pollAndInvoke(esm);
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        JsonNode records = deliveredRecords(payload.getValue());
+        assertEquals(1, records.size());
+        assertEquals(first, records.get(0).path("kinesis").path("sequenceNumber").asText());
+    }
+
+    @Test
+    void latestMappingOnAStreamThatDoesNotExistYetPinsNothing() {
+        KinesisEventSourcePoller latestPoller = pollerOver(realKinesis(), esmStore);
+        EventSourceMapping esm = esm();
+        esm.setEventSourceArn("arn:aws:kinesis:us-east-1:000000000000:stream/missing");
+        esm.setStartingPosition("LATEST");
+
+        latestPoller.initializeStartingPosition(esm);
+
+        assertTrue(esm.getShardSequenceNumbers().isEmpty());
     }
 
     @Test
