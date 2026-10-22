@@ -104,7 +104,7 @@ The `2015-01-01` API used by `aws es` and Terraform's `aws_elasticsearch_domain`
 | `FLOCI_SERVICES_OPENSEARCH_DATA_VOLUME` | *(unset)* | Data volume for the spawned domain containers. An absolute path bind-mounts `<path>/<account-id>/<region>/<domain-name>` (nested under a `<namespace>` subdirectory when `FLOCI_DOCKER_RESOURCE_NAMESPACE` is set); any other value is a Docker volume name and each domain gets its own `<name>-<account-id>-<region>-<domain-name>` volume of it (`<name>-<namespace>-<account-id>-<region>-<domain-name>` when a resource namespace is set), so no two domains or namespaced deployments sharing a Docker daemon share a data directory. Storage named here is never removed on domain delete. When unset, each domain gets a Floci-managed volume. |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT` | `9400` | Port range start for real mode |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT` | `9499` | Port range end for real mode |
-| `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave containers running after Floci stops |
+| `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave containers running after Floci stops. Applies to shutdown only: `POST /_floci/state/reset` always stops them |
 | `FLOCI_SERVICES_DOCKER_NETWORK` | *(unset)* | Shared Docker network for all container-based services including OpenSearch |
 | `FLOCI_STORAGE_SERVICES_OPENSEARCH_FLUSH_INTERVAL_MS` | `5000` | Flush interval (ms) |
 
@@ -129,6 +129,7 @@ services:
 - **Domain ID format:** `{accountId}/{domainName}`
 - **`Created` flag:** `true` immediately in mock mode; set to `true` by the readiness poller in real mode once `/_cluster/health` reports `green` or `yellow`.
 - **`Processing` flag:** `false` immediately in mock mode; `true` until the container is ready in real mode.
+- **State reset:** `POST /_floci/state/reset` (or `/_floci/state/nuke`) wipes the domains of every account, so in real mode it first stops each domain's container, returns its host port to the configured range, and removes its data volume by the same rules as `DeleteDomain`. This happens even with `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN=true`, which only governs shutdown.
 - **Engine version default:** `OpenSearch_2.19`
 - **Supported engine versions:** `OpenSearch_3.6`, `OpenSearch_3.5`, `OpenSearch_3.4`, `OpenSearch_3.3`, `OpenSearch_3.2`, `OpenSearch_3.1`, `OpenSearch_3.0`, `OpenSearch_2.19`, `OpenSearch_2.17`, `OpenSearch_2.15`, `OpenSearch_2.13`, `OpenSearch_2.11`, `OpenSearch_2.9`, `OpenSearch_2.7`, `OpenSearch_2.5`, `OpenSearch_2.3`, `OpenSearch_1.3`, `OpenSearch_1.2`, `Elasticsearch_7.10`, `Elasticsearch_7.9`, `Elasticsearch_7.8`
 - **Version validation:** `CreateDomain`, `UpdateDomainConfig`, and `UpgradeDomain` reject unknown engine versions with `ValidationException`. `UpgradeDomain` also rejects targets that aren't reachable from the current version per AWS's documented upgrade matrix.

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -38,10 +39,11 @@ import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Predicate;
 
 @ApplicationScoped
-public class OpenSearchService implements ResourceProvider {
+public class OpenSearchService implements ResourceProvider, Resettable {
 
     private static final Logger LOG = Logger.getLogger(OpenSearchService.class);
 
@@ -52,6 +54,11 @@ public class OpenSearchService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final OpenSearchDomainManager domainManager;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
+    /** Readiness writes hold the read lock; a reset takes the write lock to wait out the one in progress. */
+    private final ReentrantReadWriteLock quiesceLock = new ReentrantReadWriteLock();
+    private volatile boolean quiesced;
+    /** Completed resets: a poll writes only while none is in progress and none completed since the poll began. */
+    private volatile long resets;
 
     @Inject
     public OpenSearchService(StorageFactory storageFactory, EmulatorConfig config,
@@ -85,6 +92,49 @@ public class OpenSearchService implements ResourceProvider {
             for (Domain domain : allDomains()) {
                 domainManager.stopDomain(domain);
             }
+        }
+    }
+
+    /**
+     * The reset wipes every account's domain records, so their containers are stopped and their
+     * host ports and storage released first, whatever keep-running-on-shutdown says: nothing would
+     * be left to stop them by, or to give the ports back.
+     */
+    @Override
+    public void beforeReset() {
+        quiesceLock.writeLock().lock();
+        try {
+            quiesced = true;
+        } finally {
+            quiesceLock.writeLock().unlock();
+        }
+        if (config.services().opensearch().mock()) {
+            return;
+        }
+        for (Domain domain : allDomains()) {
+            try {
+                domainManager.stopDomain(domain);
+                domainManager.removeDomainStorage(domain);
+            } catch (RuntimeException e) {
+                LOG.warnv("Could not stop OpenSearch domain {0} for the reset: {1}",
+                        domain.getDomainName(), e.getMessage());
+            }
+        }
+    }
+
+    @Override
+    public void clear() {
+        // Nothing to wipe: the domain records live in storage, which the reset has already cleared.
+    }
+
+    @Override
+    public void afterReset() {
+        quiesceLock.writeLock().lock();
+        try {
+            resets++;
+            quiesced = false;
+        } finally {
+            quiesceLock.writeLock().unlock();
         }
     }
 
@@ -395,18 +445,31 @@ public class OpenSearchService implements ResourceProvider {
     }
 
     void pollReadiness() {
+        long resetsAtStart = resets;
         try {
             for (Domain domain : allDomains()) {
                 if (domain.isProcessing() && domainManager.isReady(domain)) {
-                    domain.setProcessing(false);
-                    putDomain(domain);
-                    LOG.infov("OpenSearch domain {0} is ready at {1}",
-                            domain.getDomainName(), domain.getEndpoint());
+                    markReady(domain, resetsAtStart);
                 }
             }
         } catch (RuntimeException e) {
             LOG.warn("OpenSearch readiness poll failed; will retry", e);
         }
+    }
+
+    /** Skipped once a reset has begun since the poll read the domain, or it would write a wiped record back. */
+    private void markReady(Domain domain, long resetsAtStart) {
+        quiesceLock.readLock().lock();
+        try {
+            if (quiesced || resets != resetsAtStart) {
+                return;
+            }
+            domain.setProcessing(false);
+            putDomain(domain);
+        } finally {
+            quiesceLock.readLock().unlock();
+        }
+        LOG.infov("OpenSearch domain {0} is ready at {1}", domain.getDomainName(), domain.getEndpoint());
     }
 
     private List<Domain> allDomains() {

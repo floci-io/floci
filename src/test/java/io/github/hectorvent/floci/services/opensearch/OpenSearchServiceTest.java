@@ -3,24 +3,31 @@ package io.github.hectorvent.floci.services.opensearch;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.opensearch.model.Domain;
 import io.github.hectorvent.floci.services.opensearch.model.VolumeOwnership;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -31,6 +38,7 @@ import static org.mockito.Mockito.when;
 class OpenSearchServiceTest {
 
     private static final String ACCOUNT = "000000000000";
+    private static final String OTHER_ACCOUNT = "111111111111";
 
     private OpenSearchService service;
     private OpenSearchDomainManager domainManager;
@@ -139,6 +147,95 @@ class OpenSearchServiceTest {
         verify(domainManager, Mockito.never()).stopDomain(any());
     }
 
+    /**
+     * A reset wipes every account's domain records, so it stops their containers first whatever
+     * keep-running-on-shutdown says, or they would keep running, and keep their host ports, with no
+     * record left of them.
+     */
+    @Test
+    void resetStopsTheDomainsOfEveryAccountEvenWhenRetentionIsEnabled() {
+        when(domainManager.tryStartDomain(any())).thenReturn(true);
+        when(osConfig.keepRunningOnShutdown()).thenReturn(true);
+        service.createDomain("east-domain", "OpenSearch_2.11", null, null, null, "us-east-1");
+        service.createDomain("west-domain", "OpenSearch_2.11", null, null, null, "us-west-2");
+        domainStore.putForAccount(OTHER_ACCOUNT, "us-east-1::other-domain",
+                domainOf(OTHER_ACCOUNT, "other-domain", "us-east-1"));
+
+        Resettable resettable = assertInstanceOf(Resettable.class, service);
+        resettable.beforeReset();
+
+        ArgumentCaptor<Domain> stopped = ArgumentCaptor.forClass(Domain.class);
+        verify(domainManager, times(3)).stopDomain(stopped.capture());
+        assertEquals(Set.of("east-domain", "west-domain", "other-domain"),
+                stopped.getAllValues().stream().map(Domain::getDomainName).collect(Collectors.toSet()));
+        ArgumentCaptor<Domain> released = ArgumentCaptor.forClass(Domain.class);
+        verify(domainManager, times(3)).removeDomainStorage(released.capture());
+        assertEquals(Set.of("east-domain", "west-domain", "other-domain"),
+                released.getAllValues().stream().map(Domain::getDomainName).collect(Collectors.toSet()));
+    }
+
+    @Test
+    void resetStillStopsTheOtherDomainsWhenOneFailsToStop() {
+        when(domainManager.tryStartDomain(any())).thenReturn(true);
+        service.createDomain("broken-domain", "OpenSearch_2.11", null, null, null, "us-east-1");
+        service.createDomain("healthy-domain", "OpenSearch_2.11", null, null, null, "us-east-1");
+        doThrow(new RuntimeException("docker stop failed"))
+                .when(domainManager).stopDomain(argThat(d -> "broken-domain".equals(d.getDomainName())));
+
+        Resettable resettable = assertInstanceOf(Resettable.class, service);
+        resettable.beforeReset();
+
+        verify(domainManager).stopDomain(argThat(d -> "healthy-domain".equals(d.getDomainName())));
+        verify(domainManager).removeDomainStorage(argThat(d -> "healthy-domain".equals(d.getDomainName())));
+    }
+
+    @Test
+    void resetInMockModeTouchesNoContainers() {
+        when(osConfig.mock()).thenReturn(true);
+        service.createDomain("mock-domain", "OpenSearch_2.11", null, null, null, "us-east-1");
+
+        Resettable resettable = assertInstanceOf(Resettable.class, service);
+        resettable.beforeReset();
+
+        verify(domainManager, Mockito.never()).stopDomain(any());
+        verify(domainManager, Mockito.never()).removeDomainStorage(any());
+    }
+
+    /** A poll that read the domains before the wipe must not write one back after it. */
+    @Test
+    void readinessPollerDoesNotRestoreADomainWipedByAReset() {
+        when(domainManager.tryStartDomain(any())).thenReturn(true);
+        service.createDomain("polled-domain", "OpenSearch_2.11", null, null, null, "us-east-1");
+        Resettable resettable = assertInstanceOf(Resettable.class, service);
+        when(domainManager.isReady(any())).thenAnswer(invocation -> {
+            resettable.beforeReset();
+            domainStore.clear();
+            resettable.clear();
+            resettable.afterReset();
+            return true;
+        });
+
+        service.pollReadiness();
+
+        assertEquals(Set.of(), rawStore.keys());
+    }
+
+    @Test
+    void readinessPollerResumesAfterAReset() {
+        Resettable resettable = assertInstanceOf(Resettable.class, service);
+        resettable.beforeReset();
+        domainStore.clear();
+        resettable.clear();
+        resettable.afterReset();
+        when(domainManager.tryStartDomain(any())).thenReturn(true);
+        when(domainManager.isReady(any())).thenReturn(true);
+        service.createDomain("after-reset", "OpenSearch_2.11", null, null, null, "us-east-1");
+
+        service.pollReadiness();
+
+        assertFalse(service.describeDomain("after-reset", "us-east-1").isProcessing());
+    }
+
     /** Before domains were keyed by Region, each sat under its bare name inside the account's partition. */
     @Test
     void legacyNameKeyedDomainIsServedOnlyInItsArnRegionAndRekeyedOnRead() {
@@ -197,11 +294,15 @@ class OpenSearchServiceTest {
     }
 
     private static Domain legacyDomain(String name, String region) {
+        return domainOf(ACCOUNT, name, region);
+    }
+
+    private static Domain domainOf(String accountId, String name, String region) {
         Domain domain = new Domain();
         domain.setDomainName(name);
-        domain.setDomainId(ACCOUNT + "/" + name);
-        domain.setAccountId(ACCOUNT);
-        domain.setArn("arn:aws:es:" + region + ":" + ACCOUNT + ":domain/" + name);
+        domain.setDomainId(accountId + "/" + name);
+        domain.setAccountId(accountId);
+        domain.setArn("arn:aws:es:" + region + ":" + accountId + ":domain/" + name);
         domain.setEngineVersion("OpenSearch_2.11");
         return domain;
     }
