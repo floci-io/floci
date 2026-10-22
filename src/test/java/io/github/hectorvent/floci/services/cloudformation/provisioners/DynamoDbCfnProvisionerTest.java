@@ -1113,6 +1113,22 @@ class DynamoDbCfnProvisionerTest {
         assertTrue(r.getAttributes().containsKey(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR));
     }
 
+    /** A committed update is never rolled back, so its snapshot does not outlive the commit. */
+    @Test
+    void committedUpdateLeavesNoSnapshotToRollBackTo() throws Exception {
+        existingTable(table(false));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}"),
+                updateCtx(TABLE_NAME));
+
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+
+        assertFalse(cleanup.applicable());
+        assertFalse(r.getAttributes().containsKey(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR));
+        assertFalse(provisioner.rollbackUpdate(r));
+    }
+
     /**
      * A snapshot describes the update in flight. One left by an earlier update is dropped, so a
      * replacing update, which takes none, cannot roll the new table back to the old one's state.

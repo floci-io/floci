@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -185,6 +186,54 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
         deleteStack(stack);
     }
 
+    /**
+     * A committed update is never rolled back. A later replacing update whose new table cannot be
+     * deleted ends UPDATE_ROLLBACK_FAILED, and retrying that rollback must not put the table back to
+     * its state before the committed update.
+     */
+    @Test
+    void retryingAFailedReplacementRollbackKeepsTheCommittedTags() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-replay-" + suffix;
+        String table = "ttl-replay-table-" + suffix;
+        String replacement = "ttl-replay-new-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", "", ""));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        String tableArn = dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(200)
+            .extract().path("Table.TableArn");
+        cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(table, "prod", "", ""));
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+        failNextUpdateTimeToLive();
+        Mockito.doThrow(new IllegalStateException("simulated DeleteTable failure"))
+                .doCallRealMethod()
+                .when(dynamoDbService)
+                .deleteTable(anyString(), anyString());
+        try {
+            cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(replacement, "prod", TTL_ENABLED, ""));
+            assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+            continueUpdateRollback(stack, null);
+            CfnStackWaits.StackState retried = CfnStackWaits.awaitTerminal(stack, CFN_AUTH);
+            assertEquals("UPDATE_ROLLBACK_FAILED", retried.status(), retried.reason());
+        } finally {
+            Mockito.doCallRealMethod().when(dynamoDbService)
+                    .updateTimeToLive(anyString(), anyString(), anyBoolean(), anyString());
+            Mockito.doCallRealMethod().when(dynamoDbService).deleteTable(anyString(), anyString());
+        }
+        dynamoDb("ListTagsOfResource", "{\"ResourceArn\": \"" + tableArn + "\"}")
+            .statusCode(200)
+            .body("Tags.Value", contains("prod"));
+
+        continueUpdateRollback(stack, "Orders");
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+        dynamoDb("DeleteTable", "{\"TableName\": \"" + replacement + "\"}").statusCode(200);
+        deleteStack(stack);
+    }
+
     /** A create that fails after the table exists rolls back to no table, not to an orphan. */
     @Test
     void aCreateThatFailsAfterTheTableExistsLeavesNoTable() {
@@ -305,6 +354,18 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
                 .doCallRealMethod()
                 .when(dynamoDbService)
                 .updateTimeToLive(anyString(), anyString(), anyBoolean(), anyString());
+    }
+
+    private void continueUpdateRollback(String stack, String resourceToSkip) {
+        RequestSpecification request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "ContinueUpdateRollback")
+            .formParam("StackName", stack);
+        if (resourceToSkip != null) {
+            request.formParam("ResourcesToSkip.member.1", resourceToSkip);
+        }
+        request.when().post("/").then().statusCode(200);
     }
 
     private void cloudFormation(String stack, String action, String template) {

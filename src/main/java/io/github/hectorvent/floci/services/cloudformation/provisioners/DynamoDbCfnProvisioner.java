@@ -667,6 +667,18 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * The engine calls this for every resource once a stack update commits. A committed update is
+     * never rolled back, so its snapshot is dropped here: left on the resource, a later failed update
+     * that puts this resource back would restore it, and a retried rollback would return the table to
+     * its state before this update. A table has no replacement cleanup to run.
+     */
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);
+        return UpdateCleanupResult.notApplicable();
+    }
+
+    /**
      * Puts back the tags, stream setting and TTL setting an in-place table update changed. All
      * three go back or none is claimed: restoring one alone would report a rollback while the
      * others stayed changed. Only an in-place {@code AWS::DynamoDB::Table} update takes the
