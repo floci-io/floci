@@ -6172,6 +6172,24 @@ class CognitoServiceTest {
     }
 
     @Test
+    void tokenIssuedAtMillisReadsTheMintInstantFromAVersion7JtiOnlyWithinItsIatSecond() {
+        long mintedAt = 1_760_000_000_123L;
+        String jti = CognitoService.timeOrderedJti(mintedAt);
+        assertEquals(7, UUID.fromString(jti).version());
+        assertEquals(2, UUID.fromString(jti).variant());
+        assertNotEquals(jti, CognitoService.timeOrderedJti(mintedAt), "a jti must stay unique within a millisecond");
+
+        assertEquals(mintedAt, CognitoService.tokenIssuedAtMillis(1_760_000_000L, jti));
+        // A jti that disagrees with iat, a random UUID, a trigger's free-form value or none at all
+        // all count as minted at the start of the iat second.
+        assertEquals(1_760_000_001_000L, CognitoService.tokenIssuedAtMillis(1_760_000_001L, jti));
+        assertEquals(1_760_000_000_000L,
+                CognitoService.tokenIssuedAtMillis(1_760_000_000L, UUID.randomUUID().toString()));
+        assertEquals(1_760_000_000_000L, CognitoService.tokenIssuedAtMillis(1_760_000_000L, "custom-jti"));
+        assertEquals(1_760_000_000_000L, CognitoService.tokenIssuedAtMillis(1_760_000_000L, null));
+    }
+
+    @Test
     void everySelfServiceEntryPointRejectsInvalidAccessToken() {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = service.createUserPoolClient(

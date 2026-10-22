@@ -266,7 +266,7 @@ further divergences, both deliberate:
 | AdminEnableUser | Re-enables a disabled user. |
 | AdminResetUserPassword | Clears a user's password and sets the status to `RESET_REQUIRED`, so sign-in fails with `PasswordResetRequiredException`. Floci sends no reset code: finish with `ForgotPassword` and `ConfirmForgotPassword`, or `AdminSetUserPassword`. Refused when the pool's account recovery is `admin_only`. |
 | AdminSetUserMFAPreference | Sets a user's SMS, email and software-token MFA preferences from `SMSMfaSettings`, `EmailMfaSettings` and `SoftwareTokenMfaSettings`, and passkey MFA from `WebAuthnMfaSettings` (see [Passkeys](#passkeys)). See [MFA preferences](#mfa-preferences). |
-| AdminUserGlobalSignOut | Revokes the access, ID and refresh tokens issued to a user. |
+| AdminUserGlobalSignOut | Revokes the access, ID and refresh tokens issued to a user before the sign-out. Tokens from a later sign-in are valid, even within the same second. |
 | AdminLinkProviderForUser | Links an external IdP identity to an existing user's `identities` attribute. |
 
 #### AdminCreateUser invitations
@@ -322,7 +322,7 @@ passwordless pool generates a password. `TemporaryPasswordValidityDays` is not e
 | DeleteUser | Deletes the authenticated access-token user and removes them from their groups. An API Gateway Cognito authorizer rejects the user's existing tokens afterwards. |
 | ChangePassword | Changes the authenticated user's password. |
 | SetUserMFAPreference | Sets the authenticated access-token user's SMS, email and software-token MFA preferences from `SMSMfaSettings`, `EmailMfaSettings` and `SoftwareTokenMfaSettings`, and passkey MFA from `WebAuthnMfaSettings` (see [Passkeys](#passkeys)). See [MFA preferences](#mfa-preferences). |
-| GlobalSignOut | Revokes the access, ID and refresh tokens issued to the authenticated access-token user. |
+| GlobalSignOut | Revokes the access, ID and refresh tokens issued to the authenticated access-token user before the sign-out. Tokens from a later sign-in are valid, even within the same second. |
 | StartWebAuthnRegistration | Returns the `CredentialCreationOptions` to register a passkey for the authenticated access-token user. See [Passkeys](#passkeys). |
 | CompleteWebAuthnRegistration | Verifies the `RegistrationResponseJSON` in `Credential` and registers the passkey. |
 | ListWebAuthnCredentials | Lists the authenticated access-token user's passkeys, oldest first, up to 20 per page. `NextToken` is a cursor on the last passkey listed, so deleting a passkey between two pages skips none. |

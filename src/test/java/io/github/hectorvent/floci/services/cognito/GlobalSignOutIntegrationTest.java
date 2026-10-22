@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.Base64;
 import java.util.UUID;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
@@ -107,7 +108,9 @@ class GlobalSignOutIntegrationTest {
 
     @Test
     @Order(4)
-    void globalSignOutSucceeds() {
+    void globalSignOutSucceeds() throws Exception {
+        // Signing out early in a second lets newLoginSucceedsAfterSignOut log in again within it.
+        awaitStartOfSecond();
         // GlobalSignOut must return HTTP 200 with an empty body
         cognitoAction("GlobalSignOut", """
                 {"AccessToken":"%s"}
@@ -174,9 +177,13 @@ class GlobalSignOutIntegrationTest {
         assertNotEquals(accessToken, newAccess, "New session must issue a new AccessToken");
         assertNotEquals(refreshToken, newRefresh, "New session must issue a new RefreshToken");
 
-        // The freshly issued refresh token must be usable — tokens minted after sign-out are valid.
-        // (Verified via the refresh flow, whose millisecond-granular iat reliably post-dates the
-        // revocation timestamp even when the new login lands in the same wall-clock second.)
+        // Tokens minted after the sign-out are valid, even within the second it happened in.
+        cognitoAction("GetUser", """
+                {"AccessToken":"%s"}
+                """.formatted(newAccess))
+                .then()
+                .statusCode(200);
+
         JsonNode refreshed = cognitoJson("InitiateAuth", """
                 {
                   "ClientId": "%s",
@@ -252,6 +259,58 @@ class GlobalSignOutIntegrationTest {
 
         assertEquals("InvalidParameterException", body.path("__type").asText(),
                 "GlobalSignOut with a null AccessToken must fail with InvalidParameterException, body was: " + body);
+    }
+
+    @Test
+    @Order(14)
+    void signOutRevokesOnlyTheTokensMintedBeforeItWithinItsSecond() throws Exception {
+        String username = "carol";
+        cognitoAction("AdminCreateUser", """
+                {"UserPoolId":"%s","Username":"%s"}
+                """.formatted(poolId, username)).then().statusCode(200);
+        cognitoAction("AdminSetUserPassword", """
+                {"UserPoolId":"%s","Username":"%s","Password":"%s","Permanent":true}
+                """.formatted(poolId, username, PASSWORD)).then().statusCode(200);
+
+        awaitStartOfSecond();
+        String before = passwordSignIn(username);
+        cognitoAction("GlobalSignOut", """
+                {"AccessToken":"%s"}
+                """.formatted(before)).then().statusCode(200);
+        String after = passwordSignIn(username);
+
+        assertEquals(issuedAt(before), issuedAt(after),
+                "both access tokens must be minted in the sign-out's second");
+        JsonNode rejected = cognitoJsonAny("GetUser", """
+                {"AccessToken":"%s"}
+                """.formatted(before));
+        assertEquals("NotAuthorizedException", rejected.path("__type").asText(),
+                "A token minted before the sign-out must stay revoked, body was: " + rejected);
+        cognitoAction("GetUser", """
+                {"AccessToken":"%s"}
+                """.formatted(after)).then().statusCode(200);
+    }
+
+    private static String passwordSignIn(String username) throws Exception {
+        JsonNode auth = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": {"USERNAME": "%s", "PASSWORD": "%s"}
+                }
+                """.formatted(clientId, username, PASSWORD));
+        return auth.path("AuthenticationResult").path("AccessToken").asText();
+    }
+
+    private static long issuedAt(String jwt) throws Exception {
+        return MAPPER.readTree(Base64.getUrlDecoder().decode(jwt.split("\\.")[1])).path("iat").asLong();
+    }
+
+    /** Waits until early in a wall-clock second, so the next few calls all land within it. */
+    private static void awaitStartOfSecond() throws InterruptedException {
+        while (System.currentTimeMillis() % 1000 >= 100) {
+            Thread.sleep(5);
+        }
     }
 
     /** Build an unsigned JWT-shaped access token — the emulator decodes the payload without verifying the signature. */

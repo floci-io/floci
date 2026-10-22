@@ -4771,7 +4771,8 @@ public class CognitoService implements ResourceProvider {
                                      ClaimsOverride override, String originJti, List<String> accessScopes,
                                      Long authTime) {
         String header = encodeJwtHeader(pool);
-        long now = System.currentTimeMillis() / 1000L;
+        long nowMillis = System.currentTimeMillis();
+        long now = nowMillis / 1000L;
         long lifetimeSeconds = resolveTokenLifetimeSeconds(client, type);
 
         Map<String, Object> claims = new LinkedHashMap<>();
@@ -4793,7 +4794,7 @@ public class CognitoService implements ResourceProvider {
         }
 
         // Add JWT ID (jti) claim for token revocation support
-        String jti = UUID.randomUUID().toString();
+        String jti = timeOrderedJti(nowMillis);
         claims.put("jti", jti);
 
         if (("access".equals(type) || "id".equals(type)) && originJti != null && isTokenRevocationEnabled(client)) {
@@ -5723,7 +5724,7 @@ public class CognitoService implements ResourceProvider {
                     ? textClaim(claims, "username") : textClaim(claims, "cognito:username");
             if (username != null) {
                 validateUserNotGloballySignedOut(username, poolId, tokenUse,
-                        requiredNumericClaim(claims, "iat"));
+                        tokenIssuedAtMillis(requiredNumericClaim(claims, "iat"), jti));
             }
             boolean clientCredentialsToken = "access".equals(tokenUse) && subject.equals(clientId);
             if (!clientCredentialsToken) {
@@ -5782,7 +5783,7 @@ public class CognitoService implements ResourceProvider {
             if (originJti != null) {
                 validateTokenNotRevoked(originJti, poolId, "access");
             }
-            validateUserNotGloballySignedOut(username, poolId, "access", issuedAt);
+            validateUserNotGloballySignedOut(username, poolId, "access", tokenIssuedAtMillis(issuedAt, jti));
             return new VerifiedAccessToken(username, poolId, subject, clientId);
         } catch (AwsException e) {
             throw e;
@@ -5971,8 +5972,47 @@ public class CognitoService implements ResourceProvider {
 
 
     /**
+     * A version 7 UUID for an access or ID token's {@code jti}: to a client it is just a unique id,
+     * but it records the millisecond the token was minted, which {@code iat} truncates to the second.
+     * Global sign-out needs that to keep a token minted just after it valid while the tokens minted
+     * earlier in the same second stay revoked.
+     */
+    static String timeOrderedJti(long epochMillis) {
+        UUID random = UUID.randomUUID();
+        long mostSignificantBits = (epochMillis << 16) | 0x7000L | (random.getMostSignificantBits() & 0x0FFFL);
+        return new UUID(mostSignificantBits, random.getLeastSignificantBits()).toString();
+    }
+
+    /**
+     * When an access or ID token was minted, in epoch milliseconds: the instant its {@link
+     * #timeOrderedJti} records when that falls within its {@code iat} second, otherwise the start of
+     * that second, so a token without one counts as minted before a sign-out in the same second.
+     */
+    static long tokenIssuedAtMillis(long iatSeconds, String jti) {
+        long startOfSecond = iatSeconds * 1000L;
+        if (jti == null) {
+            return startOfSecond;
+        }
+        try {
+            UUID uuid = UUID.fromString(jti);
+            if (uuid.version() == 7 && uuid.variant() == 2) {
+                long mintedAt = uuid.getMostSignificantBits() >>> 16;
+                if (mintedAt / 1000L == iatSeconds) {
+                    return mintedAt;
+                }
+            }
+        } catch (IllegalArgumentException ignored) {
+            // A pre token generation trigger may replace jti with any string; such a token
+            // keeps the conservative second-level comparison.
+        }
+        return startOfSecond;
+    }
+
+    /**
      * Check if a user has been globally signed out (affects all their tokens).
      * This method should be called in addition to validateTokenNotRevoked.
+     * {@code iat} is in epoch milliseconds: a refresh token's issue time, or the {@link
+     * #tokenIssuedAtMillis} of an access or ID token. A value in epoch seconds is still read as such.
      */
     private void validateUserNotGloballySignedOut(String username, String poolId, String tokenType, long iat) {
         String globalRevokeKey = revokedTokenKey(poolId, "global:" + username);
