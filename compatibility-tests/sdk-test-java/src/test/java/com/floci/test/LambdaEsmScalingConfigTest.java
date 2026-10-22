@@ -99,6 +99,14 @@ class LambdaEsmScalingConfigTest {
                 GetEventSourceMappingRequest.builder().uuid(created.uuid()).build());
         assertThat(fetched.scalingConfig()).isNotNull();
         assertThat(fetched.scalingConfig().maximumConcurrency()).isEqualTo(7);
+
+        deleteMapping(created.uuid());
+    }
+
+    /** A function has at most one mapping per queue, so a test removes its mapping before the next one creates one. */
+    private static void deleteMapping(String uuid) {
+        lambda.deleteEventSourceMapping(DeleteEventSourceMappingRequest.builder().uuid(uuid).build());
+        createdEsmUuids.remove(uuid);
     }
 
     @Test
@@ -115,6 +123,8 @@ class LambdaEsmScalingConfigTest {
         // SDK models an omitted object as null (or an unset builder); both are acceptable
         assertThat(created.scalingConfig() == null
                 || created.scalingConfig().maximumConcurrency() == null).isTrue();
+
+        deleteMapping(created.uuid());
     }
 
     @Test

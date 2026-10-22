@@ -1053,6 +1053,8 @@ For SQS mappings, a function error returns every delivered message to the queue 
 
 A DynamoDB Streams mapping created with `StartingPosition: LATEST` delivers only records written after it is created, so a stream that is empty at creation delivers everything written later. After a restart it still resumes from the trim horizon, because native stream records are volatile. Deleting or disabling a mapping stops any poll that has not yet invoked the function. An invocation already running completes, but its checkpoint is not saved: a deleted mapping is never recreated and its result is dropped, and a disabled mapping re-reads that batch when it is enabled again.
 
+A function has at most one mapping per SQS queue, Kinesis stream, or DynamoDB stream: `CreateEventSourceMapping` rejects a second one with `ResourceConflictException` (HTTP 409) naming the existing mapping's UUID. A version or alias qualifier makes a different function, while `$LATEST` is the unqualified function.
+
 ```bash
 # SQS trigger
 QUEUE_ARN=$(aws sqs get-queue-attributes \

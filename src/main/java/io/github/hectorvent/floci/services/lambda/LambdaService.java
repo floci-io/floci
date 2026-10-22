@@ -209,6 +209,8 @@ public class LambdaService implements ResourceProvider {
     private final ConcurrentHashMap<String, Object> concurrencyOpLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> policyMutationLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
+    /** Makes the duplicate check and the save of a new event source mapping one step. */
+    private final Object eventSourceMappingCreateLock = new Object();
 
     /**
      * Package-private constructor for testing without CDI. Config defaults
@@ -1584,17 +1586,49 @@ public class LambdaService implements ResourceProvider {
         esm.setTags(requestTags(request));
         esm.setLastModified(System.currentTimeMillis());
 
-        if (eventSourceArn != null && eventSourceArn.contains(":dynamodb:")) {
-            dynamodbStreamsPoller.initializeStartingPosition(esm);
-        } else if (eventSourceArn != null && eventSourceArn.contains(":kinesis:")) {
-            kinesisPoller.initializeStartingPosition(esm);
+        synchronized (eventSourceMappingCreateLock) {
+            if (eventSourceArn != null) {
+                rejectDuplicateMapping(eventSourceArn, esm.getFunctionArn(), functionName);
+            }
+            if (eventSourceArn != null && eventSourceArn.contains(":dynamodb:")) {
+                dynamodbStreamsPoller.initializeStartingPosition(esm);
+            } else if (eventSourceArn != null && eventSourceArn.contains(":kinesis:")) {
+                kinesisPoller.initializeStartingPosition(esm);
+            }
+            esmStore.save(esm);
         }
-        esmStore.save(esm);
         if (enabled) {
             startPollingHelper(esm);
         }
         LOG.infov("Created ESM {0}: {1} → {2}", esm.getUuid(), eventSourceArn, resolvedName);
         return esm;
+    }
+
+    /**
+     * AWS keeps one mapping per event source ARN and function. A qualifier names a different
+     * function, except {@code $LATEST}, which is the unqualified function.
+     */
+    private void rejectDuplicateMapping(String eventSourceArn, String functionArn, String requestedFunctionName) {
+        String function = withoutLatestQualifier(functionArn);
+        for (EventSourceMapping existing : esmStore.list()) {
+            if (eventSourceArn.equals(existing.getEventSourceArn())
+                    && function.equals(withoutLatestQualifier(existing.getFunctionArn()))) {
+                String message = eventSourceArn.contains(":sqs:")
+                        ? "An event source mapping with SQS arn (\" " + eventSourceArn + " \") and function (\" "
+                                + requestedFunctionName + " \") already exists. Please update or delete the existing"
+                                + " mapping with UUID " + existing.getUuid()
+                        : "The event source arn (\" " + eventSourceArn + " \") and function (\" "
+                                + requestedFunctionName + " \") provided mapping already exists. Please update or"
+                                + " delete the existing mapping with UUID " + existing.getUuid();
+                throw new AwsException("ResourceConflictException", message, 409);
+            }
+        }
+    }
+
+    private static String withoutLatestQualifier(String functionArn) {
+        return functionArn != null && functionArn.endsWith(":$LATEST")
+                ? functionArn.substring(0, functionArn.length() - ":$LATEST".length())
+                : functionArn;
     }
 
     private EventSourceMapping.DestinationConfig parseDestinationConfig(Map<String, Object> request) {

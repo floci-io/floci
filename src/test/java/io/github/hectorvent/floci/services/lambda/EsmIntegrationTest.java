@@ -11,8 +11,14 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -35,6 +41,10 @@ class EsmIntegrationTest {
     private static final String REGION = "us-east-1";
     private static final String QUEUE_ARN =
             "arn:aws:sqs:" + REGION + ":" + ACCOUNT_ID + ":" + QUEUE_NAME;
+    /** A function may have only one mapping per queue, so a test holding two mappings at once uses both queues. */
+    private static final String SECOND_QUEUE_NAME = "esm-test-queue-2";
+    private static final String SECOND_QUEUE_ARN =
+            "arn:aws:sqs:" + REGION + ":" + ACCOUNT_ID + ":" + SECOND_QUEUE_NAME;
     private static final String FUNCTION_ARN =
             "arn:aws:lambda:" + REGION + ":" + ACCOUNT_ID + ":function:" + FUNCTION_NAME;
     private static final String STREAM_ARN =
@@ -55,15 +65,17 @@ class EsmIntegrationTest {
     @Test
     @Order(1)
     void setupSqsQueue() {
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "CreateQueue")
-            .formParam("QueueName", QUEUE_NAME)
-            .formParam("Version", "2012-11-05")
-        .when()
-            .post(SQS_BASE)
-        .then()
-            .statusCode(200);
+        for (String queueName : List.of(QUEUE_NAME, SECOND_QUEUE_NAME)) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateQueue")
+                .formParam("QueueName", queueName)
+                .formParam("Version", "2012-11-05")
+            .when()
+                .post(SQS_BASE)
+            .then()
+                .statusCode(200);
+        }
     }
 
     @Test
@@ -125,7 +137,7 @@ class EsmIntegrationTest {
                     "BatchSize": 3,
                     "FunctionResponseTypes": ["ReportBatchItemFailures"]
                 }
-                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+                """.formatted(FUNCTION_NAME, SECOND_QUEUE_ARN))
         .when()
             .post(LAMBDA_BASE + "/event-source-mappings")
         .then()
@@ -505,6 +517,116 @@ class EsmIntegrationTest {
 
         given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
         kinesis("Kinesis_20131202.DeleteStream", "{\"StreamName\": \"%s\"}".formatted(streamName));
+    }
+
+    @Test
+    void createEventSourceMappingRejectsADuplicateSqsMapping() {
+        assertDuplicateMappingIsRejected(
+                "arn:aws:sqs:" + REGION + ":" + ACCOUNT_ID + ":esm-duplicate-" + UUID.randomUUID(), FUNCTION_NAME);
+    }
+
+    @Test
+    void createEventSourceMappingRejectsADuplicateKinesisMapping() {
+        assertDuplicateMappingIsRejected(
+                "arn:aws:kinesis:" + REGION + ":" + ACCOUNT_ID + ":stream/esm-duplicate-" + UUID.randomUUID(),
+                FUNCTION_ARN + ":$LATEST");
+    }
+
+    @Test
+    void createEventSourceMappingRejectsADuplicateDynamoDbStreamsMapping() {
+        assertDuplicateMappingIsRejected("arn:aws:dynamodb:" + REGION + ":" + ACCOUNT_ID + ":table/esm-duplicate-"
+                + UUID.randomUUID() + "/stream/2026-01-01T00:00:00.000", FUNCTION_ARN);
+    }
+
+    @Test
+    void concurrentCreatesForOneFunctionAndQueueLeaveExactlyOneMapping() throws Exception {
+        String queueArn = "arn:aws:sqs:" + REGION + ":" + ACCOUNT_ID + ":esm-concurrent-" + UUID.randomUUID();
+        String body = """
+                {"FunctionName": "%s", "EventSourceArn": "%s", "Enabled": false}
+                """.formatted(FUNCTION_NAME, queueArn);
+        int callers = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(callers);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Integer> statusCodes = new ArrayList<>();
+        try {
+            List<Future<Integer>> responses = new ArrayList<>();
+            for (int i = 0; i < callers; i++) {
+                responses.add(pool.submit(() -> {
+                    start.await();
+                    return given()
+                            .contentType("application/json")
+                            .body(body)
+                            .when()
+                            .post(LAMBDA_BASE + "/event-source-mappings/")
+                            .then()
+                            .extract()
+                            .statusCode();
+                }));
+            }
+            start.countDown();
+            for (Future<Integer> response : responses) {
+                statusCodes.add(response.get(30, TimeUnit.SECONDS));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        List<String> uuids = given()
+                .queryParam("EventSourceArn", queueArn)
+                .when()
+                .get(LAMBDA_BASE + "/event-source-mappings")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("EventSourceMappings.UUID");
+        for (String uuid : uuids) {
+            given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+        }
+        assertEquals(1, uuids.size(), "mappings left for one function and queue: " + uuids);
+        assertEquals(1, statusCodes.stream().filter(code -> code == 202).count(), "status codes " + statusCodes);
+        assertEquals(callers - 1, statusCodes.stream().filter(code -> code == 409).count(),
+                "status codes " + statusCodes);
+    }
+
+    private void assertDuplicateMappingIsRejected(String eventSourceArn, String duplicateFunctionName) {
+        String createBody = """
+                {
+                  "FunctionName": "%s",
+                  "EventSourceArn": "%s",
+                  "Enabled": false
+                }
+                """;
+        String uuid = given()
+                .contentType("application/json")
+                .body(createBody.formatted(FUNCTION_NAME, eventSourceArn))
+                .when()
+                .post(LAMBDA_BASE + "/event-source-mappings/")
+                .then()
+                .statusCode(202)
+                .extract()
+                .path("UUID");
+
+        given()
+                .contentType("application/json")
+                .body(createBody.formatted(duplicateFunctionName, eventSourceArn))
+                .when()
+                .post(LAMBDA_BASE + "/event-source-mappings/")
+                .then()
+                .statusCode(409)
+                .body("__type", equalTo("ResourceConflictException"))
+                .body("message", containsString(eventSourceArn))
+                .body("message", containsString(uuid));
+
+        given()
+                .queryParam("EventSourceArn", eventSourceArn)
+                .when()
+                .get(LAMBDA_BASE + "/event-source-mappings")
+                .then()
+                .statusCode(200)
+                .body("EventSourceMappings", hasSize(1))
+                .body("EventSourceMappings[0].UUID", equalTo(uuid));
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
     }
 
     private static JsonPath kinesis(String target, String body) {
@@ -961,7 +1083,7 @@ class EsmIntegrationTest {
                     "EventSourceArn": "%s",
                     "BatchSize": 4
                 }
-                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+                """.formatted(FUNCTION_NAME, SECOND_QUEUE_ARN))
         .when()
             .post(LAMBDA_BASE + "/event-source-mappings")
         .then()
@@ -1642,7 +1764,7 @@ class EsmIntegrationTest {
             .contentType("application/json")
             .body("""
                 { "FunctionName": "%s", "EventSourceArn": "%s", "BatchSize": 4 }
-                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+                """.formatted(FUNCTION_NAME, SECOND_QUEUE_ARN))
         .when().post(LAMBDA_BASE + "/event-source-mappings")
         .then().statusCode(202).extract().path("UUID");
 
