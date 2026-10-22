@@ -172,6 +172,8 @@ the field on a source its parameter block does not describe, for example
   `data` base64 encoded.
 - `StartingPosition` `TRIM_HORIZON`, `LATEST` and `AT_TIMESTAMP` (with `StartingPositionTimestamp`,
   in Unix seconds) are honored. The position is resolved once, on the pipe's first poll.
+  `CreatePipe` and `UpdatePipe` reject `AT_TIMESTAMP` without a `StartingPositionTimestamp`, or with
+  one that is not a timestamp, with `ValidationException`.
 - The pipe moves past a batch only once it is filtered out, delivered, or sent to the
   `DeadLetterConfig` queue, as AWS checkpoints only a fully successful batch. A failed batch is read
   again on the next poll, and later records wait behind it. With a per-record target, the batch stops

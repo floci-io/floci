@@ -372,8 +372,11 @@ public class PipesPoller implements Resettable {
         }
     }
 
-    /** A timestamp the API carries in Unix seconds, possibly fractional, as epoch milliseconds. */
-    private static Long epochMillis(JsonNode seconds) {
+    /**
+     * A timestamp the API carries in Unix seconds, possibly fractional, as epoch milliseconds; also read
+     * from a numeric or ISO-8601 string. Null when it is none of those.
+     */
+    static Long epochMillis(JsonNode seconds) {
         if (seconds.isNumber()) {
             return seconds.decimalValue().movePointRight(3).longValue();
         }

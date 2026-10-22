@@ -340,6 +340,31 @@ public class PipesService implements TagHandler, ResourceProvider {
             requireKafkaParameters(sourceParameters, "ManagedStreamingKafkaParameters");
         }
         validateParallelizationFactor(source, sourceParameters);
+        validateKinesisStartingPositionTimestamp(source, sourceParameters);
+    }
+
+    /**
+     * An {@code AT_TIMESTAMP} Kinesis source reads from {@code StartingPositionTimestamp}, so it needs one
+     * the poller can read: Unix seconds, as a number or as the string CloudFormation sends, or ISO-8601.
+     */
+    private void validateKinesisStartingPositionTimestamp(String source, JsonNode sourceParameters) {
+        if (sourceParameters == null || !source.contains(":kinesis:")) {
+            return;
+        }
+        JsonNode parameters = sourceParameters.path("KinesisStreamParameters");
+        if (!"AT_TIMESTAMP".equals(parameters.path("StartingPosition").asText(null))) {
+            return;
+        }
+        String property = "SourceParameters.KinesisStreamParameters.StartingPositionTimestamp";
+        JsonNode timestamp = parameters.path("StartingPositionTimestamp");
+        if (timestamp.isMissingNode() || timestamp.isNull()) {
+            throw new AwsException("ValidationException",
+                    property + " is required when StartingPosition is AT_TIMESTAMP", 400);
+        }
+        if (PipesPoller.epochMillis(timestamp) == null) {
+            throw new AwsException("ValidationException",
+                    property + " must be a timestamp in Unix seconds (got " + timestamp.asText() + ")", 400);
+        }
     }
 
     private void requireKafkaParameters(JsonNode sourceParameters, String parameterBlock) {

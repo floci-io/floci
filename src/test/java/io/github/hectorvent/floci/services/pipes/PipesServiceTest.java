@@ -542,6 +542,79 @@ class PipesServiceTest {
     }
 
     @Test
+    void createPipeRejectsAnAtTimestampKinesisSourceWithoutStartingPositionTimestamp() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.createPipe("at-ts-missing",
+                        "arn:aws:kinesis:us-east-1:000000000000:stream/events",
+                        "arn:aws:sqs:us-east-1:000000000000:target",
+                        "arn:aws:iam::000000000000:role/role",
+                        null, null, null,
+                        sourceParameters("""
+                                {"KinesisStreamParameters":{"StartingPosition":"AT_TIMESTAMP"}}"""),
+                        null, null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains(
+                "StartingPositionTimestamp is required when StartingPosition is AT_TIMESTAMP"), ex.getMessage());
+    }
+
+    @Test
+    void createPipeRejectsAnAtTimestampKinesisSourceWithAnUnreadableStartingPositionTimestamp() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.createPipe("at-ts-unreadable",
+                        "arn:aws:kinesis:us-east-1:000000000000:stream/events",
+                        "arn:aws:sqs:us-east-1:000000000000:target",
+                        "arn:aws:iam::000000000000:role/role",
+                        null, null, null,
+                        sourceParameters("""
+                                {"KinesisStreamParameters":{"StartingPosition":"AT_TIMESTAMP",
+                                 "StartingPositionTimestamp":"yesterday"}}"""),
+                        null, null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("StartingPositionTimestamp must be a timestamp"), ex.getMessage());
+    }
+
+    @Test
+    void createPipeAcceptsAnAtTimestampKinesisSourceWithStartingPositionTimestamp() {
+        for (String timestamp : new String[]{"1790000000.25", "\"1790000000\"", "\"2026-09-21T14:13:20Z\""}) {
+            Pipe pipe = pipesService.createPipe("at-ts-" + Math.abs(timestamp.hashCode()),
+                    "arn:aws:kinesis:us-east-1:000000000000:stream/events",
+                    "arn:aws:sqs:us-east-1:000000000000:target",
+                    "arn:aws:iam::000000000000:role/role",
+                    null, null, null,
+                    sourceParameters("{\"KinesisStreamParameters\":{\"StartingPosition\":\"AT_TIMESTAMP\","
+                            + "\"StartingPositionTimestamp\":" + timestamp + "}}"),
+                    null, null, null, "us-east-1");
+
+            assertEquals("AT_TIMESTAMP", pipe.getSourceParameters()
+                    .path("KinesisStreamParameters").path("StartingPosition").asText(), timestamp);
+        }
+    }
+
+    @Test
+    void updatePipeRejectsAnAtTimestampKinesisSourceWithoutStartingPositionTimestamp() {
+        pipesService.createPipe("at-ts-update",
+                "arn:aws:kinesis:us-east-1:000000000000:stream/events",
+                "arn:aws:sqs:us-east-1:000000000000:target",
+                "arn:aws:iam::000000000000:role/role",
+                null, null, null,
+                sourceParameters("""
+                        {"KinesisStreamParameters":{"StartingPosition":"TRIM_HORIZON"}}"""),
+                null, null, null, "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.updatePipe("at-ts-update", null, null, null, null, null,
+                        sourceParameters("""
+                                {"KinesisStreamParameters":{"StartingPosition":"AT_TIMESTAMP"}}"""),
+                        null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains(
+                "StartingPositionTimestamp is required when StartingPosition is AT_TIMESTAMP"), ex.getMessage());
+    }
+
+    @Test
     void dynamoDbStreamRetryOptionsAreAcceptedAndReturned() {
         String created = """
                 {"StartingPosition":"TRIM_HORIZON","MaximumRetryAttempts":3,"MaximumRecordAgeInSeconds":60,
