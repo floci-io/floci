@@ -505,6 +505,7 @@ class PipesPollerTest {
                         kinesisRecord("{\"n\":1}", "pk-1", "4959001", Instant.now()),
                         kinesisRecord("{\"n\":2}", "pk-1", "4959002", Instant.now())));
 
+        poller.startPolling(pipe);
         poller.pollKinesis(pipe, "us-east-1");
 
         ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
@@ -568,6 +569,98 @@ class PipesPollerTest {
         assertEquals("4959003", record.path("sequenceNumber").asText());
         assertEquals(Base64.getEncoder().encodeToString("{\"City\":\"Seattle\"}".getBytes(StandardCharsets.UTF_8)),
                 record.path("data").asText(), "the decoded data is only the filter's view");
+    }
+
+    @Test
+    void kinesisBatchTheTargetFailsWithoutADlqIsRereadNextPoll() throws Exception {
+        Pipe pipe = kinesisPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
+        when(kinesisService.getShardIteratorForAccount("000000000000", "orders-stream", "shardId-000000000000",
+                "TRIM_HORIZON", null, "us-east-1")).thenReturn("it-0");
+        when(kinesisService.getRecordsForAccount("000000000000", "it-0", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1", kinesisRecord("{\"n\":1}", "pk-1", "4959001", Instant.now())));
+        lenient().when(kinesisService.getRecordsForAccount("000000000000", "it-1", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1"));
+        doThrow(new RuntimeException("target down")).doNothing()
+                .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
+
+        poller.startPolling(pipe);
+        poller.pollKinesis(pipe, "us-east-1");
+        poller.pollKinesis(pipe, "us-east-1");
+
+        verify(kinesisService, times(2)).getRecordsForAccount("000000000000", "it-0", 10, "us-east-1");
+        verify(targetInvoker, times(2)).invoke(eq(pipe), contains("4959001"), eq("us-east-1"));
+    }
+
+    @Test
+    void kinesisBatchSentToTheDeadLetterQueueIsCheckpointed() throws Exception {
+        Pipe pipe = kinesisPipe("{\"StartingPosition\":\"TRIM_HORIZON\",\"DeadLetterConfig\":{\"Arn\":\""
+                + DLQ_ARN + "\"}}");
+        when(kinesisService.getShardIteratorForAccount("000000000000", "orders-stream", "shardId-000000000000",
+                "TRIM_HORIZON", null, "us-east-1")).thenReturn("it-0");
+        when(kinesisService.getRecordsForAccount("000000000000", "it-0", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1", kinesisRecord("{\"n\":1}", "pk-1", "4959001", Instant.now())));
+        when(kinesisService.getRecordsForAccount("000000000000", "it-1", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1"));
+        doThrow(new RuntimeException("target down"))
+                .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
+
+        poller.startPolling(pipe);
+        poller.pollKinesis(pipe, "us-east-1");
+        poller.pollKinesis(pipe, "us-east-1");
+
+        verify(sqsService).sendMessage(contains("pipe-dlq"), contains("4959001"), isNull(), eq("us-east-1"));
+        verify(kinesisService).getRecordsForAccount("000000000000", "it-1", 10, "us-east-1");
+    }
+
+    @Test
+    void kinesisLatestStartingPositionOpensTheShardAtLatest() throws Exception {
+        Pipe pipe = kinesisPipe("{\"StartingPosition\":\"LATEST\"}");
+        when(kinesisService.getShardIteratorForAccount(eq("000000000000"), eq("orders-stream"),
+                eq("shardId-000000000000"), anyString(), isNull(), eq("us-east-1"))).thenReturn("it-0");
+        when(kinesisService.getRecordsForAccount("000000000000", "it-0", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-0"));
+
+        poller.startPolling(pipe);
+        poller.pollKinesis(pipe, "us-east-1");
+
+        verify(kinesisService).getShardIteratorForAccount("000000000000", "orders-stream", "shardId-000000000000",
+                "LATEST", null, "us-east-1");
+    }
+
+    @Test
+    void kinesisAtTimestampStartingPositionOpensTheShardAtTheTimestamp() throws Exception {
+        Pipe pipe = kinesisPipe("{\"StartingPosition\":\"AT_TIMESTAMP\",\"StartingPositionTimestamp\":1790000000.25}");
+        lenient().when(kinesisService.getShardIteratorForAccount("000000000000", "orders-stream",
+                "shardId-000000000000", "AT_TIMESTAMP", null, 1790000000250L, "us-east-1")).thenReturn("it-0");
+        lenient().when(kinesisService.getRecordsForAccount("000000000000", "it-0", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-0"));
+
+        poller.startPolling(pipe);
+        poller.pollKinesis(pipe, "us-east-1");
+
+        verify(kinesisService).getShardIteratorForAccount("000000000000", "orders-stream", "shardId-000000000000",
+                "AT_TIMESTAMP", null, 1790000000250L, "us-east-1");
+    }
+
+    @Test
+    void stoppedAndRestartedKinesisPipeResumesWhereItLeftOff() throws Exception {
+        Pipe pipe = kinesisPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
+        when(kinesisService.getShardIteratorForAccount("000000000000", "orders-stream", "shardId-000000000000",
+                "TRIM_HORIZON", null, "us-east-1")).thenReturn("it-0");
+        when(kinesisService.getRecordsForAccount("000000000000", "it-0", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1", kinesisRecord("{\"n\":1}", "pk-1", "4959001", Instant.now())));
+        when(kinesisService.getRecordsForAccount("000000000000", "it-1", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1"));
+
+        poller.startPolling(pipe);
+        poller.pollKinesis(pipe, "us-east-1");
+        poller.stopPolling(pipe);
+        poller.startPolling(pipe);
+        poller.pollKinesis(pipe, "us-east-1");
+
+        verify(kinesisService, times(1)).getShardIteratorForAccount("000000000000", "orders-stream",
+                "shardId-000000000000", "TRIM_HORIZON", null, "us-east-1");
+        verify(targetInvoker, times(1)).invoke(eq(pipe), anyString(), eq("us-east-1"));
     }
 
     /** Starts the pipe and runs one tick of its poll timer, which polls on a pipes-poller thread. */

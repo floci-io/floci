@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -24,7 +25,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -119,7 +123,6 @@ public class PipesPoller implements Resettable {
         Long timerId = timerIds.remove(pipeKey);
         if (timerId != null) {
             vertx.cancelTimer(timerId);
-            kinesisIterators.remove(pipeKey);
             kafkaConsumerManager.close(pipe);
             LOG.infov("Pipe {0}: stopped polling", pipe.getName());
         }
@@ -129,8 +132,9 @@ public class PipesPoller implements Resettable {
         return timerIds.containsKey(pipeKey(pipe));
     }
 
-    /** Drops the pipe's DynamoDB Stream progress, which a stop keeps so a restart resumes from it. */
+    /** Drops the pipe's Kinesis and DynamoDB Stream progress, which a stop keeps so a restart resumes from it. */
     public void forget(Pipe pipe) {
+        kinesisIterators.remove(pipeKey(pipe));
         dynamoDbProgress.remove(pipeKey(pipe));
     }
 
@@ -265,41 +269,42 @@ public class PipesPoller implements Resettable {
         return received;
     }
 
+    /**
+     * Reads one batch from the pipe's iterator and moves past it only once the batch is filtered out,
+     * delivered, or sent to the DLQ, so an undisposed batch is read again next poll.
+     */
     void pollKinesis(Pipe pipe, String region) {
         String pipeKey = pipeKey(pipe);
         String streamName = extractResourceName(pipe.getSource());
         String pipeAccountId = pipe.getAccountId();
         int batchSize = getBatchSize(pipe, "KinesisStreamParameters");
-        String iterator = kinesisIterators.get(pipeKey);
+        // As for DynamoDB: a delete stops polling before it forgets, so a poll it raced cannot open the
+        // shard again for a pipe that no longer polls.
+        String iterator = kinesisIterators.computeIfAbsent(pipeKey, key -> timerIds.containsKey(key)
+                ? initKinesisIterator(pipe, streamName, region, pipeAccountId)
+                : null);
         if (iterator == null) {
-            iterator = initKinesisIterator(streamName, region, pipeAccountId);
-            if (iterator == null) {
-                return;
-            }
+            return;
         }
         try {
             Map<String, Object> result = (pipeAccountId != null)
                     ? kinesisService.getRecordsForAccount(pipeAccountId, iterator, batchSize, region)
                     : kinesisService.getRecords(iterator, batchSize, region);
             String nextIterator = (String) result.get("NextShardIterator");
-            if (nextIterator != null) {
-                kinesisIterators.put(pipeKey, nextIterator);
-            }
             @SuppressWarnings("unchecked")
             List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
-            if (records == null || records.isEmpty()) {
-                return;
+            if (records != null && !records.isEmpty()) {
+                LOG.infov("Pipe {0}: received {1} Kinesis record(s)", pipe.getName(), records.size());
+                List<ObjectNode> recordNodes = buildKinesisRecordNodes(records, pipe, KINESIS_SHARD_ID, region);
+                List<JsonNode> filtered = filterKinesisRecords(pipe, recordNodes, records);
+                if (!filtered.isEmpty() && deliverRecords(pipe, filtered, region) > 0) {
+                    LOG.warnv("Pipe {0}: Kinesis batch was neither delivered nor sent to a DLQ, retrying it next poll",
+                            pipe.getName());
+                    return;
+                }
             }
-            LOG.infov("Pipe {0}: received {1} Kinesis record(s)", pipe.getName(), records.size());
-            List<ObjectNode> recordNodes = buildKinesisRecordNodes(records, pipe, KINESIS_SHARD_ID, region);
-            List<JsonNode> filtered = filterKinesisRecords(pipe, recordNodes, records);
-            if (filtered.isEmpty()) {
-                return;
-            }
-            int failed = deliverRecords(pipe, filtered, region);
-            if (failed > 0) {
-                LOG.warnv("Pipe {0}: {1} Kinesis record(s) dropped — delivery and DLQ both failed",
-                        pipe.getName(), failed);
+            if (nextIterator != null) {
+                kinesisIterators.replace(pipeKey, iterator, nextIterator);
             }
         } catch (AwsException e) {
             if ("ExpiredIteratorException".equals(e.getErrorCode())) {
@@ -310,21 +315,59 @@ public class PipesPoller implements Resettable {
     }
 
     /**
-     * Opens an iterator on the stream's first shard. Floci polls that one shard and delivers one
-     * batch at a time, so a pipe's {@code ParallelizationFactor} is persisted and returned on the
-     * wire but not enforced here: see docs/services/pipes.md.
+     * Opens an iterator on the stream's first shard at the pipe's {@code StartingPosition}. Floci polls
+     * that one shard and delivers one batch at a time, so a pipe's {@code ParallelizationFactor} is
+     * persisted and returned on the wire but not enforced here: see docs/services/pipes.md.
      */
-    private String initKinesisIterator(String streamName, String region, String accountId) {
+    private String initKinesisIterator(Pipe pipe, String streamName, String region, String accountId) {
+        JsonNode parameters = pipe.getSourceParameters() != null
+                ? pipe.getSourceParameters().path("KinesisStreamParameters")
+                : MissingNode.getInstance();
+        String startingPosition = parameters.path("StartingPosition").asText("TRIM_HORIZON");
         try {
+            if ("AT_TIMESTAMP".equals(startingPosition)) {
+                Long timestampMillis = epochMillis(parameters.path("StartingPositionTimestamp"));
+                if (timestampMillis == null) {
+                    LOG.warnv("Pipe {0}: StartingPosition AT_TIMESTAMP needs a StartingPositionTimestamp",
+                            pipe.getName());
+                    return null;
+                }
+                return (accountId != null)
+                        ? kinesisService.getShardIteratorForAccount(
+                                accountId, streamName, KINESIS_SHARD_ID, "AT_TIMESTAMP", null, timestampMillis, region)
+                        : kinesisService.getShardIterator(
+                                streamName, KINESIS_SHARD_ID, "AT_TIMESTAMP", null, timestampMillis, region);
+            }
+            String type = "LATEST".equals(startingPosition) ? "LATEST" : "TRIM_HORIZON";
             return (accountId != null)
                     ? kinesisService.getShardIteratorForAccount(
-                            accountId, streamName, KINESIS_SHARD_ID, "TRIM_HORIZON", null, region)
+                            accountId, streamName, KINESIS_SHARD_ID, type, null, region)
                     : kinesisService.getShardIterator(
-                            streamName, KINESIS_SHARD_ID, "TRIM_HORIZON", null, null, region);
+                            streamName, KINESIS_SHARD_ID, type, null, null, region);
         } catch (Exception e) {
             LOG.warnv("Failed to get Kinesis shard iterator for {0}: {1}", streamName, e.getMessage());
             return null;
         }
+    }
+
+    /** A timestamp the API carries in Unix seconds, possibly fractional, as epoch milliseconds. */
+    private static Long epochMillis(JsonNode seconds) {
+        if (seconds.isNumber()) {
+            return seconds.decimalValue().movePointRight(3).longValue();
+        }
+        if (seconds.isTextual()) {
+            try {
+                return new BigDecimal(seconds.asText()).movePointRight(3).longValue();
+            } catch (NumberFormatException e) {
+                LOG.debugv("StartingPositionTimestamp {0} is not Unix seconds, reading it as ISO-8601", seconds.asText());
+            }
+            try {
+                return Instant.parse(seconds.asText()).toEpochMilli();
+            } catch (DateTimeParseException e) {
+                LOG.debugv("StartingPositionTimestamp {0} is not a timestamp: {1}", seconds.asText(), e.getMessage());
+            }
+        }
+        return null;
     }
 
     /**

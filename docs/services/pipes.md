@@ -162,6 +162,15 @@ the field on a source its parameter block does not describe, for example
 - Filter patterns match `data` decoded, and parsed as JSON when it is JSON, so a pattern such as
   `{"partitionKey":["1"],"data":{"City":["Seattle"]}}` works as on AWS. The delivered record keeps
   `data` base64 encoded.
+- `StartingPosition` `TRIM_HORIZON`, `LATEST` and `AT_TIMESTAMP` (with `StartingPositionTimestamp`,
+  in Unix seconds) are honored. The position is resolved once, on the pipe's first poll.
+- The pipe moves past a batch only once it is filtered out, delivered, or sent to the
+  `DeadLetterConfig` queue, as AWS checkpoints only a fully successful batch. A failed batch is read
+  again on the next poll, and later records wait behind it.
+- Progress survives `StopPipe` and `StartPipe`: a restarted pipe resumes after the last batch it
+  disposed of. The progress is kept in memory, so it is lost when Floci restarts.
+- `MaximumRetryAttempts`, `MaximumRecordAgeInSeconds` and `OnPartialBatchItemFailure` are accepted
+  and returned but not enforced, so they do not bound or split those retries.
 
 ## DynamoDB Streams Source
 
