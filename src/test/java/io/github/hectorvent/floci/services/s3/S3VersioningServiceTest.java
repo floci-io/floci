@@ -452,6 +452,7 @@ class S3VersioningServiceTest {
         s3Service.copyObject("versioned-bucket", "replace-key", "versioned-bucket", "replace-key",
                 null,
                 new CopyObjectOptions()
+                        .withMetadataDirective("REPLACE")
                         .withTaggingDirective("REPLACE")
                         .withReplacementTagging(Map.of("new", "value")));
 
@@ -470,6 +471,7 @@ class S3VersioningServiceTest {
         s3Service.copyObject("versioned-bucket", "clear-key", "versioned-bucket", "clear-key",
                 null,
                 new CopyObjectOptions()
+                        .withMetadataDirective("REPLACE")
                         .withTaggingDirective("REPLACE")
                         .withReplacementTagging(Map.of()));
 

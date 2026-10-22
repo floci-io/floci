@@ -459,7 +459,7 @@ class S3ServiceAnnotationsTest {
     void selfCopyPreservesAnnotations() {
         putAnnotation("kept-through-copy", "payload");
         s3Service.copyObject(BUCKET, "docs/readme.txt", BUCKET, "docs/readme.txt",
-                new io.github.hectorvent.floci.services.s3.model.CopyObjectOptions());
+                new io.github.hectorvent.floci.services.s3.model.CopyObjectOptions().withMetadataDirective("REPLACE"));
         assertEquals("payload", readPayload("kept-through-copy"));
         ObjectAnnotation annotation = s3Service.getObjectAnnotation(BUCKET, "docs/readme.txt",
                 "kept-through-copy", null);

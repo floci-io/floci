@@ -2739,6 +2739,73 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(100)
+    void copyObjectOntoItselfMustChangeSomething() {
+        String bucket = "self-copy-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("v1").when().put("/" + bucket + "/k.txt").then().statusCode(200);
+        try {
+            given()
+                .header("x-amz-copy-source", "/" + bucket + "/k.txt")
+            .when()
+                .put("/" + bucket + "/k.txt")
+            .then()
+                .statusCode(400)
+                .body("Error.Code", equalTo("InvalidRequest"))
+                .body("Error.Message", equalTo("This copy request is illegal because it is trying to copy an object"
+                        + " to itself without changing the object's metadata, storage class, website redirect location"
+                        + " or encryption attributes."));
+            given()
+                .header("x-amz-copy-source", "/" + bucket + "/k.txt")
+                .header("x-amz-tagging-directive", "REPLACE")
+                .header("x-amz-tagging", "a=b")
+            .when()
+                .put("/" + bucket + "/k.txt")
+            .then()
+                .statusCode(400)
+                .body(containsString("<Code>InvalidRequest</Code>"));
+
+            given()
+                .header("x-amz-copy-source", "/" + bucket + "/k.txt")
+                .header("x-amz-metadata-directive", "REPLACE")
+            .when()
+                .put("/" + bucket + "/k.txt")
+            .then()
+                .statusCode(200);
+            given()
+                .header("x-amz-copy-source", "/" + bucket + "/k.txt?versionId=null")
+            .when()
+                .put("/" + bucket + "/k.txt")
+            .then()
+                .statusCode(200);
+            given()
+                .header("x-amz-copy-source", "/" + bucket + "/k.txt")
+                .header("x-amz-storage-class", "STANDARD_IA")
+            .when()
+                .put("/" + bucket + "/k.txt")
+            .then()
+                .statusCode(200);
+            given()
+                .body("<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault>"
+                        + "<SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule>"
+                        + "</ServerSideEncryptionConfiguration>")
+            .when()
+                .put("/" + bucket + "?encryption")
+            .then()
+                .statusCode(200);
+            given()
+                .header("x-amz-copy-source", "/" + bucket + "/k.txt")
+            .when()
+                .put("/" + bucket + "/k.txt")
+            .then()
+                .statusCode(200);
+        } finally {
+            given().when().delete("/" + bucket + "/k.txt");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
     @Order(101)
     void listObjectsV2StartAfterFiltersResults() {
         // bucket and objects from earlier test orders exist; add fresh ones in a dedicated bucket

@@ -2475,20 +2475,23 @@ public class S3Service implements Resettable, ResourceProvider {
                                String destBucket, String destKey, String versionId, CopyObjectOptions options)
     {
         CopyObjectOptions effectiveOptions = options != null ? options : new CopyObjectOptions();
-        return copyPinnedSource(sourceBucket, sourceKey, destBucket, destKey,
+        return copyPinnedSource(sourceBucket, sourceKey, destBucket, destKey, versionId,
                 pinCopySource(sourceBucket, sourceKey, versionId), effectiveOptions);
     }
 
     public S3Object copyObject(String sourceBucket, String sourceKey,
                                String destBucket, String destKey, CopyObjectOptions options) {
         CopyObjectOptions effectiveOptions = options != null ? options : new CopyObjectOptions();
-        return copyPinnedSource(sourceBucket, sourceKey, destBucket, destKey,
+        return copyPinnedSource(sourceBucket, sourceKey, destBucket, destKey, null,
                 pinCopySource(sourceBucket, sourceKey, null), effectiveOptions);
     }
 
     private S3Object copyPinnedSource(String sourceBucket, String sourceKey, String destBucket, String destKey,
-                                      CopySource source, CopyObjectOptions effectiveOptions) {
+                                      String sourceVersionId, CopySource source,
+                                      CopyObjectOptions effectiveOptions) {
         try {
+            rejectCopyOntoItselfWithoutChange(sourceBucket, sourceKey, sourceVersionId, destBucket, destKey,
+                    effectiveOptions);
             checkCopySourcePreconditions(source.object(), effectiveOptions.getCopySourceConditions());
             validateSseCustomerAccess(source.object(),
                     effectiveOptions.getCopySourceSseCustomerAlgorithm(),
@@ -2502,6 +2505,31 @@ public class S3Service implements Resettable, ResourceProvider {
             if (source.pinnedFile() != null) {
                 deleteQuietly(source.pinnedFile(), "pinned copy source that was not stored");
             }
+        }
+    }
+
+    /**
+     * Refuses a copy of an object onto itself that would change nothing, as S3 does. Replacing the
+     * metadata, naming a storage class, encryption or checksum algorithm, copying a named version over
+     * the current one, or a bucket default encryption someone configured makes it a change; replacing
+     * the tags alone does not.
+     */
+    private void rejectCopyOntoItselfWithoutChange(String sourceBucket, String sourceKey, String sourceVersionId,
+                                                   String destBucket, String destKey, CopyObjectOptions options) {
+        if (!sourceBucket.equals(destBucket) || !sourceKey.equals(destKey) || sourceVersionId != null) {
+            return;
+        }
+        boolean changes = "REPLACE".equalsIgnoreCase(options.getMetadataDirective())
+                || options.getStorageClass() != null
+                || options.getServerSideEncryption() != null
+                || options.getSseKmsKeyId() != null
+                || options.getSseCustomerAlgorithm() != null
+                || options.getChecksumAlgorithm() != null
+                || resolveBucket(destBucket).map(Bucket::getEncryptionConfiguration).isPresent();
+        if (!changes) {
+            throw new AwsException("InvalidRequest", "This copy request is illegal because it is trying to copy an"
+                    + " object to itself without changing the object's metadata, storage class, website redirect"
+                    + " location or encryption attributes.", 400);
         }
     }
 
