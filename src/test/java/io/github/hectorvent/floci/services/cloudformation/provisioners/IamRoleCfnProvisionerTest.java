@@ -437,6 +437,41 @@ class IamRoleCfnProvisionerTest {
     }
 
     @Test
+    void maxSessionDurationOutsideThe3600To43200RangeFailsTheResource() {
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), anyInt(), eq(Map.of()), any()))
+                .thenReturn(new IamRole("AROAapp-role", "app-role", "/",
+                        "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST));
+
+        for (int seconds : new int[] {3599, 43201}) {
+            AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource(), props("""
+                    {"RoleName": "app-role", "MaxSessionDuration": %d}
+                    """.formatted(seconds)), ctx()), String.valueOf(seconds));
+
+            assertEquals("ValidationError", failure.getErrorCode());
+            assertEquals(400, failure.getHttpStatus());
+            assertTrue(failure.getMessage().contains("MaxSessionDuration")
+                    && failure.getMessage().contains("3600") && failure.getMessage().contains("43200"),
+                    failure.getMessage());
+        }
+        verify(iam, never()).createRole(anyString(), anyString(), anyString(), any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void maxSessionDurationAtEitherEndOfTheRangeReachesTheRole() {
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), anyInt(), eq(Map.of()), any()))
+                .thenReturn(new IamRole("AROAapp-role", "app-role", "/",
+                        "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST));
+
+        for (int seconds : new int[] {3600, 43200}) {
+            provisioner.provision(resource(), props("""
+                    {"RoleName": "app-role", "MaxSessionDuration": %d}
+                    """.formatted(seconds)), ctx());
+
+            verify(iam).createRole(eq("app-role"), eq("/"), anyString(), any(), eq(seconds), eq(Map.of()), any());
+        }
+    }
+
+    @Test
     void createPassesThePermissionsBoundaryToTheRole() {
         StackResource r = resource();
         when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()),

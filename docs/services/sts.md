@@ -122,7 +122,8 @@ when its condition matches.
 `AssumeRole` and `AssumeRoleWithWebIdentity` accept a `DurationSeconds` from 900 to 43200, and, as
 on AWS, no longer than the target role's `MaxSessionDuration` (3600 unless the role sets another):
 a longer request fails with `ValidationError`. A CloudFormation `AWS::IAM::Role` sets the role's
-`MaxSessionDuration` from its template, on create and on update. An `AssumeRole` call signed with another role
+`MaxSessionDuration` from its template, on create and on update, and fails the resource with
+`ValidationError` when the value is outside 3600 to 43200. An `AssumeRole` call signed with another role
 session's credentials (role chaining) is limited to one hour whatever the role allows, and fails
 with `ValidationError` above 3600. These checks apply with IAM enforcement on or off.
 

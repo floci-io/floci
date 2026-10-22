@@ -34,6 +34,8 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
     private static final String INLINE_NAMES_ATTR = "__FlociInlinePolicyNames";
     private static final String MANAGED_ARNS_ATTR = "__FlociManagedPolicyArns";
     private static final int DEFAULT_MAX_SESSION_DURATION = 3600;
+    private static final int SHORTEST_MAX_SESSION_DURATION = 3600;
+    private static final int LONGEST_MAX_SESSION_DURATION = 43200;
 
     private final IamService iamService;
 
@@ -318,17 +320,27 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         writeTrackedSet(r, MANAGED_ARNS_ATTR, managedPolicyArns);
     }
 
-    /** The template's {@code MaxSessionDuration} in seconds, or AWS's 3600 default when it has none. */
+    /**
+     * The template's {@code MaxSessionDuration} in seconds, or AWS's 3600 default when it has none.
+     * AWS accepts 3600 to 43200.
+     */
     private static int maxSessionDuration(String value) {
         if (value == null) {
             return DEFAULT_MAX_SESSION_DURATION;
         }
+        int seconds;
         try {
-            return Integer.parseInt(value.trim());
+            seconds = Integer.parseInt(value.trim());
         } catch (NumberFormatException e) {
             throw new AwsException("ValidationError",
                     "MaxSessionDuration must be an integer number of seconds, got: " + value, 400);
         }
+        if (seconds < SHORTEST_MAX_SESSION_DURATION || seconds > LONGEST_MAX_SESSION_DURATION) {
+            throw new AwsException("ValidationError", "MaxSessionDuration must be between "
+                    + SHORTEST_MAX_SESSION_DURATION + " and " + LONGEST_MAX_SESSION_DURATION
+                    + " seconds, got: " + seconds, 400);
+        }
+        return seconds;
     }
 
     private static Set<String> readTrackedSet(StackResource r, String attribute) {
