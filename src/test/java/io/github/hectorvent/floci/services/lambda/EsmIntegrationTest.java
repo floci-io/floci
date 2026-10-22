@@ -539,6 +539,65 @@ class EsmIntegrationTest {
     }
 
     @Test
+    void updateEventSourceMappingRejectsAFunctionThatAlreadyHasAMappingForTheSource() {
+        String queueArn = "arn:aws:sqs:" + REGION + ":" + ACCOUNT_ID + ":esm-update-duplicate-" + UUID.randomUUID();
+        String otherFunction = "esm-update-duplicate-" + UUID.randomUUID().toString().substring(0, 8);
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler"
+                }
+                """.formatted(otherFunction))
+        .when()
+            .post(LAMBDA_BASE + "/functions")
+        .then()
+            .statusCode(201);
+        String createBody = """
+                {"FunctionName": "%s", "EventSourceArn": "%s", "Enabled": false}
+                """;
+        String existing = given()
+                .contentType("application/json")
+                .body(createBody.formatted(FUNCTION_NAME, queueArn))
+                .when().post(LAMBDA_BASE + "/event-source-mappings/")
+                .then().statusCode(202)
+                .extract().path("UUID");
+        String moving = given()
+                .contentType("application/json")
+                .body(createBody.formatted(otherFunction, queueArn))
+                .when().post(LAMBDA_BASE + "/event-source-mappings/")
+                .then().statusCode(202)
+                .extract().path("UUID");
+
+        given()
+                .contentType("application/json")
+                .body("{\"FunctionName\": \"%s\"}".formatted(FUNCTION_NAME))
+                .when().put(LAMBDA_BASE + "/event-source-mappings/" + moving)
+                .then()
+                .statusCode(409)
+                .body("__type", equalTo("ResourceConflictException"))
+                .body("message", containsString(existing));
+        given()
+                .when().get(LAMBDA_BASE + "/event-source-mappings/" + moving)
+                .then()
+                .statusCode(200)
+                .body("FunctionArn", endsWith(":function:" + otherFunction));
+        given()
+                .contentType("application/json")
+                .body("{\"FunctionName\": \"%s\"}".formatted(FUNCTION_ARN))
+                .when().put(LAMBDA_BASE + "/event-source-mappings/" + existing)
+                .then()
+                .statusCode(202);
+
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + existing).then().statusCode(202);
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + moving).then().statusCode(202);
+        given().delete(LAMBDA_BASE + "/functions/" + otherFunction).then().statusCode(204);
+    }
+
+    @Test
     void concurrentCreatesForOneFunctionAndQueueLeaveExactlyOneMapping() throws Exception {
         String queueArn = "arn:aws:sqs:" + REGION + ":" + ACCOUNT_ID + ":esm-concurrent-" + UUID.randomUUID();
         String body = """
