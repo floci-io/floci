@@ -36,6 +36,13 @@ one compaction interval behind, and the journal is replayed on the next start. A
 `cwlogs-events.json` or `s3-objects.json` from an older version is picked up as the first snapshot
 without any migration.
 
+### Reset
+
+`POST /_floci/state/reset` empties every store, including the stores of services that have not
+been used since Floci started: under `persistent`, `hybrid` and `wal` modes such a store starts
+empty the first time its service is used after the reset, and its file is overwritten then. A
+store that no service opens again before Floci stops keeps its file, so the next start loads it.
+
 ## Per-Service Override
 
 When not set for a service, it inherits `FLOCI_STORAGE_MODE`. Only override when you need different behavior for a specific service.

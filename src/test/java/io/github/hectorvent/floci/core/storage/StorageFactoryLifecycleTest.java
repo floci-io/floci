@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -22,8 +24,9 @@ import static org.mockito.Mockito.when;
 
 /**
  * Lifecycle contract of {@link StorageFactory}: {@code create()} owns the initial load of each
- * backend, {@code loadAll()} never reloads a live backend, and {@code shutdownAll()} performs the
- * final flush and then leaves no open WAL writer behind.
+ * backend, {@code loadAll()} never reloads a live backend, {@code shutdownAll()} performs the
+ * final flush and then leaves no open WAL writer behind, and a backend first created after
+ * {@code clearAll()} starts empty instead of loading its pre-reset file.
  */
 class StorageFactoryLifecycleTest {
 
@@ -108,6 +111,42 @@ class StorageFactoryLifecycleTest {
         assertEquals(Optional.of("v1"), again.get("before"));
         assertEquals(Optional.empty(), again.get("after"));
         reloaded.shutdownAll();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"persistent,DEFAULT", "persistent,APPEND_HEAVY", "hybrid,DEFAULT", "wal,DEFAULT"})
+    void storeFirstCreatedAfterAResetStartsEmptyAndOverwritesItsFile(String mode, WriteProfile profile) {
+        StorageFactory earlierRun = newFactory(mode);
+        earlierRun.create("ssm", "ssm-parameters.json", TYPE, profile).put("/app/stale", "v1");
+        earlierRun.shutdownAll();
+
+        // A service that is neither Resettable nor touched at boot creates its store only after the reset.
+        StorageFactory resetRun = newFactory(mode);
+        resetRun.clearAll();
+        AccountAwareStorageBackend<String> late = resetRun.create("ssm", "ssm-parameters.json", TYPE, profile);
+        assertTrue(late.keys().isEmpty(), "a store created after a reset must not load the pre-reset file");
+        late.put("/app/fresh", "v2");
+        resetRun.shutdownAll();
+
+        StorageFactory restarted = newFactory(mode);
+        AccountAwareStorageBackend<String> reloaded = restarted.create("ssm", "ssm-parameters.json", TYPE, profile);
+        assertEquals(Optional.empty(), reloaded.get("/app/stale"));
+        assertEquals(Optional.of("v2"), reloaded.get("/app/fresh"));
+        restarted.shutdownAll();
+    }
+
+    @Test
+    void resetLeavesFilesThatNoStoreOwnsUnderThePersistentPath() throws IOException {
+        Path lambdaCode = tempDir.resolve("lambda-code").resolve("function.zip");
+        Files.createDirectories(lambdaCode.getParent());
+        Files.writeString(lambdaCode, "zip");
+
+        StorageFactory factory = newFactory("persistent");
+        factory.clearAll();
+        factory.create("ssm", "ssm-parameters.json", TYPE);
+        factory.shutdownAll();
+
+        assertEquals("zip", Files.readString(lambdaCode));
     }
 
     private long walSize() throws IOException {

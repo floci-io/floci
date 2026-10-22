@@ -41,6 +41,9 @@ public class StorageFactory {
     // loadAll() only picks up backends that were never loaded, so neither path replays a store
     // that is already live or opens a second WAL writer on top of the first.
     private final Set<StorageBackend<?, ?>> loadedBackends = Collections.newSetFromMap(new IdentityHashMap<>());
+    // Set by clearAll(). The file of a backend first created after a reset predates that reset,
+    // so create() empties the backend and overwrites the file instead of loading it.
+    private boolean resetPerformed;
 
     @Inject
     Instance<RequestContext> requestContextInstance;
@@ -137,7 +140,13 @@ public class StorageFactory {
         // create() owns the initial load. Most services are lazily instantiated and only reach
         // this point after the lifecycle's loadAll() has already run, so a backend that is not
         // loaded here would serve an empty store and (for WAL) never open its writer (#71).
-        loadOnce(backend);
+        if (resetPerformed) {
+            backend.clear();
+            backend.flush();
+            loadedBackends.add(backend);
+        } else {
+            loadOnce(backend);
+        }
         allBackends.add(backend);
         backendsByPath.put(filePath, backend);
         return backend;
@@ -165,8 +174,12 @@ public class StorageFactory {
         }
     }
 
-    /** Clear all storage backends. */
+    /**
+     * Clear all storage backends, including those created later in this run: a backend first
+     * created after this call starts empty rather than loading the file an earlier run left.
+     */
     public synchronized void clearAll() {
+        resetPerformed = true;
         for (StorageBackend<?, ?> backend : allBackends) {
             backend.clear();
         }
