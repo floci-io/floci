@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.TaskOverride;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -53,6 +54,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
 
     private static final String TASK_ARN = "arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/ecsTaskRole";
+    private static final String OVERRIDE_ROLE_ARN = "arn:aws:iam::000000000000:role/overrideTaskRole";
     private static final String NETWORK = "floci-ecs-net";
     private static final String RELATIVE_URI = "/v2/credentials/0b5f1a6e-8c21-4c2e-9a4c-2f0d2b6c7a10";
 
@@ -312,6 +314,26 @@ class EcsContainerManagerTaskRoleCredentialsTest {
     }
 
     @Test
+    void vendsTheRoleRunTaskOverridesInsteadOfTheTaskDefinitionRole() {
+        manager.startTask(taskOverridingRole(OVERRIDE_ROLE_ARN), taskDef(ROLE_ARN, "app"), null, "us-east-1");
+
+        verify(taskRoleCredentials).issue(eq(TASK_ARN), eq(OVERRIDE_ROLE_ARN), any(), any());
+        verify(taskRoleCredentials, never()).issue(any(), eq(ROLE_ARN), any(), any());
+    }
+
+    @Test
+    void vendsAnOverriddenRoleForATaskDefinitionWithoutOne() {
+        manager.startTask(taskOverridingRole(OVERRIDE_ROLE_ARN), taskDef(null, "app"), null, "us-east-1");
+
+        verify(taskRoleCredentials).issue(eq(TASK_ARN), eq(OVERRIDE_ROLE_ARN), any(), any());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> env = ArgumentCaptor.forClass(List.class);
+        verify(builder).withEnv(env.capture());
+        assertTrue(env.getValue().contains("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=" + RELATIVE_URI),
+                env.getValue().toString());
+    }
+
+    @Test
     void issuesNothingForATaskWithNoRole() {
         manager.startTask(task(), taskDef(null, "app"), null, "us-east-1");
 
@@ -396,6 +418,14 @@ class EcsContainerManagerTaskRoleCredentialsTest {
     private static EcsTask task() {
         EcsTask task = new EcsTask();
         task.setTaskArn(TASK_ARN);
+        return task;
+    }
+
+    private static EcsTask taskOverridingRole(String roleArn) {
+        TaskOverride overrides = new TaskOverride();
+        overrides.setTaskRoleArn(roleArn);
+        EcsTask task = task();
+        task.setOverrides(overrides);
         return task;
     }
 

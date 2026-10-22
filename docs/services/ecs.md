@@ -917,7 +917,9 @@ Off by default. With `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_ENABLED=true`, a 
 definition sets a resolvable `taskRoleArn` gets credentials for that role the way real ECS vends
 them: Floci
 writes `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` into every container in the task, pointing at one
-`/v2/credentials/{id}` path per task, and the AWS SDKs pick it up with no code change.
+`/v2/credentials/{id}` path per task, and the AWS SDKs pick it up with no code change. A
+`RunTask` `overrides.taskRoleArn` takes the place of the definition's role, and gives a task
+whose definition names none a role of its own.
 
 **A user-defined Docker network is required.** Set `FLOCI_SERVICES_ECS_DOCKER_NETWORK` to a network
 you created; the default bridge will not work. The SDKs hardcode `169.254.170.2` for this endpoint,
