@@ -262,9 +262,12 @@ final class EventPatternMatcher {
         return expected.isObject() ? matchesOperator(expected, value) : matchesLiteral(expected, value);
     }
 
-    /** An empty array carries no value, so {@code exists} treats it as absent. */
+    /**
+     * Exists matching only sees leaf values: an object is an intermediate node, and an array carries
+     * a value only through its elements, so neither an object nor an empty array is present.
+     */
     private static boolean hasValue(JsonNode value) {
-        if (value == null) {
+        if (value == null || value.isObject()) {
             return false;
         }
         if (!value.isArray()) {

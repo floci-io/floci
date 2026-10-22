@@ -100,7 +100,7 @@ aws events put-events \
 A pattern is matched against the whole event envelope, so any top-level field can be filtered: `source`, `detail-type`, `account`, `region`, `time`, `id`, `version`, `resources` and `detail`.
 
 - Supported operators: exact values (string, number, boolean, `null`), `prefix` and `suffix` (each also as `{"equals-ignore-case": "..."}`), `equals-ignore-case`, `wildcard` (with `\*` and `\\` for a literal asterisk and backslash), `cidr` (IPv4 and IPv6), `numeric` (`=`, `<`, `<=`, `>`, `>=` and two-sided ranges), `exists`, `anything-but` (a value, a list, or `prefix`, `suffix`, `equals-ignore-case` or `wildcard` with one value or a list) and `$or`.
-- When the event value is an array, the field matches if any element matches. A nested pattern over an array of objects matches when a single element matches all of it. An empty array counts as absent for `exists`.
+- When the event value is an array, the field matches if any element matches. A nested pattern over an array of objects matches when a single element matches all of it. `exists` only sees leaf values, so an object or an empty array counts as absent.
 - `PutRule`, `CreateArchive`, `UpdateArchive` and `TestEventPattern` reject a pattern with `InvalidEventPatternException` when it is not valid JSON, its root is not an object, a field is neither an object nor an array, or a match expression uses an unknown operator or a wrongly shaped operand.
 
 ## Input Transformation

@@ -1447,6 +1447,18 @@ class EventBridgeServiceTest {
                 "{\"detail\":{\"tags\":[{\"exists\":false}]}}"));
     }
 
+    /** Exists matching only works on leaf nodes, so an object is not a value it can find. */
+    @Test
+    void matchesPatternExistsDoesNotCountAnObjectAsAValue() {
+        Map<String, Object> object = eventWithDetail("{\"x\":{\"a\":1}}");
+        assertFalse(service.matchesPattern(object, "{\"detail\":{\"x\":[{\"exists\":true}]}}"));
+        assertTrue(service.matchesPattern(object, "{\"detail\":{\"x\":[{\"exists\":false}]}}"));
+
+        Map<String, Object> arrayOfObjects = eventWithDetail("{\"x\":[{\"a\":1}]}");
+        assertFalse(service.matchesPattern(arrayOfObjects, "{\"detail\":{\"x\":[{\"exists\":true}]}}"));
+        assertTrue(service.matchesPattern(arrayOfObjects, "{\"detail\":{\"x\":[{\"exists\":false}]}}"));
+    }
+
     // ─────────────── Events without Resources ───────────────
 
     @Test
