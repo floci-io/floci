@@ -135,10 +135,12 @@ public class PipesFilterMatcher {
         }
         if (element.isObject()) {
             if (element.has("prefix")) {
-                return actualStr != null && actualStr.startsWith(element.get("prefix").asText());
+                JsonNode prefix = element.get("prefix");
+                return actualStr != null && prefix.isTextual() && actualStr.startsWith(prefix.asText());
             }
             if (element.has("suffix")) {
-                return actualStr != null && actualStr.endsWith(element.get("suffix").asText());
+                JsonNode suffix = element.get("suffix");
+                return actualStr != null && suffix.isTextual() && actualStr.endsWith(suffix.asText());
             }
             if (element.has("equals-ignore-case")) {
                 return actualStr != null && actualStr.equalsIgnoreCase(element.get("equals-ignore-case").asText());

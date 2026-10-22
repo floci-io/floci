@@ -262,6 +262,20 @@ class PipesFilterMatcherTest {
     }
 
     @Test
+    void prefixWithANonStringOperand_doesNotMatchEveryValue() throws Exception {
+        JsonNode record = MAPPER.readTree("{\"body\": \"invoice-1\"}");
+        assertFalse(matcher.matchesRecord(record,
+                "{\"body\": [{\"prefix\": {\"equals-ignore-case\": \"order-\"}}]}"));
+    }
+
+    @Test
+    void suffixWithANonStringOperand_doesNotMatchEveryValue() throws Exception {
+        JsonNode record = MAPPER.readTree("{\"body\": \"report.xml\"}");
+        assertFalse(matcher.matchesRecord(record,
+                "{\"body\": [{\"suffix\": {\"equals-ignore-case\": \".json\"}}]}"));
+    }
+
+    @Test
     void numericFilter_withNonNumber_doesNotMatch() throws Exception {
         JsonNode record = MAPPER.readTree("{\"count\": \"not-a-number\"}");
         assertFalse(matcher.matchesRecord(record, "{\"count\": [{\"numeric\": [\"=\", 42]}]}"));
