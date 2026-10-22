@@ -811,6 +811,22 @@ class S3ServiceTest {
         assertEquals("s3-notif-test", lambdaInvoker.functionName);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"reports(2024)/", "reports%282024%29/", "reports%282024%29/a!'~", "reports%282024%29/a%21%27%7e"})
+    void notificationFilterTreatsSafeCharactersAndTheirEncodingAlike(String prefix) {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notif-s3-safe-filter"), false, lambdaInvoker,
+                new RegionResolver("us-east-1", "000000000000"));
+        service.createBucket("test-bucket", "ap-northeast-1");
+        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig(prefix, ".csv"), true);
+
+        service.putObject("test-bucket", "reports(2024)/a!'~.csv", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/csv", null);
+
+        assertEquals("s3-notif-test", lambdaInvoker.functionName);
+    }
+
     @Test
     void notificationFilterWithARawSpecialCharacterDoesNotMatch() {
         RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
