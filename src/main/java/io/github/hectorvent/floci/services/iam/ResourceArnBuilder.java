@@ -1363,21 +1363,65 @@ public class ResourceArnBuilder {
     }
 
     // ── SSM ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * Uses the serving operation, as {@link #buildSecretsManagerResources} does, so a field the handler
+     * does not read cannot choose the resource. GetParameters and DeleteParameters are authorized
+     * against each parameter their {@code Names} lists, and GetParametersByPath against the path it
+     * requests rather than the parameters it returns.
+     */
+    public List<String> buildSsmResources(String action, ContainerRequestContext ctx, String region,
+                                          String accountId) {
+        return switch (action) {
+            case "ssm:GetParameters", "ssm:DeleteParameters" -> buildSsmParameterArns(ctx, region, accountId);
+            case "ssm:GetParametersByPath" -> List.of(buildSsmPathArn(ctx, region, accountId));
+            default -> List.of(buildSsmArn(ctx, region, accountId));
+        };
+    }
+
     private String buildSsmArn(ContainerRequestContext ctx, String region, String accountId) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
             if (json.hasNonNull("Name")) {
                 String name = json.get("Name").asText().trim();
                 if (!name.isEmpty()) {
-                    if (AwsArnUtils.isArnFor(name, "ssm")) {
-                        return name;
-                    }
-                    String paramResource = name.startsWith("/") ? "parameter" + name : "parameter/" + name;
-                    return AwsArnUtils.Arn.of("ssm", region, accountId, paramResource).toString();
+                    return ssmParameterArn(name, region, accountId);
                 }
             }
         }
         return AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString();
+    }
+
+    private List<String> buildSsmParameterArns(ContainerRequestContext ctx, String region, String accountId) {
+        JsonNode json = readJsonBody(ctx);
+        Set<String> arns = new LinkedHashSet<>();
+        if (json != null && json.isObject()) {
+            for (JsonNode element : json.path("Names")) {
+                String name = element.asText().trim();
+                if (!name.isEmpty()) {
+                    arns.add(ssmParameterArn(name, region, accountId));
+                }
+            }
+        }
+        return arns.isEmpty()
+                ? List.of(AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString())
+                : new ArrayList<>(arns);
+    }
+
+    private String buildSsmPathArn(ContainerRequestContext ctx, String region, String accountId) {
+        JsonNode json = readJsonBody(ctx);
+        String path = json != null && json.hasNonNull("Path") ? json.get("Path").asText().trim() : "";
+        return path.isEmpty()
+                ? AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString()
+                : ssmParameterArn(path, region, accountId);
+    }
+
+    private static String ssmParameterArn(String name, String region, String accountId) {
+        if (AwsArnUtils.isArnFor(name, "ssm")) {
+            return name;
+        }
+        String paramResource = name.startsWith("/") ? "parameter" + name : "parameter/" + name;
+        return AwsArnUtils.Arn.of("ssm", region, accountId, paramResource).toString();
     }
 
     // ── KMS ──────────────────────────────────────────────────────────────────────

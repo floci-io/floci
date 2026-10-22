@@ -1097,6 +1097,46 @@ class ResourceArnBuilderTest {
         assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/config-key", arn);
     }
 
+    /** Parameter Store authorizes GetParameters, and DeleteParameters, against each parameter requested. */
+    @Test
+    void ssmNamesEveryParameterAMultiParameterOperationRequests() {
+        String arn = "arn:aws:ssm:us-east-1:000000000000:parameter/app/c";
+        for (String action : List.of("ssm:GetParameters", "ssm:DeleteParameters")) {
+            setJsonBody("{\"Names\":[\"/app/a\",\"app-b\",\"" + arn + "\",\"/app/a\"],\"WithDecryption\":true}");
+            assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/a",
+                            "arn:aws:ssm:us-east-1:000000000000:parameter/app-b", arn),
+                    builder.buildSsmResources(action, ctx, "us-east-1", ACCOUNT), action);
+        }
+        setJsonBody("{\"Names\":[]}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/*"),
+                builder.buildSsmResources("ssm:GetParameters", ctx, "us-east-1", ACCOUNT));
+    }
+
+    /** GetParametersByPath is authorized against the path requested, not the parameters it returns. */
+    @Test
+    void ssmNamesThePathAPathQueryRequests() {
+        setJsonBody("{\"Path\":\"/app\",\"Recursive\":true}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app"),
+                builder.buildSsmResources("ssm:GetParametersByPath", ctx, "us-east-1", ACCOUNT));
+        setJsonBody("{\"Path\":\"/\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/"),
+                builder.buildSsmResources("ssm:GetParametersByPath", ctx, "us-east-1", ACCOUNT));
+    }
+
+    /** A field the serving operation does not read cannot choose the resource it is checked against. */
+    @Test
+    void ssmTargetsTheFieldTheServingOperationReads() {
+        setJsonBody("{\"Name\":\"/public\",\"Names\":[\"/secret\"],\"Path\":\"/other\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/secret"),
+                builder.buildSsmResources("ssm:GetParameters", ctx, "us-east-1", ACCOUNT));
+        setJsonBody("{\"Name\":\"/public\",\"Names\":[\"/secret\"],\"Path\":\"/other\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/other"),
+                builder.buildSsmResources("ssm:GetParametersByPath", ctx, "us-east-1", ACCOUNT));
+        setJsonBody("{\"Name\":\"/public\",\"Names\":[\"/secret\"],\"Path\":\"/other\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/public"),
+                builder.buildSsmResources("ssm:GetParameter", ctx, "us-east-1", ACCOUNT));
+    }
+
     // ── SQS ─────────────────────────────────────────────────────────────────────
 
     @Test
