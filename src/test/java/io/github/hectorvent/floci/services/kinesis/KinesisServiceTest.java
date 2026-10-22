@@ -555,6 +555,89 @@ class KinesisServiceTest {
         assertNull(iterator, "the shard ends once its final record has been read");
     }
 
+    /**
+     * Runs {@code afterClose} once, right after a split or merge closes the shard: the earliest point at
+     * which a GetRecords reader, which holds no stream lock, can see the shard as closed.
+     */
+    private static final class CloseObservingShard extends KinesisShard {
+        private Runnable afterClose;
+
+        CloseObservingShard(KinesisShard original) {
+            super(original.getShardId(), original.getHashKeyRange().startingHashKey(),
+                    original.getHashKeyRange().endingHashKey(),
+                    original.getSequenceNumberRange().startingSequenceNumber());
+        }
+
+        @Override
+        public void setClosed(boolean closed) {
+            super.setClosed(closed);
+            Runnable action = afterClose;
+            if (closed && action != null) {
+                afterClose = null;
+                action.run();
+            }
+        }
+    }
+
+    /**
+     * Reads the shard at {@code index} from TRIM_HORIZON the moment it closes, adding that page's
+     * NextShardIterator to {@code nextIterators} and returning its ChildShards ids.
+     */
+    private List<String> childShardIdsSeenWhenClosed(KinesisStream stream, int index, boolean forAccount,
+                                                     List<Object> nextIterators) {
+        CloseObservingShard shard = new CloseObservingShard(stream.getShards().get(index));
+        stream.getShards().set(index, shard);
+        String iterator = kinesisService.getShardIterator(stream.getStreamName(), shard.getShardId(),
+                "TRIM_HORIZON", null, REGION);
+        List<String> childIds = new ArrayList<>();
+        shard.afterClose = () -> {
+            Map<String, Object> page = forAccount
+                    ? kinesisService.getRecordsForAccount("000000000000", iterator, 10, REGION)
+                    : kinesisService.getRecords(iterator, 10, REGION);
+            nextIterators.add(page.get("NextShardIterator"));
+            @SuppressWarnings("unchecked")
+            List<KinesisShard> children = (List<KinesisShard>) page.getOrDefault("ChildShards", List.of());
+            for (KinesisShard child : children) {
+                childIds.add(child.getShardId());
+            }
+        };
+        return childIds;
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void splitPublishesItsChildShardsBeforeAReaderCanSeeTheParentClosed(boolean forAccount) {
+        kinesisService.createStream("my-stream", 1, REGION);
+        KinesisStream stream = kinesisService.describeStream("my-stream", REGION);
+        List<Object> nextIterators = new ArrayList<>();
+        List<String> childIds = childShardIdsSeenWhenClosed(stream, 0, forAccount, nextIterators);
+
+        kinesisService.splitShard("my-stream", "shardId-000000000000",
+                "170141183460469231731687303715884105728", REGION);
+
+        assertEquals(Collections.nCopies(1, null), nextIterators, "the empty closed parent ends at once");
+        assertEquals(List.of("shardId-000000000001", "shardId-000000000002"), childIds,
+                "a reader that sees the parent closed must find its children in ChildShards");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void mergePublishesItsChildShardBeforeAReaderCanSeeEitherParentClosed(boolean forAccount) {
+        kinesisService.createStream("my-stream", 2, REGION);
+        KinesisStream stream = kinesisService.describeStream("my-stream", REGION);
+        List<Object> nextIterators = new ArrayList<>();
+        List<String> firstParentChildIds = childShardIdsSeenWhenClosed(stream, 0, forAccount, nextIterators);
+        List<String> adjacentParentChildIds = childShardIdsSeenWhenClosed(stream, 1, forAccount, nextIterators);
+
+        kinesisService.mergeShards("my-stream", "shardId-000000000000", "shardId-000000000001", REGION);
+
+        assertEquals(Collections.nCopies(2, null), nextIterators, "both empty closed parents end at once");
+        assertEquals(List.of("shardId-000000000002"), firstParentChildIds,
+                "a reader that sees the parent closed must find the merged child in ChildShards");
+        assertEquals(List.of("shardId-000000000002"), adjacentParentChildIds,
+                "a reader that sees the adjacent parent closed must find the merged child in ChildShards");
+    }
+
     @Test
     void updateShardCountScalesUpToDouble() {
         kinesisService.createStream("my-stream", 2, REGION);

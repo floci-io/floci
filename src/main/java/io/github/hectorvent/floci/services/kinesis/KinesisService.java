@@ -416,7 +416,6 @@ public class KinesisService implements ResourceProvider {
             }
 
             applySequenceFloor(key, stream);
-            parent.setClosed(true);
             parent.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(
                     parent.getSequenceNumberRange().startingSequenceNumber(),
                     String.valueOf(sequenceGenerator.get())));
@@ -438,6 +437,9 @@ public class KinesisService implements ResourceProvider {
             child2.setParentShardId(shardId);
 
             stream.getShards().addAll(List.of(child1, child2));
+            // Close only once the children are listed: GetRecords takes no stream lock and reports a
+            // closed shard's ChildShards, so a reader that sees the parent closed must also see them.
+            parent.setClosed(true);
             store.put(key, stream);
             LOG.infov("Split shard {0} in stream {1}", shardId, streamName);
         }
@@ -463,8 +465,6 @@ public class KinesisService implements ResourceProvider {
             }
 
             applySequenceFloor(key, stream);
-            shard1.setClosed(true);
-            shard2.setClosed(true);
             String seq = String.valueOf(sequenceGenerator.get());
             shard1.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard1.getSequenceNumberRange().startingSequenceNumber(), seq));
             shard2.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard2.getSequenceNumberRange().startingSequenceNumber(), seq));
@@ -483,6 +483,9 @@ public class KinesisService implements ResourceProvider {
             child.setAdjacentParentShardId(adjacentShardId);
 
             stream.getShards().add(child);
+            // Close only once the child is listed, as in splitShard.
+            shard1.setClosed(true);
+            shard2.setClosed(true);
             store.put(key, stream);
             LOG.infov("Merged shards {0} and {1} in stream {2}", shardId, adjacentShardId, streamName);
         }
