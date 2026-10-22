@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -15,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -150,6 +152,63 @@ class KinesisCfnProvisionerTest {
                 """, "s");
         verify(kinesis, never()).increaseStreamRetentionPeriod("s", 24, REGION);
         verify(kinesis, never()).decreaseStreamRetentionPeriod("s", 24, REGION);
+    }
+
+    /** ShardCount updates with no interruption, so a changed count rescales the existing stream. */
+    @Test
+    void aChangedShardCountRescalesTheExistingStream() {
+        when(kinesis.describeStream("s", REGION)).thenReturn(streamWithOpenShards(1));
+
+        provision("""
+                {"Name": "s", "ShardCount": 2}
+                """, "s");
+
+        verify(kinesis).updateShardCount("s", 2, "UNIFORM_SCALING", REGION);
+    }
+
+    /** A rescale Kinesis refuses (more than double, say) fails the resource rather than passing. */
+    @Test
+    void aRefusedRescaleFailsTheResource() {
+        when(kinesis.describeStream("s", REGION)).thenReturn(streamWithOpenShards(1));
+        when(kinesis.updateShardCount("s", 3, "UNIFORM_SCALING", REGION))
+                .thenThrow(new AwsException("LimitExceededException", "exceeds double", 400));
+
+        AwsException e = assertThrows(AwsException.class, () -> provision("""
+                {"Name": "s", "ShardCount": 3}
+                """, "s"));
+
+        assertEquals("LimitExceededException", e.getErrorCode());
+    }
+
+    @Test
+    void anUnchangedShardCountIsNotRescaled() {
+        when(kinesis.describeStream("s", REGION)).thenReturn(streamWithOpenShards(2));
+
+        provision("""
+                {"Name": "s", "ShardCount": 2}
+                """, "s");
+
+        verify(kinesis, never()).updateShardCount(anyString(), anyInt(), anyString(), anyString());
+    }
+
+    /** An on-demand stream manages its own shards; UpdateShardCount refuses it. */
+    @Test
+    void anOnDemandStreamIsNotRescaled() {
+        when(kinesis.describeStream("s", REGION)).thenReturn(streamWithOpenShards(1));
+
+        provision("""
+                {"Name": "s", "ShardCount": 2, "StreamModeDetails": {"StreamMode": "ON_DEMAND"}}
+                """, "s");
+
+        verify(kinesis, never()).updateShardCount(anyString(), anyInt(), anyString(), anyString());
+    }
+
+    private static KinesisStream streamWithOpenShards(int count) {
+        KinesisStream s = stream("arn", 24);
+        for (int i = 0; i < count; i++) {
+            s.getShards().add(new KinesisShard("shardId-" + i, "0", "0", "0"));
+        }
+        return s;
     }
 
     @Test

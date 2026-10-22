@@ -58,10 +58,12 @@ public class KinesisCfnProvisioner implements CfnResourceProvisioner {
         }
         // ShardCount is required for PROVISIONED streams; default to 1 when unset (ON_DEMAND ignores it).
         int shardCount = DEFAULT_SHARD_COUNT;
+        boolean shardCountDeclared = false;
         String shards = ctx.resolveOptional(props, "ShardCount");
         if (shards != null && !shards.isBlank()) {
             try {
                 shardCount = Integer.parseInt(shards.trim());
+                shardCountDeclared = true;
             } catch (NumberFormatException ignored) {
                 // keep default
             }
@@ -87,13 +89,18 @@ public class KinesisCfnProvisioner implements CfnResourceProvisioner {
         }
 
         // provision() re-runs on every UpdateStack, so a same-named stream already on file must be
-        // reconciled instead of re-created (createStream throws ResourceInUseException). ShardCount
-        // changes aren't reconciled here: KinesisService has no UpdateShardCount support to call into.
+        // reconciled instead of re-created (createStream throws ResourceInUseException).
         KinesisStream stream = sameNameExistingResource(priorPhysicalId, name,
                 n -> kinesisService.describeStream(n, ctx.region()));
         if (stream != null) {
-            kinesisService.updateStreamMode(name,
-                    streamMode != null ? streamMode : DEFAULT_STREAM_MODE, ctx.region());
+            String targetMode = streamMode != null ? streamMode : DEFAULT_STREAM_MODE;
+            kinesisService.updateStreamMode(name, targetMode, ctx.region());
+            // ShardCount updates with no interruption. A rescale Kinesis refuses (beyond double or
+            // half the open shards, say) fails the resource, as it fails the update on AWS.
+            long openShards = stream.getShards().stream().filter(shard -> !shard.isClosed()).count();
+            if (shardCountDeclared && DEFAULT_STREAM_MODE.equals(targetMode) && shardCount != openShards) {
+                kinesisService.updateShardCount(name, shardCount, "UNIFORM_SCALING", ctx.region());
+            }
             if (retention != null) {
                 if (retention > stream.getRetentionPeriodHours()) {
                     kinesisService.increaseStreamRetentionPeriod(name, retention, ctx.region());
