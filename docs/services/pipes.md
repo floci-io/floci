@@ -129,6 +129,17 @@ the field on a source its parameter block does not describe, for example
   reads them in `ReceiveMessage` calls of at most 10 messages each, until the batch is full or the
   queue has no more visible messages.
 
+## Kinesis Streams Source
+
+- Records are delivered in the AWS Pipes Kinesis record shape: a flat record with
+  `kinesisSchemaVersion`, `partitionKey`, `sequenceNumber`, `data` (base64 encoded),
+  `approximateArrivalTimestamp`, `eventSource` (`aws:kinesis`), `eventVersion`, `eventID`
+  (`<shardId>:<sequenceNumber>`), `eventName` (`aws:kinesis:record`), `invokeIdentityArn` (the pipe's
+  role), `awsRegion` and `eventSourceARN`.
+- Filter patterns match `data` decoded, and parsed as JSON when it is JSON, so a pattern such as
+  `{"partitionKey":["1"],"data":{"City":["Seattle"]}}` works as on AWS. The delivered record keeps
+  `data` base64 encoded.
+
 ## DynamoDB Streams Source
 
 - `StartingPosition` `TRIM_HORIZON` and `LATEST` are honored. `LATEST` is pinned on the pipe's

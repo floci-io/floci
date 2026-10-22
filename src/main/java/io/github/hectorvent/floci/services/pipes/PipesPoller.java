@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbTtlIdentity;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -42,6 +43,7 @@ public class PipesPoller implements Resettable {
     private static final long POLL_INTERVAL_MS = 1000;
     private static final int DEFAULT_BATCH_SIZE = 10;
     private static final int MAX_SQS_MESSAGES_PER_RECEIVE = 10;
+    private static final String KINESIS_SHARD_ID = "shardId-000000000000";
 
     private final Vertx vertx;
     private final SqsService sqsService;
@@ -264,7 +266,7 @@ public class PipesPoller implements Resettable {
         return received;
     }
 
-    private void pollKinesis(Pipe pipe, String region) {
+    void pollKinesis(Pipe pipe, String region) {
         String pipeKey = pipeKey(pipe);
         String streamName = extractResourceName(pipe.getSource());
         String pipeAccountId = pipe.getAccountId();
@@ -284,14 +286,14 @@ public class PipesPoller implements Resettable {
             if (nextIterator != null) {
                 kinesisIterators.put(pipeKey, nextIterator);
             }
-            List<?> records = (List<?>) result.get("Records");
+            @SuppressWarnings("unchecked")
+            List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
             if (records == null || records.isEmpty()) {
                 return;
             }
             LOG.infov("Pipe {0}: received {1} Kinesis record(s)", pipe.getName(), records.size());
-            List<ObjectNode> recordNodes = buildKinesisRecordNodes(records, pipe, region);
-            List<JsonNode> filtered = filterMatcher.applyFilterCriteria(
-                    new ArrayList<>(recordNodes), pipe.getSourceParameters());
+            List<ObjectNode> recordNodes = buildKinesisRecordNodes(records, pipe, KINESIS_SHARD_ID, region);
+            List<JsonNode> filtered = filterKinesisRecords(pipe, recordNodes, records);
             if (filtered.isEmpty()) {
                 return;
             }
@@ -317,9 +319,9 @@ public class PipesPoller implements Resettable {
         try {
             return (accountId != null)
                     ? kinesisService.getShardIteratorForAccount(
-                            accountId, streamName, "shardId-000000000000", "TRIM_HORIZON", null, region)
+                            accountId, streamName, KINESIS_SHARD_ID, "TRIM_HORIZON", null, region)
                     : kinesisService.getShardIterator(
-                            streamName, "shardId-000000000000", "TRIM_HORIZON", null, null, region);
+                            streamName, KINESIS_SHARD_ID, "TRIM_HORIZON", null, null, region);
         } catch (Exception e) {
             LOG.warnv("Failed to get Kinesis shard iterator for {0}: {1}", streamName, e.getMessage());
             return null;
@@ -760,25 +762,52 @@ public class PipesPoller implements Resettable {
         return nodes;
     }
 
-    private List<ObjectNode> buildKinesisRecordNodes(List<?> records, Pipe pipe, String region) {
-        List<ObjectNode> nodes = new ArrayList<>();
-        for (Object record : records) {
-            ObjectNode node = objectMapper.valueToTree(record);
-            ObjectNode eventRecord = objectMapper.createObjectNode();
-            eventRecord.put("eventSource", "aws:kinesis");
-            eventRecord.put("eventSourceARN", pipe.getSource());
-            eventRecord.put("awsRegion", region);
-            eventRecord.put("eventID", pipe.getSource() + ":" +
-                    node.path("SequenceNumber").asText());
-            ObjectNode kinesis = eventRecord.putObject("kinesis");
-            kinesis.put("partitionKey", node.path("PartitionKey").asText());
-            kinesis.put("sequenceNumber", node.path("SequenceNumber").asText());
-            kinesis.put("approximateArrivalTimestamp",
-                    node.path("ApproximateArrivalTimestamp").asDouble());
-            kinesis.put("data", node.path("Data").asText());
-            nodes.add(eventRecord);
+    /** The flat record EventBridge Pipes delivers from a Kinesis stream, with {@code data} base64 encoded. */
+    private List<ObjectNode> buildKinesisRecordNodes(List<KinesisRecord> records, Pipe pipe, String shardId,
+                                                     String region) {
+        List<ObjectNode> nodes = new ArrayList<>(records.size());
+        for (KinesisRecord record : records) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("kinesisSchemaVersion", "1.0");
+            node.put("partitionKey", record.getPartitionKey());
+            node.put("sequenceNumber", record.getSequenceNumber());
+            node.put("data", record.getData() != null ? base64(record.getData()) : "");
+            node.put("approximateArrivalTimestamp",
+                    record.getApproximateArrivalTimestamp().toEpochMilli() / 1000.0);
+            node.put("eventSource", "aws:kinesis");
+            node.put("eventVersion", "1.0");
+            node.put("eventID", shardId + ":" + record.getSequenceNumber());
+            node.put("eventName", "aws:kinesis:record");
+            if (pipe.getRoleArn() != null) {
+                node.put("invokeIdentityArn", pipe.getRoleArn());
+            }
+            node.put("awsRegion", region);
+            node.put("eventSourceARN", pipe.getSource());
+            nodes.add(node);
         }
         return nodes;
+    }
+
+    /**
+     * Matches the pipe's filter against each record with its {@code data} decoded, parsed as JSON when it
+     * parses, as AWS filters a Kinesis record, and returns the matching records as delivered.
+     */
+    private List<JsonNode> filterKinesisRecords(Pipe pipe, List<ObjectNode> deliveryNodes,
+                                                List<KinesisRecord> records) {
+        Map<String, JsonNode> deliveryNodesByEventId = new HashMap<>();
+        List<JsonNode> filterNodes = new ArrayList<>(deliveryNodes.size());
+        for (int i = 0; i < deliveryNodes.size(); i++) {
+            ObjectNode deliveryNode = deliveryNodes.get(i);
+            deliveryNodesByEventId.put(deliveryNode.path("eventID").asText(), deliveryNode);
+            ObjectNode filterNode = deliveryNode.deepCopy();
+            applyDecodedField(filterNode, "data", records.get(i).getData());
+            filterNodes.add(filterNode);
+        }
+        List<JsonNode> matched = new ArrayList<>();
+        for (JsonNode filterNode : filterMatcher.applyFilterCriteria(filterNodes, pipe.getSourceParameters())) {
+            matched.add(deliveryNodesByEventId.get(filterNode.path("eventID").asText()));
+        }
+        return matched;
     }
 
     private List<ObjectNode> buildKafkaRecordNodes(List<KafkaRecordDto> records, Pipe pipe) {
@@ -825,8 +854,8 @@ public class PipesPoller implements Resettable {
         for (int i = 0; i < deliveryNodes.size(); i++) {
             ObjectNode node = deliveryNodes.get(i).deepCopy();
             KafkaRecordDto record = records.get(i);
-            applyDecodedKafkaField(node, "key", record.key());
-            applyDecodedKafkaField(node, "value", record.value());
+            applyDecodedField(node, "key", record.key());
+            applyDecodedField(node, "value", record.value());
             nodes.add(node);
         }
         return nodes;
@@ -857,7 +886,7 @@ public class PipesPoller implements Resettable {
         return record.topic() + ":" + record.partition() + ":" + record.offset();
     }
 
-    private void applyDecodedKafkaField(ObjectNode node, String fieldName, byte[] value) {
+    private void applyDecodedField(ObjectNode node, String fieldName, byte[] value) {
         if (value == null) {
             node.putNull(fieldName);
             return;
@@ -867,7 +896,7 @@ public class PipesPoller implements Resettable {
             JsonNode parsed = objectMapper.readTree(decoded);
             node.set(fieldName, parsed);
         } catch (JsonProcessingException e) {
-            LOG.debugv("Kafka {0} is not valid JSON: {1}", fieldName, e.getOriginalMessage());
+            LOG.debugv("Record {0} is not valid JSON: {1}", fieldName, e.getOriginalMessage());
             node.put(fieldName, decoded);
         }
     }

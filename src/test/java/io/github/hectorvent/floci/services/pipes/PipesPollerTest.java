@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.pipes;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -26,6 +28,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -53,6 +57,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -60,11 +65,13 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class PipesPollerTest {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** Registers the Java time module as the Quarkus mapper the poller is given at runtime does. */
+    private static final ObjectMapper MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
     private static final String STREAM_ARN =
             "arn:aws:dynamodb:us-east-1:000000000000:table/orders/stream/2026-09-01T00:00:00.000";
     private static final String SHARD_ID = "shardId-0000000001-00000000001";
     private static final String DLQ_ARN = "arn:aws:sqs:us-east-1:000000000000:pipe-dlq";
+    private static final String KINESIS_ARN = "arn:aws:kinesis:us-east-1:000000000000:stream/orders-stream";
 
     @Mock private Vertx vertx;
     @Mock private SqsService sqsService;
@@ -392,6 +399,100 @@ class PipesPollerTest {
         ArgumentCaptor<List<KafkaOffsetDto>> offsetsCaptor = ArgumentCaptor.forClass(List.class);
         verify(kafkaConsumerManager).commit(eq(pipe), offsetsCaptor.capture());
         assertEquals(2L, singleOffset(offsetsCaptor.getValue(), "orders", 0));
+    }
+
+    // ──────────────────────────── Kinesis ────────────────────────────
+
+    @Test
+    void kinesisRecordsAreDeliveredInTheFlatAwsPipesRecordShape() throws Exception {
+        Pipe pipe = kinesisPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
+        Instant arrival = Instant.parse("2026-09-01T10:15:30.987Z");
+        String body = "{\"City\":\"Seattle\"}";
+        when(kinesisService.getShardIteratorForAccount("000000000000", "orders-stream", "shardId-000000000000",
+                "TRIM_HORIZON", null, "us-east-1")).thenReturn("it-0");
+        when(kinesisService.getRecordsForAccount("000000000000", "it-0", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1", kinesisRecord(body, "pk-1", "4959001", arrival)));
+
+        runOneTimerTick(pipe);
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker, timeout(5000)).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        JsonNode record = MAPPER.readTree(payload.getValue());
+        assertEquals("pk-1", record.path("partitionKey").asText());
+        assertEquals("4959001", record.path("sequenceNumber").asText());
+        assertEquals(Base64.getEncoder().encodeToString(body.getBytes(StandardCharsets.UTF_8)),
+                record.path("data").asText(), "data is delivered base64 encoded, as AWS does");
+        assertEquals(arrival.toEpochMilli() / 1000.0, record.path("approximateArrivalTimestamp").asDouble());
+        assertEquals("1.0", record.path("kinesisSchemaVersion").asText());
+        assertEquals("aws:kinesis", record.path("eventSource").asText());
+        assertEquals("1.0", record.path("eventVersion").asText());
+        assertEquals("shardId-000000000000:4959001", record.path("eventID").asText());
+        assertEquals("aws:kinesis:record", record.path("eventName").asText());
+        assertEquals("us-east-1", record.path("awsRegion").asText());
+        assertEquals(KINESIS_ARN, record.path("eventSourceARN").asText());
+        assertFalse(record.has("kinesis"), "Pipes delivers a flat record, not the Lambda ESM envelope");
+    }
+
+    @Test
+    void kinesisFilterMatchesTheDecodedDataAndThePartitionKey() throws Exception {
+        Pipe pipe = kinesisPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
+        pipe.setSourceParameters(MAPPER.readTree("""
+                {"KinesisStreamParameters":{"StartingPosition":"TRIM_HORIZON"},
+                 "FilterCriteria":{"Filters":[
+                   {"Pattern":"{\\"partitionKey\\":[\\"pk-1\\"],\\"data\\":{\\"City\\":[\\"Seattle\\"]}}"}]}}"""));
+        when(kinesisService.getShardIteratorForAccount("000000000000", "orders-stream", "shardId-000000000000",
+                "TRIM_HORIZON", null, "us-east-1")).thenReturn("it-0");
+        when(kinesisService.getRecordsForAccount("000000000000", "it-0", 10, "us-east-1"))
+                .thenReturn(kinesisPage("it-1",
+                        kinesisRecord("{\"City\":\"Portland\"}", "pk-1", "4959001", Instant.now()),
+                        kinesisRecord("{\"City\":\"Seattle\"}", "pk-2", "4959002", Instant.now()),
+                        kinesisRecord("{\"City\":\"Seattle\"}", "pk-1", "4959003", Instant.now())));
+
+        runOneTimerTick(pipe);
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker, timeout(5000)).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        verify(targetInvoker, times(1)).invoke(eq(pipe), anyString(), eq("us-east-1"));
+        JsonNode record = MAPPER.readTree(payload.getValue());
+        assertEquals("4959003", record.path("sequenceNumber").asText());
+        assertEquals(Base64.getEncoder().encodeToString("{\"City\":\"Seattle\"}".getBytes(StandardCharsets.UTF_8)),
+                record.path("data").asText(), "the decoded data is only the filter's view");
+    }
+
+    /** Starts the pipe and runs one tick of its poll timer, which polls on a pipes-poller thread. */
+    private void runOneTimerTick(Pipe pipe) {
+        poller.startPolling(pipe);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Handler<Long>> tick = ArgumentCaptor.forClass(Handler.class);
+        verify(vertx).setPeriodic(eq(1000L), tick.capture());
+        tick.getValue().handle(1L);
+    }
+
+    private Pipe kinesisPipe(String kinesisStreamParameters) throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setName("orders-kinesis-pipe");
+        pipe.setArn("arn:aws:pipes:us-east-1:000000000000:pipe/orders-kinesis-pipe");
+        pipe.setSource(KINESIS_ARN);
+        pipe.setTarget("arn:aws:sqs:us-east-1:000000000000:orders-target");
+        pipe.setRoleArn("arn:aws:iam::000000000000:role/pipe-role");
+        pipe.setDesiredState(DesiredState.RUNNING);
+        pipe.setAccountId("000000000000");
+        pipe.setSourceParameters(MAPPER.readTree("{\"KinesisStreamParameters\":" + kinesisStreamParameters + "}"));
+        return pipe;
+    }
+
+    private static KinesisRecord kinesisRecord(String data, String partitionKey, String sequenceNumber,
+                                               Instant arrival) {
+        return new KinesisRecord(data.getBytes(StandardCharsets.UTF_8), partitionKey, sequenceNumber, arrival);
+    }
+
+    /** A GetRecords result as {@link KinesisService} returns it. */
+    private static Map<String, Object> kinesisPage(String nextShardIterator, KinesisRecord... records) {
+        Map<String, Object> page = new HashMap<>();
+        page.put("Records", List.of(records));
+        page.put("NextShardIterator", nextShardIterator);
+        page.put("MillisBehindLatest", 0L);
+        return page;
     }
 
     // ──────────────────────────── DynamoDB Streams ────────────────────────────
