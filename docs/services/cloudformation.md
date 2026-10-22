@@ -610,13 +610,16 @@ resource schema declares (measured). Floci reads them the same way, before anyth
   records a warning event for a value that it does not convert itself and the handler does
   (`" 128"`, `"0128"`, `" true"`); Floci does not.
 
-The task definition is registered with its `Volumes` (`Host` and `EFSVolumeConfiguration`),
-`PidMode`, `IpcMode`, `EphemeralStorage`, `RuntimePlatform` and `Tags`, and each container with its
-`DependsOn`, `MountPoints`, `VolumesFrom`, `WorkingDirectory`, `User`, `StartTimeout`,
-`StopTimeout`, `ReadonlyRootFilesystem`, `HealthCheck`, `EnvironmentFiles`, `DockerLabels` and
-`Hostname`, besides the members above. RegisterTaskDefinition's own checks apply: an unknown
-`DependsOn` condition, `PidMode` or `IpcMode` fails the resource, and a host volume's `SourcePath`
-goes through the same host-volume policy as one registered through the ECS API (see
+The task definition is registered with its `Volumes` (`Host` and `EFSVolumeConfiguration`, and
+`DockerVolumeConfiguration`, `FSxWindowsFileServerVolumeConfiguration`, `S3FilesVolumeConfiguration`
+and `ConfiguredAtLaunch` kept as the ECS API keeps them, so such a volume is not run as ephemeral
+task storage), `PidMode`, `IpcMode`, `EphemeralStorage`, `RuntimePlatform` and `Tags`, and each
+container with its `DependsOn`, `MountPoints`, `VolumesFrom`, `WorkingDirectory`, `User`,
+`StartTimeout`, `StopTimeout`, `ReadonlyRootFilesystem`, `HealthCheck`, `EnvironmentFiles`,
+`DockerLabels` and `Hostname`, besides the members above. RegisterTaskDefinition's own checks
+apply: an unknown `DependsOn` condition, `PidMode` or `IpcMode` fails the resource, an EFS volume
+with an access point fails unless its `RootDirectory` is omitted or `/`, and a host volume's
+`SourcePath` goes through the same host-volume policy as one registered through the ECS API (see
 [Host volume safety](ecs.md#host-volume-safety)). Other properties, such as a container's `Privileged`, `Ulimits` or
 `RepositoryCredentials` and the task's `ProxyConfiguration` or `PlacementConstraints`, are not
 registered.

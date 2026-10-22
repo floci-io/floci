@@ -597,9 +597,62 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             String sourcePath = item.path("Host").path("SourcePath").asText(null);
             result.add(new Volume(item.path("Name").asText(null),
                     sourcePath == null || sourcePath.isBlank() ? null : sourcePath,
-                    parseEfsVolumeConfiguration(item.path("EFSVolumeConfiguration"))));
+                    parseEfsVolumeConfiguration(item.path("EFSVolumeConfiguration")),
+                    parseUnmodelledVolumeMembers(item)));
         }
         return result;
+    }
+
+    /**
+     * The volume members Floci backs with nothing, in the shape RegisterTaskDefinition takes them,
+     * kept where that path keeps them: among the volume's unparsed members. So DescribeTaskDefinition
+     * shows them, and a Docker, FSx, S3 Files or launch-configured volume is not run as ephemeral
+     * task storage, as for a definition registered through the API.
+     */
+    private static Map<String, Object> parseUnmodelledVolumeMembers(JsonNode item) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        JsonNode docker = item.path("DockerVolumeConfiguration");
+        if (docker.isObject()) {
+            Map<String, Object> configuration = new LinkedHashMap<>();
+            putValue(configuration, "scope", docker.path("Scope"));
+            putValue(configuration, "autoprovision", docker.path("Autoprovision"));
+            putValue(configuration, "driver", docker.path("Driver"));
+            putOptions(configuration, "driverOpts", docker.path("DriverOpts"));
+            putOptions(configuration, "labels", docker.path("Labels"));
+            result.put("dockerVolumeConfiguration", configuration);
+        }
+        JsonNode fsx = item.path("FSxWindowsFileServerVolumeConfiguration");
+        if (fsx.isObject()) {
+            Map<String, Object> configuration = new LinkedHashMap<>();
+            putValue(configuration, "fileSystemId", fsx.path("FileSystemId"));
+            putValue(configuration, "rootDirectory", fsx.path("RootDirectory"));
+            JsonNode auth = fsx.path("AuthorizationConfig");
+            if (auth.isObject()) {
+                Map<String, Object> authorization = new LinkedHashMap<>();
+                putValue(authorization, "credentialsParameter", auth.path("CredentialsParameter"));
+                putValue(authorization, "domain", auth.path("Domain"));
+                configuration.put("authorizationConfig", authorization);
+            }
+            result.put("fsxWindowsFileServerVolumeConfiguration", configuration);
+        }
+        JsonNode s3Files = item.path("S3FilesVolumeConfiguration");
+        if (s3Files.isObject()) {
+            Map<String, Object> configuration = new LinkedHashMap<>();
+            putValue(configuration, "fileSystemArn", s3Files.path("FileSystemArn"));
+            putValue(configuration, "accessPointArn", s3Files.path("AccessPointArn"));
+            putValue(configuration, "rootDirectory", s3Files.path("RootDirectory"));
+            putValue(configuration, "transitEncryptionPort", s3Files.path("TransitEncryptionPort"));
+            result.put("s3filesVolumeConfiguration", configuration);
+        }
+        putValue(result, "configuredAtLaunch", item.path("ConfiguredAtLaunch"));
+        return result.isEmpty() ? null : result;
+    }
+
+    private static void putOptions(Map<String, Object> target, String key, JsonNode value) {
+        Map<String, String> options = parseOptions(value);
+        if (options != null) {
+            target.put(key, options);
+        }
     }
 
     private static EfsVolumeConfiguration parseEfsVolumeConfiguration(JsonNode node) {
@@ -607,9 +660,17 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             return null;
         }
         JsonNode auth = node.path("AuthorizationConfig");
+        String rootDirectory = node.path("RootDirectory").asText(null);
+        String accessPointId = auth.path("AccessPointId").asText(null);
+        if (accessPointId != null && !accessPointId.isBlank()
+                && rootDirectory != null && !rootDirectory.isBlank() && !"/".equals(rootDirectory)) {
+            throw new AwsException("InvalidParameterException",
+                    "Root directory must either be omitted or set to '/' when an EFS access point "
+                            + "is specified in authorizationConfig.accessPointId.", 400);
+        }
         return new EfsVolumeConfiguration(node.path("FilesystemId").asText(null),
-                node.path("RootDirectory").asText(null), node.path("TransitEncryption").asText(null),
-                optionalInt(node, "TransitEncryptionPort"), auth.path("AccessPointId").asText(null),
+                rootDirectory, node.path("TransitEncryption").asText(null),
+                optionalInt(node, "TransitEncryptionPort"), accessPointId,
                 auth.path("IAM").asText(null));
     }
 

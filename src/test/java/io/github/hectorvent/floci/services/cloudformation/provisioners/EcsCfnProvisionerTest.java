@@ -377,6 +377,89 @@ class EcsCfnProvisionerTest {
         assertEquals(Map.of("tier", "web"), app.getDockerLabels());
     }
 
+    /**
+     * The volume members Floci backs with nothing reach the definition as RegisterTaskDefinition
+     * keeps them, so a Docker, FSx, S3 Files or launch-configured volume is not run as ephemeral
+     * task storage and DescribeTaskDefinition shows it as declared.
+     */
+    @Test
+    void aVolumeKeepsTheMembersFlociDoesNotModel() throws Exception {
+        TaskDefinition td = new TaskDefinition();
+        td.setTaskDefinitionArn(TASK_DEF_ARN);
+        when(ecs.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), eq(REGION))).thenReturn(td);
+        JsonNode props = mapper.readTree("""
+                {"Family": "web",
+                 "Volumes": [
+                   {"Name": "cache", "DockerVolumeConfiguration": {"Scope": "shared", "Autoprovision": true,
+                     "Driver": "local", "DriverOpts": {"type": "tmpfs"}, "Labels": {"Team": "core"}}},
+                   {"Name": "reports", "FSxWindowsFileServerVolumeConfiguration": {"FileSystemId": "fs-0123",
+                     "RootDirectory": "share", "AuthorizationConfig": {"CredentialsParameter": "fsx-credentials",
+                     "Domain": "corp.example.com"}}},
+                   {"Name": "objects", "S3FilesVolumeConfiguration": {"FileSystemArn": "files-arn",
+                     "RootDirectory": "/", "TransitEncryptionPort": 2999}},
+                   {"Name": "scratch", "ConfiguredAtLaunch": true}],
+                 "ContainerDefinitions": [{"Name": "app", "Image": "nginx:1"}]}
+                """);
+
+        provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx());
+
+        assertEquals(List.of(
+                new Volume("cache", null, null, Map.of("dockerVolumeConfiguration", Map.of("scope", "shared",
+                        "autoprovision", true, "driver", "local", "driverOpts", Map.of("type", "tmpfs"),
+                        "labels", Map.of("Team", "core")))),
+                new Volume("reports", null, null, Map.of("fsxWindowsFileServerVolumeConfiguration", Map.of(
+                        "fileSystemId", "fs-0123", "rootDirectory", "share", "authorizationConfig",
+                        Map.of("credentialsParameter", "fsx-credentials", "domain", "corp.example.com")))),
+                new Volume("objects", null, null, Map.of("s3filesVolumeConfiguration", Map.of(
+                        "fileSystemArn", "files-arn", "rootDirectory", "/", "transitEncryptionPort", 2999))),
+                new Volume("scratch", null, null, Map.of("configuredAtLaunch", true))),
+                registeredRequest().getVolumes());
+    }
+
+    /** As RegisterTaskDefinition refuses it: an access point fixes the directory the volume mounts. */
+    @Test
+    void anEfsAccessPointWithAnotherRootDirectoryIsRefused() throws Exception {
+        TaskDefinition td = new TaskDefinition();
+        td.setTaskDefinitionArn(TASK_DEF_ARN);
+        when(ecs.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), eq(REGION))).thenReturn(td);
+        JsonNode props = mapper.readTree("""
+                {"Family": "web",
+                 "Volumes": [{"Name": "shared", "EFSVolumeConfiguration": {"FilesystemId": "fs-1",
+                   "RootDirectory": "/exports", "TransitEncryption": "ENABLED",
+                   "AuthorizationConfig": {"AccessPointId": "fsap-1"}}}],
+                 "ContainerDefinitions": [{"Name": "app", "Image": "nginx:1"}]}
+                """);
+        StackResource taskDef = resource("AWS::ECS::TaskDefinition", "TaskDef");
+        ProvisionContext ctx = ctx();
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(taskDef, props, ctx));
+
+        assertEquals("InvalidParameterException", e.getErrorCode());
+        assertEquals("Root directory must either be omitted or set to '/' when an EFS access point is specified"
+                + " in authorizationConfig.accessPointId.", e.getMessage());
+        verify(ecs, never()).registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), anyString());
+    }
+
+    @Test
+    void anEfsAccessPointWithTheRootDirectoryOrNoneIsAccepted() throws Exception {
+        TaskDefinition td = new TaskDefinition();
+        td.setTaskDefinitionArn(TASK_DEF_ARN);
+        when(ecs.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), eq(REGION))).thenReturn(td);
+        JsonNode props = mapper.readTree("""
+                {"Family": "web",
+                 "Volumes": [
+                   {"Name": "root", "EFSVolumeConfiguration": {"FilesystemId": "fs-1", "RootDirectory": "/",
+                     "TransitEncryption": "ENABLED", "AuthorizationConfig": {"AccessPointId": "fsap-1"}}},
+                   {"Name": "none", "EFSVolumeConfiguration": {"FilesystemId": "fs-1",
+                     "TransitEncryption": "ENABLED", "AuthorizationConfig": {"AccessPointId": "fsap-2"}}}],
+                 "ContainerDefinitions": [{"Name": "app", "Image": "nginx:1"}]}
+                """);
+
+        provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx());
+
+        assertEquals(List.of("root", "none"), registeredRequest().getVolumes().stream().map(Volume::name).toList());
+    }
+
     private RegisterTaskDefinitionRequest registeredRequest() {
         ArgumentCaptor<RegisterTaskDefinitionRequest> request =
                 ArgumentCaptor.forClass(RegisterTaskDefinitionRequest.class);
