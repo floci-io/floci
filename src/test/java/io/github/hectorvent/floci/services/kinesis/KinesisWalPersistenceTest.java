@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -23,6 +24,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -95,6 +97,62 @@ class KinesisWalPersistenceTest {
             }
         } finally {
             // Shut down both stores so neither leaves a compaction scheduler or open WAL writer.
+            if (store2 != null) {
+                store2.shutdown();
+            }
+            store1.shutdown();
+        }
+    }
+
+    @Test
+    void putRecordAfterARestartIssuesASequenceNumberAboveEveryPersistedOne() throws Exception {
+        long persistedSequence = System.currentTimeMillis() + 1_000_000_000L;
+        withRestartedService(persistedSequence, after -> {
+            String next = after.putRecord("seq-stream", "after".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+            assertTrue(Long.parseLong(next) > persistedSequence,
+                    "sequence " + next + " must exceed the persisted " + persistedSequence);
+        });
+    }
+
+    @Test
+    void splitShardAfterARestartClosesTheParentAboveItsPersistedRecords() throws Exception {
+        long persistedSequence = System.currentTimeMillis() + 1_000_000_000L;
+        withRestartedService(persistedSequence, after -> {
+            after.splitShard("seq-stream", "shardId-000000000000", "170141183460469231731687303715884105728", REGION);
+            KinesisStream stream = after.describeStream("seq-stream", REGION);
+            assertTrue(Long.parseLong(stream.getShards().get(0).getSequenceNumberRange().endingSequenceNumber())
+                    >= persistedSequence, "the closed parent's range must cover its last record");
+            assertTrue(Long.parseLong(stream.getShards().get(1).getSequenceNumberRange().startingSequenceNumber())
+                    >= persistedSequence, "a child must start after its parent's records");
+        });
+    }
+
+    /**
+     * Persists a one-shard stream whose record carries {@code persistedSequence} (a producer that ran
+     * ahead of the wall clock), reloads the WAL into a fresh store and hands a new service over it to
+     * {@code afterRestart}.
+     */
+    private void withRestartedService(long persistedSequence, Consumer<KinesisService> afterRestart)
+            throws Exception {
+        TypeReference<Map<String, KinesisStream>> type = new TypeReference<>() {};
+        RegionResolver rr = new RegionResolver("us-east-1", "000000000000");
+        WalStorage<String, KinesisStream> store1 = new WalStorage<>(
+                tmp.resolve("seq-streams.json"), tmp.resolve("seq-streams.wal"), type, 3_600_000L);
+        WalStorage<String, KinesisStream> store2 = null;
+        try {
+            store1.load();
+            KinesisService before = new KinesisService(store1, new InMemoryStorage<>(), rr);
+            KinesisStream stream = before.createStream("seq-stream", 1, REGION);
+            stream.getShards().getFirst().addRecord(new KinesisRecord("before".getBytes(StandardCharsets.UTF_8),
+                    "pk", String.valueOf(persistedSequence), Instant.now()));
+            store1.put(REGION + "::seq-stream", stream);
+
+            Path wal2 = tmp.resolve("seq-reload.wal");
+            Files.copy(tmp.resolve("seq-streams.wal"), wal2, StandardCopyOption.REPLACE_EXISTING);
+            store2 = new WalStorage<>(tmp.resolve("seq-reload.json"), wal2, type, 3_600_000L);
+            store2.load();
+            afterRestart.accept(new KinesisService(store2, new InMemoryStorage<>(), rr));
+        } finally {
             if (store2 != null) {
                 store2.shutdown();
             }

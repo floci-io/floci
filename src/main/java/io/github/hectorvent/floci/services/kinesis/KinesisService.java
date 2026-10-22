@@ -68,6 +68,8 @@ public class KinesisService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final Clock clock;
     private final AtomicLong sequenceGenerator = new AtomicLong(System.currentTimeMillis());
+    // Streams the generator has been raised above in this JVM; see applySequenceFloor.
+    private final Set<String> sequenceFloorApplied = ConcurrentHashMap.newKeySet();
     // One monitor per stream key, handed out by lockFor. Serializes sequence allocation + shard
     // append + persist so the in-memory log, the assigned sequence order and the WAL write order
     // all agree, and serializes every other read-modify-write on a stream against deleteStream.
@@ -413,6 +415,7 @@ public class KinesisService implements ResourceProvider {
                 throw new AwsException("InvalidArgumentException", "Shard " + shardId + " is already closed", 400);
             }
 
+            applySequenceFloor(key, stream);
             parent.setClosed(true);
             parent.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(
                     parent.getSequenceNumberRange().startingSequenceNumber(),
@@ -459,6 +462,7 @@ public class KinesisService implements ResourceProvider {
                 throw new AwsException("InvalidArgumentException", "One or both shards are already closed", 400);
             }
 
+            applySequenceFloor(key, stream);
             shard1.setClosed(true);
             shard2.setClosed(true);
             String seq = String.valueOf(sequenceGenerator.get());
@@ -789,12 +793,50 @@ public class KinesisService implements ResourceProvider {
             validateRecordSize(current, data, partitionKey);
             KinesisShard shard = selectShard(current, partitionKey, explicitHashKey);
             pruneExpiredRecords(current, shard);
+            applySequenceFloor(key, current);
             String sequenceNumber = String.valueOf(sequenceGenerator.incrementAndGet());
             putRecordAppendHook.run();
             KinesisRecord record = new KinesisRecord(data, partitionKey, sequenceNumber, clock.instant());
             shard.addRecord(record);
             persistStream(accountId, key, current);
             return new PutRecordResult(sequenceNumber, shard.getShardId());
+        }
+    }
+
+    /**
+     * Raises the generator above every sequence number {@code stream} already holds, once per stream in
+     * this JVM. The generator restarts from the wall clock, which a restarted emulator can find behind
+     * numbers it issued before: any burst above one record per millisecond runs ahead of the clock.
+     * Callers hold the stream's lock.
+     */
+    private void applySequenceFloor(String key, KinesisStream stream) {
+        if (!sequenceFloorApplied.add(stream.getStreamArn() != null ? stream.getStreamArn() : key)) {
+            return;
+        }
+        long highest = 0L;
+        for (KinesisShard shard : stream.getShards()) {
+            KinesisShard.SequenceNumberRange range = shard.getSequenceNumberRange();
+            if (range != null) {
+                highest = Math.max(highest, sequenceValue(range.startingSequenceNumber()));
+                highest = Math.max(highest, sequenceValue(range.endingSequenceNumber()));
+            }
+            List<KinesisRecord> records = shard.getRecords();
+            if (!records.isEmpty()) {
+                highest = Math.max(highest, sequenceValue(records.getLast().getSequenceNumber()));
+            }
+        }
+        sequenceGenerator.accumulateAndGet(highest, Math::max);
+    }
+
+    private static long sequenceValue(String sequenceNumber) {
+        if (sequenceNumber == null) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(sequenceNumber);
+        } catch (NumberFormatException ignored) {
+            // Floci only mints decimal longs, so a value that is not one can never be reissued.
+            return 0L;
         }
     }
 

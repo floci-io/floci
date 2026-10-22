@@ -82,6 +82,8 @@ A `LATEST` iterator is positioned at the shard tip at the moment the iterator is
 
 A shard closed by `SplitShard`, `MergeShards` or `UpdateShardCount` ends: once an iterator is past its last record, `GetRecords` returns no records, no `NextShardIterator`, and the shard's `ChildShards` (`ShardId`, `ParentShards`, `HashKeyRange`), so a consumer knows to continue with the children. The response that returns the final records still carries a `NextShardIterator`; the call made with it reports the end.
 
+Sequence numbers are unique within a stream and keep increasing across an emulator restart in the persistent storage modes: the first put, split or merge on a stream after a restart issues numbers above every one the stream already holds.
+
 ## Record Retention
 
 A stream's retention period (default 24 hours, `IncreaseStreamRetentionPeriod`/`DecreaseStreamRetentionPeriod` up to 8760 hours) is enforced: a record older than the current retention period is not returned by `GetRecords` or the `GET /_aws/kinesis/records` inspection endpoint, and is actually removed from memory rather than merely hidden. Expiry is checked lazily on each stream's next `PutRecord`/`PutRecords` or read after a record ages out; there is no scheduled sweep. After `DecreaseStreamRetentionPeriod`, records outside the new window are inaccessible from the next put or read, in line with AWS making them inaccessible almost immediately. Shard iterators (including `NextShardIterator` continuation tokens and `LATEST`) resolve by sequence number, so they keep working correctly across pruning even if the exact record they were positioned at has since expired.
