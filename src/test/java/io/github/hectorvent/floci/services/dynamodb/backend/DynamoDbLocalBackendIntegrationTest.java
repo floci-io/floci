@@ -334,6 +334,46 @@ class DynamoDbLocalBackendIntegrationTest {
             .body("Tags.Value", contains("prod"));
     }
 
+    /**
+     * A table Local holds on demand, as stacks made before billing was applied left theirs, under a
+     * template declaring CDK's default throughput: an update that keeps that throughput changes no
+     * billing, which Local could not do.
+     */
+    @Test
+    void aStackUpdateThatKeepsTheDeclaredThroughputLeavesAnOnDemandTableAlone() {
+        String table = tableName("billing");
+        String stack = "local-it-billing-" + UUID.randomUUID();
+        createTable(A_EAST, table, "").statusCode(200);
+        String template = """
+            {
+                "Resources": {
+                    "Orders": {
+                        "Type": "AWS::DynamoDB::Table",
+                        "Properties": {
+                            "TableName": "%s",
+                            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                            "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                            "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5},
+                            "Tags": [{"Key": "env", "Value": "%s"}]
+                        }
+                    }
+                }
+            }
+            """;
+
+        cloudFormation(A_EAST, "CreateStack", stack, template.formatted(table, "dev"));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, A_EAST.authorization("cloudformation"))
+                .status());
+
+        cloudFormation(A_EAST, "UpdateStack", stack, template.formatted(table, "prod"));
+        CfnStackWaits.StackState updated = CfnStackWaits.awaitTerminal(stack, A_EAST.authorization("cloudformation"));
+
+        assertEquals("UPDATE_COMPLETE", updated.status(), updated.reason());
+        dynamoDb(A_EAST, "DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(200)
+            .body("Table.BillingModeSummary.BillingMode", equalTo("PAY_PER_REQUEST"));
+    }
+
     @Test
     void resetIsRefused() {
         given().when().post("/_floci/state/reset").then().statusCode(409);

@@ -68,6 +68,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     // The Kinesis data stream this resource's KinesisStreamSpecification enabled, so a removed block
     // or a new StreamArn disables that destination and leaves any other the table has alone.
     private static final String KINESIS_STREAM_ATTR = "__FlociDynamoDbKinesisStreamArn";
+    // The billing the template declared, resolved, when this resource was last provisioned: the
+    // previous template's value an update compares with, as CloudFormation does.
+    private static final String DECLARED_BILLING_ATTR = "__FlociDynamoDbDeclaredBilling";
     private static final int TABLE_NAME_MAX_LENGTH = 255;
 
     private final DynamoDbFacade dynamoDb;
@@ -216,8 +219,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         JsonNode throughput = props != null ? engine.resolveNode(props.get("ProvisionedThroughput")) : null;
         Long readCapacity = capacity(throughput, "ReadCapacityUnits");
         Long writeCapacity = capacity(throughput, "WriteCapacityUnits");
-        boolean billingDeclared = (billingMode != null && !billingMode.isBlank())
-                || (throughput != null && throughput.isObject());
+        String declaredBilling = declaredBilling(props, engine);
         boolean onDemand = PAY_PER_REQUEST.equals(billingMode);
         JsonNode kinesisSpec = props != null ? engine.resolveNode(props.get("KinesisStreamSpecification")) : null;
         boolean kinesisDeclared = kinesisSpec != null && kinesisSpec.isObject();
@@ -242,13 +244,17 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         try {
             // TTL is read when the template declares it, and on an in-place update for the rollback
             // snapshot, so UpdateTimeToLive is called only when something differs. A rename of an
-            // enabled TTL attribute fails here, and the snapshot is taken here, before anything changes.
+            // enabled TTL attribute and a changed index fail here, before anything changes, and the
+            // snapshot is taken after them, before the first change.
             // A table this attempt created has no prior state to snapshot; a failure deletes it instead.
             boolean inPlaceUpdate = !created && ctx.reusesPriorEntity(tableName);
             TimeToLive currentTtl = null;
             if (ttlDeclared || inPlaceUpdate) {
                 currentTtl = dynamoDb.tables().timeToLive(scope, tableName);
                 requireTimeToLiveChangeAllowed(currentTtl, desiredTtl);
+            }
+            if (inPlaceUpdate) {
+                requireIndexesUpdatable(table, gsis);
             }
             Map<String, String> currentTags = dynamoDb.tables().listTagsOfResource(scope, table.getTableArn());
             if (inPlaceUpdate && TABLE.equals(r.getResourceType())) {
@@ -258,9 +264,13 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             reconcileTags(scope, table.getTableArn(), currentTags,
                     parseCfnTags(props != null ? props.get("Tags") : null, engine));
 
-            // Both update with no interruption. An adopted table that is not this resource's is left
-            // as it is, and a table this attempt created already carries the declared indexes.
-            if (billingDeclared && (created || inPlaceUpdate)) {
+            // Both update with no interruption. A table this attempt created takes the declared billing;
+            // an update applies only a billing the template changed, since CloudFormation compares the
+            // template with the previous one rather than with the table. An adopted table that is not
+            // this resource's is left as it is, and a table this attempt created already carries the
+            // declared indexes.
+            if (declaredBilling != null
+                    && (created || (inPlaceUpdate && !declaredBilling.equals(priorDeclaredBilling(r, ctx))))) {
                 table = reconcileBilling(scope, tableName, table, onDemand ? PAY_PER_REQUEST : PROVISIONED,
                         readCapacity, writeCapacity);
             }
@@ -299,6 +309,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
 
             r.setPhysicalId(tableName);
             r.getAttributes().put("Arn", table.getTableArn());
+            putOrRemove(r, DECLARED_BILLING_ATTR, declaredBilling);
             // Only the global table's registry schema declares TableId read-only; a plain table exposes
             // Arn and StreamArn alone, so publishing it there would accept a Fn::GetAtt CloudFormation
             // rejects. DescribeTable reports the same value, so Fn::GetAtt and the API agree.
@@ -386,6 +397,44 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * The billing {@code props} declare as one comparable value, or null when they declare neither
+     * BillingMode nor ProvisionedThroughput.
+     */
+    private static String declaredBilling(JsonNode props, CloudFormationTemplateEngine engine) {
+        if (props == null) {
+            return null;
+        }
+        String mode = props.hasNonNull("BillingMode") ? engine.resolve(props.get("BillingMode")) : null;
+        JsonNode throughput = engine.resolveNode(props.get("ProvisionedThroughput"));
+        boolean throughputDeclared = throughput != null && throughput.isObject();
+        if ((mode == null || mode.isBlank()) && !throughputDeclared) {
+            return null;
+        }
+        if (PAY_PER_REQUEST.equals(mode)) {
+            return PAY_PER_REQUEST;
+        }
+        return PROVISIONED + " " + capacity(throughput, "ReadCapacityUnits") + " "
+                + capacity(throughput, "WriteCapacityUnits");
+    }
+
+    /**
+     * The billing the previous template declared: as recorded when it was provisioned, or read from
+     * that template for a resource provisioned before the record was kept.
+     */
+    private static String priorDeclaredBilling(StackResource r, ProvisionContext ctx) {
+        String recorded = r.getAttributes().get(DECLARED_BILLING_ATTR);
+        return recorded != null ? recorded : declaredBilling(ctx.priorProperties(), ctx.engine());
+    }
+
+    private static void putOrRemove(StackResource r, String attribute, String value) {
+        if (value != null) {
+            r.getAttributes().put(attribute, value);
+        } else {
+            r.getAttributes().remove(attribute);
+        }
+    }
+
+    /**
      * Whether the table bills on demand. DescribeTable reports an on-demand table's throughput as
      * zero, and a provisioned table has at least one unit of each, so zero reads as on-demand where
      * the billing mode itself is not reported.
@@ -419,27 +468,41 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Brings the table's global secondary indexes to {@code declared}, by name: an index no longer
-     * declared is deleted and a declared one the table lacks is created, one UpdateTable call each, as
-     * DynamoDB runs one index operation at a time. An index whose key schema or projection changed
-     * cannot be updated in place, so that fails before anything changes.
+     * An index whose key schema or projection changed cannot be updated in place, so an update
+     * declaring one fails, before it changes anything.
      */
-    private TableDefinition reconcileGlobalSecondaryIndexes(Scope scope, String tableName, TableDefinition table,
-                                                            List<GlobalSecondaryIndex> declared,
-                                                            List<AttributeDefinition> attributeDefinitions) {
-        Map<String, GlobalSecondaryIndex> existing = new LinkedHashMap<>();
-        if (table.getGlobalSecondaryIndexes() != null) {
-            table.getGlobalSecondaryIndexes().forEach(index -> existing.put(index.getIndexName(), index));
-        }
-        Set<String> declaredNames = new LinkedHashSet<>();
+    private static void requireIndexesUpdatable(TableDefinition table, List<GlobalSecondaryIndex> declared) {
+        Map<String, GlobalSecondaryIndex> existing = indexesByName(table);
         for (GlobalSecondaryIndex index : declared) {
-            declaredNames.add(index.getIndexName());
             GlobalSecondaryIndex current = existing.get(index.getIndexName());
             if (current != null && !sameShape(current, index)) {
                 throw new AwsException("InvalidRequest", "Invalid request provided: Cannot update GSI's properties"
                         + " other than Provisioned Throughput and Contributor Insights Specification. You can create"
                         + " a new GSI with a different name.", 400);
             }
+        }
+    }
+
+    private static Map<String, GlobalSecondaryIndex> indexesByName(TableDefinition table) {
+        Map<String, GlobalSecondaryIndex> existing = new LinkedHashMap<>();
+        if (table.getGlobalSecondaryIndexes() != null) {
+            table.getGlobalSecondaryIndexes().forEach(index -> existing.put(index.getIndexName(), index));
+        }
+        return existing;
+    }
+
+    /**
+     * Brings the table's global secondary indexes to {@code declared}, by name: an index no longer
+     * declared is deleted and a declared one the table lacks is created, one UpdateTable call each, as
+     * DynamoDB runs one index operation at a time. Callers check {@link #requireIndexesUpdatable} first.
+     */
+    private TableDefinition reconcileGlobalSecondaryIndexes(Scope scope, String tableName, TableDefinition table,
+                                                            List<GlobalSecondaryIndex> declared,
+                                                            List<AttributeDefinition> attributeDefinitions) {
+        Map<String, GlobalSecondaryIndex> existing = indexesByName(table);
+        Set<String> declaredNames = new LinkedHashSet<>();
+        for (GlobalSecondaryIndex index : declared) {
+            declaredNames.add(index.getIndexName());
         }
         for (String indexName : existing.keySet()) {
             if (!declaredNames.contains(indexName)) {
@@ -583,6 +646,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         snapshot.put("kinesisStreamArn", r.getAttributes().get(KINESIS_STREAM_ATTR));
+        snapshot.put("declaredBilling", r.getAttributes().get(DECLARED_BILLING_ATTR));
         ArrayNode attributes = snapshot.putArray("attributeDefinitions");
         if (table.getAttributeDefinitions() != null) {
             table.getAttributeDefinitions().forEach(attribute -> attributes.addObject()
@@ -634,8 +698,10 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
 
         // A snapshot an earlier release took has no indexes or billing; that update changed neither.
         if (snapshot.has("globalSecondaryIndexes")) {
+            List<GlobalSecondaryIndex> priorIndexes = snapshotIndexes(snapshot);
+            requireIndexesUpdatable(table, priorIndexes);
             table = reconcileGlobalSecondaryIndexes(scope, tableName, table,
-                    snapshotIndexes(snapshot), snapshotAttributeDefinitions(snapshot));
+                    priorIndexes, snapshotAttributeDefinitions(snapshot));
             table = reconcileBilling(scope, tableName, table, snapshot.path("billingMode").asText(PROVISIONED),
                     snapshot.hasNonNull("readCapacity") ? snapshot.get("readCapacity").asLong() : null,
                     snapshot.hasNonNull("writeCapacity") ? snapshot.get("writeCapacity").asLong() : null);
@@ -656,6 +722,10 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         if (snapshot.has("kinesisStreamArn")) {
             reconcileKinesisDestination(resource, scope, tableName, table,
                     snapshot.get("kinesisStreamArn").textValue(), null);
+        }
+        // The previous template is the stack's again, so the next update compares with its billing.
+        if (snapshot.has("declaredBilling")) {
+            putOrRemove(resource, DECLARED_BILLING_ATTR, snapshot.get("declaredBilling").textValue());
         }
 
         publishStreamArn(resource, table);

@@ -872,6 +872,131 @@ class DynamoDbCfnProvisionerTest {
                 "PROVISIONED", "us-east-1");
     }
 
+    private static final String DECLARED_THROUGHPUT = "{\"TableName\":\"orders\","
+            + "\"ProvisionedThroughput\":{\"ReadCapacityUnits\":5,\"WriteCapacityUnits\":5}%s}";
+
+    /**
+     * CloudFormation diffs a template against the previous one, not against the table: a table the
+     * DynamoDB Local backend created on demand keeps that billing while the template's throughput
+     * stays the same, and Local refuses any billing change.
+     */
+    @Test
+    void anUpdateThatKeepsTheDeclaredThroughputLeavesTheBillingAlone() throws Exception {
+        TableDefinition onDemand = table(false);
+        onDemand.setBillingMode("PAY_PER_REQUEST");
+        onDemand.setProvisionedThroughput(new ProvisionedThroughput(0, 0));
+        existingTable(onDemand);
+        updateTableAnswers(onDemand);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props(DECLARED_THROUGHPUT.formatted(",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]")),
+                updateCtx(TABLE_NAME, DECLARED_THROUGHPUT.formatted("")));
+
+        verify(dynamoDb).tagResource(TABLE_ARN, Map.of("env", "prod"), "us-east-1");
+        verify(dynamoDb, never()).updateTable(anyString(), any(), any(), anyList(), anyList(), anyList(), anyList(),
+                anyList(), any(), anyString());
+    }
+
+    @Test
+    void aBillingChangeTheTemplateMakesIsAppliedOnUpdate() throws Exception {
+        TableDefinition provisioned = table(false);
+        provisioned.setProvisionedThroughput(new ProvisionedThroughput(5, 5));
+        existingTable(provisioned);
+        updateTableAnswers(provisioned);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+
+        provisioner.provision(r, props("{\"TableName\":\"orders\",\"BillingMode\":\"PAY_PER_REQUEST\"}"),
+                updateCtx(TABLE_NAME, DECLARED_THROUGHPUT.formatted("")));
+
+        verify(dynamoDb).updateTable(TABLE_NAME, null, null, List.of(), List.of(), List.of(), List.of(), List.of(),
+                "PAY_PER_REQUEST", "us-east-1");
+    }
+
+    /** The stack's template is the previous one again after a rollback, so retrying the change applies it. */
+    @Test
+    void aBillingChangeRetriedAfterItsUpdateRolledBackIsAppliedAgain() throws Exception {
+        TableDefinition provisioned = table(false);
+        provisioned.setProvisionedThroughput(new ProvisionedThroughput(5, 5));
+        TableDefinition onDemand = table(false);
+        onDemand.setBillingMode("PAY_PER_REQUEST");
+        onDemand.setProvisionedThroughput(new ProvisionedThroughput(0, 0));
+        existingTable(provisioned);
+        updateTableAnswers(onDemand);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        String payPerRequest = "{\"TableName\":\"orders\",\"BillingMode\":\"PAY_PER_REQUEST\"}";
+        provisioner.provision(r, props(payPerRequest), updateCtx(TABLE_NAME, DECLARED_THROUGHPUT.formatted("")));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(onDemand);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        when(dynamoDb.describeTable(TABLE_NAME, "us-east-1")).thenReturn(provisioned);
+        provisioner.provision(r, props(payPerRequest), updateCtx(TABLE_NAME, DECLARED_THROUGHPUT.formatted("")));
+
+        verify(dynamoDb).updateTable(TABLE_NAME, 5L, 5L, List.of(), List.of(), List.of(), List.of(), List.of(),
+                "PROVISIONED", "us-east-1");
+        verify(dynamoDb, times(2)).updateTable(TABLE_NAME, null, null, List.of(), List.of(), List.of(), List.of(),
+                List.of(), "PAY_PER_REQUEST", "us-east-1");
+    }
+
+    /** The same template text resolves to new capacities when the parameter it references changes. */
+    @Test
+    void aThroughputChangedThroughAParameterIsApplied() throws Exception {
+        String parameterized = "{\"TableName\":\"orders\",\"ProvisionedThroughput\":"
+                + "{\"ReadCapacityUnits\":{\"Ref\":\"Capacity\"},\"WriteCapacityUnits\":{\"Ref\":\"Capacity\"}}}";
+        TableDefinition created = table(false);
+        created.setProvisionedThroughput(new ProvisionedThroughput(5, 5));
+        when(dynamoDb.createTable(anyString(), anyList(), anyList(), any(), any(), anyList(), anyList(), anyString()))
+                .thenReturn(created);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        provisioner.provision(r, props(parameterized), resolvingCapacityTo(ctx(), 5));
+        existingTable(created);
+        updateTableAnswers(created);
+
+        provisioner.provision(r, props(parameterized), resolvingCapacityTo(updateCtx(TABLE_NAME, parameterized), 10));
+
+        verify(dynamoDb).updateTable(TABLE_NAME, 10L, 10L, List.of(), List.of(), List.of(), List.of(), List.of(),
+                "PROVISIONED", "us-east-1");
+    }
+
+    /** Resolves a ProvisionedThroughput whose capacities reference a parameter to {@code capacity}. */
+    private ProvisionContext resolvingCapacityTo(ProvisionContext ctx, long capacity) {
+        when(ctx.engine().resolveNode(any())).thenAnswer(inv -> {
+            JsonNode node = inv.getArgument(0);
+            if (node != null && node.path("ReadCapacityUnits").has("Ref")) {
+                return mapper.createObjectNode().put("ReadCapacityUnits", capacity)
+                        .put("WriteCapacityUnits", capacity);
+            }
+            return node;
+        });
+        return ctx;
+    }
+
+    /** A refused index change fails before the update retags the table or changes its billing. */
+    @Test
+    void aRefusedIndexChangeLeavesTagsAndBillingAsTheyWere() throws Exception {
+        TableDefinition current = table(false);
+        current.setProvisionedThroughput(new ProvisionedThroughput(5, 5));
+        current.getGlobalSecondaryIndexes().add(index("byEmail", "pk"));
+        existingTable(current);
+        updateTableAnswers(current);
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        JsonNode props = props(BY_EMAIL_PROPS.replace("\"TableName\":\"orders\",",
+                "\"TableName\":\"orders\",\"BillingMode\":\"PAY_PER_REQUEST\","
+                        + "\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}],"));
+        ProvisionContext update = updateCtx(TABLE_NAME);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, update));
+
+        assertEquals("InvalidRequest", e.getErrorCode());
+        verify(dynamoDb, never()).tagResource(anyString(), any(), anyString());
+        verify(dynamoDb, never()).updateTable(anyString(), any(), any(), anyList(), anyList(), anyList(), anyList(),
+                anyList(), any(), anyString());
+        assertFalse(provisioner.retainsFailedUpdateState(r));
+    }
+
     /** A failed update takes back the index it created, with the rest of the table's prior state. */
     @Test
     void rollbackUpdateDeletesTheIndexTheFailedUpdateCreated() throws Exception {
