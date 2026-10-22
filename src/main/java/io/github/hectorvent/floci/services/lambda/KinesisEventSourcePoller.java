@@ -52,6 +52,7 @@ public class KinesisEventSourcePoller implements Resettable {
     private final PipesFilterMatcher filterMatcher;
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
+    private final Set<String> stopped = ConcurrentHashMap.newKeySet();
     private final ExecutorService pollExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "kinesis-esm-poller");
         t.setDaemon(true);
@@ -95,9 +96,11 @@ public class KinesisEventSourcePoller implements Resettable {
         timerIds.values().forEach(vertx::cancelTimer);
         timerIds.clear();
         activePolls.clear();
+        stopped.clear();
     }
 
-    public void startPolling(EventSourceMapping esm) {
+    public synchronized void startPolling(EventSourceMapping esm) {
+        stopped.remove(esm.getUuid());
         if (timerIds.containsKey(esm.getUuid())) return;
         String uuid = esm.getUuid();
         String accountId = esm.getAccountId();
@@ -110,9 +113,22 @@ public class KinesisEventSourcePoller implements Resettable {
         LOG.infov("Started Kinesis polling for ESM {0} → {1}", uuid, esm.getEventSourceArn());
     }
 
-    public void stopPolling(String uuid) {
+    /**
+     * Taking the monitor drains an in-flight advanceCheckpoint save, and the tombstone stops any
+     * later one, so a stopped or deleted mapping is never written back.
+     */
+    public synchronized void stopPolling(String uuid) {
+        stopped.add(uuid);
         Long timerId = timerIds.remove(uuid);
         if (timerId != null) vertx.cancelTimer(timerId);
+    }
+
+    /**
+     * Drops the stop tombstone. Safe once the store delete has run, because exists() in the
+     * synchronized advanceCheckpoint then refuses any write-back on its own.
+     */
+    void mappingDeleted(String uuid) {
+        stopped.remove(uuid);
     }
 
     /**
@@ -158,6 +174,10 @@ public class KinesisEventSourcePoller implements Resettable {
                         esm.getAccountId(), streamName, esm.getRegion());
 
                 for (KinesisShard shard : stream.getShards()) {
+                    if (isStopped(esm)) {
+                        LOG.debugv("Kinesis ESM {0} was stopped or deleted, ending its poll", esm.getUuid());
+                        return;
+                    }
                     String lastSeq = esm.getShardSequenceNumbers().get(shard.getShardId());
                     String iterator;
                     if (lastSeq == null && "AT_TIMESTAMP".equals(esm.getStartingPosition())
@@ -355,9 +375,20 @@ public class KinesisEventSourcePoller implements Resettable {
         return previousCheckpoint;
     }
 
-    private void advanceCheckpoint(EventSourceMapping esm, String shardId, String newestSeq) {
+    private synchronized void advanceCheckpoint(EventSourceMapping esm, String shardId, String newestSeq) {
+        if (isStopped(esm)) {
+            return;
+        }
         esm.getShardSequenceNumbers().put(shardId, newestSeq);
         esmStore.saveForAccount(esm.getAccountId(), esm);
+    }
+
+    private boolean isStopped(EventSourceMapping esm) {
+        return stopped.contains(esm.getUuid()) || !exists(esm);
+    }
+
+    private boolean exists(EventSourceMapping esm) {
+        return esmStore.getForAccount(esm.getAccountId(), esm.getUuid()).isPresent();
     }
 
     /**

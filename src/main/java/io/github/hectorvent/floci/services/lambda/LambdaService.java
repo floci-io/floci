@@ -2280,6 +2280,8 @@ public class LambdaService implements ResourceProvider {
         esmStore.delete(uuid);
         if (esm.getEventSourceArn() != null && esm.getEventSourceArn().contains(":dynamodb:")) {
             dynamodbStreamsPoller.mappingDeleted(uuid);
+        } else if (esm.getEventSourceArn() != null && esm.getEventSourceArn().contains(":kinesis:")) {
+            kinesisPoller.mappingDeleted(uuid);
         }
         LOG.infov("Deleted ESM {0}", uuid);
     }
