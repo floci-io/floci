@@ -299,9 +299,80 @@ class StsQueryHandlerTest {
         params.putSingle("RoleSessionName", "test-session");
         params.putSingle("DurationSeconds", durationSeconds);
 
-        Response response = newHandler().handle("AssumeRole", params);
+        Response response = newHandler(roleWithMaxSessionDuration(43200)).handle("AssumeRole", params);
 
         assertEquals(200, response.getStatus(), (String) response.getEntity());
+    }
+
+    @Test
+    void assumeRoleRejectsDurationSecondsAboveTheRolesMaxSessionDuration() {
+        Response response = newHandler(roleWithMaxSessionDuration(3600))
+                .handle("AssumeRole", assumeRoleParams("3601"));
+
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>ValidationError</Code>"), body);
+        assertTrue(body.contains("exceeds the MaxSessionDuration set for this role"), body);
+    }
+
+    @Test
+    void assumeRoleAcceptsDurationSecondsUpToTheRolesMaxSessionDuration() {
+        Response response = newHandler(roleWithMaxSessionDuration(7200))
+                .handle("AssumeRole", assumeRoleParams("7200"));
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+    }
+
+    @Test
+    void assumeRoleFromARoleSessionIsLimitedToOneHour() {
+        IamService iamService = mock(IamService.class);
+        when(iamService.findRole(anyString(), anyString()))
+                .thenReturn(Optional.of(roleWithMaxSessionDuration(43200)));
+        when(iamService.resolveCallerArns("ASIACHAINED")).thenReturn(Optional.of(new IamService.CallerArns(
+                "arn:aws:sts::000000000000:assumed-role/FirstRole/first", "arn:aws:iam::000000000000:role/FirstRole",
+                IamService.CallerArns.TYPE_ASSUMED_ROLE, "AROAFIRST:first", null)));
+        StsQueryHandler handler = newHandler(iamService, new RegionResolver(REGION, "000000000000"));
+        setCaller(handler, "ASIACHAINED", "-");
+
+        Response chained = handler.handle("AssumeRole", assumeRoleParams("3601"));
+        assertEquals(400, chained.getStatus());
+        String body = (String) chained.getEntity();
+        assertTrue(body.contains("<Code>ValidationError</Code>"), body);
+        assertTrue(body.contains("1 hour session limit for roles assumed by role chaining"), body);
+
+        assertEquals(200, handler.handle("AssumeRole", assumeRoleParams("3600")).getStatus());
+    }
+
+    @Test
+    void assumeRoleWithWebIdentityRejectsDurationSecondsAboveTheRolesMaxSessionDuration() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("WebIdentityToken", "opaque-token");
+        params.putSingle("DurationSeconds", "3601");
+
+        Response response = newHandler(roleWithMaxSessionDuration(3600)).handle("AssumeRoleWithWebIdentity", params);
+
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>ValidationError</Code>"), body);
+        assertTrue(body.contains("exceeds the MaxSessionDuration set for this role"), body);
+    }
+
+    private static IamRole roleWithMaxSessionDuration(int maxSessionDuration) {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        role.setMaxSessionDuration(maxSessionDuration);
+        return role;
+    }
+
+    private static MultivaluedMap<String, String> assumeRoleParams(String durationSeconds) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("DurationSeconds", durationSeconds);
+        return params;
     }
 
     @ParameterizedTest

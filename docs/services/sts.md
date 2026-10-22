@@ -117,6 +117,14 @@ when its condition matches.
   `sts:AssumeRole`, but it is evaluated for resource `*` rather than the role's ARN, so a policy
   that names the role in `Resource` does not grant it.
 
+## Session Duration
+
+`AssumeRole` and `AssumeRoleWithWebIdentity` accept a `DurationSeconds` from 900 to 43200, and, as
+on AWS, no longer than the target role's `MaxSessionDuration` (3600 unless the role sets another):
+a longer request fails with `ValidationError`. An `AssumeRole` call signed with another role
+session's credentials (role chaining) is limited to one hour whatever the role allows, and fails
+with `ValidationError` above 3600. These checks apply with IAM enforcement on or off.
+
 ## Web Identity Validation (IRSA)
 
 `AssumeRoleWithWebIdentity` validates tokens minted by an OIDC issuer Floci hosts - currently an EKS cluster's IRSA provider.

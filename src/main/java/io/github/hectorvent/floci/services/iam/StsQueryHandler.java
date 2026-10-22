@@ -50,6 +50,7 @@ public class StsQueryHandler {
     private static final Pattern ACCESS_KEY_ID_PATTERN = Pattern.compile("[\\w]*");
     private static final int ACCESS_KEY_ID_MIN_LENGTH = 16;
     private static final int ACCESS_KEY_ID_MAX_LENGTH = 128;
+    private static final int ROLE_CHAINING_MAX_SESSION_SECONDS = 3600;
 
     private static final Logger LOG = Logger.getLogger(StsQueryHandler.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -160,6 +161,10 @@ public class StsQueryHandler {
         Response trustDenied = enforceTrustPolicy(roleArn, role, accountId, params);
         if (trustDenied != null) {
             return trustDenied;
+        }
+        Response durationDenied = validateRoleSessionDuration(params, role, true);
+        if (durationDenied != null) {
+            return durationDenied;
         }
 
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
@@ -386,6 +391,10 @@ public class StsQueryHandler {
             if (role == null || !IamService.roleArnMatches(roleArn, role)) {
                 return accessDenied(roleArn);
             }
+        }
+        Response durationDenied = validateRoleSessionDuration(params, role, false);
+        if (durationDenied != null) {
+            return durationDenied;
         }
 
         String accessKeyId = "ASIA" + randomId(16);
@@ -738,6 +747,34 @@ public class StsQueryHandler {
      * Returns {@code null} when the parameter is absent or valid; otherwise a {@code ValidationError} (out of
      * range) or {@code InvalidParameterValue} (not an integer) response, matching AWS's own wire behavior.
      */
+    /**
+     * AWS refuses a session longer than the role's {@code MaxSessionDuration}, and longer than an
+     * hour when the caller signs with credentials of another role session (role chaining).
+     * Called after {@link #validateDurationSeconds}, so the value parses.
+     */
+    private Response validateRoleSessionDuration(MultivaluedMap<String, String> params, IamRole role,
+                                                 boolean checkRoleChaining) {
+        String value = params.getFirst("DurationSeconds");
+        if (value == null) {
+            return null;
+        }
+        int durationSeconds = Integer.parseInt(value);
+        if (durationSeconds > role.getMaxSessionDuration()) {
+            return AwsQueryResponse.error("ValidationError",
+                    "The requested DurationSeconds exceeds the MaxSessionDuration set for this role.",
+                    AwsNamespaces.STS, 400);
+        }
+        if (checkRoleChaining && durationSeconds > ROLE_CHAINING_MAX_SESSION_SECONDS
+                && iamService.resolveCallerArns(callerAccessKeyId())
+                        .filter(caller -> IamService.CallerArns.TYPE_ASSUMED_ROLE.equals(caller.principalType()))
+                        .isPresent()) {
+            return AwsQueryResponse.error("ValidationError",
+                    "The requested DurationSeconds exceeds the 1 hour session limit for roles assumed by role chaining.",
+                    AwsNamespaces.STS, 400);
+        }
+        return null;
+    }
+
     private Response validateDurationSeconds(MultivaluedMap<String, String> params, int minSeconds, int maxSeconds) {
         String value = params.getFirst("DurationSeconds");
         if (value == null) {
