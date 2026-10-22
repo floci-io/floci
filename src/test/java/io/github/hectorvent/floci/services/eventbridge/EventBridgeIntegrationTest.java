@@ -276,4 +276,26 @@ class EventBridgeIntegrationTest {
                 .then().statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
+
+    @Test
+    @Order(9)
+    void putRuleRejectsAnInvalidEventPattern() {
+        for (String pattern : new String[] {"{\\\"source\\\":\\\"my.app\\\"}", "{not json"}) {
+            given()
+                    .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                    .header("X-Amz-Target", "AWSEvents.PutRule")
+                    .body("{\"Name\":\"eb-invalid-pattern\",\"EventPattern\":\"" + pattern + "\"}")
+                    .when().post("/")
+                    .then().statusCode(400)
+                    .body("__type", equalTo("InvalidEventPatternException"));
+        }
+
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.DescribeRule")
+                .body("{\"Name\":\"eb-invalid-pattern\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
 }

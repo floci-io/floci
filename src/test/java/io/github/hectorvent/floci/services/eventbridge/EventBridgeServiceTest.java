@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.eventbridge;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.NullNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -31,6 +32,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -341,6 +343,21 @@ class EventBridgeServiceTest {
         assertEquals(0, archive.getRetentionDays());
     }
 
+    @Test
+    void createAndUpdateArchiveRejectAnInvalidEventPattern() {
+        AwsException created = assertThrows(AwsException.class, () ->
+                service.createArchive("orders-archive", DEFAULT_BUS, null, "{\"source\":\"my.app\"}", 0, REGION));
+        assertEquals("InvalidEventPatternException", created.getErrorCode());
+        assertEquals(400, created.getHttpStatus());
+        assertTrue(service.listArchives(null, null, null, REGION).isEmpty());
+
+        service.createArchive("orders-archive", DEFAULT_BUS, null, "{\"source\":[\"my.app\"]}", 0, REGION);
+        AwsException updated = assertThrows(AwsException.class, () ->
+                service.updateArchive("orders-archive", null, "{\"source\":[{\"bogus\":1}]}", null, REGION));
+        assertEquals("InvalidEventPatternException", updated.getErrorCode());
+        assertEquals("{\"source\":[\"my.app\"]}", service.describeArchive("orders-archive", REGION).getEventPattern());
+    }
+
     private static String patternOfLength(int length) {
         String pattern = "{\"source\":[\"" + "a".repeat(length - 15) + "\"]}";
         assertEquals(length, pattern.length());
@@ -388,6 +405,96 @@ class EventBridgeServiceTest {
         assertEquals(400, error.getHttpStatus());
         assertEquals("Parameter(s) EventPattern or ScheduleExpression must be specified.", error.getMessage());
         assertTrue(service.listRules(null, null, REGION).isEmpty());
+    }
+
+    static Stream<String> invalidEventPatterns() {
+        return """
+                {"source": "my.app"}
+                {"detail": {"status": "PAID"}}
+                {not json
+                ["my.app"]
+                "my.app"
+                {"source": [{"begins-with": "my."}]}
+                {"source": [["my.app"]]}
+                {"source": [{}]}
+                {"source": [{"prefix": "my.", "suffix": ".app"}]}
+                {"detail": {"f": [{"prefix": 5}]}}
+                {"detail": {"f": [{"suffix": {"equals-ignore-case": 5}}]}}
+                {"detail": {"f": [{"equals-ignore-case": ["a"]}]}}
+                {"detail": {"n": [{"numeric": [">", "ten"]}]}}
+                {"detail": {"n": [{"numeric": ["!=", 1]}]}}
+                {"detail": {"n": [{"numeric": [">"]}]}}
+                {"detail": {"n": [{"exists": "yes"}]}}
+                {"detail": {"ip": [{"cidr": "not-a-cidr"}]}}
+                {"detail": {"f": [{"wildcard": "a**b"}]}}
+                {"detail": {"f": [{"wildcard": "a\\\\b"}]}}
+                {"detail": {"f": [{"anything-but": {"exists": true}}]}}
+                {"detail": {"f": [{"anything-but": {"prefix": 5}}]}}
+                {"detail": {"f": [{"anything-but": [{"prefix": "a"}]}]}}
+                {"$or": [{"source": "my.app"}, {"detail-type": ["x"]}]}
+                """.lines();
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidEventPatterns")
+    void putRuleRejectsAnInvalidEventPattern(String pattern) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule("bad-rule", null, pattern, null, RuleState.ENABLED, null, null, null, REGION));
+
+        assertEquals("InvalidEventPatternException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.listRules(null, null, REGION).isEmpty());
+    }
+
+    /** Every example on the AWS comparison-operator page is a pattern PutRule must accept. */
+    static Stream<String> documentedEventPatterns() {
+        return """
+                {"Location": ["New York"], "Day": ["Monday"]}
+                {"detail": {"state": [{"anything-but": "initializing"}]}}
+                {"detail": {"x-limit": [{"anything-but": 123}]}}
+                {"detail": {"state": [{"anything-but": ["stopped", "overloaded"]}]}}
+                {"detail": {"x-limit": [{"anything-but": [100, 200, 300]}]}}
+                {"Region": [{"anything-but": {"prefix": "us-"}}]}
+                {"detail": {"state": [{"anything-but": {"prefix": ["init", "stop"]}}]}}
+                {"FileName": [{"anything-but": {"suffix": ".png"}}]}
+                {"detail": {"FileName": [{"anything-but": {"suffix": [".txt", ".rtf"]}}]}}
+                {"state": [{"anything-but": {"equals-ignore-case": "initializing"}}]}
+                {"detail": {"state": [{"anything-but": {"equals-ignore-case": ["initializing", "stopped"]}}]}}
+                {"FilePath": [{"anything-but": {"wildcard": "*/lib/*"}}]}
+                {"detail": {"FilePath": [{"anything-but": {"wildcard": ["*/lib/*", "*/bin/*"]}}]}}
+                {"time": [{"prefix": "2017-10-02"}]}
+                {"detail": {"service": [{"prefix": {"equals-ignore-case": "EventB"}}]}}
+                {"LastName": [""]}
+                {"Name": ["Alice"]}
+                {"Name": [{"equals-ignore-case": "alice"}]}
+                {"FileName": [{"suffix": ".png"}]}
+                {"detail": {"FileName": [{"suffix": {"equals-ignore-case": ".png"}}]}}
+                {"detail": {"state": [{"exists": true}]}}
+                {"ProductName": [{"exists": false}]}
+                {"Weather": [{"anything-but": ["Raining"]}]}
+                {"UserID": [null]}
+                {"Price": [{"numeric": ["=", 100]}]}
+                {"Price": [{"numeric": [">", 10, "<=", 20]}]}
+                {"detail": {"c-count": [{"numeric": [">", 0, "<=", 5]}], "d-count": [{"numeric": ["<", 10]}], "x-limit": [{"numeric": ["=", 3.018e2]}]}}
+                {"PaymentType": ["Credit", "Debit"]}
+                {"$or": [{"Location": ["New York"]}, {"Day": ["Monday"]}]}
+                {"detail": {"$or": [{"c-count": [{"numeric": [">", 0, "<=", 5]}]}, {"d-count": [{"numeric": ["<", 10]}]}]}}
+                {"FileName": [{"wildcard": "dir/*.png"}]}
+                {"EventBusArn": [{"wildcard": "*:*:*:*:*:event-bus/*"}]}
+                {"detail": {"f": [{"wildcard": "a\\\\*b\\\\\\\\"}]}}
+                {"detail": {"sourceIPAddress": [{"cidr": "10.0.0.0/24"}]}}
+                {"detail": {"sourceIPAddress": [{"cidr": "2001:db8::/32"}]}}
+                {"detail-type": [{"equals-ignore-case": "ec2 instance state-change notification"}]}
+                {"source": ["aws.ec2"], "detail": {"enabled": [true], "count": [5]}}
+                {"time": [{"prefix": "2017-10-02"}], "detail": {"state": [{"anything-but": "initializing"}], "c-count": [{"numeric": [">", 0, "<=", 5]}], "x-limit": [{"anything-but": [100, 200, 300]}]}}
+                """.lines();
+    }
+
+    @ParameterizedTest
+    @MethodSource("documentedEventPatterns")
+    void putRuleAcceptsEveryDocumentedOperator(String pattern) {
+        Rule rule = service.putRule("ok-rule", null, pattern, null, RuleState.ENABLED, null, null, null, REGION);
+        assertEquals(pattern, rule.getEventPattern());
     }
 
     @Test
@@ -1165,6 +1272,208 @@ class EventBridgeServiceTest {
                 "{\"source\":[\"my.app\"],\"account\":[\"000000000000\"],\"region\":[\"us-east-1\"],\"detail\":{\"status\":[\"CONFIRMED\"]}}"));
         assertFalse(service.matchesPattern(event,
                 "{\"source\":[\"my.app\"],\"account\":[\"999999999999\"],\"detail\":{\"status\":[\"CONFIRMED\"]}}"));
+    }
+
+    // ─────────────── Comparison operators ───────────────
+
+    private static Map<String, Object> eventWithDetail(String detail) {
+        return Map.of("Source", "my.app", "DetailType", "Order", "Detail", detail);
+    }
+
+    @Test
+    void matchesPatternNumericComparison() {
+        String pattern = "{\"detail\":{\"price\":[{\"numeric\":[\">\",10]}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"price\":42}"), pattern));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"price\":5}"), pattern));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"price\":\"42\"}"), pattern));
+    }
+
+    @Test
+    void matchesPatternNumericRangeAndEquals() {
+        String range = "{\"detail\":{\"c\":[{\"numeric\":[\">\",0,\"<=\",5]}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"c\":5}"), range));
+        assertTrue(service.matchesPattern(eventWithDetail("{\"c\":0.5}"), range));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"c\":0}"), range));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"c\":5.01}"), range));
+
+        String equals = "{\"detail\":{\"x\":[{\"numeric\":[\"=\",3.018e2]}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"x\":301.8}"), equals));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"x\":301}"), equals));
+
+        String halfOpen = "{\"detail\":{\"x\":[{\"numeric\":[\">=\",10,\"<\",20]}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"x\":10}"), halfOpen));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"x\":20}"), halfOpen));
+    }
+
+    @Test
+    void matchesPatternPrefixEqualsIgnoreCase() {
+        String pattern = "{\"detail\":{\"service\":[{\"prefix\":{\"equals-ignore-case\":\"eventb\"}}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"service\":\"EventBridge\"}"), pattern));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"service\":\"s3\"}"), pattern));
+    }
+
+    @Test
+    void matchesPatternSuffixEqualsIgnoreCase() {
+        String pattern = "{\"detail\":{\"file\":[{\"suffix\":{\"equals-ignore-case\":\".png\"}}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"file\":\"photo.PNG\"}"), pattern));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"file\":\"photo.jpg\"}"), pattern));
+    }
+
+    @Test
+    void matchesPatternWildcard() {
+        String pattern = "{\"detail\":{\"file\":[{\"wildcard\":\"dir/*.png\"}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"file\":\"dir/a.png\"}"), pattern));
+        assertTrue(service.matchesPattern(eventWithDetail("{\"file\":\"dir/sub/a.png\"}"), pattern));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"file\":\"dir/a.jpg\"}"), pattern));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"file\":\"other/a.png\"}"), pattern));
+    }
+
+    @Test
+    void matchesPatternWildcardEscapesAsteriskAndBackslash() {
+        // The pattern a\*b has a literal asterisk; a\\* is a literal backslash then a wildcard.
+        String literalStar = "{\"detail\":{\"f\":[{\"wildcard\":\"a\\\\*b\"}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"f\":\"a*b\"}"), literalStar));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"f\":\"axyzb\"}"), literalStar));
+
+        String literalBackslash = "{\"detail\":{\"f\":[{\"wildcard\":\"a\\\\\\\\*\"}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"f\":\"a\\\\xyz\"}"), literalBackslash));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"f\":\"axyz\"}"), literalBackslash));
+    }
+
+    @Test
+    void matchesPatternCidr() {
+        String ipv4 = "{\"detail\":{\"ip\":[{\"cidr\":\"10.0.0.0/24\"}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"ip\":\"10.0.0.255\"}"), ipv4));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"ip\":\"10.0.1.1\"}"), ipv4));
+
+        String ipv6 = "{\"detail\":{\"ip\":[{\"cidr\":\"2001:db8::/32\"}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"ip\":\"2001:db8::1\"}"), ipv6));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"ip\":\"2001:db9::1\"}"), ipv6));
+    }
+
+    @Test
+    void matchesPatternAnythingButSuffix() {
+        String single = "{\"detail\":{\"f\":[{\"anything-but\":{\"suffix\":\".txt\"}}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"f\":\"a.png\"}"), single));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"f\":\"a.txt\"}"), single));
+
+        String list = "{\"detail\":{\"f\":[{\"anything-but\":{\"suffix\":[\".txt\",\".rtf\"]}}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"f\":\"a.png\"}"), list));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"f\":\"a.rtf\"}"), list));
+    }
+
+    @Test
+    void matchesPatternAnythingButEqualsIgnoreCasePrefixListAndWildcard() {
+        String ignoreCase = "{\"detail\":{\"state\":[{\"anything-but\":"
+                + "{\"equals-ignore-case\":[\"initializing\",\"stopped\"]}}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"state\":\"running\"}"), ignoreCase));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"state\":\"INITIALIZING\"}"), ignoreCase));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"state\":\"Stopped\"}"), ignoreCase));
+
+        String prefixes = "{\"detail\":{\"state\":[{\"anything-but\":{\"prefix\":[\"init\",\"stop\"]}}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"state\":\"running\"}"), prefixes));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"state\":\"stopped\"}"), prefixes));
+
+        String wildcard = "{\"detail\":{\"path\":[{\"anything-but\":{\"wildcard\":\"*/lib/*\"}}]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"path\":\"/usr/bin/x\"}"), wildcard));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"path\":\"/usr/lib/x\"}"), wildcard));
+    }
+
+    @Test
+    void matchesPatternEvaluatesEveryEnvelopeKey() {
+        Map<String, Object> event = eventWithDetail("{}");
+        assertTrue(service.matchesPattern(event, "{\"version\":[\"0\"]}"));
+        assertFalse(service.matchesPattern(event, "{\"version\":[\"1\"]}"));
+        assertTrue(service.matchesPattern(event, "{\"time\":[{\"exists\":true}]}"));
+        assertFalse(service.matchesPattern(event, "{\"time\":[{\"prefix\":\"2017-10-02\"}]}"));
+        assertFalse(service.matchesPattern(event, "{\"id\":[\"not-this-event\"]}"));
+        assertFalse(service.matchesPattern(event, "{\"replay-name\":[\"some-replay\"]}"));
+    }
+
+    @Test
+    void matchesPatternDoesNotFailOpenOnAScalarPatternValue() {
+        Map<String, Object> event = eventWithDetail("{\"status\":\"CONFIRMED\"}");
+        assertFalse(service.matchesPattern(event, "{\"source\":\"other.app\"}"));
+        assertFalse(service.matchesPattern(event, "{\"detail\":{\"status\":\"PENDING\"}}"));
+    }
+
+    // ─────────────── Array-valued event fields ───────────────
+
+    @Test
+    void matchesPatternMatchesAnyElementOfAnArrayValue() {
+        String pattern = "{\"detail\":{\"tags\":[\"prod\"]}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"tags\":[\"prod\",\"eu\"]}"), pattern));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"tags\":[\"dev\"]}"), pattern));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"tags\":[]}"), pattern));
+    }
+
+    @Test
+    void matchesPatternAppliesOperatorsToEachArrayElement() {
+        assertTrue(service.matchesPattern(eventWithDetail("{\"tags\":[\"prod\"]}"),
+                "{\"detail\":{\"tags\":[{\"prefix\":\"pr\"}]}}"));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"tags\":[\"dev\"]}"),
+                "{\"detail\":{\"tags\":[{\"prefix\":\"pr\"}]}}"));
+        assertTrue(service.matchesPattern(eventWithDetail("{\"codes\":[1,50]}"),
+                "{\"detail\":{\"codes\":[{\"numeric\":[\">\",10]}]}}"));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"codes\":[1,5]}"),
+                "{\"detail\":{\"codes\":[{\"numeric\":[\">\",10]}]}}"));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"tags\":[\"prod\"]}"),
+                "{\"detail\":{\"tags\":[{\"anything-but\":[\"prod\"]}]}}"));
+        assertTrue(service.matchesPattern(eventWithDetail("{\"tags\":[\"prod\",\"dev\"]}"),
+                "{\"detail\":{\"tags\":[{\"anything-but\":[\"prod\"]}]}}"));
+    }
+
+    @Test
+    void matchesPatternEvaluatesANestedPatternAgainstEachArrayElement() {
+        String pattern = "{\"detail\":{\"items\":{\"sku\":[\"A\"]}}}";
+        assertTrue(service.matchesPattern(eventWithDetail("{\"items\":[{\"sku\":\"B\"},{\"sku\":\"A\"}]}"), pattern));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"items\":[{\"sku\":\"B\"}]}"), pattern));
+
+        String sameElement = "{\"detail\":{\"items\":{\"sku\":[\"A\"],\"qty\":[1]}}}";
+        assertFalse(service.matchesPattern(
+                eventWithDetail("{\"items\":[{\"sku\":\"A\",\"qty\":2},{\"sku\":\"B\",\"qty\":1}]}"), sameElement));
+        assertTrue(service.matchesPattern(eventWithDetail("{\"items\":[{\"sku\":\"A\",\"qty\":1}]}"), sameElement));
+    }
+
+    @Test
+    void matchesPatternExistsOnAnArrayValue() {
+        assertTrue(service.matchesPattern(eventWithDetail("{\"tags\":[\"a\"]}"),
+                "{\"detail\":{\"tags\":[{\"exists\":true}]}}"));
+        assertFalse(service.matchesPattern(eventWithDetail("{\"tags\":[]}"),
+                "{\"detail\":{\"tags\":[{\"exists\":true}]}}"));
+        assertTrue(service.matchesPattern(eventWithDetail("{\"tags\":[]}"),
+                "{\"detail\":{\"tags\":[{\"exists\":false}]}}"));
+    }
+
+    // ─────────────── Events without Resources ───────────────
+
+    @Test
+    void matchesPatternTreatsMissingResourcesAsAnEmptyList() {
+        Map<String, Object> event = Map.of("Source", "a", "DetailType", "b", "Detail", "{}");
+        assertTrue(service.matchesPattern(event, "{\"resources\":[{\"exists\":false}]}"));
+        assertFalse(service.matchesPattern(event, "{\"resources\":[\"arn:aws:s3:::bucket\"]}"));
+    }
+
+    @Test
+    void putEventsWithANullResourcesMemberDeliversAnEmptyResourcesList() throws Exception {
+        Rule rule = service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("my-rule", null, List.of(target), REGION);
+        Map<String, Object> entry = new HashMap<>();
+        entry.put("Source", "my.app");
+        entry.put("DetailType", "Test");
+        entry.put("Detail", "{\"k\":1}");
+        entry.put("Resources", NullNode.getInstance());
+
+        service.putEvents(List.of(entry), REGION);
+
+        ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
+        verify(dispatcherMock).dispatch(eq(rule.getArn()), eq(target), json.capture(), eq(REGION), any());
+        JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
+        assertEquals("my.app", envelope.path("source").asText());
+        assertTrue(envelope.path("resources").isArray());
+        assertEquals(0, envelope.path("resources").size());
     }
 
     // ─────────────── Envelope region/account propagation ───────────────

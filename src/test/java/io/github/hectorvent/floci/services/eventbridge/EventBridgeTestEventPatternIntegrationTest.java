@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -13,6 +16,7 @@ class EventBridgeTestEventPatternIntegrationTest {
 
     private static final String EVENT_BRIDGE_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String TARGET = "AWSEvents.TestEventPattern";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -700,6 +704,102 @@ class EventBridgeTestEventPatternIntegrationTest {
             .post("/")
         .then()
             .statusCode(400);
+    }
+
+    /** A complete event envelope, as AWS requires TestEventPattern events to be. */
+    private static String fullEnvelopeRequest(String eventPattern, String detail) {
+        ObjectNode event = MAPPER.createObjectNode();
+        event.put("version", "0");
+        event.put("id", "7bf73129-1428-4cd3-a780-95db273d1602");
+        event.put("detail-type", "Object Created");
+        event.put("source", "aws.s3");
+        event.put("account", "123456789012");
+        event.put("time", "2015-11-11T21:29:54Z");
+        event.put("region", "us-east-1");
+        event.putArray("resources");
+        try {
+            event.set("detail", MAPPER.readTree(detail));
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException(detail, e);
+        }
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("EventPattern", eventPattern);
+        request.put("Event", event.toString());
+        return request.toString();
+    }
+
+    private static void assertTestEventPatternResult(String eventPattern, String detail, boolean expected) {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body(fullEnvelopeRequest(eventPattern, detail))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(expected));
+    }
+
+    @Test
+    void numericComparisonOnAFullEnvelope() {
+        String pattern = "{\"detail\":{\"price\":[{\"numeric\":[\">\",10]}]}}";
+        assertTestEventPatternResult(pattern, "{\"price\":42}", true);
+        assertTestEventPatternResult(pattern, "{\"price\":5}", false);
+    }
+
+    @Test
+    void prefixEqualsIgnoreCaseOnAFullEnvelope() {
+        String pattern = "{\"detail\":{\"service\":[{\"prefix\":{\"equals-ignore-case\":\"eventb\"}}]}}";
+        assertTestEventPatternResult(pattern, "{\"service\":\"EventBridge\"}", true);
+        assertTestEventPatternResult(pattern, "{\"service\":\"s3\"}", false);
+    }
+
+    @Test
+    void wildcardOnAFullEnvelope() {
+        String pattern = "{\"detail\":{\"key\":[{\"wildcard\":\"dir/*.png\"}]}}";
+        assertTestEventPatternResult(pattern, "{\"key\":\"dir/cat.png\"}", true);
+        assertTestEventPatternResult(pattern, "{\"key\":\"dir/cat.jpg\"}", false);
+    }
+
+    @Test
+    void cidrOnAFullEnvelope() {
+        String pattern = "{\"detail\":{\"sourceIPAddress\":[{\"cidr\":\"10.0.0.0/24\"}]}}";
+        assertTestEventPatternResult(pattern, "{\"sourceIPAddress\":\"10.0.0.7\"}", true);
+        assertTestEventPatternResult(pattern, "{\"sourceIPAddress\":\"10.0.1.7\"}", false);
+    }
+
+    @Test
+    void anythingButSuffixOnAFullEnvelope() {
+        String pattern = "{\"detail\":{\"key\":[{\"anything-but\":{\"suffix\":\".txt\"}}]}}";
+        assertTestEventPatternResult(pattern, "{\"key\":\"a.png\"}", true);
+        assertTestEventPatternResult(pattern, "{\"key\":\"a.txt\"}", false);
+    }
+
+    @Test
+    void timeIsMatchedOnAFullEnvelope() {
+        assertTestEventPatternResult("{\"time\":[{\"prefix\":\"2015-11-11\"}]}", "{}", true);
+        assertTestEventPatternResult("{\"time\":[{\"prefix\":\"2017-10-02\"}]}", "{}", false);
+    }
+
+    @Test
+    void arrayValueMatchesAnyElementOnAFullEnvelope() {
+        assertTestEventPatternResult("{\"detail\":{\"tags\":[\"prod\"]}}", "{\"tags\":[\"prod\",\"eu\"]}", true);
+        assertTestEventPatternResult("{\"detail\":{\"tags\":[\"prod\"]}}", "{\"tags\":[\"dev\"]}", false);
+        assertTestEventPatternResult("{\"detail\":{\"items\":{\"sku\":[\"A\"]}}}",
+                "{\"items\":[{\"sku\":\"B\"},{\"sku\":\"A\"}]}", true);
+    }
+
+    @Test
+    void scalarPatternValueRejected() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body(fullEnvelopeRequest("{\"source\":\"aws.s3\"}", "{}"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidEventPatternException"));
     }
 
     @Test

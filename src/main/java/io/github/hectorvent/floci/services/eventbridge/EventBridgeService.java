@@ -73,6 +73,7 @@ public class EventBridgeService implements ResourceProvider {
     private final StorageBackend<String, ApiDestination> apiDestinationStore;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final EventPatternMatcher patternMatcher;
     private final RuleScheduler ruleScheduler;
     private final TargetDispatcher dispatcher;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
@@ -133,6 +134,7 @@ public class EventBridgeService implements ResourceProvider {
         this.apiDestinationStore = apiDestinationStore;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.patternMatcher = new EventPatternMatcher(objectMapper);
         this.ruleScheduler = ruleScheduler;
         this.dispatcher = dispatcher;
         this.replayDispatcher = replayDispatcher;
@@ -325,6 +327,9 @@ public class EventBridgeService implements ResourceProvider {
                 && (scheduleExpression == null || scheduleExpression.isBlank())) {
             throw new AwsException("ValidationException",
                     "Parameter(s) EventPattern or ScheduleExpression must be specified.", 400);
+        }
+        if (eventPattern != null && !eventPattern.isBlank()) {
+            patternMatcher.requireValid(eventPattern);
         }
         String effectiveBus = resolvedBusName(busName);
         ensureBusExists(effectiveBus, region);
@@ -832,7 +837,7 @@ public class EventBridgeService implements ResourceProvider {
         for (Map<String, Object> originalEntry : entries) {
             // Defensive copy: callers may pass Map.of(...) (immutable) and we don't want to
             // mutate caller state regardless. Normalize Region / Account from the PutEvents
-            // call context up front so matchesPattern, buildEventEnvelope, and the archive
+            // call context up front so matchesPattern, eventEnvelope, and the archive
             // capture all see the same values — without this, a pattern's region/account
             // filter would fall back to the resolver default in matchesPattern while the
             // delivered envelope would correctly carry the call's region/account, giving an
@@ -888,6 +893,8 @@ public class EventBridgeService implements ResourceProvider {
             }
 
             String eventId = UUID.randomUUID().toString();
+            ObjectNode envelope = eventEnvelope(entry, eventId, region, accountId);
+            String eventJson = null;
             String rulePrefix = ruleKeyPrefix(region, effectiveBus);
             List<Rule> candidateRules = accountScan(ruleStore, accountId, k -> k.startsWith(rulePrefix));
 
@@ -899,10 +906,12 @@ public class EventBridgeService implements ResourceProvider {
                 if (rule.getEventPattern() == null || rule.getEventPattern().isBlank()) {
                     continue;
                 }
-                if (matchesPattern(entry, rule.getEventPattern())) {
+                if (matchesPattern(envelope, rule.getEventPattern())) {
                     String ruleKey = ruleKey(region, effectiveBus, rule.getName());
                     List<Target> targets = accountGet(targetStore, accountId, ruleKey).orElse(List.of());
-                    String eventJson = buildEventEnvelope(entry, effectiveBus, eventId, region, accountId);
+                    if (eventJson == null) {
+                        eventJson = deliveredEventJson(envelope, effectiveBus);
+                    }
                     for (Target target : targets) {
                         dispatcher.dispatch(rule.getArn(), target, eventJson, region,
                                 () -> accountGet(targetStore, accountId, ruleKey).orElse(List.of()));
@@ -910,7 +919,7 @@ public class EventBridgeService implements ResourceProvider {
                 }
             }
 
-            captureToArchives(entry, busStoreKey, eventId, region, accountId);
+            captureToArchives(entry, envelope, busStoreKey, eventId, region, accountId);
 
             Map<String, String> successEntry = new HashMap<>();
             successEntry.put("EventId", eventId);
@@ -944,8 +953,8 @@ public class EventBridgeService implements ResourceProvider {
      * Tests whether a sample event matches a given event pattern, without firing any
      * targets. Mirrors the AWS {@code TestEventPattern} API: callers pass the full event
      * envelope (lowercase {@code source} / {@code detail-type} / {@code detail} /
-     * {@code resources}) as JSON; we adapt it to the internal entry shape and delegate
-     * to {@link #matchesPattern(Map, String)}.
+     * {@code resources}) as JSON, and the pattern is matched against that envelope as given.
+     * An event without {@code account} or {@code region} is matched as the caller's.
      */
     public boolean testEventPattern(String eventPattern, String eventJson) {
         if (eventPattern == null || eventPattern.isBlank()) {
@@ -954,12 +963,7 @@ public class EventBridgeService implements ResourceProvider {
         if (eventJson == null || eventJson.isBlank()) {
             throw new AwsException("InvalidEventPatternException", "Event is required.", 400);
         }
-        try {
-            objectMapper.readTree(eventPattern);
-        } catch (Exception e) {
-            throw new AwsException("InvalidEventPatternException",
-                    "Event pattern is not valid JSON: " + e.getMessage(), 400);
-        }
+        JsonNode pattern = patternMatcher.requireValid(eventPattern);
         JsonNode event;
         try {
             event = objectMapper.readTree(eventJson);
@@ -967,275 +971,102 @@ public class EventBridgeService implements ResourceProvider {
             throw new AwsException("InvalidEventPatternException",
                     "Event is not valid JSON: " + e.getMessage(), 400);
         }
-        if (event == null || !event.isObject()) {
+        if (!(event instanceof ObjectNode envelope)) {
             throw new AwsException("InvalidEventPatternException",
                     "Event must be a JSON object.", 400);
         }
-        Map<String, Object> entry = new HashMap<>();
-        if (event.hasNonNull("source")) {
-            entry.put("Source", event.get("source").asText());
+        if (!envelope.hasNonNull("account")) {
+            envelope.put("account", regionResolver.getAccountId());
         }
-        if (event.hasNonNull("detail-type")) {
-            entry.put("DetailType", event.get("detail-type").asText());
+        if (!envelope.hasNonNull("region")) {
+            envelope.put("region", regionResolver.getDefaultRegion());
         }
-        if (event.hasNonNull("detail")) {
-            JsonNode detail = event.get("detail");
-            entry.put("Detail", detail.isTextual() ? detail.asText() : detail.toString());
-        }
-        if (event.hasNonNull("resources") && event.get("resources").isArray()) {
-            entry.put("Resources", event.get("resources"));
-        }
-        if (event.hasNonNull("account")) {
-            entry.put("Account", event.get("account").asText());
-        }
-        if (event.hasNonNull("region")) {
-            entry.put("Region", event.get("region").asText());
-        }
-        return matchesPattern(entry, eventPattern);
+        return patternMatcher.matches(envelope, pattern);
     }
 
+    /**
+     * Matches an entry in the internal {@code putEvents} shape by building the envelope a target
+     * would receive. Without {@code Region} / {@code Account} the entry is matched as the caller's.
+     */
     boolean matchesPattern(Map<String, Object> event, String eventPattern) {
         if (eventPattern == null || eventPattern.isBlank()) {
             return true;
         }
-        try {
-            JsonNode pattern = objectMapper.readTree(eventPattern);
-            JsonNode orClauses = pattern.get("$or");
-            if (orClauses != null && orClauses.isArray()) {
-                boolean anyMatches = false;
-                for (JsonNode subPattern : orClauses) {
-                    if (matchesPattern(event, objectMapper.writeValueAsString(subPattern))) {
-                        anyMatches = true;
-                        break;
-                    }
-                }
-                if (!anyMatches) {
-                    return false;
-                }
-            }
-            JsonNode sourceField = pattern.get("source");
-            if (sourceField != null && sourceField.isArray()) {
-                String eventSource = (String) event.get("Source");
-                if (!matchesArrayField(sourceField, eventSource)) {
-                    return false;
-                }
-            }
-            JsonNode detailTypeField = pattern.get("detail-type");
-            if (detailTypeField != null && detailTypeField.isArray()) {
-                String eventDetailType = (String) event.get("DetailType");
-                if (!matchesArrayField(detailTypeField, eventDetailType)) {
-                    return false;
-                }
-            }
-            JsonNode accountField = pattern.get("account");
-            if (accountField != null && accountField.isArray()) {
-                // Prefer the entry's Account (set by TestEventPattern from the
-                // supplied event envelope); fall back to the caller's account
-                // for PutEvents rule dispatch, where the event always belongs
-                // to the caller.
-                String eventAccount = (String) event.getOrDefault(
-                        "Account", regionResolver.getAccountId());
-                if (!matchesArrayField(accountField, eventAccount)) {
-                    return false;
-                }
-            }
-            JsonNode regionField = pattern.get("region");
-            if (regionField != null && regionField.isArray()) {
-                String eventRegion = (String) event.getOrDefault(
-                        "Region", regionResolver.getDefaultRegion());
-                if (!matchesArrayField(regionField, eventRegion)) {
-                    return false;
-                }
-            }
-            JsonNode detailPattern = pattern.get("detail");
-            if (detailPattern != null && detailPattern.isObject()) {
-                Object eventDetail = event.get("Detail");
-                String detailStr = eventDetail instanceof String s ? s : null;
-                if (detailStr == null) {
-                    return false;
-                }
-                JsonNode detailNode = objectMapper.readTree(detailStr);
-                if (!matchesDetailNode(detailNode, detailPattern)) {
-                    return false;
-                }
-            }
-            JsonNode resourcesPattern = pattern.get("resources");
-            if (resourcesPattern != null && resourcesPattern.isArray()) {
-                var resources = ((ArrayNode) event.get("Resources")).elements();
-                while (resources.hasNext()) {
-                    var resource = resources.next().asText(null);
-                    if (matchesArrayField(resourcesPattern, resource)) {
-                        return true;
-                    }
-                }
-                return false;
-            }
+        return matchesPattern(eventEnvelope(event, null, null, null), eventPattern);
+    }
+
+    private boolean matchesPattern(JsonNode envelope, String eventPattern) {
+        if (eventPattern == null || eventPattern.isBlank()) {
             return true;
-        } catch (Exception e) {
+        }
+        JsonNode pattern;
+        try {
+            pattern = objectMapper.readTree(eventPattern);
+        } catch (JsonProcessingException e) {
             LOG.warnv("Failed to parse event pattern: {0}", e.getMessage());
             return false;
         }
-    }
-
-    private boolean matchesDetailNode(JsonNode actual, JsonNode pattern) {
-        JsonNode orClauses = pattern.get("$or");
-        if (orClauses != null && orClauses.isArray()) {
-            boolean anyMatches = false;
-            for (JsonNode subPattern : orClauses) {
-                if (matchesDetailNode(actual, subPattern)) {
-                    anyMatches = true;
-                    break;
-                }
-            }
-            if (!anyMatches) {
-                return false;
-            }
-        }
-        var fields = pattern.fields();
-        while (fields.hasNext()) {
-            var field = fields.next();
-            if ("$or".equals(field.getKey())) {
-                continue;
-            }
-            JsonNode expected = field.getValue();
-            JsonNode actualField = actual.get(field.getKey());
-            if (expected.isArray()) {
-                if (!matchesArrayField(expected, actualField)) {
-                    return false;
-                }
-            } else if (expected.isObject()) {
-                if (actualField == null || actualField.isNull()) {
-                    return false;
-                }
-                JsonNode nestedActual = actualField;
-                if (actualField.isTextual()) {
-                    try {
-                        nestedActual = objectMapper.readTree(actualField.asText());
-                    } catch (Exception e) {
-                        return false;
-                    }
-                }
-                if (!matchesDetailNode(nestedActual, expected)) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    private boolean matchesArrayField(JsonNode arrayNode, String value) {
-        JsonNode actual = value != null ? TextNode.valueOf(value) : null;
-        return matchesArrayField(arrayNode, actual);
-    }
-
-    private boolean matchesArrayField(JsonNode arrayNode, JsonNode actual) {
-        for (JsonNode element : arrayNode) {
-            if (matchesSingleElement(element, actual)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean matchesSingleElement(JsonNode element, JsonNode actual) {
-        // Content filter object
-        if (element.isObject()) {
-            String value = actual != null && actual.isTextual() ? actual.asText() : null;
-            if (element.has("prefix")) {
-                return value != null && value.startsWith(element.get("prefix").asText());
-            }
-            if (element.has("suffix")) {
-                return value != null && value.endsWith(element.get("suffix").asText());
-            }
-            if (element.has("equals-ignore-case")) {
-                return value != null && value.equalsIgnoreCase(element.get("equals-ignore-case").asText());
-            }
-            if (element.has("anything-but")) {
-                JsonNode anythingBut = element.get("anything-but");
-                if (anythingBut.isValueNode()) {
-                    return actual != null && !actual.isNull() && !matchesExactValue(anythingBut, actual);
-                }
-                if (anythingBut.isArray()) {
-                    for (JsonNode v : anythingBut) {
-                        if (matchesExactValue(v, actual)) {
-                            return false;
-                        }
-                    }
-                    return actual != null && !actual.isNull();
-                }
-                if (anythingBut.isObject() && anythingBut.has("prefix")) {
-                    return value != null && !value.startsWith(anythingBut.get("prefix").asText());
-                }
-            }
-            if (element.has("exists")) {
-                boolean shouldExist = element.get("exists").asBoolean();
-                boolean present = actual != null;
-                return shouldExist == present;
-            }
-            return false;
-        }
-        // Exact literal match (string, null, boolean, number)
-        return matchesExactValue(element, actual);
-    }
-
-    private boolean matchesExactValue(JsonNode expected, JsonNode actual) {
-        if (expected.isNull()) {
-            return actual != null && actual.isNull();
-        }
-        if (actual == null) {
-            return false;
-        }
-        if (expected.isTextual()) {
-            return actual.isTextual() && expected.asText().equals(actual.asText());
-        }
-        if (expected.isBoolean()) {
-            return actual.isBoolean() && expected.booleanValue() == actual.booleanValue();
-        }
-        if (expected.isNumber()) {
-            // AWS normalizes numbers before comparing: 300, 300.0 and 3.0e2
-            // are all considered equal.
-            return actual.isNumber() && expected.decimalValue().compareTo(actual.decimalValue()) == 0;
-        }
-        return false;
+        return patternMatcher.matches(envelope, pattern);
     }
 
     // ──────────────────────────── Target Routing ────────────────────────────
 
-
-    private String buildEventEnvelope(Map<String, Object> entry, String busName, String eventId,
-                                      String callRegion, String callAccountId) {
-        try {
-            String source = (String) entry.getOrDefault("Source", "");
-            String detailType = (String) entry.getOrDefault("DetailType", "");
-            String detail = (String) entry.getOrDefault("Detail", "{}");
-            ArrayNode resources = (ArrayNode) entry.getOrDefault("Resources", objectMapper.createArrayNode());
-            // Envelope region/account precedence: entry-supplied "Region"/"Account" (set by
-            // archive replay paths and cross-region producers) wins; otherwise stamp the
-            // region/account the PutEvents call was made against. Only when neither is
-            // available do we fall back to the RegionResolver defaults. This keeps the
-            // envelope consistent with matchesPattern() which also reads entry.Region with
-            // the same fallback chain.
-            String envelopeRegion = (String) entry.get("Region");
-            if (isBlank(envelopeRegion)) {
-                envelopeRegion = isBlank(callRegion) ? regionResolver.getDefaultRegion() : callRegion;
-            }
-            String envelopeAccount = (String) entry.get("Account");
-            if (isBlank(envelopeAccount)) {
-                envelopeAccount = isBlank(callAccountId) ? regionResolver.getAccountId() : callAccountId;
-            }
-            ObjectNode node = objectMapper.createObjectNode();
-            node.put("version", "0");
+    /**
+     * The event envelope for an entry, which rules and archives are matched against. A missing or
+     * non-array {@code Resources} is an empty list, as every AWS event carries one.
+     */
+    private ObjectNode eventEnvelope(Map<String, Object> entry, String eventId,
+                                     String callRegion, String callAccountId) {
+        // Envelope region/account precedence: entry-supplied "Region"/"Account" (set by
+        // archive replay paths and cross-region producers) wins; otherwise stamp the
+        // region/account the PutEvents call was made against. Only when neither is
+        // available do we fall back to the RegionResolver defaults.
+        String envelopeRegion = entry.get("Region") instanceof String region ? region : null;
+        if (isBlank(envelopeRegion)) {
+            envelopeRegion = isBlank(callRegion) ? regionResolver.getDefaultRegion() : callRegion;
+        }
+        String envelopeAccount = entry.get("Account") instanceof String account ? account : null;
+        if (isBlank(envelopeAccount)) {
+            envelopeAccount = isBlank(callAccountId) ? regionResolver.getAccountId() : callAccountId;
+        }
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("version", "0");
+        if (eventId != null) {
             node.put("id", eventId);
-            node.put("source", source);
-            node.put("detail-type", detailType);
-            node.put("account", envelopeAccount);
-            node.put("time", Instant.now().toString());
-            node.put("region", envelopeRegion);
-            node.putArray("resources").addAll(resources);
-            node.set("detail", objectMapper.readTree(detail));
-            node.put("event-bus-name", busName);
-            return objectMapper.writeValueAsString(node);
-        } catch (Exception e) {
+        }
+        node.put("source", entry.get("Source") instanceof String source ? source : "");
+        node.put("detail-type", entry.get("DetailType") instanceof String detailType ? detailType : "");
+        node.put("account", envelopeAccount);
+        node.put("time", Instant.now().toString());
+        node.put("region", envelopeRegion);
+        ArrayNode resources = node.putArray("resources");
+        if (entry.get("Resources") instanceof ArrayNode entryResources) {
+            resources.addAll(entryResources);
+        }
+        node.set("detail", detailNode(entry.get("Detail")));
+        return node;
+    }
+
+    private JsonNode detailNode(Object detail) {
+        if (!(detail instanceof String json)) {
+            return objectMapper.createObjectNode();
+        }
+        try {
+            JsonNode parsed = objectMapper.readTree(json);
+            return parsed == null || parsed.isMissingNode() ? objectMapper.createObjectNode() : parsed;
+        } catch (JsonProcessingException e) {
+            return TextNode.valueOf(json);
+        }
+    }
+
+    private String deliveredEventJson(ObjectNode envelope, String busName) {
+        ObjectNode delivered = objectMapper.createObjectNode();
+        delivered.setAll(envelope);
+        delivered.put("event-bus-name", busName);
+        try {
+            return objectMapper.writeValueAsString(delivered);
+        } catch (JsonProcessingException e) {
+            LOG.warnv("Failed to serialize event {0}: {1}", envelope.path("id").asText(), e.getMessage());
             return "{}";
         }
     }
@@ -1323,6 +1154,9 @@ public class EventBridgeService implements ResourceProvider {
     public Archive createArchive(String archiveName, String eventSourceArn, String description,
                                  String eventPattern, int retentionDays, String region) {
         requireArchiveFields(description, eventPattern, retentionDays);
+        if (eventPattern != null && !eventPattern.isBlank()) {
+            patternMatcher.requireValid(eventPattern);
+        }
         if (archiveName == null || archiveName.isBlank()) {
             throw new AwsException("ValidationException", "ArchiveName is required.", 400);
         }
@@ -1411,6 +1245,9 @@ public class EventBridgeService implements ResourceProvider {
     public Archive updateArchive(String archiveName, String description,
                                  String eventPattern, Integer retentionDays, String region) {
         requireArchiveFields(description, eventPattern, retentionDays);
+        if (eventPattern != null && !eventPattern.isBlank()) {
+            patternMatcher.requireValid(eventPattern);
+        }
         String key = archiveKey(region, archiveName);
         Archive archive = archiveStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -1839,7 +1676,7 @@ public class EventBridgeService implements ResourceProvider {
         }
     }
 
-    private void captureToArchives(Map<String, Object> entry, String busStoreKey,
+    private void captureToArchives(Map<String, Object> entry, JsonNode envelope, String busStoreKey,
                                    String eventId, String region, String accountId) {
         EventBus bus = accountGet(busStore, accountId, busStoreKey).orElse(null);
         if (bus == null) {
@@ -1854,7 +1691,7 @@ public class EventBridgeService implements ResourceProvider {
                                 && busArn.equals(a.getEventSourceArn())).orElse(false));
 
         for (Archive archive : candidates) {
-            if (matchesPattern(entry, archive.getEventPattern())) {
+            if (matchesPattern(envelope, archive.getEventPattern())) {
                 String evKey = archivedEventKey(region, archive.getArchiveName());
                 List<ArchivedEvent> stored = new ArrayList<>(
                         accountGet(archivedEventStore, accountId, evKey).orElse(new ArrayList<>()));

@@ -332,13 +332,7 @@ public class AsyncInvokeDestinationRouter {
      * fixed ones AWS uses, which is what a rule on a Lambda destination matches against.
      *
      * <p>{@code Resources} carries the invoked function and the destination, as AWS fills it.
-     * Without it a rule whose pattern matches on {@code resources} never fires, and by a worse
-     * route than a plain mismatch: {@code EventBridgeService.matchesPattern} casts
-     * {@code event.get("Resources")} to an ArrayNode unconditionally, so an ABSENT member throws
-     * NPE, which is swallowed by the surrounding catch, logged as {@code Failed to parse event
-     * pattern} and reported as no-match. The record is then dropped at the bus rather than at the
-     * destination, and the log blames the caller's pattern. Rules matching on {@code detail} are
-     * unaffected, which is why this stayed invisible.
+     * Without it a rule whose pattern matches on {@code resources} never fires.
      */
     private void putOnEventBus(String busArn, String detail, String region, boolean failed,
                                String functionArn) {
