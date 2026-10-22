@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -49,7 +50,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
-public class FirehoseService implements ResourceProvider {
+public class FirehoseService implements ResourceProvider, Resettable {
 
     private static final Logger LOG = Logger.getLogger(FirehoseService.class);
     private static final String DEFAULT_BUCKET = "floci-firehose-results";
@@ -126,6 +127,8 @@ public class FirehoseService implements ResourceProvider {
     private final int flushRecordCount;
     private final boolean flusherEnabled;
     private final ScheduledExecutorService flushExecutor;
+    // Set from beforeReset to afterReset: the tick stays idle while the stores are wiped.
+    private volatile boolean resetting;
 
     private String currentRegion() {
         String region = regionResolver.getRegion();
@@ -303,12 +306,38 @@ public class FirehoseService implements ResourceProvider {
      * arises, so the guarantee is stated here rather than left to the executor.
      */
     synchronized void tickSafely() {
+        if (resetting) {
+            return;
+        }
         try {
             pollKinesisSources();
             flushDueBuffers(clock.instant());
         } catch (Throwable t) {
             LOG.warnv("Firehose buffer flush tick failed: {0}", t.getMessage());
         }
+    }
+
+    /** Synchronized like {@link #tickSafely()}, so it returns only once a tick in progress has finished. */
+    @Override
+    public synchronized void beforeReset() {
+        resetting = true;
+    }
+
+    /**
+     * Discards what deleteDeliveryStream discards, for every stream; StorageFactory has already wiped
+     * the streams and committed checkpoints. Flush locks stay, as on delete: dropping one a flush
+     * still holds would let a second flush of the same key run beside it.
+     */
+    @Override
+    public void clear() {
+        buffers.clear();
+        bufferSince.clear();
+        pendingSourceIterators.clear();
+    }
+
+    @Override
+    public void afterReset() {
+        resetting = false;
     }
 
     void flushDueBuffers(Instant now) {
@@ -424,6 +453,8 @@ public class FirehoseService implements ResourceProvider {
         }
         streamPut(streamKey, description);
         buffers.put(streamKey, Collections.synchronizedList(new ArrayList<>()));
+        bufferSince.remove(streamKey);
+        pendingSourceIterators.remove(streamKey);
         LOG.infov("Created Firehose delivery stream: {0}", name);
         return arn;
     }

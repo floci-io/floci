@@ -33,7 +33,7 @@ Floci emulates Amazon Data Firehose for streaming data ingestion and delivery to
 
     An emulator-only record-count trigger is also available for local dev: set `floci.services.firehose.flush-record-count` (env: `FLOCI_SERVICES_FIREHOSE_FLUSH_RECORD_COUNT`) to flush after that many buffered records — `1` gives LocalStack-style record-at-a-time delivery. Disabled by default (`0`) so delivery timing matches real AWS.
 
-    Buffers are also flushed on shutdown, so pending records are not lost. Deleting a delivery stream discards its pending records without flushing, matching real AWS.
+    Buffers are also flushed on shutdown, so pending records are not lost. Deleting a delivery stream discards its pending records without flushing, matching real AWS. An emulator state reset does the same for every stream, along with their source positions, and the flusher stays idle until the reset completes.
 3. **Format**: Buffered records are concatenated as bytes and delivered to the bucket configured in the S3 destination (`floci-firehose-results` if the stream has no destination configuration). The object is then compressed according to the destination's `CompressionFormat` and always stored with `Content-Type: application/octet-stream`, as AWS does.
 
     Known deviations from AWS in the delivery path:

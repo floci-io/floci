@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.firehose;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
@@ -626,6 +627,62 @@ class FirehoseServiceTest {
                 delivered("floci-firehose-results").body());
     }
 
+
+    /** The emulator reset as EmulatorInfoController performs it: hooks around a storage wipe. */
+    private void resetEmulatorState() {
+        Resettable resettable = firehoseService;
+        resettable.beforeReset();
+        backends.values().forEach(AccountAwareStorageBackend::clear);
+        resettable.clear();
+        resettable.afterReset();
+    }
+
+    @Test
+    void aStreamRecreatedAfterAResetWaitsItsWholeBufferingInterval() {
+        firehoseService.createDeliveryStream("reset-stream", null);
+        putRecords("reset-stream", 2);
+
+        resetEmulatorState();
+        clock.advance(Duration.ofSeconds(301));
+        firehoseService.createDeliveryStream("reset-stream", null);
+        putRecords("reset-stream", 1);
+        firehoseService.flushDueBuffers(clock.instant());
+
+        verifyNothingDelivered();
+    }
+
+    @Test
+    void aStreamRecreatedAfterAResetDoesNotResumeTheOldSourcePosition() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        firehoseService.pollKinesisSources();
+
+        resetEmulatorState();
+        kinesisService.createStream("src-stream", 1, "us-east-1");
+        kinesisService.putRecord("src-stream", "old".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        DeliveryStreamDescription.KinesisStreamSource source = kinesisSource("src-stream");
+        source.setDeliveryStartTimestamp(Instant.now().plusSeconds(3600));
+        firehoseService.createDeliveryStream("sourced-stream", destination("arn:aws:s3:::sink", null),
+                List.of(), "KinesisStreamAsSource", source);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+
+        verifyNothingDelivered();
+    }
+
+    @Test
+    void theFlushTickIsHeldWhileAResetIsInProgress() {
+        firehoseService.createDeliveryStream("held-stream", null);
+        putRecords("held-stream", 1);
+        clock.advance(Duration.ofSeconds(301));
+        firehoseService.beforeReset();
+
+        firehoseService.tickSafely();
+        verifyNothingDelivered();
+
+        firehoseService.afterReset();
+        firehoseService.tickSafely();
+        assertEquals("{\"n\":0}\n", delivered("floci-firehose-results").text());
+    }
 
     @Test
     void putRecordWithoutDataIsRejectedAndLaterRecordsStillDeliver() {
