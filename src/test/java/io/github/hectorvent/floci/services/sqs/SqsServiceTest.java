@@ -1971,10 +1971,11 @@ class SqsServiceTest {
         service.sendMessage(queueUrl, "counted", null, region);
 
         Map<String, String> attributes = service.getQueueAttributes(queueUrl,
-                List.of("VisibilityTimeout", "ApproximateNumberOfMessages"), region);
+                List.of("VisibilityTimeout", "ApproximateNumberOfMessages", "QueueArn"), region);
 
         assertEquals("30", attributes.get("VisibilityTimeout"));
         assertEquals("1", attributes.get("ApproximateNumberOfMessages"));
+        assertEquals("arn:aws:sqs:us-east-1:111111111111:worker-queue", attributes.get("QueueArn"));
     }
 
     /**

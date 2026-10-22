@@ -907,7 +907,8 @@ public class SqsService implements Resettable, ResourceProvider {
 
         Map<String, String> attrs = new LinkedHashMap<>(queue.getAttributes());
         // Add computed attributes
-        attrs.put("QueueArn", regionResolver.buildArn("sqs", region, queue.getQueueName()));
+        String accountId = queue.getAccountId() != null ? queue.getAccountId() : regionResolver.getAccountId();
+        attrs.put("QueueArn", regionResolver.buildArn("sqs", region, accountId, queue.getQueueName()));
         attrs.put("CreatedTimestamp", String.valueOf(queue.getCreatedTimestamp().getEpochSecond()));
         attrs.put("LastModifiedTimestamp", String.valueOf(queue.getLastModifiedTimestamp().getEpochSecond()));
 
