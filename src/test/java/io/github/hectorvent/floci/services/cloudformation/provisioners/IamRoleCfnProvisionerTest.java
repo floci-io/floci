@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -355,16 +356,84 @@ class IamRoleCfnProvisionerTest {
 
     /** A role this stack already owns, so provision() takes the adoption (update) path. */
     private StackResource adoptExistingRole(String currentBoundary) {
+        return adoptExistingRole(currentBoundary, 3600);
+    }
+
+    private StackResource adoptExistingRole(String currentBoundary, int currentMaxSessionDuration) {
         IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
                 "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
         existing.setPermissionsBoundaryArn(currentBoundary);
-        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
+        existing.setMaxSessionDuration(currentMaxSessionDuration);
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), anyInt(), eq(Map.of()), any()))
                 .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getRole("app-role")).thenReturn(existing);
         StackResource r = resource();
         r.setPhysicalId("app-role");
         r.getAttributes().put("RoleId", "AROAapp-role");
         return r;
+    }
+
+    @Test
+    void createPassesTheMaxSessionDurationToTheRole() {
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), anyInt(), eq(Map.of()), any()))
+                .thenReturn(new IamRole("AROAapp-role", "app-role", "/",
+                        "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST));
+
+        provisioner.provision(resource(), props("""
+                {"RoleName": "app-role", "MaxSessionDuration": 43200}
+                """), ctx());
+
+        verify(iam).createRole(eq("app-role"), eq("/"), anyString(), any(), eq(43200), eq(Map.of()), any());
+    }
+
+    @Test
+    void updateAppliesAChangedMaxSessionDuration() {
+        StackResource r = adoptExistingRole(null, 3600);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "MaxSessionDuration": 43200}
+                """), ctx());
+
+        verify(iam).updateRole("app-role", null, 43200);
+    }
+
+    @Test
+    void updateResetsAMaxSessionDurationTheTemplateDroppedToTheDefault() {
+        StackResource r = adoptExistingRole(null, 43200);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role"}
+                """), ctx());
+
+        verify(iam).updateRole("app-role", null, 3600);
+    }
+
+    @Test
+    void updateLeavesAnUnchangedMaxSessionDurationAlone() {
+        StackResource r = adoptExistingRole(null, 7200);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "MaxSessionDuration": "7200"}
+                """), ctx());
+
+        verify(iam, never()).updateRole(anyString(), any(), anyInt());
+    }
+
+    @Test
+    void failedUpdateRestoresThePriorMaxSessionDuration() {
+        StackResource r = adoptExistingRole(null, 3600);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iam).attachRolePolicy("app-role", "arn:aws:iam::aws:policy/Missing");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"RoleName": "app-role", "MaxSessionDuration": 43200,
+                 "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Missing"]}
+                """), ctx()));
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).updateRole("app-role", null, 43200);
+        order.verify(iam).updateRole("app-role", null, 3600);
+        verify(iam, never()).deleteRole(anyString());
     }
 
     @Test

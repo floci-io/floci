@@ -33,6 +33,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String INLINE_NAMES_ATTR = "__FlociInlinePolicyNames";
     private static final String MANAGED_ARNS_ATTR = "__FlociManagedPolicyArns";
+    private static final int DEFAULT_MAX_SESSION_DURATION = 3600;
 
     private final IamService iamService;
 
@@ -73,6 +74,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         List<String> managedPolicyArns = ctx.resolveStringList(props, "ManagedPolicyArns");
         // Blank means absent: Fn::If with Ref AWS::NoValue resolves to "" (CDK bootstrap does this).
         String permissionsBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);
+        int maxSessionDuration = maxSessionDuration(ctx.resolveOrDefault(props, "MaxSessionDuration", null));
 
         IamRole role;
         boolean createdRole = false;
@@ -85,9 +87,10 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         String priorAssumeRoleId = null;
         // The adopted role's boundary before this attempt, restored on failure like the trust policy.
         String priorPermissionsBoundary = null;
+        int priorMaxSessionDuration = 0;
         try {
-            role = iamService.createRole(resolvedRoleName, path, assumeDoc, description, 3600, Map.of(),
-                    permissionsBoundary);
+            role = iamService.createRole(resolvedRoleName, path, assumeDoc, description, maxSessionDuration,
+                    Map.of(), permissionsBoundary);
             createdRole = true;
             r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         } catch (AwsException e) {
@@ -121,6 +124,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             priorAssumeRolePolicyDocument = role.getAssumeRolePolicyDocument();
             priorAssumeRoleId = existingRoleId;
             priorPermissionsBoundary = role.getPermissionsBoundaryArn();
+            priorMaxSessionDuration = role.getMaxSessionDuration();
             iamService.updateAssumeRolePolicy(resolvedRoleName, assumeDoc, existingRoleId);
         }
 
@@ -147,7 +151,15 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         final String roleIdToRestore = priorAssumeRoleId;
         final String boundaryToRestore = priorPermissionsBoundary;
         boolean boundaryChangedByThisAttempt = false;
+        final int maxSessionDurationToRestore = priorMaxSessionDuration;
+        boolean maxSessionDurationChangedByThisAttempt = false;
         try {
+            // createRole() only applies MaxSessionDuration on first create; an adopted role takes the
+            // template's value, which is the 3600 default when the template leaves it out.
+            if (!createdRole && maxSessionDuration != maxSessionDurationToRestore) {
+                iamService.updateRole(resolvedRoleName, null, maxSessionDuration);
+                maxSessionDurationChangedByThisAttempt = true;
+            }
             // createRole() only applies PermissionsBoundary on first create. On adoption, set a
             // changed boundary, and remove one only if the role has one and the template dropped it.
             // ID-verified like the trust-policy write, here and in the rollback restore.
@@ -272,6 +284,13 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                     cleanupSucceeded = false;
                 }
             }
+            if (maxSessionDurationChangedByThisAttempt) {
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        "restore prior MaxSessionDuration on role " + resolvedRoleName,
+                        () -> iamService.updateRole(resolvedRoleName, null, maxSessionDurationToRestore))) {
+                    cleanupSucceeded = false;
+                }
+            }
             if (documentToRestore != null) {
                 // ID-verified, same as the primary write above: if the role was deleted and
                 // recreated under this name in between, this must not write the restored document
@@ -297,6 +316,19 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         // What the next execution compares its template against.
         writeTrackedSet(r, INLINE_NAMES_ATTR, inlineWrittenByThisAttempt);
         writeTrackedSet(r, MANAGED_ARNS_ATTR, managedPolicyArns);
+    }
+
+    /** The template's {@code MaxSessionDuration} in seconds, or AWS's 3600 default when it has none. */
+    private static int maxSessionDuration(String value) {
+        if (value == null) {
+            return DEFAULT_MAX_SESSION_DURATION;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError",
+                    "MaxSessionDuration must be an integer number of seconds, got: " + value, 400);
+        }
     }
 
     private static Set<String> readTrackedSet(StackResource r, String attribute) {
