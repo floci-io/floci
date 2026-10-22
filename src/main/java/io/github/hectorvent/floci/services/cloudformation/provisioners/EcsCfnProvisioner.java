@@ -12,18 +12,28 @@ import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.ContainerDependency;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
+import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.EnvironmentFile;
+import io.github.hectorvent.floci.services.ecs.model.EphemeralStorage;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.HealthCheck;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
+import io.github.hectorvent.floci.services.ecs.model.RegisterTaskDefinitionRequest;
+import io.github.hectorvent.floci.services.ecs.model.RuntimePlatform;
 import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -33,6 +43,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * CloudFormation provisioning for the ECS core types, {@code AWS::ECS::Cluster},
@@ -50,6 +61,10 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     private static final String SERVICE = "AWS::ECS::Service";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<List<ClusterSetting>> SETTINGS = new TypeReference<>() { };
+    private static final Set<String> PID_MODES = Set.of("host", "task");
+    private static final Set<String> IPC_MODES = Set.of("host", "task", "none");
+    private static final Set<String> DEPENDENCY_CONDITIONS = Set.of(ContainerDependency.START,
+            ContainerDependency.COMPLETE, ContainerDependency.SUCCESS, ContainerDependency.HEALTHY);
 
     private final EcsService ecsService;
 
@@ -252,16 +267,24 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         if (family == null || family.isBlank()) {
             family = ctx.generatePhysicalName(r.getLogicalId(), 255, false);
         }
-        List<ContainerDefinition> containerDefs = parseContainerDefinitions(props.get("ContainerDefinitions"), ctx);
-        NetworkMode networkMode = parseEnum(NetworkMode.class, ctx.resolveOptional(props, "NetworkMode"));
-        String cpu = ctx.resolveOptional(props, "Cpu");
-        String memory = ctx.resolveOptional(props, "Memory");
-        String taskRoleArn = ctx.resolveOptional(props, "TaskRoleArn");
-        String executionRoleArn = ctx.resolveOptional(props, "ExecutionRoleArn");
-        List<String> requiresCompatibilities = ctx.resolveStringList(props, "RequiresCompatibilities");
+        RegisterTaskDefinitionRequest request = new RegisterTaskDefinitionRequest();
+        request.setFamily(family);
+        request.setContainerDefinitions(parseContainerDefinitions(props.get("ContainerDefinitions"), ctx));
+        request.setNetworkMode(parseEnum(NetworkMode.class, ctx.resolveOptional(props, "NetworkMode")));
+        request.setCpu(ctx.resolveOptional(props, "Cpu"));
+        request.setMemory(ctx.resolveOptional(props, "Memory"));
+        request.setTaskRoleArn(ctx.resolveOptional(props, "TaskRoleArn"));
+        request.setExecutionRoleArn(ctx.resolveOptional(props, "ExecutionRoleArn"));
+        request.setRequiresCompatibilities(ctx.resolveStringList(props, "RequiresCompatibilities"));
+        request.setVolumes(parseVolumes(props.get("Volumes"), ctx));
+        request.setPidMode(parseChoice(ctx.resolveOptional(props, "PidMode"), "pidMode", PID_MODES));
+        request.setIpcMode(parseChoice(ctx.resolveOptional(props, "IpcMode"), "ipcMode", IPC_MODES));
+        request.setEphemeralStorage(parseEphemeralStorage(ctx.engine().resolveNode(props.get("EphemeralStorage"))));
+        request.setRuntimePlatform(parseRuntimePlatform(ctx.engine().resolveNode(props.get("RuntimePlatform"))));
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        request.setTags(tags.isEmpty() ? null : tags);
 
-        TaskDefinition td = ecsService.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
-                taskRoleArn, executionRoleArn, requiresCompatibilities, ctx.region());
+        TaskDefinition td = ecsService.registerTaskDefinition(request, ctx.region());
 
         r.setPhysicalId(td.getTaskDefinitionArn());
         r.getAttributes().put("TaskDefinitionArn", td.getTaskDefinitionArn());
@@ -466,9 +489,159 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             if (item.path("EntryPoint").isArray()) {
                 def.setEntryPoint(toStringList(item.path("EntryPoint")));
             }
+            def.setMountPoints(parseMountPoints(item.path("MountPoints")));
+            def.setVolumesFrom(parseVolumesFrom(item.path("VolumesFrom")));
+            if (item.path("DependsOn").isArray()) {
+                def.setDependsOn(parseDependsOn(item.path("DependsOn"), def.getName()));
+            }
+            if (item.path("HealthCheck").isObject()) {
+                def.setHealthCheck(parseHealthCheck(item.path("HealthCheck")));
+            }
+            if (item.path("EnvironmentFiles").isArray()) {
+                def.setEnvironmentFiles(parseEnvironmentFiles(item.path("EnvironmentFiles")));
+            }
+            if (item.hasNonNull("StartTimeout")) {
+                def.setStartTimeout(item.path("StartTimeout").asInt());
+            }
+            if (item.hasNonNull("StopTimeout")) {
+                def.setStopTimeout(item.path("StopTimeout").asInt());
+            }
+            if (item.hasNonNull("User")) {
+                def.setUser(item.path("User").asText());
+            }
+            if (item.hasNonNull("WorkingDirectory")) {
+                def.setWorkingDirectory(item.path("WorkingDirectory").asText());
+            }
+            if (item.hasNonNull("Hostname")) {
+                def.setHostname(item.path("Hostname").asText());
+            }
+            if (item.hasNonNull("ReadonlyRootFilesystem")) {
+                def.setReadonlyRootFilesystem(item.path("ReadonlyRootFilesystem").asBoolean());
+            }
+            if (item.path("DockerLabels").isObject()) {
+                def.setDockerLabels(parseOptions(item.path("DockerLabels")));
+            }
             result.add(def);
         }
         return result;
+    }
+
+    private static List<MountPoint> parseMountPoints(JsonNode node) {
+        List<MountPoint> result = new ArrayList<>();
+        for (JsonNode item : node) {
+            result.add(new MountPoint(item.path("SourceVolume").asText(), item.path("ContainerPath").asText(),
+                    item.path("ReadOnly").asBoolean(false)));
+        }
+        return result;
+    }
+
+    private static List<VolumeFrom> parseVolumesFrom(JsonNode node) {
+        List<VolumeFrom> result = new ArrayList<>();
+        for (JsonNode item : node) {
+            result.add(new VolumeFrom(item.path("SourceContainer").asText(), item.path("ReadOnly").asBoolean(false)));
+        }
+        return result;
+    }
+
+    /**
+     * Rejects a condition ECS does not define, as RegisterTaskDefinition does: an unknown one would
+     * otherwise become a plain start-ordering edge.
+     */
+    private static List<ContainerDependency> parseDependsOn(JsonNode node, String containerName) {
+        List<ContainerDependency> result = new ArrayList<>();
+        for (JsonNode item : node) {
+            String condition = item.path("Condition").asText();
+            if (!DEPENDENCY_CONDITIONS.contains(condition)) {
+                throw new AwsException("ClientException",
+                        "Container '" + containerName + "' depends on container '"
+                                + item.path("ContainerName").asText() + "' with an invalid condition: "
+                                + condition + ". Valid values: "
+                                + String.join(", ", new TreeSet<>(DEPENDENCY_CONDITIONS)) + ".", 400);
+            }
+            result.add(new ContainerDependency(item.path("ContainerName").asText(), condition));
+        }
+        return result;
+    }
+
+    private static HealthCheck parseHealthCheck(JsonNode node) {
+        if (!node.path("Command").isArray() || node.path("Command").isEmpty()) {
+            throw new AwsException("ClientException", "HealthCheck command is required.", 400);
+        }
+        return new HealthCheck(toStringList(node.path("Command")), optionalInt(node, "Interval"),
+                optionalInt(node, "Timeout"), optionalInt(node, "Retries"), optionalInt(node, "StartPeriod"));
+    }
+
+    private static Integer optionalInt(JsonNode node, String name) {
+        return node.hasNonNull(name) ? node.path(name).asInt() : null;
+    }
+
+    private static List<EnvironmentFile> parseEnvironmentFiles(JsonNode node) {
+        List<EnvironmentFile> result = new ArrayList<>();
+        for (JsonNode item : node) {
+            result.add(new EnvironmentFile(item.path("Value").asText(), item.path("Type").asText("s3")));
+        }
+        return result;
+    }
+
+    /**
+     * Host and EFS volumes, the two kinds a task mounts. A host source path is checked against the
+     * host-volume policy when the definition is registered, as one registered through the API is.
+     */
+    private static List<Volume> parseVolumes(JsonNode node, ProvisionContext ctx) {
+        List<Volume> result = new ArrayList<>();
+        JsonNode resolved = node == null ? null : ctx.engine().resolveNode(node);
+        if (resolved == null || !resolved.isArray()) {
+            return result;
+        }
+        for (JsonNode item : resolved) {
+            String sourcePath = item.path("Host").path("SourcePath").asText(null);
+            result.add(new Volume(item.path("Name").asText(null),
+                    sourcePath == null || sourcePath.isBlank() ? null : sourcePath,
+                    parseEfsVolumeConfiguration(item.path("EFSVolumeConfiguration"))));
+        }
+        return result;
+    }
+
+    private static EfsVolumeConfiguration parseEfsVolumeConfiguration(JsonNode node) {
+        if (!node.isObject()) {
+            return null;
+        }
+        JsonNode auth = node.path("AuthorizationConfig");
+        return new EfsVolumeConfiguration(node.path("FilesystemId").asText(null),
+                node.path("RootDirectory").asText(null), node.path("TransitEncryption").asText(null),
+                optionalInt(node, "TransitEncryptionPort"), auth.path("AccessPointId").asText(null),
+                auth.path("IAM").asText(null));
+    }
+
+    private static EphemeralStorage parseEphemeralStorage(JsonNode node) {
+        if (node == null || !node.isObject() || !node.hasNonNull("SizeInGiB")) {
+            return null;
+        }
+        return new EphemeralStorage(node.path("SizeInGiB").asInt());
+    }
+
+    private static RuntimePlatform parseRuntimePlatform(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        String cpuArchitecture = node.path("CpuArchitecture").asText(null);
+        String operatingSystemFamily = node.path("OperatingSystemFamily").asText(null);
+        if (cpuArchitecture == null && operatingSystemFamily == null) {
+            return null;
+        }
+        return new RuntimePlatform(cpuArchitecture, operatingSystemFamily);
+    }
+
+    /** An optional enum-valued property, refused as RegisterTaskDefinition refuses a value it does not define. */
+    private static String parseChoice(String value, String field, Set<String> allowed) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        if (!allowed.contains(value)) {
+            throw new AwsException("InvalidParameterException", "Invalid " + field + ": " + value
+                    + ". Valid values: " + String.join(", ", new TreeSet<>(allowed)) + ".", 400);
+        }
+        return value;
     }
 
     private static LogConfiguration parseLogConfiguration(JsonNode node) {

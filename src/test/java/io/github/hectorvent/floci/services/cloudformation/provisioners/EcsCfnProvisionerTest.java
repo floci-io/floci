@@ -10,13 +10,23 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.ContainerDependency;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
+import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.EnvironmentFile;
+import io.github.hectorvent.floci.services.ecs.model.EphemeralStorage;
+import io.github.hectorvent.floci.services.ecs.model.HealthCheck;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
+import io.github.hectorvent.floci.services.ecs.model.RegisterTaskDefinitionRequest;
+import io.github.hectorvent.floci.services.ecs.model.RuntimePlatform;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
@@ -42,6 +52,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
@@ -153,9 +164,7 @@ class EcsCfnProvisionerTest {
     void taskDefinitionRegistersTheParsedContainersAndExposesTheArn() {
         TaskDefinition td = new TaskDefinition();
         td.setTaskDefinitionArn(TASK_DEF_ARN);
-        when(ecs.registerTaskDefinition(eq("web"), anyList(), eq(NetworkMode.awsvpc), eq("256"), eq("512"),
-                eq("arn:aws:iam::000000000000:role/task"), eq("arn:aws:iam::000000000000:role/exec"),
-                eq(List.of("FARGATE")), eq(REGION))).thenReturn(td);
+        when(ecs.registerTaskDefinition(family("web"), eq(REGION))).thenReturn(td);
 
         ObjectNode props = mapper.createObjectNode()
                 .put("Family", "web").put("NetworkMode", "awsvpc").put("Cpu", "256").put("Memory", "512")
@@ -178,11 +187,15 @@ class EcsCfnProvisionerTest {
 
         assertEquals(TASK_DEF_ARN, r.getPhysicalId());
         assertEquals(TASK_DEF_ARN, r.getAttributes().get("TaskDefinitionArn"));
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<List<ContainerDefinition>> defs = ArgumentCaptor.forClass(List.class);
-        verify(ecs).registerTaskDefinition(eq("web"), defs.capture(), eq(NetworkMode.awsvpc), eq("256"),
-                eq("512"), anyString(), anyString(), anyList(), eq(REGION));
-        ContainerDefinition def = defs.getValue().get(0);
+        RegisterTaskDefinitionRequest request = registeredRequest();
+        assertEquals("web", request.getFamily());
+        assertEquals(NetworkMode.awsvpc, request.getNetworkMode());
+        assertEquals("256", request.getCpu());
+        assertEquals("512", request.getMemory());
+        assertEquals("arn:aws:iam::000000000000:role/task", request.getTaskRoleArn());
+        assertEquals("arn:aws:iam::000000000000:role/exec", request.getExecutionRoleArn());
+        assertEquals(List.of("FARGATE"), request.getRequiresCompatibilities());
+        ContainerDefinition def = request.getContainerDefinitions().get(0);
         assertEquals("app", def.getName());
         assertEquals("nginx:1", def.getImage());
         assertEquals(128, def.getCpu());
@@ -208,8 +221,7 @@ class EcsCfnProvisionerTest {
     void taskDefinitionValuesAreReadAsTheEcsHandlerConvertsThem() {
         TaskDefinition td = new TaskDefinition();
         td.setTaskDefinitionArn(TASK_DEF_ARN);
-        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(),
-                anyList(), eq(REGION))).thenReturn(td);
+        when(ecs.registerTaskDefinition(family("web"), eq(REGION))).thenReturn(td);
         ObjectNode props = mapper.createObjectNode().put("Family", "web");
         props.putArray("ContainerDefinitions").addObject()
                 .put("Name", "app").put("Image", "nginx:1").put("Cpu", " 64").put("Memory", "+128")
@@ -217,11 +229,12 @@ class EcsCfnProvisionerTest {
 
         provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx());
 
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<List<ContainerDefinition>> defs = ArgumentCaptor.forClass(List.class);
-        verify(ecs).registerTaskDefinition(eq("web"), defs.capture(), isNull(), isNull(), isNull(), isNull(),
-                isNull(), anyList(), eq(REGION));
-        ContainerDefinition def = defs.getValue().get(0);
+        RegisterTaskDefinitionRequest request = registeredRequest();
+        assertEquals("web", request.getFamily());
+        assertNull(request.getNetworkMode());
+        assertNull(request.getCpu());
+        assertNull(request.getMemory());
+        ContainerDefinition def = request.getContainerDefinitions().get(0);
         assertEquals(64, def.getCpu());
         assertEquals(128, def.getMemory());
         assertFalse(def.isEssential());
@@ -242,8 +255,7 @@ class EcsCfnProvisionerTest {
     void containerLinuxParametersReachTheTaskDefinitionInTheApiShape() {
         TaskDefinition td = new TaskDefinition();
         td.setTaskDefinitionArn(TASK_DEF_ARN);
-        when(ecs.registerTaskDefinition(anyString(), anyList(), any(), any(), any(), any(), any(), anyList(),
-                eq(REGION))).thenReturn(td);
+        when(ecs.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), eq(REGION))).thenReturn(td);
 
         ObjectNode props = mapper.createObjectNode().put("Family", "web");
         ObjectNode container = props.putArray("ContainerDefinitions").addObject()
@@ -280,8 +292,7 @@ class EcsCfnProvisionerTest {
     void linuxParametersGivenAsTextAreReadAsTheEcsHandlerConvertsThem() {
         TaskDefinition td = new TaskDefinition();
         td.setTaskDefinitionArn(TASK_DEF_ARN);
-        when(ecs.registerTaskDefinition(anyString(), anyList(), any(), any(), any(), any(), any(), anyList(),
-                eq(REGION))).thenReturn(td);
+        when(ecs.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), eq(REGION))).thenReturn(td);
 
         ObjectNode props = mapper.createObjectNode().put("Family", "web");
         props.putArray("ContainerDefinitions").addObject().put("Name", "app").put("Image", "nginx:1")
@@ -298,8 +309,7 @@ class EcsCfnProvisionerTest {
     void aContainerWithoutLinuxParametersCarriesNone() {
         TaskDefinition td = new TaskDefinition();
         td.setTaskDefinitionArn(TASK_DEF_ARN);
-        when(ecs.registerTaskDefinition(anyString(), anyList(), any(), any(), any(), any(), any(), anyList(),
-                eq(REGION))).thenReturn(td);
+        when(ecs.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), eq(REGION))).thenReturn(td);
 
         ObjectNode props = mapper.createObjectNode().put("Family", "web");
         props.putArray("ContainerDefinitions").addObject().put("Name", "app").put("Image", "nginx:1");
@@ -308,28 +318,124 @@ class EcsCfnProvisionerTest {
         assertNull(registeredContainer().getUnparsed());
     }
 
+    /**
+     * The container and task properties the runtime honours (volumes and their mounts, start
+     * ordering, the working directory, the user, the timeouts, a read-only root) and the metadata
+     * DescribeTaskDefinition reads back reach RegisterTaskDefinition.
+     */
+    @Test
+    void taskDefinitionForwardsContainerAndTaskLevelProperties() throws Exception {
+        TaskDefinition td = new TaskDefinition();
+        td.setTaskDefinitionArn(TASK_DEF_ARN);
+        when(ecs.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), eq(REGION))).thenReturn(td);
+        JsonNode props = mapper.readTree("""
+                {"Family": "web", "PidMode": "task", "IpcMode": "none",
+                 "EphemeralStorage": {"SizeInGiB": 30},
+                 "RuntimePlatform": {"CpuArchitecture": "ARM64", "OperatingSystemFamily": "LINUX"},
+                 "Tags": [{"Key": "team", "Value": "core"}],
+                 "Volumes": [
+                   {"Name": "data", "Host": {"SourcePath": "/srv/data"}},
+                   {"Name": "shared", "EFSVolumeConfiguration": {"FilesystemId": "fs-1", "RootDirectory": "/exports",
+                     "TransitEncryption": "ENABLED", "TransitEncryptionPort": 2049,
+                     "AuthorizationConfig": {"IAM": "ENABLED"}}}],
+                 "ContainerDefinitions": [
+                   {"Name": "init", "Image": "busybox", "Essential": false},
+                   {"Name": "app", "Image": "nginx:1", "WorkingDirectory": "/app", "User": "1000",
+                    "StopTimeout": 30, "StartTimeout": 20, "ReadonlyRootFilesystem": true, "Hostname": "web-1",
+                    "MountPoints": [{"SourceVolume": "data", "ContainerPath": "/data", "ReadOnly": true}],
+                    "VolumesFrom": [{"SourceContainer": "init", "ReadOnly": false}],
+                    "DependsOn": [{"ContainerName": "init", "Condition": "COMPLETE"}],
+                    "HealthCheck": {"Command": ["CMD-SHELL", "curl -f localhost"], "Interval": 10, "Timeout": 5,
+                                    "Retries": 3, "StartPeriod": 15},
+                    "EnvironmentFiles": [{"Value": "arn:aws:s3:::cfg/app.env", "Type": "s3"}],
+                    "DockerLabels": {"tier": "web"}}]}
+                """);
+
+        provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx());
+
+        RegisterTaskDefinitionRequest request = registeredRequest();
+        assertEquals(List.of(new Volume("data", "/srv/data", null),
+                new Volume("shared", null, new EfsVolumeConfiguration("fs-1", "/exports", "ENABLED", 2049, null,
+                        "ENABLED"))), request.getVolumes());
+        assertEquals("task", request.getPidMode());
+        assertEquals("none", request.getIpcMode());
+        assertEquals(new EphemeralStorage(30), request.getEphemeralStorage());
+        assertEquals(new RuntimePlatform("ARM64", "LINUX"), request.getRuntimePlatform());
+        assertEquals(Map.of("team", "core"), request.getTags());
+        ContainerDefinition app = request.getContainerDefinitions().get(1);
+        assertEquals("/app", app.getWorkingDirectory());
+        assertEquals("1000", app.getUser());
+        assertEquals(30, app.getStopTimeout());
+        assertEquals(20, app.getStartTimeout());
+        assertEquals(Boolean.TRUE, app.getReadonlyRootFilesystem());
+        assertEquals("web-1", app.getHostname());
+        assertEquals(List.of(new MountPoint("data", "/data", true)), app.getMountPoints());
+        assertEquals(List.of(new VolumeFrom("init", false)), app.getVolumesFrom());
+        assertEquals(List.of(new ContainerDependency("init", "COMPLETE")), app.getDependsOn());
+        assertEquals(new HealthCheck(List.of("CMD-SHELL", "curl -f localhost"), 10, 5, 3, 15), app.getHealthCheck());
+        assertEquals(List.of(new EnvironmentFile("arn:aws:s3:::cfg/app.env", "s3")), app.getEnvironmentFiles());
+        assertEquals(Map.of("tier", "web"), app.getDockerLabels());
+    }
+
+    private RegisterTaskDefinitionRequest registeredRequest() {
+        ArgumentCaptor<RegisterTaskDefinitionRequest> request =
+                ArgumentCaptor.forClass(RegisterTaskDefinitionRequest.class);
+        verify(ecs).registerTaskDefinition(request.capture(), eq(REGION));
+        return request.getValue();
+    }
+
     private ContainerDefinition registeredContainer() {
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<List<ContainerDefinition>> defs = ArgumentCaptor.forClass(List.class);
-        verify(ecs).registerTaskDefinition(anyString(), defs.capture(), any(), any(), any(), any(), any(),
-                anyList(), eq(REGION));
-        return defs.getValue().get(0);
+        return registeredRequest().getContainerDefinitions().get(0);
     }
 
     @Test
     void taskDefinitionWithoutFamilyGeneratesOneAndIgnoresAnUnknownNetworkMode() {
         TaskDefinition td = new TaskDefinition();
         td.setTaskDefinitionArn(TASK_DEF_ARN);
-        when(ecs.registerTaskDefinition(anyString(), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(),
-                anyList(), eq(REGION))).thenReturn(td);
+        when(ecs.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), eq(REGION))).thenReturn(td);
 
         StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
         provisioner.provision(r, mapper.createObjectNode().put("NetworkMode", "not-a-mode"), ctx());
 
-        ArgumentCaptor<String> family = ArgumentCaptor.forClass(String.class);
-        verify(ecs).registerTaskDefinition(family.capture(), anyList(), isNull(), isNull(), isNull(), isNull(),
-                isNull(), anyList(), eq(REGION));
-        assertTrue(family.getValue().startsWith("my-stack-TaskDef-"), family.getValue());
+        RegisterTaskDefinitionRequest request = registeredRequest();
+        assertTrue(request.getFamily().startsWith("my-stack-TaskDef-"), request.getFamily());
+        assertNull(request.getNetworkMode());
+    }
+
+    /** RegisterTaskDefinition refuses a dependency condition ECS does not define, so the template does too. */
+    @Test
+    void anUnknownDependencyConditionIsRefused() throws Exception {
+        JsonNode props = mapper.readTree("""
+                {"Family": "web", "ContainerDefinitions": [
+                  {"Name": "init", "Image": "busybox", "Essential": false},
+                  {"Name": "app", "Image": "nginx:1", "DependsOn": [{"ContainerName": "init", "Condition": "DONE"}]}]}
+                """);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx()));
+
+        assertEquals("ClientException", e.getErrorCode());
+        assertTrue(e.getMessage().contains("with an invalid condition: DONE"), e.getMessage());
+        verifyNoMoreInteractions(ecs);
+    }
+
+    @Test
+    void anUnknownPidModeIsRefused() throws Exception {
+        JsonNode props = mapper.readTree("""
+                {"Family": "web", "PidMode": "container",
+                 "ContainerDefinitions": [{"Name": "app", "Image": "nginx:1"}]}
+                """);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx()));
+
+        assertEquals("Invalid pidMode: container. Valid values: host, task.", e.getMessage());
+        verifyNoMoreInteractions(ecs);
+    }
+
+    /** Matches the registration of the task definition family {@code name}. */
+    private static RegisterTaskDefinitionRequest family(String name) {
+        return argThat(request -> request != null && name.equals(request.getFamily()));
     }
 
     @Test
@@ -633,8 +739,7 @@ class EcsCfnProvisionerTest {
     void aTaskDefinitionUpdateDeregistersTheDisplacedRevisionAfterCommit() {
         TaskDefinition next = new TaskDefinition();
         next.setTaskDefinitionArn(TASK_DEF_ARN.replace(":3", ":4"));
-        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
-                eq(REGION))).thenReturn(next);
+        when(ecs.registerTaskDefinition(family("web"), eq(REGION))).thenReturn(next);
         StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
 
         provisioner.provision(r, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
@@ -649,8 +754,7 @@ class EcsCfnProvisionerTest {
     void aRetainedDisplacedEntityIsNotDeletedAndAFailingDeleteIsRetriedThreeTimes() {
         TaskDefinition next = new TaskDefinition();
         next.setTaskDefinitionArn(TASK_DEF_ARN.replace(":3", ":4"));
-        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
-                eq(REGION))).thenReturn(next);
+        when(ecs.registerTaskDefinition(family("web"), eq(REGION))).thenReturn(next);
 
         StackResource retained = resource("AWS::ECS::TaskDefinition", "TaskDef");
         retained.setUpdateReplacePolicy("Retain");
@@ -971,8 +1075,7 @@ class EcsCfnProvisionerTest {
     void aRollbackWhoseDeleteFailsStillPointsTheResourceAtThePriorAndPropagates() {
         TaskDefinition next = new TaskDefinition();
         next.setTaskDefinitionArn(TASK_DEF_ARN.replace(":3", ":4"));
-        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
-                eq(REGION))).thenReturn(next);
+        when(ecs.registerTaskDefinition(family("web"), eq(REGION))).thenReturn(next);
         doThrow(new AwsException("ServerException", "busy", 500)).when(ecs).deregisterTaskDefinition(next.getTaskDefinitionArn(), REGION);
         StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
         r.getAttributes().put("TaskDefinitionArn", TASK_DEF_ARN);
@@ -998,8 +1101,7 @@ class EcsCfnProvisionerTest {
         String orphan = TASK_DEF_ARN.replace(":3", ":4");
         TaskDefinition next = new TaskDefinition();
         next.setTaskDefinitionArn(orphan);
-        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
-                eq(REGION))).thenReturn(next);
+        when(ecs.registerTaskDefinition(family("web"), eq(REGION))).thenReturn(next);
         doThrow(new AwsException("ServerException", "busy", 500)).when(ecs).deregisterTaskDefinition(orphan, REGION);
         StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
         r.getAttributes().put("TaskDefinitionArn", TASK_DEF_ARN);
@@ -1015,8 +1117,7 @@ class EcsCfnProvisionerTest {
         // and the committed cleanup deletes both, never the live revision.
         TaskDefinition fifth = new TaskDefinition();
         fifth.setTaskDefinitionArn(TASK_DEF_ARN.replace(":3", ":5"));
-        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
-                eq(REGION))).thenReturn(fifth);
+        when(ecs.registerTaskDefinition(family("web"), eq(REGION))).thenReturn(fifth);
         provisioner.provision(r, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
         org.mockito.Mockito.reset(ecs);
         UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
@@ -1032,8 +1133,7 @@ class EcsCfnProvisionerTest {
         String orphan = TASK_DEF_ARN.replace(":3", ":4");
         TaskDefinition next = new TaskDefinition();
         next.setTaskDefinitionArn(orphan);
-        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
-                eq(REGION))).thenReturn(next);
+        when(ecs.registerTaskDefinition(family("web"), eq(REGION))).thenReturn(next);
         doThrow(new AwsException("ServerException", "busy", 500)).when(ecs).deregisterTaskDefinition(orphan, REGION);
         StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
         r.getAttributes().put("TaskDefinitionArn", TASK_DEF_ARN);
@@ -1048,8 +1148,7 @@ class EcsCfnProvisionerTest {
         // A later replacement adds revision 3 to the list; its delete also fails at first.
         TaskDefinition fifth = new TaskDefinition();
         fifth.setTaskDefinitionArn(TASK_DEF_ARN.replace(":3", ":5"));
-        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
-                eq(REGION))).thenReturn(fifth);
+        when(ecs.registerTaskDefinition(family("web"), eq(REGION))).thenReturn(fifth);
         provisioner.provision(r, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
         doThrow(new AwsException("ServerException", "busy", 500)).when(ecs).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
 
@@ -1078,8 +1177,7 @@ class EcsCfnProvisionerTest {
         String orphan = TASK_DEF_ARN.replace(":3", ":4");
         TaskDefinition next = new TaskDefinition();
         next.setTaskDefinitionArn(orphan);
-        when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
-                eq(REGION))).thenReturn(next);
+        when(ecs.registerTaskDefinition(family("web"), eq(REGION))).thenReturn(next);
         doThrow(new AwsException("ServerException", "busy", 500)).when(ecs).deregisterTaskDefinition(orphan, REGION);
         StackResource r = resource("AWS::ECS::TaskDefinition", "TaskDef");
         r.getAttributes().put("TaskDefinitionArn", TASK_DEF_ARN);

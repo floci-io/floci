@@ -2447,6 +2447,17 @@ public class EcsContainerManager {
         }
     }
 
+    /**
+     * Refuses a host volume whose source path {@link HostVolumePolicy} does not allow, at
+     * registration, for a definition that did not come through the RegisterTaskDefinition handler,
+     * which checks it while parsing (a CloudFormation-registered one).
+     */
+    public void checkHostVolumePath(Volume volume) {
+        if (volume.hostSourcePath() != null && !volume.hostSourcePath().isBlank()) {
+            hostVolumePolicy.validate(volume.hostSourcePath());
+        }
+    }
+
     // Inner enum to avoid import cycle — mirrors model.TaskStatus for readability
     private enum TaskStatus {RUNNING}
 }

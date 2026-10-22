@@ -87,6 +87,75 @@ class CloudFormationEcsTaskDefinitionModelIntegrationTest {
             .body("taskDefinition.containerDefinitions.find { it.name == 'side' }.essential", equalTo(false));
     }
 
+    /** Container and task properties the runtime honours are registered, not dropped. */
+    @Test
+    void containerAndTaskLevelPropertiesAreRegistered() {
+        String family = stackName("props");
+        submit("CreateStack", family, """
+                {
+                  "Resources": {
+                    "TaskDef": {
+                      "Type": "AWS::ECS::TaskDefinition",
+                      "Properties": {
+                        "Family": "%s",
+                        "PidMode": "task",
+                        "EphemeralStorage": {"SizeInGiB": 30},
+                        "Volumes": [{"Name": "data"}],
+                        "ContainerDefinitions": [
+                          {"Name": "init", "Image": "busybox", "Memory": 64, "Essential": false},
+                          {"Name": "app", "Image": "busybox", "Memory": 128, "WorkingDirectory": "/app",
+                           "User": "1000", "StopTimeout": 30,
+                           "MountPoints": [{"SourceVolume": "data", "ContainerPath": "/data"}],
+                           "DependsOn": [{"ContainerName": "init", "Condition": "COMPLETE"}]}
+                        ]
+                      }
+                    }
+                  }
+                }
+                """.formatted(family));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(family, CFN_AUTH).status());
+
+        RestAssuredJsonUtils.awsAction(ECS_TARGET, "DescribeTaskDefinition", "{\"taskDefinition\": \"" + family + "\"}")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.pidMode", equalTo("task"))
+            .body("taskDefinition.ephemeralStorage.sizeInGiB", equalTo(30))
+            .body("taskDefinition.volumes.name", hasItem("data"))
+            .body("taskDefinition.containerDefinitions.find { it.name == 'app' }.workingDirectory", equalTo("/app"))
+            .body("taskDefinition.containerDefinitions.find { it.name == 'app' }.user", equalTo("1000"))
+            .body("taskDefinition.containerDefinitions.find { it.name == 'app' }.stopTimeout", equalTo(30))
+            .body("taskDefinition.containerDefinitions.find { it.name == 'app' }.mountPoints[0].containerPath",
+                    equalTo("/data"))
+            .body("taskDefinition.containerDefinitions.find { it.name == 'app' }.dependsOn[0].condition",
+                    equalTo("COMPLETE"));
+    }
+
+    /**
+     * A host volume's source path goes through the same policy as one registered through the ECS
+     * API, at registration, so a path it refuses fails the resource instead of the task later.
+     */
+    @Test
+    void aHostVolumeThePolicyRefusesFailsTheCreate() {
+        String family = stackName("host");
+        submit("CreateStack", family, """
+                {
+                  "Resources": {
+                    "TaskDef": {
+                      "Type": "AWS::ECS::TaskDefinition",
+                      "Properties": {
+                        "Family": "%s",
+                        "Volumes": [{"Name": "data", "Host": {"SourcePath": "relative/data"}}],
+                        "ContainerDefinitions": [{"Name": "app", "Image": "busybox", "Memory": 128,
+                          "MountPoints": [{"SourceVolume": "data", "ContainerPath": "/data"}]}]
+                      }
+                    }
+                  }
+                }
+                """.formatted(family));
+        assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(family, CFN_AUTH).status());
+        assertEventReason(family, "volumes[].host.sourcePath must be an absolute path: relative/data");
+    }
+
     private String stackName(String purpose) {
         String name = "cfn-ecs-model-" + purpose + "-" + Long.toString(System.nanoTime(), 36);
         cleanup.register(() -> {

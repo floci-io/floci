@@ -902,6 +902,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (containerDefs != null) {
             containerDefs.forEach(containerManager::checkDeviceHostPaths);
         }
+        if (request.getVolumes() != null) {
+            request.getVolumes().forEach(containerManager::checkHostVolumePath);
+        }
         EcsLinuxParameters.normalize(containerDefs);
         String family = request.getFamily();
         int revision = latestRevisions.compute(familyKey(region, family),
