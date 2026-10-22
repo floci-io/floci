@@ -178,6 +178,12 @@ and a `SecureString` keeps its `KeyId` unless the request sends a new one.
 !!! note
     `SecureString` parameters are stored as-is without actual KMS encryption in Floci. The type is preserved and returned correctly, but the value is not encrypted at rest.
 
+`GetParameter`, `GetParameters` and `GetParameterHistory` return a `SecureString`'s plaintext
+only with `WithDecryption` true, as on AWS. Without it they return an opaque Base64 stand-in for
+the KMS ciphertext AWS would return: it starts with `AQICAH` like a real one, never contains the
+plaintext, and is the same on every read of the same version, but it cannot be decrypted with
+KMS. `GetParametersByPath` still returns the plaintext whatever `WithDecryption` says.
+
 ## Parameter Store Change events
 
 Like AWS, Floci publishes a `Parameter Store Change` event (`source: aws.ssm`) to the account's

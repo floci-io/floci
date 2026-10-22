@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -28,7 +29,9 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -165,7 +168,7 @@ public class SsmJsonHandler {
         authorizeSecretValues(List.of(param), authorization);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Parameter", parameterToNode(param));
+        response.set("Parameter", parameterToNode(param, withDecryption));
         return Response.ok(response).build();
     }
 
@@ -181,7 +184,7 @@ public class SsmJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
         for (Parameter p : params) {
-            parametersArray.add(parameterToNode(p));
+            parametersArray.add(parameterToNode(p, withDecryption));
         }
         response.set("Parameters", parametersArray);
         response.set("InvalidParameters", invalidParameterNames(names,
@@ -275,6 +278,7 @@ public class SsmJsonHandler {
 
     private Response handleGetParameterHistory(JsonNode request, String region) {
         String name = request.path("Name").asText();
+        boolean withDecryption = request.path("WithDecryption").asBoolean(false);
         List<ParameterHistory> history = ssmService.getParameterHistory(name, region);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -283,7 +287,8 @@ public class SsmJsonHandler {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", h.getName());
             node.put("Version", h.getVersion());
-            node.put("Value", h.getValue());
+            node.put("Value", withDecryption || !SECURE_STRING.equals(h.getType())
+                    ? h.getValue() : encryptedValue(h.getName(), h.getVersion(), h.getValue()));
             node.put("Type", h.getType());
             node.put("LastModifiedDate", h.getLastModifiedDate().toEpochMilli() / 1000.0);
             if (h.getDescription() != null) {
@@ -1157,6 +1162,33 @@ public class SsmJsonHandler {
 
         ssmService.removeTagsFromResource(resourceId, tagKeys, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private static final String SECURE_STRING = "SecureString";
+    /** The first bytes of a KMS ciphertext blob, which is why AWS's encrypted values start "AQICAH". */
+    private static final byte[] KMS_CIPHERTEXT_HEADER = {0x01, 0x02, 0x02, 0x00, 0x78};
+
+    /** As {@link #parameterToNode(Parameter)}, with a SecureString's value encrypted unless decryption was asked for. */
+    private ObjectNode parameterToNode(Parameter p, boolean withDecryption) {
+        ObjectNode node = parameterToNode(p);
+        if (!withDecryption && SECURE_STRING.equals(p.getType()) && p.getValue() != null) {
+            node.put("Value", encryptedValue(p.getName(), p.getVersion(), p.getValue()));
+        }
+        return node;
+    }
+
+    /**
+     * What AWS returns for a SecureString read without decryption is its KMS ciphertext. Floci
+     * stores no ciphertext, so it returns a stand-in in the shape of one: Base64 of a KMS
+     * ciphertext blob header and a digest of the version. It never contains the plaintext, and
+     * each version always reads the same.
+     */
+    private static String encryptedValue(String name, long version, String value) {
+        byte[] digest = Digests.sha256((name + "\n" + version + "\n" + value).getBytes(StandardCharsets.UTF_8));
+        byte[] blob = new byte[KMS_CIPHERTEXT_HEADER.length + digest.length];
+        System.arraycopy(KMS_CIPHERTEXT_HEADER, 0, blob, 0, KMS_CIPHERTEXT_HEADER.length);
+        System.arraycopy(digest, 0, blob, KMS_CIPHERTEXT_HEADER.length, digest.length);
+        return Base64.getEncoder().encodeToString(blob);
     }
 
     private ObjectNode parameterToNode(Parameter p) {

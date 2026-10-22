@@ -29,6 +29,7 @@ import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 @QuarkusTest
@@ -1801,6 +1802,55 @@ class SsmIntegrationTest {
     }
 
     @Test
+    void secureStringValueIsReturnedInPlaintextOnlyWithDecryption() {
+        ssmCall("PutParameter", """
+                { "Name": "/masked/secure", "Value": "s3cret-value", "Type": "SecureString" }
+                """);
+        ssmCall("PutParameter", """
+                { "Name": "/masked/plain", "Value": "plain-value", "Type": "String" }
+                """);
+
+        String masked = ssmCall("GetParameter", """
+                { "Name": "/masked/secure", "WithDecryption": false }
+                """).extract().path("Parameter.Value");
+        assertFalse(masked == null || masked.isEmpty(), "a SecureString read without decryption still has a Value");
+        assertNotEquals("s3cret-value", masked);
+        ssmCall("GetParameter", """
+                { "Name": "/masked/secure" }
+                """).body("Parameter.Value", equalTo(masked));
+        ssmCall("GetParameter", """
+                { "Name": "/masked/secure", "WithDecryption": true }
+                """).body("Parameter.Value", equalTo("s3cret-value"));
+
+        ssmCall("GetParameters", """
+                { "Names": ["/masked/secure", "/masked/plain"] }
+                """)
+            .body("Parameters.find { it.Name == '/masked/secure' }.Value", equalTo(masked))
+            .body("Parameters.find { it.Name == '/masked/plain' }.Value", equalTo("plain-value"));
+        ssmCall("GetParameters", """
+                { "Names": ["/masked/secure"], "WithDecryption": true }
+                """).body("Parameters[0].Value", equalTo("s3cret-value"));
+
+        ssmCall("GetParameterHistory", """
+                { "Name": "/masked/secure" }
+                """).body("Parameters[0].Value", equalTo(masked));
+        ssmCall("GetParameterHistory", """
+                { "Name": "/masked/secure", "WithDecryption": true }
+                """).body("Parameters[0].Value", equalTo("s3cret-value"));
+    }
+
+    private ValidatableResponse ssmCall(String action, String body) {
+        return given()
+            .header("X-Amz-Target", "AmazonSSM." + action)
+            .contentType(SSM_CONTENT_TYPE)
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void putParameterWithoutTypeCannotCreateAParameter() {
         putParameterError("""
                 { "Name": "/untyped/new", "Value": "v" }
@@ -2094,7 +2144,7 @@ class SsmIntegrationTest {
             .header("X-Amz-Target", "AmazonSSM.GetParameters")
             .contentType(SSM_CONTENT_TYPE)
             .body("""
-                { "Names": ["/selector/param:1", "/selector/param:9"] }
+                { "Names": ["/selector/param:1", "/selector/param:9"], "WithDecryption": true }
                 """)
         .when()
             .post("/")
