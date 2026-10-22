@@ -6172,6 +6172,26 @@ class CognitoServiceTest {
     }
 
     @Test
+    void caseInsensitivePoolPrefersTheExactUsernameOverCaseVariantsStoredBeforehand() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "LegacyCaseVariants",
+                "UsernameConfiguration", Map.of("CaseSensitive", false)), "us-east-1");
+        service.adminCreateUser(pool.getId(), "Alice", Map.of(), null);
+        // Users differing only in case can already be in such a pool, stored before usernames
+        // were matched case-insensitively.
+        CognitoUser variant = new CognitoUser();
+        variant.setUsername("alice");
+        variant.setUserPoolId(pool.getId());
+        variant.getAttributes().put("sub", UUID.randomUUID().toString());
+        userStore.put(pool.getId() + "::alice", variant);
+
+        assertEquals("Alice", service.adminGetUser(pool.getId(), "Alice").getUsername());
+        assertEquals("alice", service.adminGetUser(pool.getId(), "alice").getUsername());
+        AwsException ambiguous = assertThrows(AwsException.class,
+                () -> service.adminGetUser(pool.getId(), "ALICE"));
+        assertEquals("InvalidParameterException", ambiguous.getErrorCode());
+    }
+
+    @Test
     void tokenIssuedAtMillisReadsTheMintInstantFromAVersion7JtiOnlyWithinItsIatSecond() {
         long mintedAt = 1_760_000_000_123L;
         String jti = CognitoService.timeOrderedJti(mintedAt);

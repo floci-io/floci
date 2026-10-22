@@ -2620,11 +2620,16 @@ public class CognitoService implements ResourceProvider {
         UserPool pool = poolStore.get(userPoolId).orElseThrow(
                 () -> userPoolNotFound(userPoolId));
         LinkedHashMap<String, CognitoUser> matches = new LinkedHashMap<>();
-        userStore.get(userKey(userPoolId, username))
-                .ifPresent(u -> matches.put(u.getUsername(), u));
+        CognitoUser exact = userStore.get(userKey(userPoolId, username)).orElse(null);
+        if (exact != null) {
+            matches.put(exact.getUsername(), exact);
+        }
+        // An exact username wins over its case variants, which a case-insensitive pool can still
+        // hold from before usernames were matched that way.
+        boolean usernameIgnoringCase = exact == null && isCaseInsensitive(pool);
         String prefix = userPoolId + "::";
         userStore.scan(k -> k.startsWith(prefix)).stream()
-                .filter(u -> matchesAliasOrUsernameAttribute(pool, u, username))
+                .filter(u -> matchesAliasOrUsernameAttribute(pool, u, username, usernameIgnoringCase))
                 .forEach(u -> matches.putIfAbsent(u.getUsername(), u));
         if (matches.isEmpty()) {
             throw new AwsException("UserNotFoundException", "User not found", 400);
@@ -6430,11 +6435,11 @@ public class CognitoService implements ResourceProvider {
     }
 
     private boolean matchesAliasOrUsernameAttribute(UserPool pool, CognitoUser user,
-            String username) {
+            String username, boolean usernameIgnoringCase) {
         if (username.equals(user.getAttributes().get("sub"))) {
             return true;
         }
-        if (isCaseInsensitive(pool) && username.equalsIgnoreCase(user.getUsername())) {
+        if (usernameIgnoringCase && username.equalsIgnoreCase(user.getUsername())) {
             return true;
         }
 

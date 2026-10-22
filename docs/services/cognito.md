@@ -885,7 +885,9 @@ A pool created with `UsernameConfiguration` `CaseSensitive: false` matches usern
 `email` and `preferred_username` a user signs in with, whatever their case, as on AWS: a user
 created as `Alice` signs in and is found as `alice` or `ALICE`, and `AdminCreateUser` or `SignUp`
 for `alice` fails with `UsernameExistsException`. The username keeps the case it was created
-with in every response and token. Pools are case-sensitive by default.
+with in every response and token. Pools are case-sensitive by default. If such a pool already
+holds users whose usernames differ only in case, an exact match still finds its own user, and a
+username that matches several of them only by case fails with `InvalidParameterException`.
 
 ### Token claims
 
