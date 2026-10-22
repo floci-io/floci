@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -101,6 +104,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -248,6 +253,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // serviceArn → why the reconciler's last attempt to launch one of its tasks failed, and for which
     // deployment. Memory-only.
     private final Map<String, LaunchFailure> launchFailures = new ConcurrentHashMap<>();
+    // clusterArn::clientToken → the RunTask that token started. Memory-only, like the tasks it names.
+    private final Map<String, RunTaskToken> runTaskTokens = new ConcurrentHashMap<>();
+    private static final Duration CLIENT_TOKEN_LIFETIME = Duration.ofHours(1);
+    private static final ObjectMapper REQUEST_MAPPER = new ObjectMapper();
 
     @Inject
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
@@ -449,6 +458,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         // wipes CloudWatch, so the Container Insights samples it held must be written again.
         launchFailures.clear();
         publishedInsights.clear();
+        runTaskTokens.clear();
     }
 
     /**
@@ -1456,7 +1466,81 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
         TaskDefinition taskDef = resolveLaunchableTaskDefinition(request.getTaskDefinition(), region);
-        return launchTasks(cluster, taskDef, request, null, null, region);
+        if (request.getClientToken() == null) {
+            return launchTasks(cluster, taskDef, request, null, null, region);
+        }
+        return runTaskOnce(cluster, taskDef, request, region);
+    }
+
+    /**
+     * Runs a RunTask that carries a client token at most once per token. A retry with the same
+     * parameters answers with the tasks the first request started, waiting for that launch while it
+     * is still pulling images or waiting on dependencies; the same token with other parameters is a
+     * {@code ConflictException} naming those tasks. A token is forgotten an hour after it was
+     * first used, and at once if its request failed, so a corrected retry can run.
+     */
+    private List<EcsTask> runTaskOnce(EcsCluster cluster, TaskDefinition taskDef, RunTaskRequest request,
+                                      String region) {
+        Instant now = clock.instant();
+        runTaskTokens.values().removeIf(token -> token.expiredAt(now));
+        JsonNode fingerprint = runTaskFingerprint(request, cluster);
+        String key = cluster.getClusterArn() + "::" + request.getClientToken();
+        RunTaskToken fresh = new RunTaskToken(fingerprint, new CompletableFuture<>(), now);
+        RunTaskToken token = runTaskTokens.compute(key,
+                (ignored, prior) -> prior == null || prior.expiredAt(now) ? fresh : prior);
+        if (token != fresh) {
+            if (!token.request().equals(fingerprint)) {
+                throw new AwsException("ConflictException",
+                        "The clientToken is already in use with a different RunTask request.", 400,
+                        Map.of("resourceIds", token.taskArns()));
+            }
+            return awaitRunTask(token.result());
+        }
+        try {
+            List<EcsTask> launched = launchTasks(cluster, taskDef, request, null, null, region);
+            fresh.result().complete(launched);
+            return launched;
+        } catch (Throwable failure) {
+            runTaskTokens.remove(key, fresh);
+            fresh.result().completeExceptionally(failure);
+            throw failure;
+        }
+    }
+
+    /**
+     * What a retry has to repeat for its token to return the first request's tasks: every member
+     * of the request but the token, with the cluster as the ARN it resolved to.
+     */
+    private static JsonNode runTaskFingerprint(RunTaskRequest request, EcsCluster cluster) {
+        ObjectNode fingerprint = REQUEST_MAPPER.valueToTree(request);
+        fingerprint.remove("clientToken");
+        fingerprint.put("cluster", cluster.getClusterArn());
+        return fingerprint;
+    }
+
+    private static List<EcsTask> awaitRunTask(CompletableFuture<List<EcsTask>> result) {
+        try {
+            return result.join();
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof RuntimeException failure) {
+                throw failure;
+            }
+            if (e.getCause() instanceof Error failure) {
+                throw failure;
+            }
+            throw e;
+        }
+    }
+
+    private record RunTaskToken(JsonNode request, CompletableFuture<List<EcsTask>> result, Instant issuedAt) {
+        boolean expiredAt(Instant now) {
+            return !now.isBefore(issuedAt.plus(CLIENT_TOKEN_LIFETIME));
+        }
+
+        List<String> taskArns() {
+            return result.state() == Future.State.SUCCESS
+                    ? result.resultNow().stream().map(EcsTask::getTaskArn).toList() : List.of();
+        }
     }
 
     public List<EcsTask> startTask(String clusterRef, List<String> containerInstanceRefs,

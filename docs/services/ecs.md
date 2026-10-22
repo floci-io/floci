@@ -310,6 +310,14 @@ converging reports none. Each `deployments` entry carries the placement it runs 
 service-only option; `TASK_DEFINITION` copies the task definition's tags onto each task.
 `StartTask` requires the `containerInstances` it places onto, at most 10 of them.
 
+A `RunTask` `clientToken` makes the call idempotent within its cluster: a retry with the same token
+and the same parameters returns the tasks the first call started instead of starting more, and a
+retry that arrives while the first call is still launching (pulling images, waiting on
+`dependsOn`) waits for it. The same token with different parameters fails with a
+`ConflictException` whose `resourceIds` are the first call's task ARNs. A token is remembered for
+one hour, and forgotten at once if its call returned an error. Tokens are kept in memory, so a
+restart or a state reset forgets them along with the tasks.
+
 `ListTasks` filters by `cluster`, `family`, `desiredStatus`, `launchType`, `containerInstance`,
 `serviceName` and `startedBy`, and pages with `maxResults` and `nextToken` (100 per page by
 default). The default filter is a desired status of `RUNNING`, so a listing that has not asked for

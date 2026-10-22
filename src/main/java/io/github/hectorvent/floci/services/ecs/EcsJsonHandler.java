@@ -393,6 +393,7 @@ public class EcsJsonHandler {
 
     private Response handleRunTask(JsonNode req, String region) {
         RunTaskRequest request = parseRunTaskRequest(req);
+        request.setClientToken(req.hasNonNull("clientToken") ? req.path("clientToken").asText() : null);
         List<EcsTask> launched = service.runTask(request, region);
 
         ObjectNode resp = objectMapper.createObjectNode();

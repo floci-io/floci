@@ -686,6 +686,114 @@ class EcsIntegrationTest {
             .body("taskDefinition.containerDefinitions[1].volumesFrom[0].readOnly", equalTo(true));
     }
 
+    @Test
+    @Order(28)
+    void runTaskRetriedWithTheSameClientTokenReturnsTheTaskItStarted() {
+        String request = """
+            {
+                "cluster": "%s",
+                "taskDefinition": "%s",
+                "launchType": "FARGATE",
+                "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
+                "startedBy": "idempotent-run",
+                "clientToken": "run-once-token"
+            }
+            """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY);
+        String firstTaskArn = ecs("RunTask")
+            .body(request)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("tasks", hasSize(1))
+        .extract()
+            .path("tasks[0].taskArn");
+
+        ecs("RunTask")
+            .body(request)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("tasks", hasSize(1))
+            .body("tasks[0].taskArn", equalTo(firstTaskArn))
+            .body("failures", empty());
+
+        ecs("ListTasks")
+            .body("""
+                {"cluster": "%s", "startedBy": "idempotent-run"}
+                """.formatted(CLUSTER_NAME))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskArns", contains(firstTaskArn));
+        stopTestTask(firstTaskArn);
+    }
+
+    @Test
+    @Order(29)
+    void runTaskReusingAClientTokenWithDifferentParametersConflicts() {
+        String firstTaskArn = ecs("RunTask")
+            .body("""
+                {
+                    "cluster": "%s",
+                    "taskDefinition": "%s",
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
+                    "startedBy": "conflicting-run",
+                    "clientToken": "reused-token"
+                }
+                """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+        .extract()
+            .path("tasks[0].taskArn");
+
+        ecs("RunTask")
+            .body("""
+                {
+                    "cluster": "%s",
+                    "taskDefinition": "%s",
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
+                    "startedBy": "conflicting-run",
+                    "count": 2,
+                    "clientToken": "reused-token"
+                }
+                """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConflictException"))
+            .body("resourceIds", contains(firstTaskArn));
+
+        ecs("ListTasks")
+            .body("""
+                {"cluster": "%s", "startedBy": "conflicting-run"}
+                """.formatted(CLUSTER_NAME))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskArns", contains(firstTaskArn));
+        stopTestTask(firstTaskArn);
+    }
+
+    private static void stopTestTask(String arn) {
+        ecs("StopTask")
+            .body("""
+                {"cluster": "%s", "task": "%s"}
+                """.formatted(CLUSTER_NAME, arn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
     // ── Services ──────────────────────────────────────────────────────────────
 
     @Test

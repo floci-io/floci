@@ -32,6 +32,8 @@ public class RunTaskRequest {
     private String referenceId;
     private Map<String, String> tags;
     private List<String> containerInstances;
+    /** RunTask's idempotency token; StartTask has none. */
+    private String clientToken;
 
     public String getCluster() { return cluster; }
     public void setCluster(String cluster) { this.cluster = cluster; }
@@ -94,4 +96,7 @@ public class RunTaskRequest {
     public void setContainerInstances(List<String> containerInstances) {
         this.containerInstances = containerInstances;
     }
+
+    public String getClientToken() { return clientToken; }
+    public void setClientToken(String clientToken) { this.clientToken = clientToken; }
 }
