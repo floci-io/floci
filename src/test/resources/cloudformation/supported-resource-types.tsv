@@ -72,6 +72,7 @@ AWS::EC2::EIP	Ec2NetworkCfnProvisioner
 AWS::EC2::FlowLog	Ec2FlowLogCfnProvisioner
 AWS::EC2::Instance	Ec2InstanceCfnProvisioner
 AWS::EC2::InternetGateway	Ec2NetworkCfnProvisioner
+AWS::EC2::KeyPair	Ec2KeyPairCfnProvisioner
 AWS::EC2::LaunchTemplate	Ec2LaunchTemplateCfnProvisioner
 AWS::EC2::NatGateway	Ec2NetworkCfnProvisioner
 AWS::EC2::NetworkAcl	Ec2NetworkAclCfnProvisioner
