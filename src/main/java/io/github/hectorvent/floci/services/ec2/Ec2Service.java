@@ -7058,13 +7058,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     // ─── Security Groups ───────────────────────────────────────────────────────
 
-    public SecurityGroup createSecurityGroup(String region, String groupName, String description, String vpcId) {
+    /**
+     * The VPC a new security group goes into: the one {@code vpcId} names, or the region's default VPC
+     * when {@code vpcId} is absent or empty. Fails with InvalidVpcID.NotFound when that VPC does not exist.
+     */
+    public Vpc requireSecurityGroupVpc(String region, String vpcId) {
         ensureDefaultResources(region);
-        if (vpcId != null && !vpcId.isEmpty()) {
-            getRequiredVpc(region, vpcId);
-        } else {
-            vpcId = resolveDefaultVpcId(region);
-        }
+        return getRequiredVpc(region, vpcId != null && !vpcId.isEmpty() ? vpcId : resolveDefaultVpcId(region));
+    }
+
+    public SecurityGroup createSecurityGroup(String region, String groupName, String description, String vpcId) {
+        vpcId = requireSecurityGroupVpc(region, vpcId).getVpcId();
         // Check duplicate
         String finalVpcId = vpcId;
         boolean exists = securityGroups.scan(k -> true).stream()

@@ -352,9 +352,8 @@ class Ec2QueryHandlerTest {
     @Test
     void aSecurityGroupDryRunWithoutAVpcIdNeedsTheDefaultVpcToExist() {
         Ec2Service service = mock(Ec2Service.class);
-        when(service.resolveDefaultVpcId("us-east-1")).thenReturn("vpc-deleted-default");
-        when(service.requireVpc("us-east-1", "vpc-deleted-default")).thenThrow(new AwsException(
-                "InvalidVpcID.NotFound", "The vpc ID 'vpc-deleted-default' does not exist", 400));
+        when(service.requireSecurityGroupVpc("us-east-1", null)).thenThrow(new AwsException(
+                "InvalidVpcID.NotFound", "The vpc ID 'vpc-default-us-east-1' does not exist", 400));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("GroupName", "test");
         params.putSingle("GroupDescription", "test");

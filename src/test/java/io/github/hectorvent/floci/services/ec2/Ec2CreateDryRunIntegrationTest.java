@@ -2,10 +2,12 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.UUID;
 
@@ -82,6 +84,30 @@ class Ec2CreateDryRunIntegrationTest {
                     .body("CreateSecurityGroupResponse.return", equalTo("true"));
         } finally {
             deleteVpcAndItsContents(vpcId);
+        }
+    }
+
+    /** A group dry run with no VpcId, or an empty one, is answered for the region's default VPC. */
+    @ParameterizedTest
+    @ValueSource(strings = {"absent", "empty"})
+    void aGroupDryRunWithoutAVpcIdIsAnsweredForTheDefaultVpc(String vpcId) {
+        String name = "dryrun-default-" + UUID.randomUUID();
+        try {
+            RequestSpecification dryRun = ec2("CreateSecurityGroup")
+                    .formParam("GroupName", name)
+                    .formParam("GroupDescription", "dry run test group")
+                    .formParam("DryRun", "true");
+            if ("empty".equals(vpcId)) {
+                dryRun.formParam("VpcId", "");
+            }
+            assertDryRun(dryRun);
+
+            groupsNamed(name).body("DescribeSecurityGroupsResponse.securityGroupInfo", emptyOrNullString());
+        } finally {
+            for (String groupId : groupsNamed(name).extract().xmlPath()
+                    .getList("DescribeSecurityGroupsResponse.securityGroupInfo.item.groupId", String.class)) {
+                ec2("DeleteSecurityGroup").formParam("GroupId", groupId).post("/").then().statusCode(200);
+            }
         }
     }
 
@@ -168,6 +194,13 @@ class Ec2CreateDryRunIntegrationTest {
                 .body("Response.Errors.Error.Code", equalTo("DryRunOperation"))
                 .body("Response.Errors.Error.Message",
                         equalTo("Request would have succeeded, but DryRun flag is set."));
+    }
+
+    private static ValidatableResponse groupsNamed(String name) {
+        return ec2("DescribeSecurityGroups")
+                .formParam("Filter.1.Name", "group-name")
+                .formParam("Filter.1.Value.1", name)
+                .post("/").then().statusCode(200);
     }
 
     private static RequestSpecification ec2(String action) {

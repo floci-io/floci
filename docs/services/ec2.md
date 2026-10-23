@@ -294,7 +294,7 @@ naming different VPCs find nothing.
 
 | Action | Description |
 |--------|-------------|
-| CreateVpc | Creates a VPC with the requested CIDR block. `InstanceTenancy` accepts `default` or `dedicated`; `host` is rejected with `InvalidParameterValue`, as on AWS. `DryRun=true` is answered with `DryRunOperation` once the tag specifications are read, before the CIDR block and the tenancy are checked, and creates nothing. |
+| CreateVpc | Creates a VPC with the requested CIDR block. `InstanceTenancy` accepts `default` or `dedicated`; `host` is rejected with `InvalidParameterValue`, as on AWS. `DryRun=true` is answered with `DryRunOperation` and creates nothing; the CIDR block and the tenancy are checked only without `DryRun`. |
 | DescribeVpcs | Lists or returns stored VPCs. |
 | DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway or egress-only internet gateway, a transit gateway attachment, an Elastic Load Balancing v2 load balancer, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
@@ -316,7 +316,7 @@ private gateway lifecycles are not modelled.
 
 | Action | Description |
 |--------|-------------|
-| CreateSubnet | Creates a subnet in a VPC. `DryRun=true` is answered with `DryRunOperation` once the tag specifications are read and the VPC is found, before the CIDR block and its overlap with other subnets are checked, and creates nothing; a missing `VpcId` or VPC keeps its own error. |
+| CreateSubnet | Creates a subnet in a VPC. `DryRun=true` is answered with `DryRunOperation` and creates nothing. A missing `VpcId` or VPC keeps its own error; the CIDR block, zone, IPv6 block and overlap with other subnets are checked only without `DryRun`. |
 | DescribeSubnets | Lists or returns stored subnets. |
 | DeleteSubnet | Deletes a subnet from the local EC2 store. Fails with `DependencyViolation` while the subnet still has a transit gateway attachment, an Elastic Load Balancing v2 load balancer, or anything holding a network interface in it: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifySubnetAttribute | Updates supported subnet attributes. |
@@ -325,7 +325,7 @@ private gateway lifecycles are not modelled.
 
 | Action | Description |
 |--------|-------------|
-| CreateSecurityGroup | Creates a security group in a VPC. `DryRun=true` is answered with `DryRunOperation` once the tag specifications, `GroupName` and `GroupDescription` are read and the VPC, the default one when `VpcId` is absent, is found, before whether the group name is taken is checked, and creates nothing; a missing VPC keeps its own error. |
+| CreateSecurityGroup | Creates a security group in a VPC, the default VPC when `VpcId` is absent. `DryRun=true` is answered with `DryRunOperation` and creates nothing. A missing `GroupName`, `GroupDescription` or VPC keeps its own error; a taken group name is checked only without `DryRun`. |
 | DescribeSecurityGroups | Lists or returns stored security groups. |
 | DeleteSecurityGroup | Deletes a security group from the local EC2 store. |
 | AuthorizeSecurityGroupIngress | Adds inbound permissions. Sources may be IPv4 ranges, IPv6 ranges, or another security group (`UserIdGroupPairs`, sent on the wire as `Groups`); prefix list sources are not stored. One rule is stored per source, each carrying its own description. |

@@ -16,7 +16,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * A create with DryRun answers DryRunOperation (HTTP 412) and creates nothing, so the same create
- * without DryRun then succeeds. A subnet dry run naming a missing VPC keeps the real create's error.
+ * without DryRun then succeeds. A subnet or group dry run naming a missing VPC keeps the real create's
+ * error.
  */
 class Ec2CreateDryRunTest {
 
@@ -90,6 +91,18 @@ class Ec2CreateDryRunTest {
         try (Ec2Client ec2 = TestFixtures.ec2Client()) {
             Ec2Exception error = assertThrows(Ec2Exception.class, () -> ec2.createSubnet(r -> r
                     .vpcId("vpc-0123456789abcdef0").cidrBlock("10.215.8.0/24").dryRun(true)));
+            assertThat(error.statusCode()).isEqualTo(400);
+            assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidVpcID.NotFound");
+        }
+    }
+
+    @Test
+    @DisplayName("CreateSecurityGroup with DryRun in a missing VPC keeps InvalidVpcID.NotFound")
+    void createSecurityGroupWithDryRunInAMissingVpc() {
+        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
+            Ec2Exception error = assertThrows(Ec2Exception.class, () -> ec2.createSecurityGroup(r -> r
+                    .vpcId("vpc-0123456789abcdef0").groupName("compat-dry-run-missing-vpc")
+                    .description("compatibility dry run").dryRun(true)));
             assertThat(error.statusCode()).isEqualTo(400);
             assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidVpcID.NotFound");
         }
