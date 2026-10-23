@@ -34,8 +34,12 @@ import org.jboss.logging.Logger;
  * Currently supported services:
  * - DynamoDB (DynamoDB_20120810.*)
  * - SQS (AmazonSQS.*)
+ * <p>
+ * A gzip-encoded CloudWatch {@code PutMetricData} body arrives here decompressed, by
+ * {@link CloudWatchGzipReaderInterceptor}.
  */
 @Path("/")
+@CloudWatchGzipBody
 public class AwsJsonController {
 
     public static final String CONTENT_TYPE_AWS_JSON_1_0 = "application/x-amz-json-1.0";

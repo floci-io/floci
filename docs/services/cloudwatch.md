@@ -362,6 +362,15 @@ legacy `2009-05-15` API, which supports only `ListMetrics` and `GetMetricStatist
 An invalid version or action returns HTTP 404 `InvalidAction`; an absent action returns
 HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action prefix.
 
+JSON `PutMetricData` accepts a gzip-compressed body (`Content-Encoding: gzip`), which the AWS
+CLI, boto3 and the other SDKs that call CloudWatch over JSON send by default for any body of
+10 KiB or more. With signature validation and IAM enforcement on, the signature is checked over
+the compressed bytes as sent and IAM decides the request before the body is decompressed. As on
+the CBOR protocol, the decompressed body is limited to 10 MiB: a larger one returns HTTP 413
+`PayloadTooLargeException`, a body that cannot be decompressed returns HTTP 400
+`InvalidRequestException`, and an empty body reads as no input. Other JSON operations do not
+decompress their body.
+
 **Endpoint:** `http://localhost:4566/`. Query: GET or POST; JSON: POST.
 
 ### Supported Actions
