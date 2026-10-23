@@ -23,6 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayInputStream;
@@ -825,6 +826,27 @@ class S3ServiceTest {
                 "text/csv", null);
 
         assertEquals("s3-notif-test", lambdaInvoker.functionName);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"prefix, reports(, reports%28", "suffix, ), %29"})
+    void notificationFiltersThatMatchTheSameKeysOverlap(String name, String value, String otherValue) {
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notif-s3-filter-overlap"), false, new RecordingLambdaInvoker(),
+                new RegionResolver("us-east-1", "000000000000"));
+        service.createBucket("test-bucket", "us-east-1");
+        NotificationConfiguration config = new NotificationConfiguration();
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification("first",
+                "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
+                List.of("s3:ObjectCreated:*"), List.of(new FilterRule(name, value))));
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification("second",
+                "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
+                List.of("s3:ObjectCreated:Put"), List.of(new FilterRule(name, otherValue))));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putBucketNotificationConfiguration("test-bucket", config, true));
+        assertEquals("InvalidArgument", error.getErrorCode());
+        assertTrue(error.getMessage().startsWith("Configuration is ambiguously defined"), error.getMessage());
     }
 
     @Test

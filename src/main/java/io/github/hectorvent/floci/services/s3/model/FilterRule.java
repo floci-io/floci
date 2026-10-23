@@ -26,8 +26,8 @@ public record FilterRule(String name, String value) {
      */
     public boolean matches(String key) {
         if (key == null || name == null || value == null) return false;
-        String normalizedKey = withSafeCharactersDecoded(key);
-        String normalizedValue = withSafeCharactersDecoded(value);
+        String normalizedKey = normalized(key);
+        String normalizedValue = normalized(value);
         return switch (name.toLowerCase()) {
             case "prefix" -> normalizedKey.startsWith(normalizedValue);
             case "suffix" -> normalizedKey.endsWith(normalizedValue);
@@ -35,7 +35,8 @@ public record FilterRule(String name, String value) {
         };
     }
 
-    private static String withSafeCharactersDecoded(String text) {
+    /** {@code text} in the form a filter compares it in, so two values match the same keys when equal. */
+    public static String normalized(String text) {
         Matcher matcher = ENCODED_SAFE_CHARACTER.matcher(text);
         return matcher.replaceAll(match -> Matcher.quoteReplacement(
                 String.valueOf((char) Integer.parseInt(match.group(1), 16))));

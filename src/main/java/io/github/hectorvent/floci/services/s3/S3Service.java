@@ -5127,8 +5127,8 @@ public class S3Service implements Resettable, ResourceProvider {
                         "FilterRule.Name", rule.name());
             }
         }
-        return new NotificationRule(eventTypes, prefix != null ? prefix : "", suffix != null ? suffix : "",
-                !rules.isEmpty());
+        return new NotificationRule(eventTypes, FilterRule.normalized(prefix != null ? prefix : ""),
+                FilterRule.normalized(suffix != null ? suffix : ""), !rules.isEmpty());
     }
 
     private static AwsException invalidNotificationArgument(String message, String argumentName,
