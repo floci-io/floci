@@ -3150,8 +3150,11 @@ public class Ec2QueryHandler {
         String azId = p.getFirst("AvailabilityZoneId");
         String ipv6CidrBlock = p.getFirst("Ipv6CidrBlock");
         List<Tag> tags = parseTagsForResource(p, "subnet", true);
-        // Answered before Ec2Service checks the VPC, the CIDR block and overlap with other subnets, an order
-        // AWS does not document.
+        // A dry run still needs a VpcId naming a VPC that exists, as a RunInstances dry run needs its subnet
+        // and groups: the Service Authorization Reference lists the VPC, with its tags and tenancy, in
+        // CreateSubnet's permission. It is answered before Ec2Service checks the CIDR block and overlap
+        // with other subnets, an order AWS does not document.
+        service.requireVpc(region, requireParameter(p, "VpcId"));
         checkDryRun(p);
         Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az, azId, ipv6CidrBlock);
         try {
@@ -3231,8 +3234,11 @@ public class Ec2QueryHandler {
         String groupName = requireParameter(p, "GroupName");
         String description = requireParameter(p, "GroupDescription");
         String vpcId = p.getFirst("VpcId");
-        // Answered before Ec2Service checks the VPC and whether the group name is taken, an order AWS does
-        // not document.
+        // A dry run still needs the VPC to exist, the default one when VpcId is absent, as a RunInstances dry
+        // run needs its subnet and groups: the Service Authorization Reference lists the VPC, with its tags
+        // and tenancy, in CreateSecurityGroup's permission. It is answered before Ec2Service checks whether
+        // the group name is taken, an order AWS does not document.
+        service.requireVpc(region, vpcId != null && !vpcId.isEmpty() ? vpcId : service.resolveDefaultVpcId(region));
         checkDryRun(p);
         SecurityGroup sg = service.createSecurityGroup(region, groupName, description, vpcId);
         applyResourceTags(resourceTags, region, sg.getGroupId());

@@ -316,7 +316,7 @@ private gateway lifecycles are not modelled.
 
 | Action | Description |
 |--------|-------------|
-| CreateSubnet | Creates a subnet in a VPC. `DryRun=true` is answered with `DryRunOperation` once the tag specifications are read, before the VPC, the CIDR block and its overlap with other subnets are checked, and creates nothing. |
+| CreateSubnet | Creates a subnet in a VPC. `DryRun=true` is answered with `DryRunOperation` once the tag specifications are read and the VPC is found, before the CIDR block and its overlap with other subnets are checked, and creates nothing; a missing `VpcId` or VPC keeps its own error. |
 | DescribeSubnets | Lists or returns stored subnets. |
 | DeleteSubnet | Deletes a subnet from the local EC2 store. Fails with `DependencyViolation` while the subnet still has a transit gateway attachment, an Elastic Load Balancing v2 load balancer, or anything holding a network interface in it: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifySubnetAttribute | Updates supported subnet attributes. |
@@ -325,7 +325,7 @@ private gateway lifecycles are not modelled.
 
 | Action | Description |
 |--------|-------------|
-| CreateSecurityGroup | Creates a security group in a VPC. `DryRun=true` is answered with `DryRunOperation` once the tag specifications, `GroupName` and `GroupDescription` are read, before the VPC and whether the group name is taken are checked, and creates nothing. |
+| CreateSecurityGroup | Creates a security group in a VPC. `DryRun=true` is answered with `DryRunOperation` once the tag specifications, `GroupName` and `GroupDescription` are read and the VPC, the default one when `VpcId` is absent, is found, before whether the group name is taken is checked, and creates nothing; a missing VPC keeps its own error. |
 | DescribeSecurityGroups | Lists or returns stored security groups. |
 | DeleteSecurityGroup | Deletes a security group from the local EC2 store. |
 | AuthorizeSecurityGroupIngress | Adds inbound permissions. Sources may be IPv4 ranges, IPv6 ranges, or another security group (`UserIdGroupPairs`, sent on the wire as `Groups`); prefix list sources are not stored. One rule is stored per source, each carrying its own description. |

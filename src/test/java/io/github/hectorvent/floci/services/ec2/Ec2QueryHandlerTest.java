@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
@@ -38,6 +39,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -345,6 +347,24 @@ class Ec2QueryHandlerTest {
         Response response = handler(service, regionResolver)
                 .handle("DescribeRegions", new MultivaluedHashMap<>(), region);
         return (String) response.getEntity();
+    }
+
+    @Test
+    void aSecurityGroupDryRunWithoutAVpcIdNeedsTheDefaultVpcToExist() {
+        Ec2Service service = mock(Ec2Service.class);
+        when(service.resolveDefaultVpcId("us-east-1")).thenReturn("vpc-deleted-default");
+        when(service.requireVpc("us-east-1", "vpc-deleted-default")).thenThrow(new AwsException(
+                "InvalidVpcID.NotFound", "The vpc ID 'vpc-deleted-default' does not exist", 400));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("GroupName", "test");
+        params.putSingle("GroupDescription", "test");
+        params.putSingle("DryRun", "true");
+
+        Response response = handler(service).handle("CreateSecurityGroup", params, "us-east-1");
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>InvalidVpcID.NotFound</Code>"));
+        verify(service, never()).createSecurityGroup(any(), any(), any(), any());
     }
 
     private Ec2QueryHandler handler(Ec2Service service) {

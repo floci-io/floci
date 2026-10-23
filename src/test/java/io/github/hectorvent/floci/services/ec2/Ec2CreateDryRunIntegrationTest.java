@@ -16,8 +16,8 @@ import static org.hamcrest.Matchers.equalTo;
 /**
  * DryRun on CreateVpc, CreateSubnet and CreateSecurityGroup is answered with DryRunOperation and HTTP 412,
  * and nothing is created, so the real create that follows can still take the same CIDR block or group
- * name. Floci answers it before the CIDR block, tenancy, VPC and group name are checked, an order AWS
- * does not document.
+ * name. A subnet or group dry run first needs the VPC it names to exist; Floci then answers it before the
+ * CIDR block, tenancy, overlap and group name are checked, an order AWS does not document.
  */
 @QuarkusTest
 class Ec2CreateDryRunIntegrationTest {
@@ -96,9 +96,7 @@ class Ec2CreateDryRunIntegrationTest {
             "vpc-host-tenancy, InvalidParameterValue",
             "subnet-range-in-use, InvalidSubnet.Conflict",
             "subnet-outside-the-vpc, InvalidSubnet.Range",
-            "subnet-in-missing-vpc, InvalidVpcID.NotFound",
-            "group-name-taken, InvalidGroup.Duplicate",
-            "group-in-missing-vpc, InvalidVpcID.NotFound"
+            "group-name-taken, InvalidGroup.Duplicate"
     })
     void aDryRunIsAnsweredBeforeTheChecksThatFailTheRealCreate(String request, String errorCode) {
         String name = "dryrun-" + UUID.randomUUID();
@@ -121,6 +119,35 @@ class Ec2CreateDryRunIntegrationTest {
         }
     }
 
+    /**
+     * A subnet or group dry run naming a VPC that does not exist, or a subnet dry run naming none, keeps the
+     * error the real create gives, as a RunInstances dry run keeps the error of a missing subnet.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "subnet-in-missing-vpc, InvalidVpcID.NotFound",
+            "subnet-without-vpc-id, MissingParameter",
+            "group-in-missing-vpc, InvalidVpcID.NotFound"
+    })
+    void aDryRunKeepsTheErrorOfAMissingVpc(String request, String errorCode) {
+        missingVpcCreate(request).formParam("DryRun", "true")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo(errorCode));
+
+        missingVpcCreate(request)
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo(errorCode));
+    }
+
+    private static RequestSpecification missingVpcCreate(String request) {
+        return switch (request) {
+            case "subnet-in-missing-vpc" -> createSubnet(MISSING_VPC, "10.97.1.0/24");
+            case "subnet-without-vpc-id" -> ec2("CreateSubnet").formParam("CidrBlock", "10.97.1.0/24");
+            case "group-in-missing-vpc" -> createSecurityGroup(MISSING_VPC, "missing-vpc-group");
+            default -> throw new IllegalArgumentException(request);
+        };
+    }
+
     /** The failing request named by {@code request}; a VPC it might create carries the tag {@code name}. */
     private static RequestSpecification failingCreate(String request, String vpcId, String name) {
         return switch (request) {
@@ -130,9 +157,7 @@ class Ec2CreateDryRunIntegrationTest {
                     .formParam("InstanceTenancy", "host");
             case "subnet-range-in-use" -> createSubnet(vpcId, "10.94.1.0/24");
             case "subnet-outside-the-vpc" -> createSubnet(vpcId, "10.96.1.0/24");
-            case "subnet-in-missing-vpc" -> createSubnet(MISSING_VPC, "10.94.2.0/24");
             case "group-name-taken" -> createSecurityGroup(vpcId, "taken-group");
-            case "group-in-missing-vpc" -> createSecurityGroup(MISSING_VPC, "missing-vpc-group");
             default -> throw new IllegalArgumentException(request);
         };
     }
