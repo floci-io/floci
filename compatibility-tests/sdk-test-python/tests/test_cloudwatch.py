@@ -157,6 +157,41 @@ class TestCloudWatchMetrics:
         assert dp["Maximum"] == 40.0
         assert dp["Average"] == 30.0  # sum / sampleCount
 
+    def test_put_metric_data_compressed_batch(self, cloudwatch_client, unique_name):
+        """Test a PutMetricData body past 10 KiB, which botocore sends gzip-compressed."""
+        namespace = f"TestApp/CompressedBatch/{unique_name}"
+        now = datetime.datetime.now(datetime.timezone.utc)
+        metric_data = [
+            {
+                "MetricName": "BatchRequests",
+                "Value": 1.0,
+                "Unit": "Count",
+                "Timestamp": now,
+                "Dimensions": [{"Name": "Host", "Value": f"host-{i:03d}-" + "x" * 60}],
+            }
+            for i in range(100)
+        ]
+        names = ("Content-Encoding", "Content-Type")
+        sent = []
+
+        def record_headers(request, **kwargs):
+            sent.append({name: request.headers.get(name) for name in names})
+
+        event = "before-send.cloudwatch.PutMetricData"
+        cloudwatch_client.meta.events.register(event, record_headers)
+        try:
+            cloudwatch_client.put_metric_data(Namespace=namespace, MetricData=metric_data)
+        finally:
+            cloudwatch_client.meta.events.unregister(event, record_headers)
+
+        assert len(sent) == 1
+        headers = {name: v.decode() if isinstance(v, bytes) else v for name, v in sent[0].items()}
+        assert headers["Content-Encoding"] == "gzip"
+        # JSON 1.0 is the path this covers; a CBOR request would reach a decoder that predates it.
+        assert headers["Content-Type"] == "application/x-amz-json-1.0"
+        response = cloudwatch_client.list_metrics(Namespace=namespace, MetricName="BatchRequests")
+        assert len(response["Metrics"]) == 100
+
 
 class TestCloudWatchAlarms:
     """Test CloudWatch alarm operations."""
