@@ -395,7 +395,7 @@ with `DryRunOperation` before any of these checks, and creates nothing either.
 |--------|-------------|
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
-| RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
+| RegisterImage | Registers an AMI from supplied metadata and block device mappings, tagged with the `image` tags of `TagSpecification`. A tag specification for any other resource type, or a tag `CreateTags` would refuse, fails the request and registers nothing. |
 | CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns. |
 | DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`, and a snapshot another AMI still uses is kept either way. |
 

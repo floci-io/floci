@@ -3710,13 +3710,17 @@ public class Ec2QueryHandler {
     }
 
     private Response handleRegisterImage(MultivaluedMap<String, String> p, String region) {
+        // "To tag the AMI, the value for ResourceType must be image. If you specify another value
+        // for ResourceType, the request fails."
+        List<Tag> imageTags = parseTagsForResource(p, "image", true);
         Image image = service.registerImage(
                 region,
                 p.getFirst("Name"),
                 p.getFirst("Description"),
                 p.getFirst("Architecture"),
                 p.getFirst("RootDeviceName"),
-                parseBlockDeviceMappings(p));
+                parseBlockDeviceMappings(p),
+                imageTags);
         XmlBuilder xml = new XmlBuilder()
                 .start("RegisterImageResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

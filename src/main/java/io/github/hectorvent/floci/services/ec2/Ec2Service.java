@@ -8126,9 +8126,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public Image registerImage(String region, String name, String description, String architecture,
                                String rootDeviceName, List<BlockDeviceMapping> blockDeviceMappings) {
+        return registerImage(region, name, description, architecture, rootDeviceName, blockDeviceMappings,
+                List.of());
+    }
+
+    /**
+     * RegisterImage, with the tags the AMI is created with. They are checked as CreateTags checks
+     * them before anything is registered, so a refused tag leaves no AMI behind.
+     */
+    public Image registerImage(String region, String name, String description, String architecture,
+                               String rootDeviceName, List<BlockDeviceMapping> blockDeviceMappings,
+                               List<Tag> imageTags) {
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter Name", 400);
         }
+        List<Tag> requestedTags = imageTags != null ? imageTags : List.of();
+        validateUserTagKeys(requestedTags);
+        validateTagLengths(requestedTags);
+        requireWithinTagLimit(List.of(), requestedTags);
         // The duplicate-name check is a read-modify-write over the whole image store, so two
         // registrations of the same name racing each other would both see no duplicate and both
         // insert. Registration also publishes this image's snapshot references, which is what
@@ -8136,12 +8151,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // a registration cannot slip between that scan and the delete.
         synchronized (imageRegistryLock) {
             return registerImageLocked(region, name, description, architecture, rootDeviceName,
-                    blockDeviceMappings);
+                    blockDeviceMappings, requestedTags);
         }
     }
 
     private Image registerImageLocked(String region, String name, String description, String architecture,
-                                      String rootDeviceName, List<BlockDeviceMapping> blockDeviceMappings) {
+                                      String rootDeviceName, List<BlockDeviceMapping> blockDeviceMappings,
+                                      List<Tag> imageTags) {
         boolean duplicateName = registeredImages.scan(k -> true).stream()
                 .filter(img -> region.equals(img.getRegion()))
                 // A deregistered AMI no longer holds its name: "If you have recently deregistered
@@ -8169,6 +8185,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         image.setCreationDate(ISO_FMT.format(Instant.now()));
         image.setRegion(region);
         image.setBlockDeviceMappings(blockDeviceMappings != null ? new ArrayList<>(blockDeviceMappings) : List.of());
+        if (!imageTags.isEmpty()) {
+            // A key given twice keeps its last value, as CreateTags keeps it.
+            List<Tag> creationTags = new ArrayList<>();
+            for (Tag tag : imageTags) {
+                creationTags.removeIf(existing -> existing.getKey().equals(tag.getKey()));
+                creationTags.add(tag);
+            }
+            image.setTags(new ArrayList<>(creationTags));
+            // Stored before the AMI is, so DescribeImages never lists it without these tags.
+            putTags(region, image.getImageId(), creationTags);
+        }
         registeredImages.put(key(region, image.getImageId()), image);
         for (BlockDeviceMapping mapping : image.getBlockDeviceMappings()) {
             EbsBlockDevice ebs = mapping.getEbs();
@@ -9315,10 +9342,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    /** At most 50 user tags on a resource after the change; tags with the aws: prefix do not count. */
     private void requireWithinTagLimit(String region, String resourceId, List<Tag> tagList) {
+        requireWithinTagLimit(tagsOf(region, resourceId).orElse(List.of()), tagList);
+    }
+
+    /** At most 50 user tags on a resource after the change; tags with the aws: prefix do not count. */
+    private static void requireWithinTagLimit(List<Tag> currentTags, List<Tag> tagList) {
         Set<String> userKeys = new HashSet<>();
-        for (Tag tag : tagsOf(region, resourceId).orElse(List.of())) {
+        for (Tag tag : currentTags) {
             if (!isAwsTagKey(tag.getKey())) {
                 userKeys.add(tag.getKey());
             }
