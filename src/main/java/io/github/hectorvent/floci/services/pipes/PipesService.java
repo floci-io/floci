@@ -363,7 +363,8 @@ public class PipesService implements TagHandler, ResourceProvider {
         }
         if (PipesPoller.epochMillis(timestamp) == null) {
             throw new AwsException("ValidationException",
-                    property + " must be a timestamp in Unix seconds (got " + timestamp.asText() + ")", 400);
+                    property + " must be a timestamp in Unix seconds or ISO-8601 format (got " + timestamp.asText()
+                            + ")", 400);
         }
     }
 

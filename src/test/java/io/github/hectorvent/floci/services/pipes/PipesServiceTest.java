@@ -572,7 +572,9 @@ class PipesServiceTest {
                         null, null, null, "us-east-1"));
 
         assertEquals("ValidationException", ex.getErrorCode());
-        assertTrue(ex.getMessage().contains("StartingPositionTimestamp must be a timestamp"), ex.getMessage());
+        assertTrue(ex.getMessage().contains(
+                "StartingPositionTimestamp must be a timestamp in Unix seconds or ISO-8601 format (got yesterday)"),
+                ex.getMessage());
     }
 
     @Test
