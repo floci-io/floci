@@ -435,14 +435,16 @@ class EventBridgeReplayIntegrationTest {
                 .when().post("/")
                 .then().statusCode(200)
                 .body("FailedEntryCount", equalTo(0));
-        given()
+        String originalReceipt = given()
                 .contentType(SQS_CT)
                 .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
                 .body("{\"QueueUrl\":\"" + timeQueueUrl + "\",\"MaxNumberOfMessages\":10,\"WaitTimeSeconds\":2}")
                 .when().post("/")
                 .then().statusCode(200)
                 .body("Messages", hasSize(1))
-                .body("Messages[0].Body", containsString("\"time\":\"2015-11-11T21:29:54Z\""));
+                .body("Messages[0].Body", containsString("\"time\":\"2015-11-11T21:29:54Z\""))
+                .extract().jsonPath().getString("Messages[0].ReceiptHandle");
+        deleteMessage(timeQueueUrl, originalReceipt);
 
         given()
                 .contentType(EB_CT)
@@ -456,7 +458,7 @@ class EventBridgeReplayIntegrationTest {
                 .then().statusCode(200);
         awaitReplayCompleted("replay-time-replay");
 
-        given()
+        String replayedReceipt = given()
                 .contentType(SQS_CT)
                 .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
                 .body("{\"QueueUrl\":\"" + timeQueueUrl + "\",\"MaxNumberOfMessages\":10,\"WaitTimeSeconds\":2}")
@@ -464,7 +466,9 @@ class EventBridgeReplayIntegrationTest {
                 .then().statusCode(200)
                 .body("Messages", hasSize(1))
                 .body("Messages[0].Body", containsString("\"orderId\":\"t-1\""))
-                .body("Messages[0].Body", containsString("\"time\":\"2015-11-11T21:29:54Z\""));
+                .body("Messages[0].Body", containsString("\"time\":\"2015-11-11T21:29:54Z\""))
+                .extract().jsonPath().getString("Messages[0].ReceiptHandle");
+        deleteMessage(timeQueueUrl, replayedReceipt);
     }
 
     @Test
@@ -482,13 +486,15 @@ class EventBridgeReplayIntegrationTest {
                 .then().statusCode(200);
         awaitReplayCompleted("replay-time-replay-again");
 
-        given()
+        String replayedAgainReceipt = given()
                 .contentType(SQS_CT)
                 .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
                 .body("{\"QueueUrl\":\"" + timeQueueUrl + "\",\"MaxNumberOfMessages\":10,\"WaitTimeSeconds\":2}")
                 .when().post("/")
                 .then().statusCode(200)
-                .body("Messages", hasSize(1));
+                .body("Messages", hasSize(1))
+                .extract().jsonPath().getString("Messages[0].ReceiptHandle");
+        deleteMessage(timeQueueUrl, replayedAgainReceipt);
         given()
                 .contentType(EB_CT)
                 .header("X-Amz-Target", "AWSEvents.DescribeArchive")
@@ -511,6 +517,15 @@ class EventBridgeReplayIntegrationTest {
                     .extract().jsonPath().getString("State");
         }
         Assertions.assertEquals("COMPLETED", state, "Replay did not reach COMPLETED state");
+    }
+
+    private static void deleteMessage(String queueUrl, String receiptHandle) {
+        given()
+                .contentType(SQS_CT)
+                .header("X-Amz-Target", "AmazonSQS.DeleteMessage")
+                .body("{\"QueueUrl\":\"%s\",\"ReceiptHandle\":\"%s\"}".formatted(queueUrl, receiptHandle))
+                .when().post("/")
+                .then().statusCode(200);
     }
 
     private static void createPartialUpdateArchive(String name) {
