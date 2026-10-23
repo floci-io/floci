@@ -710,8 +710,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
      * report a rollback while the rest stayed changed. Only an in-place
      * {@code AWS::DynamoDB::Table} update takes the snapshot, so a global table or a replacing
      * update still reports that rollback is not implemented. The snapshot is spent only once the
-     * restore succeeded: a restore that throws
-     * leaves it in place for the next attempt.
+     * restore succeeded: a restore that throws leaves it in place for the next attempt.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
