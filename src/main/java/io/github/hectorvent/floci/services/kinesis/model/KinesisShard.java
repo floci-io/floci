@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.kinesis.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -15,7 +16,8 @@ public class KinesisShard {
     private String parentShardId;
     private String adjacentParentShardId;
     private HashKeyRange hashKeyRange;
-    private volatile ParsedHashKeyRange parsedHashKeyRange;
+    @JsonIgnore
+    private transient volatile ParsedHashKeyRange parsedHashKeyRange;
     private SequenceNumberRange sequenceNumberRange;
     private final Object recordsMonitor = new Object();
     private List<KinesisRecord> records = new ArrayList<>();
