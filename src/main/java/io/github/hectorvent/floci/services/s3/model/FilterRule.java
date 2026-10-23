@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.s3.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -14,15 +16,18 @@ import java.util.regex.Pattern;
 @RegisterForReflection
 public record FilterRule(String name, String value) {
 
+    private static final Pattern PERCENT_ESCAPE = Pattern.compile("%([0-9A-Fa-f]{2})");
+
     /**
      * The percent-encoded forms of {@code ! ' ( ) *}, the special characters S3 lists as safe in a
-     * key, and of {@code ~}, which a filter may carry raw or encoded, in either hex case.
+     * key, and of {@code ~}, which a filter may carry raw or encoded.
      */
-    private static final Pattern ENCODED_SAFE_CHARACTER = Pattern.compile("%(21|27|28|29|2[Aa]|7[Ee])");
+    private static final Set<String> SAFE_CHARACTER_ESCAPES = Set.of("21", "27", "28", "29", "2A", "7E");
 
     /**
      * Matches the rule against {@code key} as the event record encodes it. A safe character and its
-     * percent-encoded form count as the same character on both sides.
+     * percent-encoded form count as the same character on both sides, and a percent-escape matches
+     * in either hex case.
      */
     public boolean matches(String key) {
         if (key == null || name == null || value == null) return false;
@@ -37,8 +42,13 @@ public record FilterRule(String name, String value) {
 
     /** {@code text} in the form a filter compares it in, so two values match the same keys when equal. */
     public static String normalized(String text) {
-        Matcher matcher = ENCODED_SAFE_CHARACTER.matcher(text);
-        return matcher.replaceAll(match -> Matcher.quoteReplacement(
-                String.valueOf((char) Integer.parseInt(match.group(1), 16))));
+        Matcher matcher = PERCENT_ESCAPE.matcher(text);
+        return matcher.replaceAll(match -> {
+            String hex = match.group(1).toUpperCase(Locale.ROOT);
+            String replacement = SAFE_CHARACTER_ESCAPES.contains(hex)
+                    ? String.valueOf((char) Integer.parseInt(hex, 16))
+                    : "%" + hex;
+            return Matcher.quoteReplacement(replacement);
+        });
     }
 }

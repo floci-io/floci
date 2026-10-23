@@ -829,7 +829,7 @@ class S3ServiceTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"prefix, reports(, reports%28", "suffix, ), %29"})
+    @CsvSource({"prefix, reports(, reports%28", "suffix, ), %29", "prefix, dt%3d2024/, dt%3D2024/"})
     void notificationFiltersThatMatchTheSameKeysOverlap(String name, String value, String otherValue) {
         S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
                 tempDir.resolve("notif-s3-filter-overlap"), false, new RecordingLambdaInvoker(),
@@ -847,6 +847,22 @@ class S3ServiceTest {
                 () -> service.putBucketNotificationConfiguration("test-bucket", config, true));
         assertEquals("InvalidArgument", error.getErrorCode());
         assertTrue(error.getMessage().startsWith("Configuration is ambiguously defined"), error.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"dt%3D2024/", "dt%3d2024/"})
+    void notificationFilterComparesPercentEscapesInEitherHexCase(String prefix) {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notif-s3-hex-case-filter"), false, lambdaInvoker,
+                new RegionResolver("us-east-1", "000000000000"));
+        service.createBucket("test-bucket", "ap-northeast-1");
+        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig(prefix, ".parquet"), true);
+
+        service.putObject("test-bucket", "dt=2024/a.parquet", "v1".getBytes(StandardCharsets.UTF_8),
+                "application/octet-stream", null);
+
+        assertEquals("s3-notif-test", lambdaInvoker.functionName);
     }
 
     @Test
