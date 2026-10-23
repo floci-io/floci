@@ -467,8 +467,9 @@ public class ScheduleInvoker {
     }
 
     /**
-     * A per-message DelaySeconds overrides the queue's, so anything that is not a number or numeric
-     * text is forwarded as absent rather than read as an explicit 0.
+     * A per-message DelaySeconds overrides the queue's, so anything that is not a whole number within
+     * int range, as a JSON number or numeric text, is forwarded as absent rather than read as an
+     * explicit 0.
      */
     private static Integer numericDelaySeconds(JsonNode delaySeconds) {
         if (delaySeconds == null) {

@@ -347,7 +347,10 @@ class ScheduleInvokerTest {
                 isNull(), argThat(attrs -> attrs == null || attrs.isEmpty()), eq("us-east-1"));
     }
 
-    /** A DelaySeconds that is not a number is no override: the queue's own DelaySeconds still applies. */
+    /**
+     * A DelaySeconds that is not a whole number within int range, as a JSON number or numeric text, is
+     * forwarded as absent, so it is no override: the queue's own DelaySeconds still applies.
+     */
     @Test
     void universalSqsSendMessageForwardsOnlyANumericDelaySeconds() {
         List<String> values = List.of("\"5\"", "\"soon\"", "\"\"", "true", "{}", "[]",
