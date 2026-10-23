@@ -3771,7 +3771,8 @@ public class Ec2QueryHandler {
                 p.getFirst("SourceRegion"),
                 p.getFirst("SourceImageId"),
                 p.getFirst("Name"),
-                p.getFirst("Description"));
+                p.getFirst("Description"),
+                Boolean.parseBoolean(p.getFirst("CopyImageTags")));
         XmlBuilder xml = new XmlBuilder()
                 .start("CopyImageResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

@@ -8375,6 +8375,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .anyMatch(ebs -> snapshotId.equals(ebs.getSnapshotId()));
     }
 
+    public Image copyImage(String destinationRegion, String sourceRegion, String sourceImageId,
+                           String name, String description) {
+        return copyImage(destinationRegion, sourceRegion, sourceImageId, name, description, false);
+    }
+
     /**
      * CopyImage. "The copy operation must be initiated in the destination Region", and for a
      * Region-to-Region copy "the destination Region is the Region in which you initiate the copy
@@ -8387,10 +8392,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * {@code available} immediately, consistent with what CreateImage and RegisterImage already
      * report. A caller that waits for {@code available} therefore returns on its first poll.
      *
+     * <p>Tags: "Default: Your user-defined AMI tags are not copied." With {@code copyImageTags}
+     * the copy gets the caller's tags on the source, less the {@code aws:} system tags, which AWS
+     * does not copy either. Floci keeps each account's tags apart and does not model shared
+     * ({@code ec2:SharedTag/}) tags, so no other account's tag is visible to the caller or copied.
+     *
      * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CopyImage.html">CopyImage</a>
      */
     public Image copyImage(String destinationRegion, String sourceRegion, String sourceImageId,
-                           String name, String description) {
+                           String name, String description, boolean copyImageTags) {
         if (sourceImageId == null || sourceImageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter SourceImageId", 400);
         }
@@ -8423,11 +8433,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         "The image id '[" + sourceImageId + "]' does not exist in region " + sourceRegion, 400);
             }
 
+            List<Tag> copiedTags = copyImageTags ? copiedImageTags(sourceRegion, source) : List.of();
             // Fresh snapshot ids: two AMIs sharing one snapshot would make deleting either appear
             // to take the other's backing with it, and the copy's snapshots live in the
             // destination region anyway.
             Image copy = registerImage(destinationRegion, name, description, source.getArchitecture(),
-                    source.getRootDeviceName(), sourceImageMappings(source));
+                    source.getRootDeviceName(), sourceImageMappings(source), copiedTags);
             copy.setVirtualizationType(source.getVirtualizationType());
             copy.setRootDeviceType(source.getRootDeviceType());
             copy.setPlatform(source.getPlatform());
@@ -8448,6 +8459,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             registeredImages.put(key(destinationRegion, copy.getImageId()), copy);
             return copy;
         }
+    }
+
+    /**
+     * The caller's tags on the source in its own region, as CreateTags and DeleteTags keep them,
+     * less the system tags. Looked up by the source's own id: tags that CreateTags filed under a
+     * catalog alias stay with the alias.
+     */
+    private List<Tag> copiedImageTags(String sourceRegion, Image source) {
+        List<Tag> sourceTags = tagsOf(sourceRegion, source.getImageId())
+                .orElseGet(() -> source.getTags() == null ? List.of() : source.getTags());
+        return sourceTags.stream()
+                .filter(tag -> !isAwsTagKey(tag.getKey()))
+                .map(tag -> new Tag(tag.getKey(), tag.getValue()))
+                .toList();
     }
 
     /** Rejects an AMI id that has been deregistered; unknown ids fall through to the resolver. */

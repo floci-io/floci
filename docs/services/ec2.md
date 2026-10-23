@@ -396,7 +396,7 @@ with `DryRunOperation` before any of these checks, and creates nothing either.
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings, tagged with the `image` tags of `TagSpecification`. A tag specification for any other resource type, or a tag `CreateTags` would refuse, fails the request and registers nothing. |
-| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns. |
+| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns. By default no tags are copied. With `CopyImageTags=true` the copy gets the caller's tags on the source AMI's own id, without its `aws:` system tags; tags put on a catalog alias such as `ami-amazonlinux2` stay behind. `TagSpecification` is neither checked nor applied to the copy or its snapshots. |
 | DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`, and a snapshot another AMI still uses is kept either way. |
 
 Every resource EC2 creates is owned by the account the request resolves to, the same account

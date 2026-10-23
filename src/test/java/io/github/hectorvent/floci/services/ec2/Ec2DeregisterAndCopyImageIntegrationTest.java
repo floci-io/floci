@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -61,6 +62,9 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
     private static final String WEST_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-west-2/ec2/aws4_request";
+    /** A 12-digit access key is taken as the account id, so this signs as a second account. */
+    private static final String OTHER_ACCOUNT_EAST_AUTH =
+            "AWS4-HMAC-SHA256 Credential=111111111111/20260205/us-east-1/ec2/aws4_request";
 
     private String ec2(String auth, String action, String... formParams) {
         RequestSpecification req = given().formParam("Action", action).header("Authorization", auth);
@@ -383,6 +387,97 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 () -> service.copyImage(WEST, null, "ami-0abcdef1234567890", "n", null)).getErrorCode());
         assertEquals("MissingParameter", assertThrows(AwsException.class,
                 () -> service.copyImage(WEST, EAST, "ami-0abcdef1234567890", null, null)).getErrorCode());
+    }
+
+    @Test
+    void copyImageCopiesTheSourceTagsOnlyWhenCopyImageTagsIsTrue() {
+        // "Default: Your user-defined AMI tags are not copied."
+        String sourceId = registerViaHttp(EAST_AUTH, uniqueName("floci-copy-tags-src"));
+        ec2(EAST_AUTH, "CreateTags", "ResourceId.1", sourceId,
+                "Tag.1.Key", "Team", "Tag.1.Value", "images", "Tag.2.Key", "Stage", "Tag.2.Value", "");
+
+        String byDefault = copyToWest(sourceId, uniqueName("floci-copy-tags-default"));
+        String declined = copyToWest(sourceId, uniqueName("floci-copy-tags-declined"), "CopyImageTags", "false");
+        String copied = copyToWest(sourceId, uniqueName("floci-copy-tags-copied"), "CopyImageTags", "true");
+
+        assertEquals(Map.of(), tagsOf(WEST_AUTH, byDefault));
+        assertEquals(Map.of(), tagsOf(WEST_AUTH, declined));
+        assertEquals(Map.of("Team", "images", "Stage", ""), tagsOf(WEST_AUTH, copied));
+        List<String> taggedInWest = XmlParser.extractAll(ec2(WEST_AUTH, "DescribeImages",
+                "Filter.1.Name", "tag:Team", "Filter.1.Value.1", "images"), "imageId");
+        assertTrue(taggedInWest.contains(copied), "DescribeImages filters on the copied tags");
+        assertFalse(taggedInWest.contains(byDefault));
+        // The source keeps its tags, and the copy's are only in the destination region.
+        assertEquals(Map.of("Team", "images", "Stage", ""), tagsOf(EAST_AUTH, sourceId));
+        assertEquals(Map.of(), tagsOf(EAST_AUTH, copied));
+    }
+
+    @Test
+    void copyImageTagsLeaveTheSourcesSystemTagsBehind() {
+        // "The following tags are not be copied: System tags (prefixed with aws:)". CreateTags
+        // refuses that prefix, so the system tag is written the way Floci writes its own.
+        String sourceId = registerViaHttp(EAST_AUTH, uniqueName("floci-copy-system-tags-src"));
+        ec2(EAST_AUTH, "CreateTags", "ResourceId.1", sourceId, "Tag.1.Key", "Team", "Tag.1.Value", "images");
+        service.createSystemTags(EAST, List.of(sourceId), List.of(new Tag("aws:cloudformation:stack-name", "images")));
+
+        String copied = copyToWest(sourceId, uniqueName("floci-copy-system-tags-dst"), "CopyImageTags", "true");
+
+        assertEquals(Map.of("Team", "images"), tagsOf(WEST_AUTH, copied));
+    }
+
+    @Test
+    void copyImageTagsCopiesTheCallersTagsOnACatalogImageAndNoOtherAccounts() {
+        // The caller's own tags on a public AMI are user-defined tags AWS copies. Another
+        // account's tags on it are not, and Floci models no shared tags that would be.
+        String catalogId = "ami-0abcdef1234567890";
+        String key = "Copied-" + UUID.randomUUID();
+        String otherKey = "OtherAccount-" + UUID.randomUUID();
+        ec2(EAST_AUTH, "CreateTags", "ResourceId.1", catalogId, "Tag.1.Key", key, "Tag.1.Value", "catalog");
+        ec2(OTHER_ACCOUNT_EAST_AUTH, "CreateTags", "ResourceId.1", catalogId,
+                "Tag.1.Key", otherKey, "Tag.1.Value", "not-yours");
+        try {
+            String copied = copyToWest(catalogId, uniqueName("floci-copy-catalog-tags"), "CopyImageTags", "true");
+
+            Map<String, String> copiedTags = tagsOf(WEST_AUTH, copied);
+            assertEquals("catalog", copiedTags.get(key));
+            assertFalse(copiedTags.containsKey(otherKey), "another account's tag must not reach the copy");
+        } finally {
+            ec2(EAST_AUTH, "DeleteTags", "ResourceId.1", catalogId, "Tag.1.Key", key);
+            ec2(OTHER_ACCOUNT_EAST_AUTH, "DeleteTags", "ResourceId.1", catalogId, "Tag.1.Key", otherKey);
+        }
+    }
+
+    @Test
+    void copyImageTagsReadACatalogImageNamedByItsAliasUnderItsOwnId() {
+        // A catalog alias names the same AMI as its id, so the copy takes the tags on that id.
+        String key = "ByAlias-" + UUID.randomUUID();
+        ec2(EAST_AUTH, "CreateTags", "ResourceId.1", "ami-0abcdef1234567890",
+                "Tag.1.Key", key, "Tag.1.Value", "canonical");
+        try {
+            String copied = copyToWest("ami-amazonlinux2", uniqueName("floci-copy-alias-tags"), "CopyImageTags", "true");
+
+            assertEquals("canonical", tagsOf(WEST_AUTH, copied).get(key));
+        } finally {
+            ec2(EAST_AUTH, "DeleteTags", "ResourceId.1", "ami-0abcdef1234567890", "Tag.1.Key", key);
+        }
+    }
+
+    private String copyToWest(String sourceId, String name, String... extraParams) {
+        List<String> params = new ArrayList<>(List.of("SourceRegion", EAST, "SourceImageId", sourceId, "Name", name));
+        params.addAll(List.of(extraParams));
+        return xmlValue(ec2(WEST_AUTH, "CopyImage", params.toArray(String[]::new)), "imageId");
+    }
+
+    /** The tags DescribeTags lists for one resource in the caller's region, by key. */
+    private Map<String, String> tagsOf(String auth, String resourceId) {
+        String xml = ec2(auth, "DescribeTags", "Filter.1.Name", "resource-id", "Filter.1.Value.1", resourceId);
+        List<String> keys = XmlParser.extractAll(xml, "key");
+        List<String> values = XmlParser.extractAll(xml, "value");
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 0; i < keys.size(); i++) {
+            tags.put(keys.get(i), values.get(i));
+        }
+        return tags;
     }
 
     // ─── Concurrency ──────────────────────────────────────────────────────────
