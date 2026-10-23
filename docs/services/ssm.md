@@ -176,8 +176,9 @@ it returns, so a statement naming `/app/secret` does not limit a query of `/app`
 `GetParameters`, the only operations that accept one, a `name:version` or `name:label` selector, in a
 name or in a parameter ARN, is checked against the parameter itself: `/app/db:3` and `/app/db:prod` are
 checked against `parameter/app/db`. Every other operation, and the `Path` of `GetParametersByPath`, is
-checked against the literal name it sends. Unlike AWS, Floci accepts a colon in a `PutParameter` name;
-`GetParameter` on such a name is still checked against the part before the first colon.
+checked against the literal name it sends. Unlike AWS, Floci accepts a colon in a `PutParameter` name.
+`GetParameter` and `GetParameters` on such a name are checked against the part before the first colon,
+so a statement naming the full colon-containing name does not apply to those reads.
 
 ## Parameter Types
 
