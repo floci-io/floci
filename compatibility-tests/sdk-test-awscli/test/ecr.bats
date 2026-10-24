@@ -170,3 +170,25 @@ teardown() {
     assert_failure
     [[ "$output" == *"RegistryPolicyNotFoundException"* ]]
 }
+
+@test "ECR: repository creation templates round-trip" {
+    prefix="floci-cli-$(unique_name)"
+    run aws_cmd ecr create-repository-creation-template --prefix "$prefix" \
+        --applied-for PULL_THROUGH_CACHE --description "cli template"
+    assert_success
+    [ "$(json_get "$output" '.repositoryCreationTemplate.encryptionConfiguration.encryptionType')" = "AES256" ]
+
+    run aws_cmd ecr update-repository-creation-template --prefix "$prefix" --image-tag-mutability IMMUTABLE
+    assert_success
+    [ "$(json_get "$output" '.repositoryCreationTemplate.imageTagMutability')" = "IMMUTABLE" ]
+
+    run aws_cmd ecr describe-repository-creation-templates --prefixes "$prefix"
+    assert_success
+    [ "$(json_get "$output" '.repositoryCreationTemplates[0].description')" = "cli template" ]
+
+    run aws_cmd ecr delete-repository-creation-template --prefix "$prefix"
+    assert_success
+    run aws_cmd ecr delete-repository-creation-template --prefix "$prefix"
+    assert_failure
+    [[ "$output" == *"TemplateNotFoundException"* ]]
+}

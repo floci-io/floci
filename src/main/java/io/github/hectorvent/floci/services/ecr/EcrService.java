@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ecr;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -27,6 +28,7 @@ import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.RegistrySettings;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
+import io.github.hectorvent.floci.services.ecr.model.RepositoryCreationTemplate;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -37,6 +39,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -75,6 +78,7 @@ public class EcrService implements ResourceProvider {
             "ecr", "ecr-public", "quay", "k8s", "docker-hub",
             "github-container-registry", "azure-container-registry",
             "gitlab-container-registry", "chainguard");
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final int MAX_REPO_NAME_LENGTH = 256;
     private static final int MAX_PULL_THROUGH_CACHE_PREFIX_LENGTH = 30;
 
@@ -83,6 +87,7 @@ public class EcrService implements ResourceProvider {
     private final StorageBackend<String, PullThroughCacheRule> pullThroughCacheRuleStore;
     private final StorageBackend<String, RegistrySettings> registrySettingsStore;
     private final Map<String, Object> registrySettingsLocks = new ConcurrentHashMap<>();
+    private final StorageBackend<String, RepositoryCreationTemplate> templateStore;
     private final EcrRegistryManager registryManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -102,6 +107,8 @@ public class EcrService implements ResourceProvider {
                         new TypeReference<Map<String, PullThroughCacheRule>>() {}),
                 factory.create("ecr", "registry-settings.json",
                         new TypeReference<Map<String, RegistrySettings>>() {}),
+                factory.create("ecr", "repository-creation-templates.json",
+                        new TypeReference<Map<String, RepositoryCreationTemplate>>() {}),
                 registryManager, config, regionResolver);
     }
 
@@ -111,7 +118,7 @@ public class EcrService implements ResourceProvider {
                EcrRegistryManager registryManager,
                EmulatorConfig config,
                RegionResolver regionResolver) {
-        this(repoStore, imageMetaStore, pullThroughCacheRuleStore, new InMemoryStorage<>(),
+        this(repoStore, imageMetaStore, pullThroughCacheRuleStore, new InMemoryStorage<>(), new InMemoryStorage<>(),
                 registryManager, config, regionResolver);
     }
 
@@ -119,6 +126,7 @@ public class EcrService implements ResourceProvider {
                StorageBackend<String, ImageMetadata> imageMetaStore,
                StorageBackend<String, PullThroughCacheRule> pullThroughCacheRuleStore,
                StorageBackend<String, RegistrySettings> registrySettingsStore,
+               StorageBackend<String, RepositoryCreationTemplate> templateStore,
                EcrRegistryManager registryManager,
                EmulatorConfig config,
                RegionResolver regionResolver) {
@@ -126,6 +134,7 @@ public class EcrService implements ResourceProvider {
         this.imageMetaStore = imageMetaStore;
         this.pullThroughCacheRuleStore = pullThroughCacheRuleStore;
         this.registrySettingsStore = registrySettingsStore;
+        this.templateStore = templateStore;
         this.registryManager = registryManager;
         this.config = config;
         this.regionResolver = regionResolver;
@@ -321,6 +330,164 @@ public class EcrService implements ResourceProvider {
         if (recreated > 0) {
             LOG.infov("Reconciled {0} ECR repository metadata entries from registry catalog", recreated);
         }
+    }
+
+    // ============================================================
+    // Repository creation templates
+    // ============================================================
+
+    /**
+     * Stores a template under its prefix. Fields left null take ECR's defaults: AES256 encryption
+     * and mutable tags.
+     */
+    public RepositoryCreationTemplate createRepositoryCreationTemplate(RepositoryCreationTemplate requested,
+                                                                       String region) {
+        validateTemplateFields(requested);
+        String account = regionResolver.getAccountId();
+        String key = templateKey(region, account, requested.getPrefix());
+        if (templateStore.get(key).isPresent()) {
+            throw new AwsException("TemplateAlreadyExistsException",
+                    "The repository creation template with prefix '" + requested.getPrefix()
+                            + "' already exists in the registry with id '" + account + "'", 400);
+        }
+        RepositoryCreationTemplate template = new RepositoryCreationTemplate();
+        template.setPrefix(requested.getPrefix());
+        template.setEncryptionConfiguration(new RepositoryCreationTemplate.EncryptionConfiguration("AES256", null));
+        template.setImageTagMutability("MUTABLE");
+        applyTemplateFields(template, requested);
+        Instant now = Instant.now();
+        template.setCreatedAt(now);
+        template.setUpdatedAt(now);
+        templateStore.put(key, template);
+        return template;
+    }
+
+    /**
+     * Every template in the account and Region, or those named in {@code prefixes}; a prefix with
+     * no template is left out, as the model lists no not-found error for this action.
+     */
+    public PaginatedResult<RepositoryCreationTemplate> describeRepositoryCreationTemplates(
+            List<String> prefixes, Integer maxResults, String nextToken, String region) {
+        String account = regionResolver.getAccountId();
+        List<RepositoryCreationTemplate> templates;
+        if (prefixes == null || prefixes.isEmpty()) {
+            String keyPrefix = region + "::" + account + "::";
+            templates = templateStore.scan(key -> key.startsWith(keyPrefix));
+        } else {
+            templates = new ArrayList<>();
+            for (String prefix : new LinkedHashSet<>(prefixes)) {
+                templateStore.get(templateKey(region, account, prefix)).ifPresent(templates::add);
+            }
+        }
+        return Pagination.paginate(templates, RepositoryCreationTemplate::getPrefix,
+                maxResults, nextToken, 100, 1000, "InvalidParameterException");
+    }
+
+    /** Replaces each field the request sets; an empty string or list clears it. */
+    public RepositoryCreationTemplate updateRepositoryCreationTemplate(RepositoryCreationTemplate requested,
+                                                                       String region) {
+        validateTemplateFields(requested);
+        String key = templateKey(region, regionResolver.getAccountId(), requested.getPrefix());
+        RepositoryCreationTemplate template = templateStore.get(key)
+                .orElseThrow(() -> templateNotFound(requested.getPrefix()));
+        applyTemplateFields(template, requested);
+        // Exclusion filters mean nothing outside a *_WITH_EXCLUSION mode. Terraform leaves the
+        // member out when the filters are removed, so they go when the mode no longer takes them.
+        if (!template.getImageTagMutability().endsWith("_WITH_EXCLUSION")) {
+            template.setImageTagMutabilityExclusionFilters(null);
+        }
+        template.setUpdatedAt(Instant.now());
+        templateStore.put(key, template);
+        return template;
+    }
+
+    public RepositoryCreationTemplate deleteRepositoryCreationTemplate(String prefix, String region) {
+        String key = templateKey(region, regionResolver.getAccountId(), prefix);
+        RepositoryCreationTemplate template = templateStore.get(key).orElseThrow(() -> templateNotFound(prefix));
+        templateStore.delete(key);
+        return template;
+    }
+
+    /** The registry the templates belong to: the caller's account. */
+    public String templateRegistryId() {
+        return regionResolver.getAccountId();
+    }
+
+    /**
+     * The template rules the ECR model can't state; {@code EcrRequestShapes} has already checked
+     * the request against the model's types, lengths, patterns and enums.
+     */
+    private static void validateTemplateFields(RepositoryCreationTemplate t) {
+        if (t.getAppliedFor() != null && t.getAppliedFor().isEmpty()) {
+            throw invalidTemplate("appliedFor must name at least one of REPLICATION, PULL_THROUGH_CACHE "
+                    + "or CREATE_ON_PUSH");
+        }
+        requireJsonObject(t.getRepositoryPolicy(), "repositoryPolicy");
+        requireJsonObject(t.getLifecyclePolicy(), "lifecyclePolicy");
+    }
+
+    private static void requireJsonObject(String text, String field) {
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+        try {
+            if (!JSON.readTree(text).isObject()) {
+                throw invalidTemplate(field + " must be a JSON object");
+            }
+        } catch (JsonProcessingException e) {
+            throw invalidTemplate(field + " must be a JSON object");
+        }
+    }
+
+    /** Copies the fields the request sets; an empty string or list clears the stored value. */
+    private static void applyTemplateFields(RepositoryCreationTemplate template, RepositoryCreationTemplate requested) {
+        if (requested.getDescription() != null) {
+            template.setDescription(emptyToNull(requested.getDescription()));
+        }
+        if (requested.getEncryptionConfiguration() != null) {
+            RepositoryCreationTemplate.EncryptionConfiguration e = requested.getEncryptionConfiguration();
+            template.setEncryptionConfiguration(new RepositoryCreationTemplate.EncryptionConfiguration(
+                    e.encryptionType(), emptyToNull(e.kmsKey())));
+        }
+        if (requested.getResourceTags() != null) {
+            template.setResourceTags(List.copyOf(requested.getResourceTags()));
+        }
+        if (requested.getImageTagMutability() != null) {
+            template.setImageTagMutability(requested.getImageTagMutability());
+        }
+        if (requested.getImageTagMutabilityExclusionFilters() != null) {
+            template.setImageTagMutabilityExclusionFilters(List.copyOf(requested.getImageTagMutabilityExclusionFilters()));
+        }
+        if (requested.getRepositoryPolicy() != null) {
+            template.setRepositoryPolicy(emptyToNull(requested.getRepositoryPolicy()));
+        }
+        if (requested.getLifecyclePolicy() != null) {
+            template.setLifecyclePolicy(emptyToNull(requested.getLifecyclePolicy()));
+        }
+        if (requested.getAppliedFor() != null) {
+            template.setAppliedFor(List.copyOf(new LinkedHashSet<>(requested.getAppliedFor())));
+        }
+        if (requested.getCustomRoleArn() != null) {
+            template.setCustomRoleArn(emptyToNull(requested.getCustomRoleArn()));
+        }
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    private static String templateKey(String region, String account, String prefix) {
+        return region + "::" + account + "::" + prefix;
+    }
+
+    private static AwsException invalidTemplate(String message) {
+        return new AwsException("InvalidParameterException", message, 400);
+    }
+
+    private AwsException templateNotFound(String prefix) {
+        return new AwsException("TemplateNotFoundException",
+                "The repository creation template with prefix '" + prefix
+                        + "' does not exist in the registry with id '" + regionResolver.getAccountId() + "'", 400);
     }
 
     // ============================================================

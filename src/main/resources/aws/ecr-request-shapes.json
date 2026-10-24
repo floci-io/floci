@@ -10,16 +10,78 @@
     "PutReplicationConfiguration": "PutReplicationConfigurationRequest",
     "DescribeRegistry": "DescribeRegistryRequest",
     "PutRegistryScanningConfiguration": "PutRegistryScanningConfigurationRequest",
-    "GetRegistryScanningConfiguration": "GetRegistryScanningConfigurationRequest"
+    "GetRegistryScanningConfiguration": "GetRegistryScanningConfigurationRequest",
+    "CreateRepositoryCreationTemplate": "CreateRepositoryCreationTemplateRequest",
+    "UpdateRepositoryCreationTemplate": "UpdateRepositoryCreationTemplateRequest",
+    "DescribeRepositoryCreationTemplates": "DescribeRepositoryCreationTemplatesRequest",
+    "DeleteRepositoryCreationTemplate": "DeleteRepositoryCreationTemplateRequest"
   },
   "shapes": {
+    "CreateRepositoryCreationTemplateRequest": {
+      "type": "structure",
+      "required": [
+        "prefix",
+        "appliedFor"
+      ],
+      "members": {
+        "prefix": "Prefix",
+        "description": "RepositoryTemplateDescription",
+        "encryptionConfiguration": "EncryptionConfigurationForRepositoryCreationTemplate",
+        "resourceTags": "TagList",
+        "imageTagMutability": "ImageTagMutability",
+        "imageTagMutabilityExclusionFilters": "ImageTagMutabilityExclusionFilters",
+        "repositoryPolicy": "RepositoryPolicyText",
+        "lifecyclePolicy": "LifecyclePolicyTextForRepositoryCreationTemplate",
+        "appliedFor": "RCTAppliedForList",
+        "customRoleArn": "CustomRoleArn"
+      }
+    },
+    "CustomRoleArn": {
+      "type": "string",
+      "max": 2048
+    },
     "DeleteRegistryPolicyRequest": {
       "type": "structure",
       "members": {}
     },
+    "DeleteRepositoryCreationTemplateRequest": {
+      "type": "structure",
+      "required": [
+        "prefix"
+      ],
+      "members": {
+        "prefix": "Prefix"
+      }
+    },
     "DescribeRegistryRequest": {
       "type": "structure",
       "members": {}
+    },
+    "DescribeRepositoryCreationTemplatesRequest": {
+      "type": "structure",
+      "members": {
+        "prefixes": "PrefixList",
+        "nextToken": "NextToken",
+        "maxResults": "MaxResults"
+      }
+    },
+    "EncryptionConfigurationForRepositoryCreationTemplate": {
+      "type": "structure",
+      "required": [
+        "encryptionType"
+      ],
+      "members": {
+        "encryptionType": "EncryptionType",
+        "kmsKey": "KmsKeyForRepositoryCreationTemplate"
+      }
+    },
+    "EncryptionType": {
+      "type": "string",
+      "enum": [
+        "AES256",
+        "KMS",
+        "KMS_DSSE"
+      ]
     },
     "GetRegistryPolicyRequest": {
       "type": "structure",
@@ -28,6 +90,73 @@
     "GetRegistryScanningConfigurationRequest": {
       "type": "structure",
       "members": {}
+    },
+    "ImageTagMutability": {
+      "type": "string",
+      "enum": [
+        "MUTABLE",
+        "IMMUTABLE",
+        "IMMUTABLE_WITH_EXCLUSION",
+        "MUTABLE_WITH_EXCLUSION"
+      ]
+    },
+    "ImageTagMutabilityExclusionFilter": {
+      "type": "structure",
+      "required": [
+        "filterType",
+        "filter"
+      ],
+      "members": {
+        "filterType": "ImageTagMutabilityExclusionFilterType",
+        "filter": "ImageTagMutabilityExclusionFilterValue"
+      }
+    },
+    "ImageTagMutabilityExclusionFilterType": {
+      "type": "string",
+      "enum": [
+        "WILDCARD"
+      ]
+    },
+    "ImageTagMutabilityExclusionFilterValue": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "^[0-9a-zA-Z._*-]{1,128}$"
+    },
+    "ImageTagMutabilityExclusionFilters": {
+      "type": "list",
+      "min": 1,
+      "max": 5,
+      "member": "ImageTagMutabilityExclusionFilter"
+    },
+    "KmsKeyForRepositoryCreationTemplate": {
+      "type": "string",
+      "min": 0,
+      "max": 2048,
+      "pattern": "^$|arn:aws[a-z0-9-]*:kms:[a-z0-9-]+:[0-9]{12}:key\\/[a-z0-9-]+"
+    },
+    "LifecyclePolicyTextForRepositoryCreationTemplate": {
+      "type": "string",
+      "min": 0,
+      "max": 30720
+    },
+    "MaxResults": {
+      "type": "integer",
+      "min": 1,
+      "max": 1000
+    },
+    "NextToken": {
+      "type": "string"
+    },
+    "Prefix": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "^([a-z0-9]+((\\.|_|__|-+)[a-z0-9]+)*(\\/[a-z0-9]+((\\.|_|__|-+)[a-z0-9]+)*)*\\/?|ROOT)$"
+    },
+    "PrefixList": {
+      "type": "list",
+      "member": "Prefix"
     },
     "PutRegistryPolicyRequest": {
       "type": "structure",
@@ -53,6 +182,18 @@
       "members": {
         "replicationConfiguration": "ReplicationConfiguration"
       }
+    },
+    "RCTAppliedFor": {
+      "type": "string",
+      "enum": [
+        "REPLICATION",
+        "PULL_THROUGH_CACHE",
+        "CREATE_ON_PUSH"
+      ]
+    },
+    "RCTAppliedForList": {
+      "type": "list",
+      "member": "RCTAppliedFor"
     },
     "Region": {
       "type": "string",
@@ -157,6 +298,15 @@
       "max": 256,
       "pattern": "^(?:[a-z0-9]+(?:[._-][a-z0-9]*)*/)*[a-z0-9]*(?:[._-][a-z0-9]*)*$"
     },
+    "RepositoryPolicyText": {
+      "type": "string",
+      "min": 0,
+      "max": 10240
+    },
+    "RepositoryTemplateDescription": {
+      "type": "string",
+      "max": 256
+    },
     "ScanFrequency": {
       "type": "string",
       "enum": [
@@ -200,6 +350,45 @@
       "min": 1,
       "max": 255,
       "pattern": "^[a-z0-9*](?:[._\\-/a-z0-9*]?[a-z0-9*]+)*$"
+    },
+    "Tag": {
+      "type": "structure",
+      "required": [
+        "Key",
+        "Value"
+      ],
+      "members": {
+        "Key": "TagKey",
+        "Value": "TagValue"
+      }
+    },
+    "TagKey": {
+      "type": "string"
+    },
+    "TagList": {
+      "type": "list",
+      "member": "Tag"
+    },
+    "TagValue": {
+      "type": "string"
+    },
+    "UpdateRepositoryCreationTemplateRequest": {
+      "type": "structure",
+      "required": [
+        "prefix"
+      ],
+      "members": {
+        "prefix": "Prefix",
+        "description": "RepositoryTemplateDescription",
+        "encryptionConfiguration": "EncryptionConfigurationForRepositoryCreationTemplate",
+        "resourceTags": "TagList",
+        "imageTagMutability": "ImageTagMutability",
+        "imageTagMutabilityExclusionFilters": "ImageTagMutabilityExclusionFilters",
+        "repositoryPolicy": "RepositoryPolicyText",
+        "lifecyclePolicy": "LifecyclePolicyTextForRepositoryCreationTemplate",
+        "appliedFor": "RCTAppliedForList",
+        "customRoleArn": "CustomRoleArn"
+      }
     }
   }
 }
