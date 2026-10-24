@@ -5188,12 +5188,14 @@ public class Ec2QueryHandler {
                 .elem("enableResourceNameDnsARecord", "false")
                 .elem("enableResourceNameDnsAAAARecord", "false")
                 .end("privateDnsNameOptions")
-                .start("capacityReservationSpecification")
-                .elem("capacityReservationPreference", inst.getCapacityReservationPreference());
-        if (inst.getCapacityReservationTarget() != null) {
+                .start("capacityReservationSpecification");
+        if (inst.getCapacityReservationTarget() != null || inst.getCapacityReservationGroupArn() != null) {
             xml.start("capacityReservationTarget")
                     .elem("capacityReservationId", inst.getCapacityReservationTarget())
+                    .elem("capacityReservationResourceGroupArn", inst.getCapacityReservationGroupArn())
                     .end("capacityReservationTarget");
+        } else {
+            xml.elem("capacityReservationPreference", inst.getCapacityReservationPreference());
         }
         xml.end("capacityReservationSpecification");
         String capacityReservationId = capacityAssociations.get(inst.getInstanceId());

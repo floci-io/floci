@@ -22,6 +22,7 @@ public class Instance {
     private String capacityReservationPlatform = "Linux/UNIX";
     private String capacityReservationPreference = "open";
     private String capacityReservationTarget;
+    private String capacityReservationGroupArn;
     private Placement placement;
     private String subnetId;
     private String vpcId;
@@ -128,6 +129,8 @@ public class Instance {
     public void setCapacityReservationPreference(String preference) { capacityReservationPreference = preference; }
     public String getCapacityReservationTarget() { return capacityReservationTarget; }
     public void setCapacityReservationTarget(String target) { capacityReservationTarget = target; }
+    public String getCapacityReservationGroupArn() { return capacityReservationGroupArn; }
+    public void setCapacityReservationGroupArn(String arn) { capacityReservationGroupArn = arn; }
 
     public boolean isSpot() { return spot; }
     public void setSpot(boolean spot) { this.spot = spot; }

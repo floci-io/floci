@@ -782,7 +782,19 @@ instance's retained launch preference and target. A failed membership write repo
 subsequent access reconciles released membership from persisted instance state.
 
 Membership and available counts publish in one atomic storage batch. Older snapshots without
-membership remain readable. Capacity reservation resource-group targeting is unsupported.
+membership remain readable.
+
+`CapacityReservationResourceGroupArn` targets the members of an existing capacity pool
+in the caller's account and region. Only members with matching instance type, platform,
+Availability Zone and tenancy are eligible. Both open and targeted member reservations
+can supply capacity. The default permits On-Demand fallback when the group has no
+matching available capacity; `capacity-reservations-only` forbids that fallback at launch
+and restart. A group target cannot accompany a reservation ID, `none`, or a Spot request.
+DescribeInstances retains the group target separately from the acquired reservation ID.
+Running group-targeted instances can acquire newly added matching members or move to
+another matching member after cancellation or expiration. Existing membership survives
+group deletion until the instance releases its reservation.
+
 
 Capacity reservation zone IDs must be among those returned by `DescribeAvailabilityZones`.
 

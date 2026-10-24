@@ -591,13 +591,15 @@ public class AutoScalingReconciler {
     private Reservation launchWithCapacity(AutoScalingGroup asg, LaunchSource launchSource,
                                            LaunchPlacement placement, String clientToken,
                                            LaunchTemplateData.CapacityReservationSpecification capacitySpecification) {
+        String launchZone = Ec2Service.isModelledAvailabilityZone(asg.getRegion(), placement.availabilityZone())
+                ? placement.availabilityZone() : null;
         return ec2Service.runInstances(
                 asg.getRegion(), launchSource.imageId(), launchSource.instanceType(), 1, 1,
                 launchSource.keyName(), launchSource.securityGroupIds(), placement.subnetId(), clientToken,
                 propagatedInstanceTags(asg, launchSource), launchSource.userData(),
                 launchSource.launchConfigurationName() == null ? launchSource.iamInstanceProfile()
                         : asgService.resolveLaunchConfigurationProfile(launchSource.iamInstanceProfile()),
-                launchSource.associatePublicIpAddress(), null, 0, null, launchSource.metadataOptions(), null,
+                launchSource.associatePublicIpAddress(), null, 0, launchZone, launchSource.metadataOptions(), null,
                 launchSource.encodedUserData() != null ? launchSource.encodedUserData()
                         : encodeLegacyUserData(launchSource.userData()),
                 false, null, null, launchSource.blockDeviceMappings(), false, null,
