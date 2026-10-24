@@ -182,6 +182,7 @@ floci:
     msk:
       enabled: true
       mock: true
+      scram-reconciliation-interval-ms: 5000
       default-image: "redpandadata/redpanda:latest"
     amazonmq:
       enabled: true

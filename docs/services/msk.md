@@ -40,6 +40,7 @@ Floci emulates Amazon MSK by orchestrating **Redpanda** containers. This provide
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` | Docker image for Redpanda (Kafka) containers |
 | `FLOCI_SERVICES_MSK_KAFKA_HOST_PORT_BASE` | `9300` | First host port a broker's Kafka listener can be published on |
 | `FLOCI_SERVICES_MSK_KAFKA_HOST_PORT_MAX` | `9399` | Last host port a broker's Kafka listener can be published on |
+| `FLOCI_SERVICES_MSK_SCRAM_RECONCILIATION_INTERVAL_MS` | `5000` | SCRAM secret reconciliation interval (ms) |
 | `FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME` | _(unset)_ | Floci in a container only: hostname the host listener advertises, and when set, `GetBootstrapBrokers` returns `<container-name>:9092,<hostname>:<host port>` instead of the Docker-network address |
 
 ## How it works
@@ -131,6 +132,19 @@ The secrets must contain JSON such as `{"username":"alice","password":"pw"}`.
 10 associations. Item failures appear in
 `unprocessedScramSecrets`; reassociation and removal of an unassociated ARN return
 `InvalidSecretArn`.
+
+Floci schedules SCRAM reconciliation jobs every five seconds by default, measured as
+a delay after each scheduling sweep. Sweeps do not wait for broker operations to finish,
+and clusters with queued or running jobs are skipped. Set
+`FLOCI_SERVICES_MSK_SCRAM_RECONCILIATION_INTERVAL_MS` to change this delay in milliseconds.
+This is Floci's timing, not an AWS synchronization guarantee.
+
+When an associated secret is scheduled for deletion or permanently deleted, reconciliation
+revokes its broker user but retains the association in `ListScramSecrets`. Restoring a secret
+whose deletion was scheduled causes reconciliation to recreate its broker user using the
+current credentials, without requiring reassociation. Permanently deleted secrets cannot
+be restored; creating a secret with the same name produces a different ARN and requires
+a new association.
 
 ## Examples
 

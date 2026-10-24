@@ -1575,6 +1575,9 @@ public interface EmulatorConfig {
         @WithDefault("9399")
         int kafkaHostPortMax();
 
+        @WithDefault("5000")
+        long scramReconciliationIntervalMs();
+
         /**
          * Only applies when Floci runs in a container. Each broker then has a second Kafka
          * listener, published to a host port from the kafka-host-port range so clients on the

@@ -478,6 +478,7 @@ floci:
     msk:
       enabled: true
       mock: false
+      scram-reconciliation-interval-ms: 5000
       default-image: "redpandadata/redpanda:latest"
       kafka-host-port-base: 9300
       kafka-host-port-max: 9399
