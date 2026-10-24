@@ -94,11 +94,14 @@ class SamTransformProcessor {
         // (including the early return below when Resources is absent or not an object).
         JsonNode globals = expanded.path("Globals");
         expanded.remove("Globals");
-        // SAM refuses any Globals property it does not list for a section. AutoPublishCodeSha256 is
-        // one of them: one value there would name every function's version.
-        if (globals.path("Function").has("AutoPublishCodeSha256")) {
-            throw new AwsException("ValidationError", "'Globals' section is invalid. 'AutoPublishCodeSha256' "
-                    + "is not a supported property of 'Function'.", 400);
+        // SAM refuses any Globals property it does not list for a section. AutoPublishCodeSha256 and
+        // VersionDescription are two of them: one value there would name, or describe, every
+        // function's version.
+        for (String property : List.of("AutoPublishCodeSha256", "VersionDescription")) {
+            if (globals.path("Function").has(property)) {
+                throw new AwsException("ValidationError", "'Globals' section is invalid. '" + property
+                        + "' is not a supported property of 'Function'.", 400);
+            }
         }
 
         JsonNode resources = expanded.path("Resources");
@@ -1016,6 +1019,7 @@ class SamTransformProcessor {
         versionDef.put("Type", "AWS::Lambda::Version");
         ObjectNode versionProps = objectMapper.createObjectNode();
         versionProps.set("FunctionName", ref(functionLogicalId));
+        copyRenamed(properties, "VersionDescription", versionProps, "Description");
         versionDef.set("Properties", versionProps);
         versionDef.setAll(passthrough.deepCopy());
         // The version a new hash replaces leaves the template on that update; like SAM, keep it
