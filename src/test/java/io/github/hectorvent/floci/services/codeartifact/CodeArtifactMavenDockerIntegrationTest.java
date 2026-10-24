@@ -633,6 +633,43 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     /**
+     * A throwaway groupId/artifactId, not {@link #GAV}: disposing it is destructive (the real
+     * assets are gone afterward), and must not disturb the artifact every other test in this class
+     * shares. Confirms the whole real round trip: {@code DisposePackageVersions} deletes the real
+     * jar/pom through Reposilite's own asset-delete endpoint, a subsequent fetch 404s, and
+     * {@code ListPackageVersions} still reports the version — by status {@code Disposed} alone,
+     * since the real sidecar listing no longer names it at all once its content is gone.
+     */
+    @Test
+    @Order(23)
+    void disposePackageVersionsDeletesTheRealReposiliteAssetsAndKeepsListingTheVersionAsDisposed() {
+        byte[] content = "dispose-me-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken).body(content)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/disposeme/1.0.0/disposeme-1.0.0.jar")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/dispose?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=disposeme")
+                .then().statusCode(200)
+                .body("successfulVersions['1.0.0'].status", equalTo("Disposed"))
+                .body("failedVersions.size()", equalTo(0));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/disposeme/1.0.0/disposeme-1.0.0.jar")
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .post("/v1/package/versions?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=disposeme&status=Disposed")
+                .then().statusCode(200)
+                .body("versions.size()", equalTo(1))
+                .body("versions[0].version", equalTo("1.0.0"))
+                .body("versions[0].status", equalTo("Disposed"));
+    }
+
+    /**
      * A throwaway groupId/artifactId, not {@link #GAV}: deleting it exercises Reposilite's real
      * directory delete (confirmed live before this was built: a single {@code DELETE} on the
      * group/artifact path removes everything beneath it), and must not disturb the artifact every

@@ -183,6 +183,22 @@ public class CodeArtifactPypiController {
                         .build();
             }
 
+            // Raised by hectorvent's review: a real twine upload to a coordinate
+            // updatePackageVersionsStatus/disposePackageVersions left Archived or Disposed must be
+            // refused outright, the same way PublishPackageVersion already refuses it for the
+            // generic format, not accepted and then have forgetContainerBackedStatusOverride below
+            // silently un-block it afterward. Checked before the real write, not after. A
+            // missing/blank version is the same case the override-clearing call below already
+            // skips: no coordinate to block either way.
+            if (version != null && !version.isBlank()) {
+                try {
+                    service.requireContainerBackedVersionNotArchivedOrDisposed(handle.region(), domain,
+                            handle.owner(), repository, "pypi", null, packageName, version);
+                } catch (AwsException e) {
+                    return Response.status(409).entity(e.getMessage()).build();
+                }
+            }
+
             // Snapshotted before the real write, not after: see
             // CodeArtifactService#currentContainerBackedPackageFence's own javadoc for why the
             // order matters.
@@ -193,6 +209,15 @@ public class CodeArtifactPypiController {
             if (uploadSucceeded) {
                 service.recordContainerBackedAssetBytes(handle.region(), domain, handle.owner(), repository,
                         "pypi", null, packageName, file.get().content().length, fenceSnapshot);
+                // Found by Qodo review: a real twine upload that republishes a coordinate an
+                // earlier updatePackageVersionsStatus/disposePackageVersions call left Archived or
+                // Disposed would otherwise still have its fresh content blocked by that stale
+                // override. A missing/blank version is the same case the readme capture below
+                // already skips: no coordinate to clear an override for.
+                if (version != null && !version.isBlank()) {
+                    service.forgetContainerBackedStatusOverride(handle.region(), domain, handle.owner(), repository,
+                            "pypi", null, packageName, version);
+                }
             }
             // Only for a real new publish, never the byte-identical-retry short-circuit above
             // (nothing new was written there either): the "description" field is the real PyPI

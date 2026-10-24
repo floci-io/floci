@@ -469,6 +469,69 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
         deployArtifact(repositoryContainerId, gav, metadata.build().getBytes(StandardCharsets.UTF_8));
     }
 
+    /**
+     * {@link #recordVersionAvailable}'s dispose-time counterpart (found missing by Qodo review on
+     * the PR that added {@code DisposePackageVersions}): without this, a disposed Maven version's
+     * real asset files are gone from its own version directory, but {@code mvn}/{@code gradle}
+     * resolving dependencies straight against the artifact-level {@code maven-metadata.xml} (not
+     * through this emulator's own {@code ListPackageVersions}, which already reads the override
+     * store and correctly stops reporting it) would keep seeing it listed as available. Removes
+     * {@code version} from the metadata's own {@code versions} list and recomputes {@code latest}/
+     * {@code release} from whatever remains, in the same append order the metadata already
+     * preserves — the list is never re-sorted, so its last surviving entry is still the most
+     * recently deployed one, exactly the same invariant {@link #recordVersionAvailable} relies on
+     * when adding to it. A metadata file that would end up with no versions left is deleted
+     * outright rather than written back empty, matching how a package that never had a version
+     * published has no metadata file at all. A missing metadata file, or one that never named this
+     * version to begin with (both possible if this is called more than once, or for a version
+     * recorded before {@code maven-metadata.xml} existed), is a no-op either way.
+     */
+    @Override
+    public void recordVersionDisposed(String repositoryContainerId, String namespace, String packageName,
+            String version) {
+        String gav = artifactMetadataGav(namespace, packageName);
+        Optional<FetchedArtifact> existing = fetchArtifact(repositoryContainerId, gav);
+        if (existing.isEmpty()) {
+            return;
+        }
+        String xml = new String(existing.get().content(), StandardCharsets.UTF_8);
+        List<String> versions = new ArrayList<>(XmlParser.extractAll(xml, "version"));
+        if (!versions.remove(version)) {
+            return;
+        }
+        String baseUrl = manager.ensureReady();
+        if (versions.isEmpty()) {
+            HttpRequest request = authenticated(baseUrl, repositoryContainerId, gav).DELETE().build();
+            send(request, BodyHandlers.discarding());
+            return;
+        }
+        String groupId = XmlParser.extractFirst(xml, "groupId", namespace);
+        String artifactId = XmlParser.extractFirst(xml, "artifactId", packageName);
+        String latest = versions.get(versions.size() - 1);
+        String release = null;
+        for (int i = versions.size() - 1; i >= 0; i--) {
+            if (!versions.get(i).endsWith("-SNAPSHOT")) {
+                release = versions.get(i);
+                break;
+            }
+        }
+        XmlBuilder metadata = new XmlBuilder().start("metadata")
+                .elem("groupId", groupId)
+                .elem("artifactId", artifactId)
+                .start("versioning")
+                .elem("latest", latest)
+                .elem("release", release)
+                .start("versions");
+        for (String v : versions) {
+            metadata.elem("version", v);
+        }
+        metadata.end("versions")
+                .elem("lastUpdated", METADATA_TIMESTAMP.format(Instant.now()))
+                .end("versioning")
+                .end("metadata");
+        deployArtifact(repositoryContainerId, gav, metadata.build().getBytes(StandardCharsets.UTF_8));
+    }
+
     private static String artifactMetadataGav(String namespace, String packageName) {
         return namespace.replace('.', '/') + "/" + packageName + "/maven-metadata.xml";
     }

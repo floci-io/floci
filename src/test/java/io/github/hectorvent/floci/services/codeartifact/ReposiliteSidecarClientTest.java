@@ -30,6 +30,7 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -782,6 +783,151 @@ class ReposiliteSidecarClientTest {
         assertEquals(List.of("1.0", "2.0-SNAPSHOT"), XmlParser.extractAll(xml, "version"));
         assertEquals("2.0-SNAPSHOT", XmlParser.extractFirst(xml, "latest", null));
         assertEquals("1.0", XmlParser.extractFirst(xml, "release", null));
+    }
+
+    /**
+     * {@link io.github.hectorvent.floci.services.codeartifact.ReposiliteSidecarClient#recordVersionDisposed}'s
+     * dispose-time counterpart to {@link #recordVersionAvailableAppendsToExistingVersionsAndAdvancesReleaseForANonSnapshot}:
+     * removing a non-latest version must leave {@code latest}/{@code release} exactly as they
+     * were, since the metadata's own append-order list is untouched past the removed entry.
+     */
+    @Test
+    void recordVersionDisposedRemovesTheVersionAndLeavesLatestAndReleaseUntouchedWhenItWasNeitherOne() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>2.0</latest><release>2.0</release><versions><version>1.0</version>"
+                + "<version>2.0</version></versions><lastUpdated>20260101000000</lastUpdated></versioning>"
+                + "</metadata>";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/maven-metadata.xml", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0");
+
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("2.0"), XmlParser.extractAll(xml, "version"));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "latest", null));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "release", null));
+    }
+
+    /**
+     * Removing the current {@code latest}/{@code release} version itself must recompute both from
+     * whatever remains, in the same append order the metadata already preserves: the last
+     * surviving entry becomes the new {@code latest}, and the last surviving non-{@code -SNAPSHOT}
+     * entry becomes the new {@code release} (here, that is the same entry since neither remaining
+     * version is a snapshot).
+     */
+    @Test
+    void recordVersionDisposedRecomputesLatestAndReleaseWhenTheDisposedVersionWasTheLatest() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>3.0</latest><release>3.0</release><versions><version>1.0</version>"
+                + "<version>2.0</version><version>3.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/maven-metadata.xml", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "3.0");
+
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("1.0", "2.0"), XmlParser.extractAll(xml, "version"));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "latest", null));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "release", null));
+    }
+
+    /**
+     * {@code release} skips back past a surviving {@code -SNAPSHOT} entry to the last real release,
+     * the same rule {@link #recordVersionAvailableLeavesTheExistingReleaseUntouchedForASnapshotVersion}
+     * already proves for the add path.
+     */
+    @Test
+    void recordVersionDisposedSkipsASnapshotWhenRecomputingRelease() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>2.0-SNAPSHOT</latest><release>1.0</release><versions><version>1.0</version>"
+                + "<version>2.0-SNAPSHOT</version></versions><lastUpdated>20260101000000</lastUpdated>"
+                + "</versioning></metadata>";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/maven-metadata.xml", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0");
+
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("2.0-SNAPSHOT"), XmlParser.extractAll(xml, "version"));
+        assertEquals("2.0-SNAPSHOT", XmlParser.extractFirst(xml, "latest", null));
+        assertNull(XmlParser.extractFirst(xml, "release", null), "no real release survives, so release must be "
+                + "omitted rather than naming a snapshot");
+    }
+
+    /**
+     * A metadata file that would end up naming no versions at all is deleted outright, matching
+     * how a package that never had a version published has no metadata file at all.
+     */
+    @Test
+    void recordVersionDisposedDeletesTheMetadataFileWhenNoVersionsAreLeft() {
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        AtomicReference<String> deletedMethod = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/maven-metadata.xml", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                deletedMethod.set(exchange.getRequestMethod());
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0");
+
+        assertEquals("DELETE", deletedMethod.get());
+    }
+
+    /**
+     * A version the metadata never named to begin with (already removed by an earlier call, or
+     * disposed before {@code maven-metadata.xml} ever existed) is a no-op: nothing is written back.
+     */
+    @Test
+    void recordVersionDisposedIsANoOpWhenTheMetadataNeverNamedTheVersion() {
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        AtomicReference<String> writeMethod = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/maven-metadata.xml", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                writeMethod.set(exchange.getRequestMethod());
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "9.9");
+
+        assertNull(writeMethod.get(), "expected no PUT/DELETE at all when the metadata never named this version");
     }
 
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {
