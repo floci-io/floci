@@ -328,11 +328,9 @@ public class NativeDynamoDbJsonHandler {
         if (!INDEX_NAME_CHARS.matcher(indexName).matches()) {
             errors.add(value + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
         }
-        if (indexName.length() < 3) {
-            errors.add(value + "Member must have length greater than or equal to 3");
-        }
-        if (255 < indexName.length()) {
-            errors.add(value + "Member must have length less than or equal to 255");
+        String lengthViolation = SmithyValidationErrors.lengthOutOfRange(path, indexName, 3, 255);
+        if (lengthViolation != null) {
+            errors.add(lengthViolation);
         }
         throwValidationErrors(errors);
         return indexName;
@@ -1967,13 +1965,12 @@ public class NativeDynamoDbJsonHandler {
                     + "Member must have value less than or equal to " + MAX_LIST_BACKUPS_LIMIT);
         }
         String exclusiveStartBackupArn = textOrNull(request, "ExclusiveStartBackupArn");
-        if (exclusiveStartBackupArn != null && exclusiveStartBackupArn.length() < MIN_BACKUP_ARN_LENGTH) {
-            violations.add("Value '" + exclusiveStartBackupArn + "' at 'exclusiveStartBackupArn' failed to satisfy "
-                    + "constraint: Member must have length greater than or equal to " + MIN_BACKUP_ARN_LENGTH);
-        }
-        if (exclusiveStartBackupArn != null && MAX_BACKUP_ARN_LENGTH < exclusiveStartBackupArn.length()) {
-            violations.add("Value '" + exclusiveStartBackupArn + "' at 'exclusiveStartBackupArn' failed to satisfy "
-                    + "constraint: Member must have length less than or equal to " + MAX_BACKUP_ARN_LENGTH);
+        if (exclusiveStartBackupArn != null) {
+            String lengthViolation = SmithyValidationErrors.lengthOutOfRange("exclusiveStartBackupArn",
+                    exclusiveStartBackupArn, MIN_BACKUP_ARN_LENGTH, MAX_BACKUP_ARN_LENGTH);
+            if (lengthViolation != null) {
+                violations.add(lengthViolation);
+            }
         }
         String backupType = request.hasNonNull("BackupType") ? request.get("BackupType").asText() : "USER";
         if (!BACKUP_TYPE_FILTERS.contains(backupType)) {
@@ -2180,11 +2177,9 @@ public class NativeDynamoDbJsonHandler {
         if (!INDEX_NAME_CHARS.matcher(name).matches()) {
             violations.add(value + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
         }
-        if (name.length() < 3) {
-            violations.add(value + "Member must have length greater than or equal to 3");
-        }
-        if (255 < name.length()) {
-            violations.add(value + "Member must have length less than or equal to 255");
+        String lengthViolation = SmithyValidationErrors.lengthOutOfRange(memberPath, name, 3, 255);
+        if (lengthViolation != null) {
+            violations.add(lengthViolation);
         }
         return violations;
     }
@@ -2217,11 +2212,9 @@ public class NativeDynamoDbJsonHandler {
         }
         String value = "Value '" + indexName.asText() + "'" + constraint;
         List<String> violations = new ArrayList<>();
-        if (indexName.asText().length() < 3) {
-            violations.add(value + "Member must have length greater than or equal to 3");
-        }
-        if (255 < indexName.asText().length()) {
-            violations.add(value + "Member must have length less than or equal to 255");
+        String lengthViolation = SmithyValidationErrors.lengthOutOfRange(memberPath, indexName.asText(), 3, 255);
+        if (lengthViolation != null) {
+            violations.add(lengthViolation);
         }
         if (!INDEX_NAME_CHARS.matcher(indexName.asText()).matches()) {
             violations.add(value + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");

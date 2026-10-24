@@ -39,7 +39,7 @@ public final class DynamoDbTableNames {
         if (input.startsWith("arn:")) {
             throw invalid("TableName must be a short name, not an ARN: " + input);
         }
-        validateTableNameForCreate(input);
+        validateTableName(input);
         return input;
     }
 
@@ -63,7 +63,7 @@ public final class DynamoDbTableNames {
         if (input.startsWith("arn:")) {
             return parseArn(input);
         }
-        validateTableNameForOps(input);
+        validateTableName(input);
         return new ResolvedTableRef(input, null);
     }
 
@@ -104,36 +104,14 @@ public final class DynamoDbTableNames {
             throw invalid("Invalid table ARN: " + input);
         }
 
-        validateTableNameForOps(tableName);
+        validateTableName(tableName);
         return new ResolvedTableRef(tableName, region);
     }
 
-    // Validation for CreateTable: min length 3, max 255, pattern
-    private static void validateTableNameForCreate(String tableName) {
-        if (tableName.length() < 3) {
-            throw SmithyValidationErrors.validationException(
-                    SmithyValidationErrors.lengthOutOfRange("tableName", tableName, 3, 255));
-        }
-        if (tableName.length() > 255) {
-            throw SmithyValidationErrors.validationException(
-                    SmithyValidationErrors.lengthOutOfRange("tableName", tableName, 3, 255));
-        }
-        if (!TABLE_NAME_CHARS.matcher(tableName).matches()) {
-            throw SmithyValidationErrors.validationException(
-                    "Value '" + tableName
-                    + "' at 'tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
-        }
-    }
-
-    // Validation for other operations (PutItem, GetItem, etc.): min length 3, max 255, pattern
-    private static void validateTableNameForOps(String tableName) {
-        if (tableName.length() < 3) {
-            throw SmithyValidationErrors.validationException(
-                    SmithyValidationErrors.lengthOutOfRange("tableName", tableName, 3, 255));
-        }
-        if (tableName.length() > 255) {
-            throw SmithyValidationErrors.validationException(
-                    SmithyValidationErrors.lengthOutOfRange("tableName", tableName, 3, 255));
+    private static void validateTableName(String tableName) {
+        String lengthViolation = SmithyValidationErrors.lengthOutOfRange("tableName", tableName, 3, 255);
+        if (lengthViolation != null) {
+            throw SmithyValidationErrors.validationException(lengthViolation);
         }
         if (!TABLE_NAME_CHARS.matcher(tableName).matches()) {
             throw SmithyValidationErrors.validationException(
