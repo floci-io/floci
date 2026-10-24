@@ -59,6 +59,9 @@ public final class CfnRollback {
      */
     public static final String RULE_TARGETS_SNAPSHOT_ATTR = "__FlociRuleTargetsSnapshot";
 
+    /** Prior SNS inline subscriptions retained for a failed in-place topic update. */
+    public static final String SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR = "__FlociSnsInlineSubscriptionsSnapshot";
+
     /**
      * Holds the configuration a Batch entity carried before the in-place update in flight changed
      * it, in the request shape its update call takes, so a failed stack update can put it back.

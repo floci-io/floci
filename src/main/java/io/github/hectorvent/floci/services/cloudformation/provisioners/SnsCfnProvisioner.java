@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -16,6 +18,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /** Provisions {@code AWS::SNS::Topic}, {@code AWS::SNS::Subscription} and {@code AWS::SNS::TopicPolicy}. */
 @ApplicationScoped
@@ -27,6 +30,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     private static final int TOPIC_NAME_MAX_LENGTH = 256;
     private static final String FIFO_SUFFIX = ".fifo";
     private static final String INLINE_SUBSCRIPTION_PREFIX = "__FlociInlineSubscription:";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final SnsService snsService;
 
@@ -51,6 +55,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionTopic(StackResource r, JsonNode props, ProvisionContext ctx) {
+        r.getAttributes().remove(CfnRollback.SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR);
         String topicName = ctx.resolveOptional(props, "TopicName");
         String contentBasedDedupFlag = ctx.resolveOptional(props, "ContentBasedDeduplication");
         String throughputScope = ctx.resolveOptional(props, "FifoThroughputScope");
@@ -108,10 +113,14 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
-        String requestedTopicName = topicName;
-        boolean created = !ctx.isUpdate() && snsService.listTopics(ctx.region()).stream()
-                .noneMatch(existing -> requestedTopicName.equals(existing.getName()));
-        Topic topic = snsService.createTopic(topicName, attributes, Map.of(), ctx.region());
+        SnsService.TopicCreation creation = snsService.createTopicWithStatus(
+                topicName, attributes, Map.of(), ctx.region());
+        Topic topic = creation.topic();
+        boolean created = creation.created();
+        List<Subscription> existing = snsService.listSubscriptionsByTopic(topic.getTopicArn(), ctx.region());
+        if (ctx.isUpdate() && !created) {
+            snapshotInlineSubscriptions(r, topic.getTopicArn(), ctx.region(), existing);
+        }
         // createTopic leaves an existing topic untouched, so an update writes the mutable
         // attributes itself. A property the template dropped is reset, not left standing.
         if (ctx.isUpdate()) {
@@ -139,13 +148,84 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", topic.getTopicArn());
         r.getAttributes().put("TopicName", topicName);
 
-        List<Subscription> existing = snsService.listSubscriptionsByTopic(topic.getTopicArn(), ctx.region());
         Set<String> added = new HashSet<>();
         CfnRollback.guarded(r, ctx, created,
                 () -> snsService.deleteTopic(topic.getTopicArn(), ctx.region()),
-                () -> added.forEach(arn -> snsService.unsubscribe(arn, ctx.region())),
+                () -> {
+                    if (ctx.isUpdate()) {
+                        restoreInlineSubscriptions(r);
+                    } else {
+                        added.forEach(arn -> snsService.unsubscribe(arn, ctx.region()));
+                    }
+                },
                 () -> reconcileInlineSubscriptions(r, topic.getTopicArn(), ctx.region(),
                         desiredSubscriptions, existing, added));
+    }
+
+    private void snapshotInlineSubscriptions(StackResource r, String topicArn, String region,
+                                             List<Subscription> existing) {
+        List<Subscription> owned = existing.stream()
+                .filter(sub -> r.getAttributes().containsKey(
+                        INLINE_SUBSCRIPTION_PREFIX + sub.getSubscriptionArn()))
+                .toList();
+        InlineSubscriptionSnapshot snapshot = new InlineSubscriptionSnapshot(topicArn, region, owned);
+        try {
+            r.getAttributes().put(CfnRollback.SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR,
+                    MAPPER.writeValueAsString(snapshot));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not snapshot inline SNS subscriptions", e);
+        }
+    }
+
+    private record InlineSubscriptionSnapshot(String topicArn, String region,
+                                              List<Subscription> owned) {
+    }
+
+    private void restoreInlineSubscriptions(StackResource r) {
+        String raw = r.getAttributes().get(CfnRollback.SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return;
+        }
+        InlineSubscriptionSnapshot snapshot;
+        try {
+            snapshot = MAPPER.readValue(raw, InlineSubscriptionSnapshot.class);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read inline SNS subscription snapshot", e);
+        }
+        Set<String> priorArns = snapshot.owned().stream()
+                .map(Subscription::getSubscriptionArn).collect(Collectors.toSet());
+        for (Subscription current : snsService.listSubscriptionsByTopic(snapshot.topicArn(), snapshot.region())) {
+            String key = INLINE_SUBSCRIPTION_PREFIX + current.getSubscriptionArn();
+            if (r.getAttributes().containsKey(key) && !priorArns.contains(current.getSubscriptionArn())) {
+                snsService.unsubscribe(current.getSubscriptionArn(), snapshot.region());
+            }
+        }
+        r.getAttributes().keySet().removeIf(key -> key.startsWith(INLINE_SUBSCRIPTION_PREFIX));
+        for (Subscription prior : snapshot.owned()) {
+            Subscription restored = snsService.subscribe(snapshot.topicArn(), prior.getProtocol(),
+                    prior.getEndpoint(), snapshot.region(), prior.getAttributes());
+            r.getAttributes().put(INLINE_SUBSCRIPTION_PREFIX + restored.getSubscriptionArn(), "true");
+        }
+        r.getAttributes().remove(CfnRollback.SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (!resource.getAttributes().containsKey(CfnRollback.SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR)) {
+            return false;
+        }
+        restoreInlineSubscriptions(resource);
+        return true;
+    }
+
+    @Override
+    public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        previous.getAttributes().keySet().removeIf(key -> key.startsWith(INLINE_SUBSCRIPTION_PREFIX));
+        attempted.getAttributes().forEach((key, value) -> {
+            if (key.startsWith(INLINE_SUBSCRIPTION_PREFIX)) {
+                previous.getAttributes().put(key, value);
+            }
+        });
     }
 
     private void reconcileInlineSubscriptions(StackResource r, String topicArn, String region,

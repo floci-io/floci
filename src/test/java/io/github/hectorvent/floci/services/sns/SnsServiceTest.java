@@ -136,6 +136,18 @@ class SnsServiceTest {
     }
 
     @Test
+    void createTopicWithStatusReportsOnlyTheActualInsertAsCreated() {
+        SnsService.TopicCreation first = snsService.createTopicWithStatus(
+                "my-topic", Map.of(), Map.of(), REGION);
+        SnsService.TopicCreation second = snsService.createTopicWithStatus(
+                "my-topic", Map.of(), Map.of(), REGION);
+
+        assertTrue(first.created());
+        assertFalse(second.created());
+        assertEquals(first.topic().getTopicArn(), second.topic().getTopicArn());
+    }
+
+    @Test
     void createTopic_requiresName() {
         assertThrows(AwsException.class, () -> snsService.createTopic(null, null, null, REGION));
         assertThrows(AwsException.class, () -> snsService.createTopic("", null, null, REGION));

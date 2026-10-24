@@ -6839,6 +6839,48 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void updateStack_snsInlineSubscriptionsReturnAfterLaterResourceFails() {
+        String stackName = "cfn-sns-inline-rollback-stack";
+        String topicArn = "arn:aws:sns:us-east-1:000000000000:cfn-sns-inline-rollback-topic";
+        String initial = """
+            {"Resources":{"ATopic":{"Type":"AWS::SNS::Topic","Properties":{
+              "TopicName":"cfn-sns-inline-rollback-topic",
+              "Subscription":[{"Protocol":"email","Endpoint":"old@example.com"}]}}}}
+            """;
+        String failingUpdate = """
+            {"Resources":{
+              "ATopic":{"Type":"AWS::SNS::Topic","Properties":{
+                "TopicName":"cfn-sns-inline-rollback-topic",
+                "Subscription":[{"Protocol":"email","Endpoint":"new@example.com"}]}},
+              "ZBroken":{"Type":"AWS::CloudFormation::Stack","DependsOn":"ATopic",
+                "Properties":{}}}}
+            """;
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", initial)
+        .when().post("/").then().statusCode(200);
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", failingUpdate)
+        .when().post("/").then().statusCode(200);
+        awaitStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListSubscriptionsByTopic")
+            .formParam("TopicArn", topicArn)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("old@example.com"))
+            .body(not(containsString("new@example.com")));
+    }
+
+    @Test
     void createStack_snsTopicSubscribesSameStackLambda() {
         String functionName = "cfn-inline-subs-lambda";
         String functionArn = "arn:aws:lambda:us-east-1:000000000000:function:" + functionName;
