@@ -867,6 +867,24 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         String connectionId = ctx.resolveOptional(props, "ConnectionId");
         req.put("connectionType", connectionType);
         req.put("connectionId", connectionId);
+        req.put("integrationMethod", ctx.resolveOptional(props, "IntegrationMethod"));
+        req.put("templateSelectionExpression", ctx.resolveOptional(props, "TemplateSelectionExpression"));
+        String timeout = ctx.resolveOptional(props, "TimeoutInMillis");
+        if (timeout != null) {
+            try {
+                req.put("timeoutInMillis", Integer.parseInt(timeout));
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationError", "TimeoutInMillis must be an integer", 400);
+            }
+        }
+        Map<String, String> requestParameters = resolveStringMap(props, "RequestParameters", ctx.engine());
+        if (requestParameters != null) {
+            req.put("requestParameters", requestParameters);
+        }
+        Map<String, String> requestTemplates = resolveStringMap(props, "RequestTemplates", ctx.engine());
+        if (requestTemplates != null) {
+            req.put("requestTemplates", requestTemplates);
+        }
         // A snapshot describes the update in flight; one an earlier update left behind is stale.
         r.getAttributes().remove(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
 
@@ -912,7 +930,12 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                                                  Map<String, Object> req) {
         boolean otherFieldChanged = changes(req.get("integrationType"), prior.getIntegrationType())
                 || changes(req.get("integrationUri"), prior.getIntegrationUri())
-                || changes(req.get("payloadFormatVersion"), prior.getPayloadFormatVersion());
+                || changes(req.get("payloadFormatVersion"), prior.getPayloadFormatVersion())
+                || changes(req.get("integrationMethod"), prior.getIntegrationMethod())
+                || changes(req.get("templateSelectionExpression"), prior.getTemplateSelectionExpression())
+                || changes(req.get("timeoutInMillis"), prior.getTimeoutInMillis())
+                || changes(req.get("requestParameters"), prior.getRequestParameters())
+                || changes(req.get("requestTemplates"), prior.getRequestTemplates());
         ObjectNode snapshot = objectMapper.createObjectNode();
         snapshot.put("region", region);
         snapshot.put("apiId", apiId);
@@ -922,7 +945,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         return snapshot.toString();
     }
 
-    private static boolean changes(Object requested, String current) {
+    private static boolean changes(Object requested, Object current) {
         return requested != null && !requested.equals(current);
     }
 
@@ -1155,10 +1178,16 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     private Map<String, String> parseStageVariables(JsonNode props, CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has("StageVariables") || props.get("StageVariables").isNull()) {
+        return resolveStringMap(props, "StageVariables", engine);
+    }
+
+    /** Resolves an object property to a string map in template order, or null when absent or not an object. */
+    private static Map<String, String> resolveStringMap(JsonNode props, String name,
+                                                        CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(name) || props.get(name).isNull()) {
             return null;
         }
-        JsonNode resolved = engine.resolveNode(props.get("StageVariables"));
+        JsonNode resolved = engine.resolveNode(props.get(name));
         if (resolved == null || !resolved.isObject()) {
             return null;
         }

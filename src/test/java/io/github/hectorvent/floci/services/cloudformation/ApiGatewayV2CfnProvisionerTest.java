@@ -715,6 +715,76 @@ class ApiGatewayV2CfnProvisionerTest {
         assertFalse(integration.getAttributes().containsKey("__FlociIntegrationConnectionSnapshot"));
     }
 
+    @Test
+    void integrationCreatePassesMethodParametersTemplatesTimeoutAndSelectionExpression() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree(INTEGRATION_PROPERTIES),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(this::carriesIntegrationProperties));
+    }
+
+    @Test
+    void integrationUpdatePassesMethodParametersTemplatesTimeoutAndSelectionExpression() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        StackResource integration = provisionIntegration(INTEGRATION_PROPERTIES);
+
+        assertTrue(integration.getStatus().endsWith("_COMPLETE"), integration.getStatus());
+        verify(apiGatewayV2Service).updateIntegration(eq(REGION), eq(API_ID), eq("int-1"),
+                argThat(this::carriesIntegrationProperties));
+    }
+
+    @Test
+    void integrationRequestParametersResolveIntrinsics() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree("""
+                        {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                         "RequestParameters":{"overwrite:header.x-stack":{"Ref":"AWS::StackName"}}}
+                        """),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(req ->
+                Map.of("overwrite:header.x-stack", "test-stack").equals(req.get("requestParameters"))));
+    }
+
+    @Test
+    void integrationWithNonNumericTimeoutIsRejected() throws Exception {
+        StackResource integration = provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration",
+                mapper.readTree("""
+                        {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                         "TimeoutInMillis":"soon"}
+                        """),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        assertEquals("CREATE_FAILED", integration.getStatus());
+        verify(apiGatewayV2Service, never()).createIntegration(any(), any(), anyMap());
+    }
+
+    private static final String INTEGRATION_PROPERTIES = """
+            {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+             "IntegrationMethod":"ANY","PayloadFormatVersion":"1.0","TimeoutInMillis":"15000",
+             "TemplateSelectionExpression":"${request.method}",
+             "RequestParameters":{"append:header.x-request-id":"$context.requestId",
+                                  "overwrite:header.x-example":"static-value"},
+             "RequestTemplates":{"application/json":"{\\"a\\":1}"}}
+            """;
+
+    private boolean carriesIntegrationProperties(Map<String, Object> req) {
+        return "ANY".equals(req.get("integrationMethod"))
+                && Integer.valueOf(15000).equals(req.get("timeoutInMillis"))
+                && "${request.method}".equals(req.get("templateSelectionExpression"))
+                && Map.of("append:header.x-request-id", "$context.requestId",
+                        "overwrite:header.x-example", "static-value").equals(req.get("requestParameters"))
+                && Map.of("application/json", "{\"a\":1}").equals(req.get("requestTemplates"));
+    }
+
     private static Integration priorVpcLinkIntegration() {
         Integration prior = new Integration();
         prior.setIntegrationId("int-1");
