@@ -88,6 +88,10 @@ ns-3.awsdns-03.com
 ns-4.awsdns-04.co.uk
 ```
 
+A configured name can be written with or without the final dot. The delegation set lists it without the dot, as Route 53 does. A new zone's apex NS records, and the primary server named in its SOA record (the first nameserver), use the fully qualified form with the dot.
+
+The apex NS and SOA records are written when a zone is created, while the delegation set that `CreateHostedZone` and `GetHostedZone` return always reflects the current settings. A zone kept in persistent storage therefore keeps its original NS and SOA records after these settings change; update them with an `UPSERT` change.
+
 ## Configuration
 
 | Variable | Default | Description |

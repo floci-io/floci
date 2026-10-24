@@ -83,7 +83,7 @@ public class Route53Service implements Resettable {
                 r53.defaultNameserver2(),
                 r53.defaultNameserver3(),
                 r53.defaultNameserver4()
-        );
+        ).stream().map(Route53Service::delegationName).toList();
         this.defaultAccountId = config.defaultAccountId();
         this.regionResolver = regionResolver;
         this.ec2Service = ec2Service;
@@ -889,6 +889,15 @@ public class Route53Service implements Resettable {
         return name.endsWith(".") ? name : name + ".";
     }
 
+    /**
+     * A configured nameserver as the delegation set lists it: without surrounding whitespace, which
+     * the config does not trim, and without the final dot, as Route 53 lists it.
+     */
+    private static String delegationName(String configured) {
+        String name = configured.strip();
+        return name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
+    }
+
     public static String normalizeRecordName(String name) {
         String normalized = normalizeName(name);
         if (normalized == null) {
@@ -932,7 +941,7 @@ public class Route53Service implements Resettable {
         soa.setType("SOA");
         soa.setTtl(900L);
         soa.setRecords(List.of(new ResourceRecord(
-                nameServers.get(0) + " awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400")));
+                normalizeName(nameServers.get(0)) + " awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400")));
         records.add(soa);
 
         ResourceRecordSet ns = new ResourceRecordSet();
@@ -940,7 +949,7 @@ public class Route53Service implements Resettable {
         ns.setType("NS");
         ns.setTtl(172800L);
         ns.setRecords(nameServers.stream()
-                .map(n -> new ResourceRecord(n + "."))
+                .map(n -> new ResourceRecord(normalizeName(n)))
                 .toList());
         records.add(ns);
 

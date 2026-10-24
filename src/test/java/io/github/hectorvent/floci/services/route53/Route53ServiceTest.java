@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.route53;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
+import io.github.hectorvent.floci.core.common.dns.DnsRecord;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -15,6 +17,7 @@ import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
@@ -26,6 +29,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -38,6 +42,10 @@ class Route53ServiceTest {
     private final Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
 
     private Route53Service newService() {
+        return newService(".");
+    }
+
+    private Route53Service newService(String nameserverSuffix) {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         Mockito.when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
                 .thenAnswer(invocation -> {
@@ -54,16 +62,47 @@ class Route53ServiceTest {
         Mockito.when(config.defaultAccountId()).thenReturn(ACCOUNT);
         Mockito.when(config.services()).thenReturn(servicesConfig);
         Mockito.when(servicesConfig.route53()).thenReturn(route53Config);
-        Mockito.when(route53Config.defaultNameserver1()).thenReturn("ns-1.awsdns-00.com.");
-        Mockito.when(route53Config.defaultNameserver2()).thenReturn("ns-2.awsdns-00.net.");
-        Mockito.when(route53Config.defaultNameserver3()).thenReturn("ns-3.awsdns-00.org.");
-        Mockito.when(route53Config.defaultNameserver4()).thenReturn("ns-4.awsdns-00.co.uk.");
+        Mockito.when(route53Config.defaultNameserver1()).thenReturn("ns-1.awsdns-00.com" + nameserverSuffix);
+        Mockito.when(route53Config.defaultNameserver2()).thenReturn("ns-2.awsdns-00.net" + nameserverSuffix);
+        Mockito.when(route53Config.defaultNameserver3()).thenReturn("ns-3.awsdns-00.org" + nameserverSuffix);
+        Mockito.when(route53Config.defaultNameserver4()).thenReturn("ns-4.awsdns-00.co.uk" + nameserverSuffix);
         Mockito.when(route53Config.vpcAssociationControlPlaneDelayMs()).thenReturn(0L);
 
         Ec2Service ec2Service = Mockito.mock(Ec2Service.class);
         RegionResolver regionResolver = new RegionResolver("us-east-1", ACCOUNT);
 
         return new Route53Service(storageFactory, config, regionResolver, ec2Service);
+    }
+
+    @ParameterizedTest(name = "configured names ending in {0}")
+    @ValueSource(strings = {"", ".", " ", ".\t"})
+    void defaultApexRecordsUseAbsoluteNamesAndTheDelegationSetDoesNot(String nameserverSuffix) {
+        Route53Service service = newService(nameserverSuffix);
+        String zoneId = service.createHostedZone("authority.example", "authority", null, null).zone().getId();
+        List<ResourceRecordSet> records = service.listResourceRecordSets(zoneId, null, null, 100);
+
+        assertAll(
+                () -> assertEquals(List.of("ns-1.awsdns-00.com. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400"),
+                        valuesOf(records, "SOA"), "SOA"),
+                () -> assertEquals(List.of("ns-1.awsdns-00.com.", "ns-2.awsdns-00.net.", "ns-3.awsdns-00.org.",
+                        "ns-4.awsdns-00.co.uk."), valuesOf(records, "NS"), "NS"),
+                () -> assertEquals(List.of("ns-1.awsdns-00.com", "ns-2.awsdns-00.net", "ns-3.awsdns-00.org",
+                        "ns-4.awsdns-00.co.uk"), service.getNameServers(), "delegation set"));
+    }
+
+    @ParameterizedTest(name = "configured names ending in {0}")
+    @ValueSource(strings = {"", ".", " ", ".\t"})
+    void apexNsQueryIsAnswered(String nameserverSuffix) {
+        Route53Service service = newService(nameserverSuffix);
+        service.createHostedZone("authority.example", "authority", null, null);
+
+        DnsAnswer answer = new Route53DnsRecordSource(service).resolveAuthoritative("authority.example", 2)
+                .orElseThrow();
+
+        assertEquals(0, answer.responseCode(), "rcode");
+        assertEquals(List.of(new DnsRecord.Ns("ns-1.awsdns-00.com."), new DnsRecord.Ns("ns-2.awsdns-00.net."),
+                new DnsRecord.Ns("ns-3.awsdns-00.org."), new DnsRecord.Ns("ns-4.awsdns-00.co.uk.")),
+                answer.records(), "answers");
     }
 
     @Test
@@ -104,6 +143,14 @@ class Route53ServiceTest {
         Mockito.clearInvocations(zones);
         assertTrue(service.publicDnsZones("text.owned.example").isEmpty());
         Mockito.verifyNoInteractions(zones);
+    }
+
+    private static List<String> valuesOf(List<ResourceRecordSet> records, String type) {
+        return records.stream()
+                .filter(rrs -> type.equals(rrs.getType()))
+                .flatMap(rrs -> rrs.getRecords().stream())
+                .map(ResourceRecord::getValue)
+                .toList();
     }
 
     @Test
