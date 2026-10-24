@@ -387,13 +387,24 @@ class IamActionRegistryTest {
 
     @Test
     void anEksAccessEntryRouteTakesThePrincipalAsTheRestOfThePath() {
-        // EKS reads the principal greedily, so a GET or DELETE under an entry reads or deletes an entry.
+        // EKS reads the principal greedily, but an entry's access policy routes win over the entry's own, as
+        // they do in the router.
         String entry = "/clusters/c/access-entries/arn:aws:iam::000000000000:role/team/worker";
         String[][] routes = {
             {"GET", entry, "eks:DescribeAccessEntry"},
-            {"GET", entry + "/access-policies", "eks:DescribeAccessEntry"},
-            {"DELETE", entry + "/access-policies/arn:aws:eks::aws:cluster-access-policy/Admin", "eks:DeleteAccessEntry"},
+            {"DELETE", entry, "eks:DeleteAccessEntry"},
+            {"GET", entry + "/access-policies", "eks:ListAssociatedAccessPolicies"},
+            {"DELETE", entry + "/access-policies/arn:aws:eks::aws:cluster-access-policy/Admin",
+                "eks:DisassociateAccessPolicy"},
             {"POST", entry + "/access-policies", "eks:AssociateAccessPolicy"},
+            {"DELETE", entry + "/access-policies/arn%3Aaws%3Aeks%3A%3Aaws%3Acluster-access-policy%2FAdmin",
+                "eks:DisassociateAccessPolicy"},
+            // A principal whose IAM path holds an access-policies segment is still an entry: only a cluster
+            // access policy ARN after it makes a DELETE a disassociate.
+            {"DELETE", "/clusters/c/access-entries/arn:aws:iam::000000000000:role/ci/access-policies/runner",
+                "eks:DeleteAccessEntry"},
+            {"GET", "/clusters/c/access-entries/arn:aws:iam::000000000000:role/ci/access-policies/runner",
+                "eks:DescribeAccessEntry"},
             {"POST", entry, "eks:UpdateAccessEntry"},
             {"GET", "/clusters/c/access-entries", "eks:ListAccessEntries"},
         };

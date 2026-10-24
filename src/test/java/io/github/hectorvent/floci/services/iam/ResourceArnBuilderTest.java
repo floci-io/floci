@@ -1711,6 +1711,7 @@ class ResourceArnBuilderTest {
     /** The cluster {@code held}, which EKS keeps in us-west-2 and finds by its name alone, and what it holds. */
     private static final String HELD_CLUSTER = "arn:aws:eks:us-west-2:000000000000:cluster/held";
     private static final String WORKER = "arn:aws:iam::000000000000:role/team/worker";
+    private static final String RUNNER = "arn:aws:iam::000000000000:role/ci/access-policies/runner";
 
     private static ResourceArnBuilder eksHolding() {
         EksService eks = mock(EksService.class);
@@ -1723,6 +1724,7 @@ class ResourceArnBuilderTest {
             {"pod-identity-associations", "a-1", "podidentityassociation/held/a-1"},
             {"access-entries", WORKER, "access-entry/held/role/000000000000/worker/5"},
             {"access-entries", WORKER + "/access-policies", "access-entry/held/role/000000000000/access-policies/6"},
+            {"access-entries", RUNNER, "access-entry/held/role/000000000000/runner/7"},
         }) {
             when(eks.findResourceArn("held", held[0], held[1]))
                     .thenReturn(Optional.of("arn:aws:eks:us-west-2:000000000000:" + held[2]));
@@ -1773,8 +1775,23 @@ class ResourceArnBuilderTest {
                 "/clusters/held/access-entries/arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Fteam%2Fworker"));
         assertEquals(held + "access-entry/held/role/000000000000/worker/5",
                 eksResource(eks, "DELETE", "/clusters/held/access-entries/" + WORKER));
-        assertEquals(held + "access-entry/held/role/000000000000/access-policies/6",
+        // An entry's access policy routes act on the entry, as the router serves them.
+        String admin = "/access-policies/arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
+        assertEquals(held + "access-entry/held/role/000000000000/worker/5",
                 eksResource(eks, "GET", "/clusters/held/access-entries/" + WORKER + "/access-policies"));
+        assertEquals(held + "access-entry/held/role/000000000000/worker/5",
+                eksResource(eks, "POST", "/clusters/held/access-entries/" + WORKER + "/access-policies"));
+        assertEquals(held + "access-entry/held/role/000000000000/worker/5",
+                eksResource(eks, "DELETE", "/clusters/held/access-entries/" + WORKER + admin));
+        assertEquals(held + "access-entry/held/role/000000000000/worker/5", eksResource(eks, "DELETE",
+                "/clusters/held/access-entries/" + WORKER
+                        + "/access-policies/arn%3Aaws%3Aeks%3A%3Aaws%3Acluster-access-policy%2FAdmin"));
+        // Any other route under the entry takes the rest of the path as its principal, an IAM path holding
+        // access-policies included.
+        assertEquals(held + "access-entry/held/role/000000000000/runner/7",
+                eksResource(eks, "DELETE", "/clusters/held/access-entries/" + RUNNER));
+        assertEquals(held + "access-entry/held/role/000000000000/access-policies/6",
+                eksResource(eks, "DELETE", "/clusters/held/access-entries/" + WORKER + "/access-policies"));
         // What EKS does not hold names no resource, nor do what Floci keeps no id for.
         assertEquals("*", eksResource(eks, "GET", "/clusters/held/node-groups/other"));
         assertEquals("*", eksResource(eks, "GET", "/clusters/gone/addons/vpc-cni"));

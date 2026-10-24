@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.ProtocolClaim;
 import io.github.hectorvent.floci.core.common.WireProtocol;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser;
+import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -288,12 +289,15 @@ public class IamActionRegistry {
         rule("pipes", "DELETE", "^/tags(/.+)?$",           "pipes:UntagResource"),
 
         // ── EKS ────────────────────────────────────────────────────────────────
-        // Floci takes an access entry's principal ARN whole, slashes included, so a GET or DELETE under an
-        // entry is DescribeAccessEntry or DeleteAccessEntry: the entry's access policy routes, which Floci
-        // does not serve, run as those and are checked as those.
+        // Floci takes an access entry's principal ARN whole, slashes included, so any other GET or DELETE under
+        // an entry is DescribeAccessEntry or DeleteAccessEntry. The entry's access policy routes come first, as
+        // they win in the router; a DELETE is a disassociate only when a cluster access policy ARN follows.
+        rule("eks", "GET",    "^/clusters/[^/]+/access-entries/.+/access-policies$",     "eks:ListAssociatedAccessPolicies"),
+        rule("eks", "POST",   "^/clusters/[^/]+/access-entries/.+/access-policies$",     "eks:AssociateAccessPolicy"),
+        rule("eks", "DELETE", "^/clusters/[^/]+/access-entries/.+/access-policies/" + EksController.ACCESS_POLICY_ARN + "$",
+                "eks:DisassociateAccessPolicy"),
         rule("eks", "GET",    "^/clusters/[^/]+/access-entries/.+$",                     "eks:DescribeAccessEntry"),
         rule("eks", "DELETE", "^/clusters/[^/]+/access-entries/.+$",                     "eks:DeleteAccessEntry"),
-        rule("eks", "POST",   "^/clusters/[^/]+/access-entries/.+/access-policies$",     "eks:AssociateAccessPolicy"),
         rule("eks", "POST",   "^/clusters/[^/]+/access-entries/.+$",                     "eks:UpdateAccessEntry"),
         rule("eks", "GET",    "^/clusters/[^/]+/access-entries$",                        "eks:ListAccessEntries"),
         rule("eks", "POST",   "^/clusters/[^/]+/access-entries$",                        "eks:CreateAccessEntry"),

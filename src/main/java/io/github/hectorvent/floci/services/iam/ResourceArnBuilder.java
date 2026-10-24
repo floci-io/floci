@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
+import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
@@ -33,6 +34,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Constructs the target resource ARN for a request so the policy evaluator
@@ -43,6 +45,8 @@ import java.util.regex.Matcher;
  */
 @ApplicationScoped
 public class ResourceArnBuilder {
+
+    private static final Pattern ACCESS_POLICY_ARN = Pattern.compile(EksController.ACCESS_POLICY_ARN);
 
     /** The only scheme IAM accepts on an OIDC provider URL, and the part its ARN drops. */
     private static final String OIDC_URL_SCHEME = "https://";
@@ -1066,7 +1070,7 @@ public class ResourceArnBuilder {
             return "*";
         }
         return switch (segments[0]) {
-            case "clusters" -> eksClusterRouteArn(name, segments, region, accountId);
+            case "clusters" -> eksClusterRouteArn(name, segments, ctx.getMethod(), region, accountId);
             case "cluster-registrations" -> eksClusterArn(name, region, accountId);
             case "eks-anywhere-subscriptions" ->
                     AwsArnUtils.Arn.of("eks", region, accountId, "eks-anywhere-subscription/" + name).toString();
@@ -1074,8 +1078,9 @@ public class ResourceArnBuilder {
         };
     }
 
-    /** The resource of a route under the cluster {@code cluster}, its path split into {@code segments}. */
-    private String eksClusterRouteArn(String cluster, String[] segments, String region, String accountId) {
+    /** The resource of a {@code method} route under the cluster {@code cluster}, its path split into {@code segments}. */
+    private String eksClusterRouteArn(String cluster, String[] segments, String method, String region,
+                                      String accountId) {
         if (segments.length < 4 || segments[3].isEmpty()) {
             return eksClusterArn(cluster, region, accountId);
         }
@@ -1084,7 +1089,7 @@ public class ResourceArnBuilder {
             case "node-groups", "fargate-profiles", "addons", "pod-identity-associations" ->
                     eksHeldArn(cluster, collection, pathSegment(segments[3]));
             case "access-entries" -> eksHeldArn(cluster, collection,
-                    pathSegment(String.join("/", List.of(segments).subList(3, segments.length))));
+                    pathSegment(String.join("/", List.of(segments).subList(3, accessEntryEnd(segments, method)))));
             case "updates" -> {
                 // The updates Floci keeps are its add-ons', and EKS returns one whether or not the request names
                 // its add-on, so the update is checked against the add-on it was made to.
@@ -1098,6 +1103,28 @@ public class ResourceArnBuilder {
             case "capabilities" -> "*";
             default -> eksClusterArn(cluster, region, accountId);
         };
+    }
+
+    /**
+     * Where an access entry's principal ends in {@code segments}: before {@code access-policies} on the routes
+     * that act on the entry's policies, as the router reads them (a DELETE only when a cluster access policy
+     * ARN follows), and at the end on every other route.
+     */
+    private static int accessEntryEnd(String[] segments, String method) {
+        int last = segments.length - 1;
+        if (("GET".equalsIgnoreCase(method) || "POST".equalsIgnoreCase(method))
+                && last > 3 && "access-policies".equals(segments[last])) {
+            return last;
+        }
+        if ("DELETE".equalsIgnoreCase(method)) {
+            for (int i = last - 1; i > 3; i--) {
+                if ("access-policies".equals(segments[i]) && ACCESS_POLICY_ARN.matcher(
+                        String.join("/", List.of(segments).subList(i + 1, segments.length))).matches()) {
+                    return i;
+                }
+            }
+        }
+        return segments.length;
     }
 
     /** The ARN EKS holds the cluster {@code name} under, or else the one a create mints in {@code region}. */
