@@ -16,6 +16,8 @@ import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPrepar
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSqlException;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataStatementStore.StoredParameter;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataStatementStore.StoredStatement;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -380,6 +382,11 @@ public class RedshiftDataService implements Resettable {
         stored.dbUser = target.user();
         stored.database = target.database();
         stored.resultFormat = request.path("ResultFormat").asText("JSON");
+        if (!parameters.isEmpty()) {
+            stored.queryParameters = parameters.entrySet().stream()
+                    .map(entry -> new StoredParameter(entry.getKey(), entry.getValue()))
+                    .toList();
+        }
         capture(stored, target, region, request);
 
         return new PendingStatement(stored, (execution, session) -> runStatement(stored, target, sql, parameters, execution, session),
@@ -646,6 +653,18 @@ public class RedshiftDataService implements Resettable {
             response.put("Error", stored.error);
         }
         response.put("QueryString", stored.sql);
+        if (stored.queryParameters != null && !stored.queryParameters.isEmpty()) {
+            ArrayNode queryParameters = response.putArray("QueryParameters");
+            for (StoredParameter parameter : stored.queryParameters) {
+                ObjectNode paramNode = queryParameters.addObject();
+                paramNode.put("name", parameter.name());
+                if (parameter.value() == null) {
+                    paramNode.putNull("value");
+                } else {
+                    paramNode.put("value", parameter.value());
+                }
+            }
+        }
         int stableId = stored.id.hashCode() & Integer.MAX_VALUE;
         response.put("RedshiftPid", stableId);
         response.put("RedshiftQueryId", (long) stableId);
@@ -945,6 +964,18 @@ public class RedshiftDataService implements Resettable {
                 node.put("StatementName", s.statementName);
             }
             node.put("IsBatchStatement", s.batch);
+            if (s.queryParameters != null && !s.queryParameters.isEmpty()) {
+                ArrayNode queryParameters = node.putArray("QueryParameters");
+                for (StoredParameter parameter : s.queryParameters) {
+                    ObjectNode paramNode = queryParameters.addObject();
+                    paramNode.put("name", parameter.name());
+                    if (parameter.value() == null) {
+                        paramNode.putNull("value");
+                    } else {
+                        paramNode.put("value", parameter.value());
+                    }
+                }
+            }
             node.put("ResultRows", s.resultRows);
             node.put("ResultSize", s.resultSize);
             node.put("Duration", s.durationNanos);

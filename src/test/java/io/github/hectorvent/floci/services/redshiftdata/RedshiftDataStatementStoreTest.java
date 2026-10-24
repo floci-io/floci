@@ -193,6 +193,17 @@ class RedshiftDataStatementStoreTest {
         original.columnMetadata = columnMetadata;
         original.rows = List.of(row);
         original.subStatements = List.of(sub);
+        original.queryParameters = List.of(new RedshiftDataStatementStore.StoredParameter("param1", "val1"));
+
+        RedshiftDataStatementStore.StoredStatement snapshot = original.snapshot();
+        assertEquals(1, snapshot.queryParameters.size());
+        assertEquals("param1", snapshot.queryParameters.get(0).name());
+        assertEquals("val1", snapshot.queryParameters.get(0).value());
+
+        RedshiftDataStatementStore.StoredStatement summary = original.summary();
+        assertEquals(1, summary.queryParameters.size());
+        assertEquals("param1", summary.queryParameters.get(0).name());
+        assertEquals("val1", summary.queryParameters.get(0).value());
 
         String json = mapper.writeValueAsString(Map.of("parent", original));
         Map<String, RedshiftDataStatementStore.StoredStatement> back =
@@ -215,5 +226,9 @@ class RedshiftDataStatementStoreTest {
         assertEquals(1, restored.subStatements.size());
         assertEquals("parent:1", restored.subStatements.get(0).id);
         assertEquals(RedshiftDataStatementStore.Status.FINISHED, restored.subStatements.get(0).status);
+        assertNotNull(restored.queryParameters);
+        assertEquals(1, restored.queryParameters.size());
+        assertEquals("param1", restored.queryParameters.get(0).name());
+        assertEquals("val1", restored.queryParameters.get(0).value());
     }
 }

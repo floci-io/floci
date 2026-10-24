@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -447,6 +448,37 @@ class RedshiftDataServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.listStatements(om.createObjectNode().put("MaxResults", 500)));
         assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void executeStatementStoresAndReturnsQueryParameters() {
+        ObjectNode request = req("select CAST(:value AS INTEGER) + 1 as res");
+        ArrayNode params = request.putArray("Parameters");
+        params.addObject().put("name", "value").put("value", "41");
+        String id = service.executeStatement(request, REGION).get("Id").asText();
+
+        ObjectNode described = service.describeStatement(idOf(id));
+        assertEquals("FINISHED", described.get("Status").asText());
+        assertTrue(described.has("QueryParameters"));
+        ArrayNode queryParams = (ArrayNode) described.get("QueryParameters");
+        assertEquals(1, queryParams.size());
+        assertEquals("value", queryParams.get(0).get("name").asText());
+        assertEquals("41", queryParams.get(0).get("value").asText());
+
+        ObjectNode listed = service.listStatements(om.createObjectNode());
+        JsonNode listedStatement = null;
+        for (JsonNode s : listed.get("Statements")) {
+            if (id.equals(s.path("Id").asText())) {
+                listedStatement = s;
+                break;
+            }
+        }
+        assertNotNull(listedStatement);
+        assertTrue(listedStatement.has("QueryParameters"));
+        ArrayNode listedParams = (ArrayNode) listedStatement.get("QueryParameters");
+        assertEquals(1, listedParams.size());
+        assertEquals("value", listedParams.get(0).get("name").asText());
+        assertEquals("41", listedParams.get(0).get("value").asText());
     }
 
     @Test
