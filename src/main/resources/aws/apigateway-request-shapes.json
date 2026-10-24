@@ -1,0 +1,1056 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_apigateway_shapes.py",
+    "botocore": "botocore 1.43.113 (installed package)"
+  },
+  "operations": {
+    "CreateApiKey": "CreateApiKeyRequest",
+    "CreateAuthorizer": "CreateAuthorizerRequest",
+    "CreateBasePathMapping": "CreateBasePathMappingRequest",
+    "CreateDeployment": "CreateDeploymentRequest",
+    "CreateDocumentationPart": "CreateDocumentationPartRequest",
+    "CreateDocumentationVersion": "CreateDocumentationVersionRequest",
+    "CreateDomainName": "CreateDomainNameRequest",
+    "CreateDomainNameAccessAssociation": "CreateDomainNameAccessAssociationRequest",
+    "CreateModel": "CreateModelRequest",
+    "CreateRequestValidator": "CreateRequestValidatorRequest",
+    "CreateResource": "CreateResourceRequest",
+    "CreateRestApi": "CreateRestApiRequest",
+    "CreateStage": "CreateStageRequest",
+    "CreateUsagePlan": "CreateUsagePlanRequest",
+    "CreateUsagePlanKey": "CreateUsagePlanKeyRequest",
+    "CreateVpcLink": "CreateVpcLinkRequest",
+    "DeleteApiKey": "DeleteApiKeyRequest",
+    "DeleteAuthorizer": "DeleteAuthorizerRequest",
+    "DeleteBasePathMapping": "DeleteBasePathMappingRequest",
+    "DeleteClientCertificate": "DeleteClientCertificateRequest",
+    "DeleteDeployment": "DeleteDeploymentRequest",
+    "DeleteDocumentationPart": "DeleteDocumentationPartRequest",
+    "DeleteDocumentationVersion": "DeleteDocumentationVersionRequest",
+    "DeleteDomainName": "DeleteDomainNameRequest",
+    "DeleteDomainNameAccessAssociation": "DeleteDomainNameAccessAssociationRequest",
+    "DeleteGatewayResponse": "DeleteGatewayResponseRequest",
+    "DeleteIntegration": "DeleteIntegrationRequest",
+    "DeleteIntegrationResponse": "DeleteIntegrationResponseRequest",
+    "DeleteMethod": "DeleteMethodRequest",
+    "DeleteMethodResponse": "DeleteMethodResponseRequest",
+    "DeleteModel": "DeleteModelRequest",
+    "DeleteRequestValidator": "DeleteRequestValidatorRequest",
+    "DeleteResource": "DeleteResourceRequest",
+    "DeleteRestApi": "DeleteRestApiRequest",
+    "DeleteStage": "DeleteStageRequest",
+    "DeleteUsagePlan": "DeleteUsagePlanRequest",
+    "DeleteUsagePlanKey": "DeleteUsagePlanKeyRequest",
+    "DeleteVpcLink": "DeleteVpcLinkRequest",
+    "FlushStageAuthorizersCache": "FlushStageAuthorizersCacheRequest",
+    "FlushStageCache": "FlushStageCacheRequest",
+    "GenerateClientCertificate": "GenerateClientCertificateRequest",
+    "GetAccount": "GetAccountRequest",
+    "GetApiKey": "GetApiKeyRequest",
+    "GetApiKeys": "GetApiKeysRequest",
+    "GetAuthorizer": "GetAuthorizerRequest",
+    "GetAuthorizers": "GetAuthorizersRequest",
+    "GetBasePathMapping": "GetBasePathMappingRequest",
+    "GetBasePathMappings": "GetBasePathMappingsRequest",
+    "GetClientCertificate": "GetClientCertificateRequest",
+    "GetClientCertificates": "GetClientCertificatesRequest",
+    "GetDeployment": "GetDeploymentRequest",
+    "GetDeployments": "GetDeploymentsRequest",
+    "GetDocumentationPart": "GetDocumentationPartRequest",
+    "GetDocumentationParts": "GetDocumentationPartsRequest",
+    "GetDocumentationVersion": "GetDocumentationVersionRequest",
+    "GetDocumentationVersions": "GetDocumentationVersionsRequest",
+    "GetDomainName": "GetDomainNameRequest",
+    "GetDomainNameAccessAssociations": "GetDomainNameAccessAssociationsRequest",
+    "GetDomainNames": "GetDomainNamesRequest",
+    "GetExport": "GetExportRequest",
+    "GetGatewayResponse": "GetGatewayResponseRequest",
+    "GetGatewayResponses": "GetGatewayResponsesRequest",
+    "GetIntegration": "GetIntegrationRequest",
+    "GetIntegrationResponse": "GetIntegrationResponseRequest",
+    "GetMethod": "GetMethodRequest",
+    "GetMethodResponse": "GetMethodResponseRequest",
+    "GetModel": "GetModelRequest",
+    "GetModelTemplate": "GetModelTemplateRequest",
+    "GetModels": "GetModelsRequest",
+    "GetRequestValidator": "GetRequestValidatorRequest",
+    "GetRequestValidators": "GetRequestValidatorsRequest",
+    "GetResource": "GetResourceRequest",
+    "GetResources": "GetResourcesRequest",
+    "GetRestApi": "GetRestApiRequest",
+    "GetRestApis": "GetRestApisRequest",
+    "GetSdk": "GetSdkRequest",
+    "GetSdkType": "GetSdkTypeRequest",
+    "GetSdkTypes": "GetSdkTypesRequest",
+    "GetStage": "GetStageRequest",
+    "GetStages": "GetStagesRequest",
+    "GetTags": "GetTagsRequest",
+    "GetUsage": "GetUsageRequest",
+    "GetUsagePlan": "GetUsagePlanRequest",
+    "GetUsagePlanKey": "GetUsagePlanKeyRequest",
+    "GetUsagePlanKeys": "GetUsagePlanKeysRequest",
+    "GetUsagePlans": "GetUsagePlansRequest",
+    "GetVpcLink": "GetVpcLinkRequest",
+    "GetVpcLinks": "GetVpcLinksRequest",
+    "ImportApiKeys": "ImportApiKeysRequest",
+    "ImportDocumentationParts": "ImportDocumentationPartsRequest",
+    "ImportRestApi": "ImportRestApiRequest",
+    "PutGatewayResponse": "PutGatewayResponseRequest",
+    "PutIntegration": "PutIntegrationRequest",
+    "PutIntegrationResponse": "PutIntegrationResponseRequest",
+    "PutMethod": "PutMethodRequest",
+    "PutMethodResponse": "PutMethodResponseRequest",
+    "PutRestApi": "PutRestApiRequest",
+    "RejectDomainNameAccessAssociation": "RejectDomainNameAccessAssociationRequest",
+    "TagResource": "TagResourceRequest",
+    "TestInvokeAuthorizer": "TestInvokeAuthorizerRequest",
+    "TestInvokeMethod": "TestInvokeMethodRequest",
+    "UntagResource": "UntagResourceRequest",
+    "UpdateAccount": "UpdateAccountRequest",
+    "UpdateApiKey": "UpdateApiKeyRequest",
+    "UpdateAuthorizer": "UpdateAuthorizerRequest",
+    "UpdateBasePathMapping": "UpdateBasePathMappingRequest",
+    "UpdateClientCertificate": "UpdateClientCertificateRequest",
+    "UpdateDeployment": "UpdateDeploymentRequest",
+    "UpdateDocumentationPart": "UpdateDocumentationPartRequest",
+    "UpdateDocumentationVersion": "UpdateDocumentationVersionRequest",
+    "UpdateDomainName": "UpdateDomainNameRequest",
+    "UpdateGatewayResponse": "UpdateGatewayResponseRequest",
+    "UpdateIntegration": "UpdateIntegrationRequest",
+    "UpdateIntegrationResponse": "UpdateIntegrationResponseRequest",
+    "UpdateMethod": "UpdateMethodRequest",
+    "UpdateMethodResponse": "UpdateMethodResponseRequest",
+    "UpdateModel": "UpdateModelRequest",
+    "UpdateRequestValidator": "UpdateRequestValidatorRequest",
+    "UpdateResource": "UpdateResourceRequest",
+    "UpdateRestApi": "UpdateRestApiRequest",
+    "UpdateStage": "UpdateStageRequest",
+    "UpdateUsage": "UpdateUsageRequest",
+    "UpdateUsagePlan": "UpdateUsagePlanRequest",
+    "UpdateVpcLink": "UpdateVpcLinkRequest"
+  },
+  "shapes": {
+    "AccessAssociationSourceType": {
+      "type": "string"
+    },
+    "ApiKeySourceType": {
+      "type": "string"
+    },
+    "ApiStage": {
+      "type": "structure",
+      "members": {
+        "apiId": "String",
+        "stage": "String",
+        "throttle": "MapOfApiStageThrottleSettings"
+      }
+    },
+    "AuthorizerType": {
+      "type": "string"
+    },
+    "Blob": {
+      "type": "blob"
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "CacheClusterSize": {
+      "type": "string"
+    },
+    "CanarySettings": {
+      "type": "structure",
+      "members": {
+        "percentTraffic": "Double",
+        "deploymentId": "String",
+        "stageVariableOverrides": "MapOfStringToString",
+        "useStageCache": "Boolean"
+      }
+    },
+    "ConnectionType": {
+      "type": "string"
+    },
+    "ContentHandlingStrategy": {
+      "type": "string"
+    },
+    "CreateApiKeyRequest": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "description": "String",
+        "enabled": "Boolean",
+        "generateDistinctId": "Boolean",
+        "value": "String",
+        "stageKeys": "ListOfStageKeys",
+        "customerId": "String",
+        "tags": "MapOfStringToString"
+      }
+    },
+    "CreateAuthorizerRequest": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "type": "AuthorizerType",
+        "providerARNs": "ListOfARNs",
+        "authType": "String",
+        "authorizerUri": "String",
+        "authorizerCredentials": "String",
+        "identitySource": "String",
+        "identityValidationExpression": "String",
+        "authorizerResultTtlInSeconds": "NullableInteger"
+      }
+    },
+    "CreateBasePathMappingRequest": {
+      "type": "structure",
+      "members": {
+        "basePath": "String",
+        "restApiId": "String",
+        "stage": "String"
+      }
+    },
+    "CreateDeploymentRequest": {
+      "type": "structure",
+      "members": {
+        "stageName": "String",
+        "stageDescription": "String",
+        "description": "String",
+        "cacheClusterEnabled": "NullableBoolean",
+        "cacheClusterSize": "CacheClusterSize",
+        "variables": "MapOfStringToString",
+        "canarySettings": "DeploymentCanarySettings",
+        "tracingEnabled": "NullableBoolean"
+      }
+    },
+    "CreateDocumentationPartRequest": {
+      "type": "structure",
+      "members": {
+        "location": "DocumentationPartLocation",
+        "properties": "String"
+      }
+    },
+    "CreateDocumentationVersionRequest": {
+      "type": "structure",
+      "members": {
+        "documentationVersion": "String",
+        "stageName": "String",
+        "description": "String"
+      }
+    },
+    "CreateDomainNameAccessAssociationRequest": {
+      "type": "structure",
+      "members": {
+        "domainNameArn": "String",
+        "accessAssociationSourceType": "AccessAssociationSourceType",
+        "accessAssociationSource": "String",
+        "tags": "MapOfStringToString"
+      }
+    },
+    "CreateDomainNameRequest": {
+      "type": "structure",
+      "members": {
+        "domainName": "String",
+        "certificateName": "String",
+        "certificateBody": "String",
+        "certificatePrivateKey": "String",
+        "certificateChain": "String",
+        "certificateArn": "String",
+        "regionalCertificateName": "String",
+        "regionalCertificateArn": "String",
+        "endpointConfiguration": "EndpointConfiguration",
+        "tags": "MapOfStringToString",
+        "securityPolicy": "SecurityPolicy",
+        "endpointAccessMode": "EndpointAccessMode",
+        "mutualTlsAuthentication": "MutualTlsAuthenticationInput",
+        "ownershipVerificationCertificateArn": "String",
+        "policy": "String",
+        "routingMode": "RoutingMode"
+      }
+    },
+    "CreateModelRequest": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "description": "String",
+        "schema": "String",
+        "contentType": "String"
+      }
+    },
+    "CreateRequestValidatorRequest": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "validateRequestBody": "Boolean",
+        "validateRequestParameters": "Boolean"
+      }
+    },
+    "CreateResourceRequest": {
+      "type": "structure",
+      "members": {
+        "pathPart": "String"
+      }
+    },
+    "CreateRestApiRequest": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "description": "String",
+        "version": "String",
+        "cloneFrom": "String",
+        "binaryMediaTypes": "ListOfString",
+        "minimumCompressionSize": "NullableInteger",
+        "apiKeySource": "ApiKeySourceType",
+        "endpointConfiguration": "EndpointConfiguration",
+        "policy": "String",
+        "tags": "MapOfStringToString",
+        "disableExecuteApiEndpoint": "Boolean",
+        "securityPolicy": "SecurityPolicy",
+        "endpointAccessMode": "EndpointAccessMode"
+      }
+    },
+    "CreateStageRequest": {
+      "type": "structure",
+      "members": {
+        "stageName": "String",
+        "deploymentId": "String",
+        "description": "String",
+        "cacheClusterEnabled": "Boolean",
+        "cacheClusterSize": "CacheClusterSize",
+        "variables": "MapOfStringToString",
+        "documentationVersion": "String",
+        "canarySettings": "CanarySettings",
+        "tracingEnabled": "Boolean",
+        "tags": "MapOfStringToString"
+      }
+    },
+    "CreateUsagePlanKeyRequest": {
+      "type": "structure",
+      "members": {
+        "keyId": "String",
+        "keyType": "String"
+      }
+    },
+    "CreateUsagePlanRequest": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "description": "String",
+        "apiStages": "ListOfApiStage",
+        "throttle": "ThrottleSettings",
+        "quota": "QuotaSettings",
+        "tags": "MapOfStringToString"
+      }
+    },
+    "CreateVpcLinkRequest": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "description": "String",
+        "targetArns": "ListOfString",
+        "tags": "MapOfStringToString"
+      }
+    },
+    "DeleteApiKeyRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteAuthorizerRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteBasePathMappingRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteClientCertificateRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteDeploymentRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteDocumentationPartRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteDocumentationVersionRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteDomainNameAccessAssociationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteDomainNameRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteGatewayResponseRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteIntegrationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteIntegrationResponseRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteMethodRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteMethodResponseRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteModelRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteRequestValidatorRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteResourceRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteRestApiRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteStageRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteUsagePlanKeyRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteUsagePlanRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteVpcLinkRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeploymentCanarySettings": {
+      "type": "structure",
+      "members": {
+        "percentTraffic": "Double",
+        "stageVariableOverrides": "MapOfStringToString",
+        "useStageCache": "Boolean"
+      }
+    },
+    "DocumentationPartLocation": {
+      "type": "structure",
+      "members": {
+        "type": "DocumentationPartType",
+        "path": "String",
+        "method": "String",
+        "statusCode": "DocumentationPartLocationStatusCode",
+        "name": "String"
+      }
+    },
+    "DocumentationPartLocationStatusCode": {
+      "type": "string"
+    },
+    "DocumentationPartType": {
+      "type": "string"
+    },
+    "Double": {
+      "type": "double"
+    },
+    "EndpointAccessMode": {
+      "type": "string"
+    },
+    "EndpointConfiguration": {
+      "type": "structure",
+      "members": {
+        "types": "ListOfEndpointType",
+        "ipAddressType": "IpAddressType",
+        "vpcEndpointIds": "ListOfString"
+      }
+    },
+    "EndpointType": {
+      "type": "string"
+    },
+    "FlushStageAuthorizersCacheRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "FlushStageCacheRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GenerateClientCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "description": "String",
+        "tags": "MapOfStringToString"
+      }
+    },
+    "GetAccountRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetApiKeyRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetApiKeysRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetAuthorizerRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetAuthorizersRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetBasePathMappingRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetBasePathMappingsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetClientCertificateRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetClientCertificatesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDeploymentRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDeploymentsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDocumentationPartRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDocumentationPartsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDocumentationVersionRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDocumentationVersionsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDomainNameAccessAssociationsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDomainNameRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDomainNamesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetExportRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetGatewayResponseRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetGatewayResponsesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetIntegrationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetIntegrationResponseRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetMethodRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetMethodResponseRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetModelRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetModelTemplateRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetModelsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetRequestValidatorRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetRequestValidatorsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetResourceRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetResourcesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetRestApiRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetRestApisRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetSdkRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetSdkTypeRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetSdkTypesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetStageRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetStagesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetTagsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetUsagePlanKeyRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetUsagePlanKeysRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetUsagePlanRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetUsagePlansRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetUsageRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetVpcLinkRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetVpcLinksRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ImportApiKeysRequest": {
+      "type": "structure",
+      "members": {
+        "body": "Blob"
+      }
+    },
+    "ImportDocumentationPartsRequest": {
+      "type": "structure",
+      "members": {
+        "body": "Blob"
+      }
+    },
+    "ImportRestApiRequest": {
+      "type": "structure",
+      "members": {
+        "body": "Blob"
+      }
+    },
+    "Integer": {
+      "type": "integer"
+    },
+    "IntegrationType": {
+      "type": "string"
+    },
+    "IpAddressType": {
+      "type": "string"
+    },
+    "ListOfARNs": {
+      "type": "list",
+      "member": "ProviderARN"
+    },
+    "ListOfApiStage": {
+      "type": "list",
+      "member": "ApiStage"
+    },
+    "ListOfEndpointType": {
+      "type": "list",
+      "member": "EndpointType"
+    },
+    "ListOfPatchOperation": {
+      "type": "list",
+      "member": "PatchOperation"
+    },
+    "ListOfStageKeys": {
+      "type": "list",
+      "member": "StageKey"
+    },
+    "ListOfString": {
+      "type": "list",
+      "member": "String"
+    },
+    "MapOfApiStageThrottleSettings": {
+      "type": "map",
+      "value": "ThrottleSettings"
+    },
+    "MapOfStringToBoolean": {
+      "type": "map",
+      "value": "NullableBoolean"
+    },
+    "MapOfStringToList": {
+      "type": "map",
+      "value": "ListOfString"
+    },
+    "MapOfStringToString": {
+      "type": "map",
+      "value": "String"
+    },
+    "MutualTlsAuthenticationInput": {
+      "type": "structure",
+      "members": {
+        "truststoreUri": "String",
+        "truststoreVersion": "String"
+      }
+    },
+    "NullableBoolean": {
+      "type": "boolean"
+    },
+    "NullableInteger": {
+      "type": "integer"
+    },
+    "Op": {
+      "type": "string"
+    },
+    "PatchOperation": {
+      "type": "structure",
+      "members": {
+        "op": "Op",
+        "path": "String",
+        "value": "String",
+        "from": "String"
+      }
+    },
+    "ProviderARN": {
+      "type": "string"
+    },
+    "PutGatewayResponseRequest": {
+      "type": "structure",
+      "members": {
+        "statusCode": "StatusCode",
+        "responseParameters": "MapOfStringToString",
+        "responseTemplates": "MapOfStringToString"
+      }
+    },
+    "PutIntegrationRequest": {
+      "type": "structure",
+      "members": {
+        "type": "IntegrationType",
+        "integrationHttpMethod": "String",
+        "uri": "String",
+        "connectionType": "ConnectionType",
+        "connectionId": "String",
+        "credentials": "String",
+        "requestParameters": "MapOfStringToString",
+        "requestTemplates": "MapOfStringToString",
+        "passthroughBehavior": "String",
+        "cacheNamespace": "String",
+        "cacheKeyParameters": "ListOfString",
+        "contentHandling": "ContentHandlingStrategy",
+        "timeoutInMillis": "NullableInteger",
+        "tlsConfig": "TlsConfig",
+        "responseTransferMode": "ResponseTransferMode",
+        "integrationTarget": "String"
+      }
+    },
+    "PutIntegrationResponseRequest": {
+      "type": "structure",
+      "members": {
+        "selectionPattern": "String",
+        "responseParameters": "MapOfStringToString",
+        "responseTemplates": "MapOfStringToString",
+        "contentHandling": "ContentHandlingStrategy"
+      }
+    },
+    "PutMethodRequest": {
+      "type": "structure",
+      "members": {
+        "authorizationType": "String",
+        "authorizerId": "String",
+        "apiKeyRequired": "Boolean",
+        "operationName": "String",
+        "requestParameters": "MapOfStringToBoolean",
+        "requestModels": "MapOfStringToString",
+        "requestValidatorId": "String",
+        "authorizationScopes": "ListOfString"
+      }
+    },
+    "PutMethodResponseRequest": {
+      "type": "structure",
+      "members": {
+        "responseParameters": "MapOfStringToBoolean",
+        "responseModels": "MapOfStringToString"
+      }
+    },
+    "PutRestApiRequest": {
+      "type": "structure",
+      "members": {
+        "body": "Blob"
+      }
+    },
+    "QuotaPeriodType": {
+      "type": "string"
+    },
+    "QuotaSettings": {
+      "type": "structure",
+      "members": {
+        "limit": "Integer",
+        "offset": "Integer",
+        "period": "QuotaPeriodType"
+      }
+    },
+    "RejectDomainNameAccessAssociationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ResponseTransferMode": {
+      "type": "string"
+    },
+    "RoutingMode": {
+      "type": "string"
+    },
+    "SecurityPolicy": {
+      "type": "string"
+    },
+    "StageKey": {
+      "type": "structure",
+      "members": {
+        "restApiId": "String",
+        "stageName": "String"
+      }
+    },
+    "StatusCode": {
+      "type": "string"
+    },
+    "String": {
+      "type": "string"
+    },
+    "TagResourceRequest": {
+      "type": "structure",
+      "members": {
+        "tags": "MapOfStringToString"
+      }
+    },
+    "TestInvokeAuthorizerRequest": {
+      "type": "structure",
+      "members": {
+        "headers": "MapOfStringToString",
+        "multiValueHeaders": "MapOfStringToList",
+        "pathWithQueryString": "String",
+        "body": "String",
+        "stageVariables": "MapOfStringToString",
+        "additionalContext": "MapOfStringToString"
+      }
+    },
+    "TestInvokeMethodRequest": {
+      "type": "structure",
+      "members": {
+        "pathWithQueryString": "String",
+        "body": "String",
+        "headers": "MapOfStringToString",
+        "multiValueHeaders": "MapOfStringToList",
+        "clientCertificateId": "String",
+        "stageVariables": "MapOfStringToString"
+      }
+    },
+    "ThrottleSettings": {
+      "type": "structure",
+      "members": {
+        "burstLimit": "Integer",
+        "rateLimit": "Double"
+      }
+    },
+    "TlsConfig": {
+      "type": "structure",
+      "members": {
+        "insecureSkipVerification": "Boolean"
+      }
+    },
+    "UntagResourceRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "UpdateAccountRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateApiKeyRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateAuthorizerRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateBasePathMappingRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateClientCertificateRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateDeploymentRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateDocumentationPartRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateDocumentationVersionRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateDomainNameRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateGatewayResponseRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateIntegrationRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateIntegrationResponseRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateMethodRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateMethodResponseRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateModelRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateRequestValidatorRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateResourceRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateRestApiRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateStageRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateUsagePlanRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateUsageRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    },
+    "UpdateVpcLinkRequest": {
+      "type": "structure",
+      "members": {
+        "patchOperations": "ListOfPatchOperation"
+      }
+    }
+  }
+}
