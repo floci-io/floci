@@ -6,9 +6,12 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /** Translates the supported explicit REST API authentication controls into inline OpenAPI. */
 final class SamRestApiAuth {
@@ -17,6 +20,7 @@ final class SamRestApiAuth {
             "get", "put", "post", "delete", "options", "head", "patch", "trace",
             "x-amazon-apigateway-any-method");
     private static final Set<String> SUPPORTED = Set.of("DefaultAuthorizer", "ApiKeyRequired");
+    private static final Pattern OPENAPI_3 = Pattern.compile("3(\\.\\d)(\\.\\d)?");
 
     private final ObjectMapper mapper;
 
@@ -51,14 +55,26 @@ final class SamRestApiAuth {
         if (!(body instanceof ObjectNode document) || !body.path("paths").isObject()) {
             throw invalid("Auth requires an inline DefinitionBody with a paths object.");
         }
-        ObjectNode definitions;
-        if ("2.0".equals(body.path("swagger").asText())) {
-            definitions = object(document, "securityDefinitions");
-        } else if (body.path("openapi").asText().startsWith("3.0.")) {
-            definitions = object(object(document, "components"), "securitySchemes");
-        } else {
+        if (!iam && !keyRequired) {
+            // Like SAM, an Auth that selects no default, such as ApiKeyRequired: false alone,
+            // leaves the document as written once it has checked what SAM checks for any Auth.
+            requireSamDocument(document);
+            return;
+        }
+        // The template engine keeps only an intrinsic function's result, and the importer reads a
+        // document naming both versions as OpenAPI 3: either way the defaults would be lost.
+        if (CloudFormationTemplateEngine.callsIntrinsic(document)) {
+            throw invalid("Auth requires a DefinitionBody written inline, not as an intrinsic function.");
+        }
+        if (document.has("swagger") && document.has("openapi")) {
+            throw invalid("Auth requires a DefinitionBody that declares swagger or openapi, not both.");
+        }
+        boolean swagger = "2.0".equals(body.path("swagger").asText());
+        if (!swagger && !body.path("openapi").asText().startsWith("3.0.")) {
             throw invalid("Auth currently supports Swagger 2.0 and OpenAPI 3.0 only.");
         }
+        ObjectNode definitions = swagger ? object(document, "securityDefinitions")
+                : object(object(document, "components"), "securitySchemes");
         if (iam) {
             addScheme(definitions, "AWS_IAM", true);
         }
@@ -67,31 +83,105 @@ final class SamRestApiAuth {
         }
         Iterator<Map.Entry<String, JsonNode>> paths = document.path("paths").fields();
         while (paths.hasNext()) {
-            JsonNode path = paths.next().getValue();
-            if (!path.isObject() || path.has("$ref")) {
-                throw invalid("Auth requires inline path objects.");
-            }
-            Iterator<Map.Entry<String, JsonNode>> methods = path.fields();
-            while (methods.hasNext()) {
-                Map.Entry<String, JsonNode> method = methods.next();
-                if (!METHODS.contains(method.getKey())) {
-                    continue;
+            for (JsonNode path : branches(paths.next().getValue())) {
+                if (!path.isObject() || path.has("$ref")) {
+                    throw invalid("Auth requires inline path objects.");
                 }
-                if (!(method.getValue() instanceof ObjectNode operation)) {
-                    throw invalid("Auth requires inline operation objects.");
+                Iterator<Map.Entry<String, JsonNode>> methods = path.fields();
+                while (methods.hasNext()) {
+                    Map.Entry<String, JsonNode> method = methods.next();
+                    if (!METHODS.contains(method.getKey())) {
+                        continue;
+                    }
+                    for (JsonNode branch : conditionalContents(method.getValue())) {
+                        // SAM reads one level of Fn::If around an operation and skips a branch without
+                        // an integration, so a nested Fn::If there is left as written, without defaults.
+                        if (branch.has("Fn::If")) {
+                            continue;
+                        }
+                        if (!(branch instanceof ObjectNode operation)) {
+                            throw invalid("Auth requires inline operation objects.");
+                        }
+                        applyDefaults(operation, definitions, iam, keyRequired);
+                    }
                 }
-                JsonNode existing = operation.has("security")
-                        ? operation.get("security") : document.path("security");
-                ArrayNode security = security(existing, definitions);
-                if (iam && !hasScheme(security, "AWS_IAM")) {
-                    security.add(mapper.createObjectNode().set("AWS_IAM", mapper.createArrayNode()));
-                }
-                if (keyRequired && !hasScheme(security, "api_key")) {
-                    security.add(mapper.createObjectNode().set("api_key", mapper.createArrayNode()));
-                }
-                operation.set("security", security);
             }
         }
+    }
+
+    private void applyDefaults(ObjectNode operation, ObjectNode definitions, boolean iam, boolean keyRequired) {
+        // SAM starts from the operation's own security, never the document's root security.
+        ArrayNode security = security(operation.path("security"), definitions);
+        if (iam && !hasScheme(security, "AWS_IAM")) {
+            security.add(mapper.createObjectNode().set("AWS_IAM", mapper.createArrayNode()));
+        }
+        if (keyRequired && !hasScheme(security, "api_key")) {
+            security.add(mapper.createObjectNode().set("api_key", mapper.createArrayNode()));
+        }
+        operation.set("security", security);
+    }
+
+    /**
+     * The checks SAM makes for any non-empty Auth before it applies a default: SwaggerEditor.is_valid
+     * wants a truthy swagger or an openapi of 3.x, and the SwaggerEditor constructor wants every
+     * paths entry, and each branch of an {@code Fn::If} around one, to be an object.
+     */
+    private void requireSamDocument(ObjectNode document) {
+        JsonNode openapi = document.path("openapi");
+        if (!SamTransformProcessor.isTruthy(document.path("swagger"))
+                && !(SamTransformProcessor.isTruthy(openapi) && OPENAPI_3.matcher(openapi.asText()).matches())) {
+            throw invalid("Auth requires a Swagger or OpenAPI 3 DefinitionBody.");
+        }
+        Iterator<JsonNode> paths = document.path("paths").elements();
+        while (paths.hasNext()) {
+            for (JsonNode path : conditionalContents(paths.next())) {
+                if (!path.isObject()) {
+                    throw invalid("Auth requires inline path objects.");
+                }
+            }
+        }
+    }
+
+    /**
+     * The values a path item may take when a default is added to its operations: as
+     * {@link #conditionalContents}, refusing a nested {@code Fn::If}, as SAM does once it reads the
+     * methods of the inner one. The template engine keeps only the chosen branch, so a default must
+     * be written inside each branch, not beside the {@code Fn::If}.
+     */
+    private List<JsonNode> branches(JsonNode node) {
+        List<JsonNode> branches = conditionalContents(node);
+        for (JsonNode branch : branches) {
+            if (branch.has("Fn::If")) {
+                throw invalid("Auth does not support a nested Fn::If in paths.");
+            }
+        }
+        return branches;
+    }
+
+    /**
+     * SAM's get_conditional_contents: both branches of an {@code Fn::If} other than
+     * {@code AWS::NoValue}, or the node itself.
+     */
+    private List<JsonNode> conditionalContents(JsonNode node) {
+        if (!node.has("Fn::If")) {
+            return List.of(node);
+        }
+        JsonNode arguments = node.get("Fn::If");
+        if (!arguments.isArray()) {
+            throw invalid("Fn::If must be a list.");
+        }
+        List<JsonNode> branches = new ArrayList<>();
+        for (int i = 1; i < arguments.size(); i++) {
+            JsonNode branch = arguments.get(i);
+            if (!isNoValue(branch)) {
+                branches.add(branch);
+            }
+        }
+        return branches;
+    }
+
+    private static boolean isNoValue(JsonNode node) {
+        return node.isObject() && node.size() == 1 && "AWS::NoValue".equals(node.path("Ref").asText());
     }
 
     private ArrayNode security(JsonNode value, ObjectNode definitions) {
@@ -148,7 +238,8 @@ final class SamRestApiAuth {
     }
 
     private boolean isScheme(JsonNode scheme, boolean iam) {
-        return "apiKey".equals(scheme.path("type").asText())
+        return !CloudFormationTemplateEngine.callsIntrinsic(scheme)
+                && "apiKey".equals(scheme.path("type").asText())
                 && "header".equals(scheme.path("in").asText())
                 && (iam ? "Authorization" : "x-api-key").equalsIgnoreCase(scheme.path("name").asText())
                 && !scheme.has("x-amazon-apigateway-authorizer")
@@ -162,6 +253,12 @@ final class SamRestApiAuth {
         }
         if (!(parent.get(name) instanceof ObjectNode result)) {
             throw invalid(name + " must be an object.");
+        }
+        // The template engine keeps only an intrinsic function's result, so a generated scheme
+        // written beside one would be dropped and the operations would name a scheme the importer
+        // ignores.
+        if (CloudFormationTemplateEngine.callsIntrinsic(result)) {
+            throw invalid(name + " must be written inline, not as an intrinsic function.");
         }
         return result;
     }

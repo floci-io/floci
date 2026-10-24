@@ -1545,7 +1545,7 @@ class SamTransformProcessor {
     }
 
     /** Python truthiness, which SAM applies to an optional property before reading it. */
-    private static boolean isTruthy(JsonNode node) {
+    static boolean isTruthy(JsonNode node) {
         if (node.isMissingNode() || node.isNull()) {
             return false;
         }
