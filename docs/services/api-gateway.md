@@ -592,7 +592,8 @@ Usage plan product codes are not supported, so an `add`, `replace` or `remove` o
 `BadRequestException`.
 Values are validated with API Gateway's messages: a quota needs a `DAY`, `WEEK` or `MONTH` period and
 an offset inside it, a per-method throttle needs a plan throttle, and adding a stage the plan already
-lists is a `ConflictException`.
+lists is a `ConflictException`. `AWS::ApiGateway::UsagePlan` maps its `ApiStages`, with each stage's
+`Throttle`, and its `Throttle` and `Quota` the same way, and an update replaces them.
 
 Floci does not check that a stage's API, stage or method exists, does not filter `GetUsagePlans` by
 `keyId`, and does not enforce throttles or quotas.

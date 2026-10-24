@@ -132,8 +132,8 @@ public class ApiGatewayService implements ResourceProvider {
     private final Object domainNameLock = new Object();
     private final Object vpcLinkTagLock = new Object();
     /**
-     * Guards a usage plan patch. A patch writes back the stages, throttle and quota it read, so two at
-     * once would restore one another's stale values.
+     * Guards a usage plan patch and a CloudFormation limits replacement. Each writes back the stages,
+     * throttle and quota it read, so two at once would restore one another's stale values.
      */
     private final Object usagePlanLock = new Object();
     private final TlsCertificateManager certificateManager;
@@ -1622,6 +1622,19 @@ public class ApiGatewayService implements ResourceProvider {
         plan.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
         usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
         return plan;
+    }
+
+    /**
+     * Replaces a usage plan's stages, throttle and quota wholesale. CloudFormation drives them to the
+     * template's desired state on update, as it does tags, so a stage the template dropped has to go.
+     */
+    public UsagePlan replaceUsagePlanLimits(String region, String usagePlanId, UsagePlan.Limits limits) {
+        synchronized (usagePlanLock) {
+            UsagePlan plan = getUsagePlan(region, usagePlanId);
+            plan.applyLimits(limits);
+            usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
+            return plan;
+        }
     }
 
     public void tagUsagePlan(String region, String usagePlanId, Map<String, String> tags) {

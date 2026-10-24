@@ -55,6 +55,7 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
             return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         return new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId);
     }
 
@@ -150,11 +151,80 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
     }
 
     @Test
-    void usagePlanUpdatePatchesNameDescriptionAndStagesInPlace() {
+    void usagePlanCreateSendsThrottleQuotaAndStageThrottles() {
+        when(apiGateway.createUsagePlan(eq(REGION), anyMap())).thenReturn(plan("plan-1", "gold", null, Map.of()));
+        ObjectNode props = planProps("gold", null, null);
+        props.putObject("Throttle").put("BurstLimit", 10).put("RateLimit", 5);
+        props.putObject("Quota").put("Limit", 1000).put("Offset", 2).put("Period", "WEEK");
+        ObjectNode stage = ((ArrayNode) props.get("ApiStages")).addObject().put("ApiId", "api1").put("Stage", "dev");
+        stage.putObject("Throttle").putObject("/pets/GET").put("BurstLimit", 3).put("RateLimit", 1.5);
+
+        provisioner.provision(resource(PLAN, "Plan", null), props, ctx());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> request = ArgumentCaptor.forClass(Map.class);
+        verify(apiGateway).createUsagePlan(eq(REGION), request.capture());
+        assertEquals(Map.of("burstLimit", "10", "rateLimit", "5"), request.getValue().get("throttle"));
+        assertEquals(Map.of("limit", "1000", "offset", "2", "period", "WEEK"), request.getValue().get("quota"));
+        assertEquals(List.of(Map.of("apiId", "api1", "stage", "dev",
+                        "throttle", Map.of("/pets/GET", Map.of("burstLimit", "3", "rateLimit", "1.5")))),
+                request.getValue().get("apiStages"));
+    }
+
+    @Test
+    void aQuotaTheServiceWouldRefuseLeavesThePlanUntouched() {
+        UsagePlan existing = plan("plan-1", "gold", null, Map.of());
+        when(apiGateway.getUsagePlan(REGION, "plan-1")).thenReturn(existing);
+        ObjectNode props = planProps("platinum", null, null);
+        props.putObject("Quota").put("Limit", 10);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(PLAN, "Plan", "plan-1"), props, ctx("plan-1")));
+
+        assertEquals("BadRequestException", e.getErrorCode());
+        verify(apiGateway, never()).updateUsagePlan(any(), any(), anyList());
+        verify(apiGateway, never()).replaceUsagePlanLimits(any(), any(), any());
+    }
+
+    @Test
+    void aBlankQuotaOffsetIsRefusedRatherThanReadAsZero() {
+        UsagePlan existing = plan("plan-1", "gold", null, Map.of());
+        existing.setQuota(new UsagePlan.Quota(10, 3, "WEEK"));
+        when(apiGateway.getUsagePlan(REGION, "plan-1")).thenReturn(existing);
+        ObjectNode props = planProps("gold", null, null);
+        props.putObject("Quota").put("Limit", 10).put("Offset", "").put("Period", "WEEK");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(PLAN, "Plan", "plan-1"), props, ctx("plan-1")));
+
+        assertEquals("Usage Plan quota offset must be numeric and less than the number of time units in the period",
+                e.getMessage());
+        verify(apiGateway, never()).replaceUsagePlanLimits(any(), any(), any());
+    }
+
+    @Test
+    void aBurstLimitThatIsAListIsRefusedRatherThanReadAsZero() {
+        UsagePlan existing = plan("plan-1", "gold", null, Map.of());
+        existing.setThrottle(new UsagePlan.Throttle(20, 10.0));
+        when(apiGateway.getUsagePlan(REGION, "plan-1")).thenReturn(existing);
+        ObjectNode props = planProps("gold", null, null);
+        props.putObject("Throttle").put("RateLimit", 5).putArray("BurstLimit");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(PLAN, "Plan", "plan-1"), props, ctx("plan-1")));
+
+        assertEquals("Usage Plan throttle rate limit and burst limit must be numeric and greater than zero",
+                e.getMessage());
+        verify(apiGateway, never()).replaceUsagePlanLimits(any(), any(), any());
+    }
+
+    @Test
+    void usagePlanUpdatePatchesNameAndDescriptionAndReplacesTheStages() {
         UsagePlan existing = plan("plan-1", "gold", "old", Map.of(),
                 new UsagePlan.ApiStage("api1", "dev"), new UsagePlan.ApiStage("api1", "test"));
         when(apiGateway.getUsagePlan(REGION, "plan-1")).thenReturn(existing);
         when(apiGateway.updateUsagePlan(eq(REGION), eq("plan-1"), anyList())).thenReturn(existing);
+        when(apiGateway.replaceUsagePlanLimits(eq(REGION), eq("plan-1"), any())).thenReturn(existing);
         StackResource r = resource(PLAN, "Plan", "plan-1");
 
         provisioner.provision(r, planProps("platinum", "new", null, "api1:dev", "api1:prod"), ctx("plan-1"));
@@ -166,9 +236,9 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
         List<Map<String, String>> ops = patches.getValue();
         assertTrue(ops.contains(Map.of("op", "replace", "path", "/name", "value", "platinum")), ops.toString());
         assertTrue(ops.contains(Map.of("op", "replace", "path", "/description", "value", "new")), ops.toString());
-        assertTrue(ops.contains(Map.of("op", "remove", "path", "/apiStages", "value", "api1:test")), ops.toString());
-        assertTrue(ops.contains(Map.of("op", "add", "path", "/apiStages", "value", "api1:prod")), ops.toString());
-        assertEquals(4, ops.size(), ops.toString());
+        assertEquals(2, ops.size(), ops.toString());
+        verify(apiGateway).replaceUsagePlanLimits(REGION, "plan-1", new UsagePlan.Limits(
+                List.of(new UsagePlan.ApiStage("api1", "dev"), new UsagePlan.ApiStage("api1", "prod")), null, null));
         assertEquals("plan-1", r.getPhysicalId());
         assertEquals("plan-1", r.getAttributes().get("Id"));
     }
@@ -183,6 +253,7 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
         verify(apiGateway, never()).createUsagePlan(any(), anyMap());
         verify(apiGateway, never()).updateUsagePlan(any(), any(), anyList());
         verify(apiGateway, never()).replaceUsagePlanTags(any(), any(), anyMap());
+        verify(apiGateway, never()).replaceUsagePlanLimits(any(), any(), any());
     }
 
     @Test
@@ -322,6 +393,75 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
 
         assertThrows(AwsException.class, () -> provisioner.provision(resource(PLAN_KEY, "PlanKey", null), props, ctx()));
         verify(apiGateway, never()).createUsagePlanKey(any(), any(), anyMap());
+    }
+
+    private void assertCreateRefused(ObjectNode props, String message) {
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(PLAN, "Plan", null), props, ctx()));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals(message, e.getMessage());
+        verify(apiGateway, never()).createUsagePlan(any(), anyMap());
+    }
+
+    @Test
+    void aPlanThrottleThatIsNotAnObjectIsRefused() {
+        ObjectNode props = planProps("gold", null, null);
+        props.putArray("Throttle").addObject().put("BurstLimit", 10);
+
+        assertCreateRefused(props, "Property [Throttle] expected type: JSONObject, found: JSONArray");
+    }
+
+    @Test
+    void aQuotaThatIsNotAnObjectIsRefused() {
+        ObjectNode props = planProps("gold", null, null);
+        props.put("Quota", "1000 a month");
+
+        assertCreateRefused(props, "Property [Quota] expected type: JSONObject, found: String");
+    }
+
+    @Test
+    void anApiStagesEntryThatIsNotAnObjectIsRefusedByItsIndex() {
+        ObjectNode props = planProps("gold", null, null, "api1:dev");
+        ((ArrayNode) props.get("ApiStages")).add("api1:prod");
+
+        assertCreateRefused(props, "Property [1] expected type: JSONObject, found: String");
+    }
+
+    @Test
+    void aStageThrottleThatIsNotAnObjectIsRefused() {
+        ObjectNode props = planProps("gold", null, null);
+        props.putObject("Throttle").put("BurstLimit", 10).put("RateLimit", 5);
+        ((ArrayNode) props.get("ApiStages")).addObject().put("ApiId", "api1").put("Stage", "dev")
+                .putArray("Throttle").addObject().put("BurstLimit", 3);
+
+        assertCreateRefused(props, "Property [Throttle] expected type: JSONObject, found: JSONArray");
+    }
+
+    @Test
+    void aMethodThrottleSettingThatIsNotAnObjectIsRefused() {
+        ObjectNode props = planProps("gold", null, null);
+        props.putObject("Throttle").put("BurstLimit", 10).put("RateLimit", 5);
+        ((ArrayNode) props.get("ApiStages")).addObject().put("ApiId", "api1").put("Stage", "dev")
+                .putObject("Throttle").put("/pets/GET", 3);
+
+        assertCreateRefused(props, "Property [/pets/GET] expected type: JSONObject, found: String");
+    }
+
+    @Test
+    void anUpdateWithAThrottleThatIsNotAnObjectLeavesThePlanUntouched() {
+        UsagePlan existing = plan("plan-1", "gold", null, Map.of());
+        when(apiGateway.getUsagePlan(REGION, "plan-1")).thenReturn(existing);
+        ObjectNode props = planProps("platinum", null, null);
+        props.put("Throttle", "fast");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(PLAN, "Plan", "plan-1"), props, ctx("plan-1")));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("Property [Throttle] expected type: JSONObject, found: String", e.getMessage());
+        verify(apiGateway, never()).updateUsagePlan(any(), any(), anyList());
+        verify(apiGateway, never()).replaceUsagePlanLimits(any(), any(), any());
     }
 
     @Test

@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeType;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
+import io.github.hectorvent.floci.services.apigateway.UsagePlanLimits;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -13,6 +15,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -23,9 +26,9 @@ import java.util.Set;
  * {@code AWS::ApiGateway::UsagePlanKey}, backed by {@link ApiGatewayService}.
  *
  * <p>A usage plan's {@code Ref} and {@code Fn::GetAtt Id} are the plan id. Every plan property is
- * mutable, so an update patches the plan in place, adding and removing API stages as the template
- * moves them. Throttle and Quota, on the plan and per stage, have no counterpart in
- * {@link UsagePlan} and are accepted without effect.
+ * mutable, so an update patches the name and description in place and replaces the API stages,
+ * throttle and quota together when any of them changes. Throttle and quota are stored and reported,
+ * not enforced.
  *
  * <p>A usage plan key's {@code Ref} and {@code Fn::GetAtt Id} are {@code <keyId>:<usagePlanId>},
  * as on AWS. All three of its properties are createOnly, so a change to any of them is refused as a
@@ -84,23 +87,17 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
         if (name == null || name.isBlank()) {
             name = ctx.generatePhysicalName(r.getLogicalId(), GENERATED_NAME_MAX, false);
         }
-        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> request = limitsRequest(props, ctx);
         request.put("name", name);
         request.put("description", ctx.resolveOptional(props, "Description"));
-        List<Map<String, Object>> apiStages = new ArrayList<>();
-        for (UsagePlan.ApiStage stage : apiStages(props, ctx)) {
-            Map<String, Object> entry = new HashMap<>();
-            entry.put("apiId", stage.apiId());
-            entry.put("stage", stage.stage());
-            apiStages.add(entry);
-        }
-        request.put("apiStages", apiStages);
         request.put("tags", ctx.resolveTags(props, "Tags"));
 
         recordPlan(r, apiGatewayService.createUsagePlan(ctx.region(), request));
     }
 
     private void updateUsagePlan(StackResource r, UsagePlan existing, JsonNode props, ProvisionContext ctx) {
+        // Validated before anything changes, so a template the service would refuse leaves the plan as it was.
+        UsagePlan.Limits desiredLimits = UsagePlanLimits.fromRequest(limitsRequest(props, ctx));
         List<Map<String, String>> patches = new ArrayList<>();
         // A template that omits UsagePlanName keeps whatever name the plan was created with.
         String name = ctx.resolveOptional(props, "UsagePlanName");
@@ -112,23 +109,14 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
             // The service rejects a null patch value, so a dropped Description clears to "".
             patches.add(patch("replace", "/description", description == null ? "" : description));
         }
-        // ApiStages is a set the template owns outright: stages it no longer lists come off the
-        // plan, stages it adds go on. The service models that as add/remove of "apiId:stage".
-        List<UsagePlan.ApiStage> desired = apiStages(props, ctx);
-        List<UsagePlan.ApiStage> current = List.copyOf(existing.getApiStages());
-        for (UsagePlan.ApiStage stage : current) {
-            if (!desired.contains(stage)) {
-                patches.add(patch("remove", "/apiStages", stage.apiId() + KEY_ID_SEPARATOR + stage.stage()));
-            }
-        }
-        for (UsagePlan.ApiStage stage : desired) {
-            if (!current.contains(stage)) {
-                patches.add(patch("add", "/apiStages", stage.apiId() + KEY_ID_SEPARATOR + stage.stage()));
-            }
-        }
         UsagePlan plan = patches.isEmpty()
                 ? existing
                 : apiGatewayService.updateUsagePlan(ctx.region(), existing.getId(), patches);
+        // ApiStages, Throttle and Quota belong to the template outright, so what it no longer lists comes
+        // off the plan. They are replaced together, and only when one of them changed.
+        if (!desiredLimits.equals(plan.limits())) {
+            plan = apiGatewayService.replaceUsagePlanLimits(ctx.region(), plan.getId(), desiredLimits);
+        }
 
         // The stored tags never include the reserved id-override keys (createUsagePlan strips them),
         // so the comparison ignores them too; the service strips them again on the way in.
@@ -139,32 +127,93 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
         recordPlan(r, plan);
     }
 
-    /** The template's ApiStages as (apiId, stage) pairs, in template order. */
-    private static List<UsagePlan.ApiStage> apiStages(JsonNode props, ProvisionContext ctx) {
-        List<UsagePlan.ApiStage> stages = new ArrayList<>();
-        if (props == null || !props.has("ApiStages")) {
+    /**
+     * The template's ApiStages, Throttle and Quota in CreateUsagePlan's request shape, which
+     * {@link UsagePlanLimits#fromRequest} validates for create and update alike.
+     */
+    private static Map<String, Object> limitsRequest(JsonNode props, ProvisionContext ctx) {
+        Map<String, Object> request = new HashMap<>();
+        request.put("apiStages", apiStages(props, ctx));
+        JsonNode throttle = resolved(props, "Throttle", ctx);
+        if (throttle != null) {
+            CfnPropertyTypes.requireType("Throttle", throttle, JsonNodeType.OBJECT);
+            request.put("throttle", throttle(throttle, ctx));
+        }
+        JsonNode quota = resolved(props, "Quota", ctx);
+        if (quota != null) {
+            CfnPropertyTypes.requireType("Quota", quota, JsonNodeType.OBJECT);
+            Map<String, Object> settings = new HashMap<>();
+            putResolved(settings, "limit", quota.path("Limit"), ctx);
+            putResolved(settings, "offset", quota.path("Offset"), ctx);
+            putResolved(settings, "period", quota.path("Period"), ctx);
+            request.put("quota", settings);
+        }
+        return request;
+    }
+
+    /** The template's ApiStages in template order, each with its per-method Throttle. */
+    private static List<Map<String, Object>> apiStages(JsonNode props, ProvisionContext ctx) {
+        List<Map<String, Object>> stages = new ArrayList<>();
+        JsonNode resolved = resolved(props, "ApiStages", ctx);
+        if (resolved == null) {
             return stages;
         }
-        JsonNode resolved = ctx.engine().resolveNode(props.get("ApiStages"));
-        if (resolved == null || resolved.isNull()) {
-            return stages;
-        }
-        if (!resolved.isArray()) {
-            throw new AwsException("ValidationError", "ApiStages of a usage plan must be a list.", 400);
-        }
-        for (JsonNode entry : resolved) {
+        CfnPropertyTypes.requireType("ApiStages", resolved, JsonNodeType.ARRAY);
+        for (int i = 0; i < resolved.size(); i++) {
+            JsonNode entry = resolved.get(i);
+            // Template validation names a list entry by its index.
+            CfnPropertyTypes.requireType(String.valueOf(i), entry, JsonNodeType.OBJECT);
             String apiId = blankToNull(ctx.engine().resolve(entry.path("ApiId")));
             String stage = blankToNull(ctx.engine().resolve(entry.path("Stage")));
             if (apiId == null || stage == null) {
                 throw new AwsException("ValidationError",
                         "Every ApiStages entry of a usage plan needs both ApiId and Stage.", 400);
             }
-            UsagePlan.ApiStage apiStage = new UsagePlan.ApiStage(apiId, stage);
-            if (!stages.contains(apiStage)) {
-                stages.add(apiStage);
+            Map<String, Object> apiStage = new HashMap<>();
+            apiStage.put("apiId", apiId);
+            apiStage.put("stage", stage);
+            JsonNode methods = entry.path("Throttle");
+            if (!methods.isMissingNode() && !methods.isNull()) {
+                CfnPropertyTypes.requireType("Throttle", methods, JsonNodeType.OBJECT);
+                Map<String, Object> throttles = new LinkedHashMap<>();
+                for (Map.Entry<String, JsonNode> method : methods.properties()) {
+                    CfnPropertyTypes.requireType(method.getKey(), method.getValue(), JsonNodeType.OBJECT);
+                    throttles.put(method.getKey(), throttle(method.getValue(), ctx));
+                }
+                apiStage.put("throttle", throttles);
             }
+            stages.add(apiStage);
         }
         return stages;
+    }
+
+    private static Map<String, Object> throttle(JsonNode settings, ProvisionContext ctx) {
+        Map<String, Object> throttle = new HashMap<>();
+        putResolved(throttle, "burstLimit", settings.path("BurstLimit"), ctx);
+        putResolved(throttle, "rateLimit", settings.path("RateLimit"), ctx);
+        return throttle;
+    }
+
+    /**
+     * {@code props[name]} with its intrinsics resolved, or null when the template leaves it out,
+     * including through {@code AWS::NoValue}.
+     */
+    private static JsonNode resolved(JsonNode props, String name, ProvisionContext ctx) {
+        if (props == null || !props.has(name)) {
+            return null;
+        }
+        JsonNode node = ctx.engine().resolveNodeOmittingNoValue(props.get(name));
+        return node == null || node.isNull() || node.isMissingNode() ? null : node;
+    }
+
+    /**
+     * A member the template gives is passed on as it resolves, blank included, so the service refuses an
+     * invalid one instead of reading it as absent; only a missing or null member is left out.
+     */
+    private static void putResolved(Map<String, Object> target, String key, JsonNode value, ProvisionContext ctx) {
+        if (!value.isMissingNode() && !value.isNull()) {
+            target.put(key, ctx.engine().resolve(value));
+        }
     }
 
     private UsagePlan findUsagePlan(String region, String usagePlanId) {
