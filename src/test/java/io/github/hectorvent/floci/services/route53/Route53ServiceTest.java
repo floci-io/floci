@@ -222,6 +222,33 @@ class Route53ServiceTest {
     }
 
     @Test
+    void recordOutsideTheHostedZoneIsRejected() {
+        Route53Service service = newService();
+        String zoneId = service.createHostedZone("datacite.org.", "ref-outside", null, null).zone().getId();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("_lovable.strategy", 300, "1.2.3.4"))), null));
+        assertEquals("InvalidChangeBatch", e.getErrorCode());
+        assertEquals("RRSet with DNS name _lovable.strategy. is not permitted in zone datacite.org.", e.getMessage());
+        AwsException suffixOnly = assertThrows(AwsException.class, () -> service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("notdatacite.org", 300, "1.2.3.4"))), null));
+        assertEquals("InvalidChangeBatch", suffixOnly.getErrorCode());
+    }
+
+    @Test
+    void recordInsideTheHostedZoneIsAcceptedRegardlessOfCaseDotOrWildcard() {
+        Route53Service service = newService();
+        String zoneId = service.createHostedZone("datacite.org.", "ref-inside", null, null).zone().getId();
+
+        service.changeResourceRecordSets(zoneId, List.of(
+                change("CREATE", aRecord("WWW.DataCite.org", 300, "1.2.3.4")),
+                change("CREATE", aRecord("*.blog.datacite.org.", 300, "1.2.3.5")),
+                change("CREATE", aRecord("datacite.org", 300, "1.2.3.6"))), null);
+
+        assertEquals(5, service.listResourceRecordSets(zoneId, null, null, 0).size());
+    }
+
+    @Test
     void deleteFailsWithNotFoundMessageWhenNoRecordWithMatchingNameAndTypeExists() {
         Route53Service service = newService();
         String zoneId = service.createHostedZone("example.com.", "ref-missing", null, null).zone().getId();
