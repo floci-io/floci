@@ -247,7 +247,8 @@ public class OrganizationsJsonHandler {
 
     private Response createAccount(JsonNode request, String caller, boolean govCloud) {
         CreateAccountStatus status = service.createAccount(caller,
-                text(request, "Email"), text(request, "AccountName"), parseTags(request.path("Tags")), govCloud);
+                text(request, "Email"), text(request, "AccountName"), parseTags(request.path("Tags")),
+                text(request, "RoleName"), govCloud);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("CreateAccountStatus", createAccountStatusNode(status));
         return Response.ok(response).build();

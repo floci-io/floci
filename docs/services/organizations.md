@@ -59,6 +59,12 @@ call `LeaveOrganization`. An account in no organization gets
 - `CreateAccount` returns a `CreateAccountStatus` you can poll with
   `DescribeCreateAccountStatus`, matching the asynchronous AWS contract. A duplicate email
   produces `State=FAILED` with `FailureReason=EMAIL_ALREADY_EXISTS` rather than an error.
+- As on AWS, `CreateAccount` preconfigures the account access role in the new member account:
+  the optional `RoleName` parameter names it, defaulting to `OrganizationAccountAccessRole`.
+  The role exists in the new account, its trust policy allows the management account
+  (`arn:<partition>:iam::<management-account-id>:root` to `sts:AssumeRole`), and it carries the
+  `AdministratorAccess` AWS-managed policy, so the management account can assume it immediately.
+  Accounts that join through `InviteAccountToOrganization` do not get the role, matching AWS.
 - `DescribeEffectivePolicy` merges every policy of the requested type down the
   root → OU → target chain, with the closest ancestor winning on conflicting keys. As on AWS,
   the access-control types (`SERVICE_CONTROL_POLICY`, `RESOURCE_CONTROL_POLICY`) are rejected.

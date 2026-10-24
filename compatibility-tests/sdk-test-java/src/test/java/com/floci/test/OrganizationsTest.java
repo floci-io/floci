@@ -20,6 +20,8 @@ import software.amazon.awssdk.services.organizations.model.PolicyInUseException;
 import software.amazon.awssdk.services.organizations.model.PolicyType;
 import software.amazon.awssdk.services.organizations.model.Root;
 import software.amazon.awssdk.services.organizations.model.TargetType;
+import software.amazon.awssdk.services.sts.StsClient;
+import software.amazon.awssdk.services.sts.model.Credentials;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -100,6 +102,30 @@ public class OrganizationsTest {
             String memberAccountId = status.accountId();
             assertThat(client.describeCreateAccountStatus(r -> r.createAccountRequestId(status.id()))
                     .createAccountStatus().accountId()).isEqualTo(memberAccountId);
+
+            // 4b. The account access role AWS preconfigures in the new account: the management
+            //     account can assume it right away, and a RoleName renames it.
+            try (StsClient sts = TestFixtures.stsClient()) {
+                Credentials accessRoleCredentials = sts.assumeRole(r -> r
+                                .roleArn(TestFixtures.globalArn("iam", memberAccountId,
+                                        "role/OrganizationAccountAccessRole"))
+                                .roleSessionName("compat-access-role"))
+                        .credentials();
+                assertThat(accessRoleCredentials.accessKeyId()).startsWith("ASIA");
+                assertThat(accessRoleCredentials.sessionToken()).isNotBlank();
+            }
+
+            CreateAccountStatus customRoleAccount = client.createAccount(r -> r
+                    .email("compat-role@example.com").accountName("CompatRole")
+                    .roleName("CompatAccessRole")).createAccountStatus();
+            assertThat(customRoleAccount.state()).isEqualTo(CreateAccountState.SUCCEEDED);
+            try (StsClient sts = TestFixtures.stsClient()) {
+                assertThat(sts.assumeRole(r -> r
+                                .roleArn(TestFixtures.globalArn("iam", customRoleAccount.accountId(),
+                                        "role/CompatAccessRole"))
+                                .roleSessionName("compat-access-role"))
+                        .credentials().accessKeyId()).startsWith("ASIA");
+            }
 
             Account member = client.describeAccount(r -> r.accountId(memberAccountId)).account();
             assertThat(member.email()).isEqualTo("compat-dev@example.com");
@@ -242,6 +268,7 @@ public class OrganizationsTest {
 
             // 11. Tear the organization down.
             client.removeAccountFromOrganization(r -> r.accountId(memberAccountId));
+            client.removeAccountFromOrganization(r -> r.accountId(customRoleAccount.accountId()));
             client.deleteOrganizationalUnit(r -> r.organizationalUnitId(production.id()));
             client.deleteOrganizationalUnit(r -> r.organizationalUnitId(workloads.id()));
         } finally {

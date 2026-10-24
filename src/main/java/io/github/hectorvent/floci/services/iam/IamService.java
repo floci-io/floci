@@ -1222,6 +1222,43 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * Creates the account access role AWS Organizations preconfigures in a member account it
+     * just created ({@code CreateAccount}'s {@code RoleName}, default
+     * {@code OrganizationAccountAccessRole}), in that account's own namespace: the management
+     * account is the caller here, so {@link #createRole} would file the role under the
+     * caller's partition instead of the new account's.
+     *
+     * <p>The role matches the one AWS creates: it trusts the management account, through the
+     * account-root principal AWS's generated trust policy names, and carries the
+     * {@code AdministratorAccess} AWS-managed policy. The account is fresh, so the name
+     * cannot collide; a role that is there anyway is returned rather than failing an account
+     * creation AWS would have completed.
+     */
+    public IamRole provisionAccountAccessRole(String accountId, String roleName, String managementAccountId) {
+        validateRoleName(roleName);
+        synchronized (resourceNameLock) {
+            Optional<IamRole> existing = findRole(accountId, roleName);
+            if (existing.isPresent()) {
+                return existing.get();
+            }
+            String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"Principal\":{\"AWS\":\"" + regionResolver.buildGlobalArn("iam", managementAccountId, "root")
+                    + "\"},\"Action\":\"sts:AssumeRole\"}]}";
+            IamRole role = new IamRole("AROA" + randomId(16), roleName, "/",
+                    regionResolver.buildGlobalArn("iam", accountId, "role/" + roleName), trustPolicy);
+            role.getAttachedPolicyArns().add(
+                    AwsManagedPolicies.arnPrefix(regionResolver.getPartition()) + "/AdministratorAccess");
+            if (roles instanceof AccountAwareStorageBackend<IamRole> aware) {
+                aware.putForAccount(accountId, roleName, role);
+            } else {
+                roles.put(roleName, role);
+            }
+            LOG.infov("Created account access role {0} in account {1}", roleName, accountId);
+            return role;
+        }
+    }
+
+    /**
      * roleDescriptionType: at most 1000 characters of the set AWS publishes, which admits tab,
      * newline and carriage return and no other control character. Enforced wherever a role
      * description is taken, so {@code CreateRole}, {@code UpdateRole},

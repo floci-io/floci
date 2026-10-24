@@ -17,6 +17,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -61,7 +62,7 @@ class OrganizationsServiceTest {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
 
         assertTrue(organization.getId().matches("o-[a-z0-9]{10}"), organization.getId());
-        assertTrue(organization.getRoot().getId().matches("r-[a-z0-9]{4}"), organization.getRoot().getId());
+        assertTrue(organization.getRoot().getId().matches("r-[0-9a-z]{4}"), organization.getRoot().getId());
 
         String rootSuffix = organization.getRoot().getId().substring(2);
         OrganizationalUnit unit =
@@ -77,6 +78,84 @@ class OrganizationsServiceTest {
                 service.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, false);
         assertTrue(status.getId().matches("car-[a-z0-9]{8}"), status.getId());
         assertTrue(status.getAccountId().matches("\\d{12}"), status.getAccountId());
+    }
+
+    /** The (member account, role name, management account) triples a provisioner received. */
+    private static final class RecordedProvisions implements AccountAccessRoleProvisioner {
+        final List<String> calls = new ArrayList<>();
+
+        @Override
+        public void provision(String memberAccountId, String roleName, String managementAccountId) {
+            calls.add(memberAccountId + "|" + roleName + "|" + managementAccountId);
+        }
+    }
+
+    private OrganizationsService serviceWithProvisioner(RecordedProvisions provisioner) {
+        return new OrganizationsService(
+                new ObjectMapper(),
+                REGION_RESOLVER,
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                true,
+                null,
+                provisioner);
+    }
+
+    @Test
+    void createAccountProvisionsTheDefaultAccountAccessRole() {
+        RecordedProvisions provisioner = new RecordedProvisions();
+        OrganizationsService provisioning = serviceWithProvisioner(provisioner);
+        provisioning.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        CreateAccountStatus status = provisioning.createAccount(
+                MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, null, false);
+
+        assertEquals("SUCCEEDED", status.getState());
+        assertEquals(List.of(status.getAccountId() + "|OrganizationAccountAccessRole|" + MANAGEMENT_ACCOUNT),
+                provisioner.calls);
+    }
+
+    @Test
+    void createAccountWithARoleNameProvisionsThatName() {
+        RecordedProvisions provisioner = new RecordedProvisions();
+        OrganizationsService provisioning = serviceWithProvisioner(provisioner);
+        provisioning.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        CreateAccountStatus status = provisioning.createAccount(
+                MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, "CustomAccessRole", false);
+
+        assertEquals(status.getAccountId() + "|CustomAccessRole|" + MANAGEMENT_ACCOUNT,
+                provisioner.calls.get(0));
+    }
+
+    @Test
+    void createAccountWithAnInvalidRoleNameIsRejected() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        for (String roleName : List.of("bad name", "", "x".repeat(65), "AWSServiceRoleForOrganizations")) {
+            AwsException error = assertThrows(AwsException.class, () -> service.createAccount(
+                    MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, roleName, false));
+            assertEquals("InvalidInputException", error.getErrorCode());
+        }
+    }
+
+    @Test
+    void createAccountWithADuplicateEmailProvisionsNoRole() {
+        RecordedProvisions provisioner = new RecordedProvisions();
+        OrganizationsService provisioning = serviceWithProvisioner(provisioner);
+        provisioning.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        provisioning.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, null, false);
+        int provisionedSoFar = provisioner.calls.size();
+
+        CreateAccountStatus failed = provisioning.createAccount(
+                MANAGEMENT_ACCOUNT, "dev@example.com", "Dev2", null, null, false);
+
+        assertEquals("FAILED", failed.getState());
+        assertEquals(provisionedSoFar, provisioner.calls.size());
     }
 
     @ParameterizedTest
