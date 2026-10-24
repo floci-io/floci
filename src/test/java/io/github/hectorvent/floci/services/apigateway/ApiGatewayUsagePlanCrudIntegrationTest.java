@@ -544,6 +544,45 @@ class ApiGatewayUsagePlanCrudIntegrationTest {
                         + "constraint: Member must satisfy enum value set: [MONTH, WEEK, DAY]");
     }
 
+    // Measured on API Gateway: a fractional burst limit is truncated, numeric text is taken, and a burst
+    // limit outside the int range refuses the whole value.
+    @Test
+    void aStageThrottleValueIsReadAsApiGatewayReadsIt() {
+        String usagePlanId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"stage-throttle-value\",\"throttle\":{\"burstLimit\":20,\"rateLimit\":10},"
+                        + "\"apiStages\":[{\"apiId\":\"a1\",\"stage\":\"v1\","
+                        + "\"throttle\":{\"/pets/GET\":{\"burstLimit\":10,\"rateLimit\":5}}}]}")
+                .post("/usageplans")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("id");
+
+        given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/apiStages/a1:v1/throttle\","
+                        + "\"value\":\"{\\\"/pets/GET\\\":{\\\"burstLimit\\\":1.5,\\\"rateLimit\\\":\\\"5.5\\\"}}\"}]}")
+                .patch("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(200)
+                .body("apiStages[0].throttle['/pets/GET'].burstLimit", equalTo(1))
+                .body("apiStages[0].throttle['/pets/GET'].rateLimit", equalTo(5.5f));
+
+        given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/apiStages/a1:v1/throttle\","
+                        + "\"value\":\"{\\\"/pets/GET\\\":{\\\"burstLimit\\\":3000000000}}\"}]}")
+                .patch("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("Invalid API Stage throttle specified for usageplan"));
+
+        given().get("/usageplans/{usagePlanId}", usagePlanId)
+                .then()
+                .statusCode(200)
+                .body("apiStages[0].throttle['/pets/GET'].burstLimit", equalTo(1));
+    }
+
     private static int planCount() {
         return given().get("/usageplans").then().statusCode(200).extract().path("item.size()");
     }

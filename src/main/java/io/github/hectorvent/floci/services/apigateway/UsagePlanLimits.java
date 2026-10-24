@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
@@ -138,13 +138,17 @@ public final class UsagePlanLimits {
         for (Map.Entry<String, Map<?, ?>> entry : settingsByKey.entrySet()) {
             String[] resourcePathAndMethod = methodKey(entry.getKey());
             if (resourcePathAndMethod[1].isEmpty()) {
-                // No space after the comma: API Gateway's own formatting.
-                throw new AwsException(BAD_REQUEST, "Invalid method {resourcePath: " + resourcePathAndMethod[0]
-                        + ",method: " + resourcePathAndMethod[1] + "} specified", 400);
+                throw new AwsException(BAD_REQUEST, "Invalid method " + methodRef(resourcePathAndMethod) + " specified",
+                        400);
             }
             methods.put(entry.getKey(), throttle(entry.getValue()));
         }
         return methods;
+    }
+
+    /** {@code {resourcePath: <path>,method: <method>}}, with no space after the comma: API Gateway's own formatting. */
+    private static String methodRef(String[] resourcePathAndMethod) {
+        return "{resourcePath: " + resourcePathAndMethod[0] + ",method: " + resourcePathAndMethod[1] + "}";
     }
 
     /**
@@ -452,18 +456,101 @@ public final class UsagePlanLimits {
         }
     }
 
-    /** A {@code /apiStages/<apiId>:<stage>/throttle} value: a JSON map of method key to limits. */
+    /**
+     * A {@code /apiStages/<apiId>:<stage>/throttle} value: a JSON map of method key to limits, read as
+     * API Gateway reads it, which is not how a create body's numbers are read. A burst limit takes a
+     * JSON number in int range, truncated, or whole-number text; a rate limit takes a finite number or
+     * numeric text. Anything else, an unknown member included, refuses the whole value. Every value is
+     * read before any key is checked, then each key's method before its limits and their sign.
+     */
     private static Map<String, Throttle> methodThrottles(String json) {
-        Map<String, Object> raw;
+        JsonNode root;
         try {
-            raw = json == null ? null : JSON.readValue(json, new TypeReference<Map<String, Object>>() { });
+            root = json == null ? null : JSON.readTree(json);
         } catch (JsonProcessingException e) {
-            throw new AwsException(BAD_REQUEST, STAGE_THROTTLE_INVALID, 400);
+            throw stageThrottleInvalid();
         }
-        if (raw == null) {
-            throw new AwsException(BAD_REQUEST, STAGE_THROTTLE_INVALID, 400);
+        if (root == null || !root.isObject()) {
+            throw stageThrottleInvalid();
         }
-        return methodThrottles(raw, STAGE_THROTTLE_INVALID);
+        Map<String, Throttle> read = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonNode> entry : root.properties()) {
+            JsonNode settings = entry.getValue();
+            if (!settings.isNull() && !settings.isObject()) {
+                throw stageThrottleInvalid();
+            }
+            read.put(entry.getKey(), settings.isNull() ? null : stageThrottle(settings));
+        }
+        Map<String, Throttle> methods = new LinkedHashMap<>();
+        for (Map.Entry<String, Throttle> entry : read.entrySet()) {
+            String[] resourcePathAndMethod = methodKey(entry.getKey());
+            if (resourcePathAndMethod[1].isEmpty()) {
+                throw new AwsException(BAD_REQUEST, "Invalid method " + methodRef(resourcePathAndMethod) + " specified",
+                        400);
+            }
+            Throttle throttle = entry.getValue();
+            if (throttle == null) {
+                throw new AwsException(BAD_REQUEST,
+                        "Invalid throttle setting specified for method " + methodRef(resourcePathAndMethod), 400);
+            }
+            if (throttle.burstLimit() < 0 || throttle.rateLimit() < 0) {
+                throw new AwsException(BAD_REQUEST, THROTTLE_INVALID, 400);
+            }
+            methods.put(entry.getKey(), throttle);
+        }
+        return methods;
+    }
+
+    /** One method's limits in a stage throttle value, sign unchecked; a limit left out or null reads 0. */
+    private static Throttle stageThrottle(JsonNode settings) {
+        for (Map.Entry<String, JsonNode> member : settings.properties()) {
+            if (!"burstLimit".equals(member.getKey()) && !"rateLimit".equals(member.getKey())) {
+                throw stageThrottleInvalid();
+            }
+        }
+        JsonNode burst = settings.path("burstLimit");
+        JsonNode rate = settings.path("rateLimit");
+        return new Throttle(burst.isMissingNode() || burst.isNull() ? 0 : stageBurstLimit(burst),
+                rate.isMissingNode() || rate.isNull() ? 0.0 : stageRateLimit(rate));
+    }
+
+    private static int stageBurstLimit(JsonNode value) {
+        if (value.isNumber() && value.canConvertToInt()) {
+            return value.intValue();
+        }
+        if (value.isTextual()) {
+            try {
+                return Integer.parseInt(value.textValue());
+            } catch (NumberFormatException e) {
+                throw stageThrottleInvalid();
+            }
+        }
+        throw stageThrottleInvalid();
+    }
+
+    private static double stageRateLimit(JsonNode value) {
+        double rate;
+        if (value.isNumber()) {
+            rate = value.doubleValue();
+        } else if (value.isTextual()) {
+            try {
+                rate = Double.parseDouble(value.textValue());
+            } catch (NumberFormatException e) {
+                throw stageThrottleInvalid();
+            }
+        } else {
+            throw stageThrottleInvalid();
+        }
+        // API Gateway answers a rate beyond the double range, such as 1e400, with a 500 InternalFailure, a
+        // fault rather than a contract; Floci refuses it as an invalid stage throttle instead.
+        if (!Double.isFinite(rate)) {
+            throw stageThrottleInvalid();
+        }
+        return rate;
+    }
+
+    private static AwsException stageThrottleInvalid() {
+        return new AwsException(BAD_REQUEST, STAGE_THROTTLE_INVALID, 400);
     }
 
     /** {@code apiId:stage} split in two, or API Gateway's 400 for anything else. */

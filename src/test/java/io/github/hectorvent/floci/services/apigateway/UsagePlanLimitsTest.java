@@ -502,6 +502,64 @@ class UsagePlanLimitsTest {
         assertRefused(() -> patch(fixture(), op, path, value), code, status, message);
     }
 
+    static Stream<Arguments> storedStageThrottleValues() {
+        return Stream.of(
+                Arguments.of("{\"burstLimit\":1.5,\"rateLimit\":2}", new Throttle(1, 2.0)),
+                Arguments.of("{\"burstLimit\":1e1}", new Throttle(10, 0.0)),
+                Arguments.of("{\"burstLimit\":2147483647}", new Throttle(Integer.MAX_VALUE, 0.0)),
+                Arguments.of("{\"burstLimit\":\"7\"}", new Throttle(7, 0.0)),
+                Arguments.of("{\"rateLimit\":\"5.5\"}", new Throttle(0, 5.5)),
+                Arguments.of("{\"burstLimit\":1}", new Throttle(1, 0.0)),
+                Arguments.of("{}", new Throttle(0, 0.0)),
+                Arguments.of("{\"burstLimit\":null,\"rateLimit\":2}", new Throttle(0, 2.0)));
+    }
+
+    // Measured on API Gateway with a replace of /apiStages/<apiId>:<stage>/throttle.
+    @ParameterizedTest
+    @MethodSource("storedStageThrottleValues")
+    void aStageThrottleValueIsReadAsApiGatewayReadsIt(String settings, Throttle stored) {
+        assertEquals(Map.of("/pets/GET", stored), patch(fixture(), "replace", "/apiStages/a:v1/throttle",
+                "{\"/pets/GET\":" + settings + "}").apiStages().get(0).throttle());
+    }
+
+    static Stream<Arguments> refusedStageThrottleValues() {
+        String stageThrottle = "Invalid API Stage throttle specified for usageplan";
+        String throttle = "Usage Plan throttle rate limit and burst limit must be numeric and greater than zero";
+        return Stream.of(
+                Arguments.of("{\"/pets/GET\":{\"burstLimit\":3000000000}}", stageThrottle),
+                Arguments.of("{\"/pets/GET\":{\"burstLimit\":-3000000000}}", stageThrottle),
+                Arguments.of("{\"/pets/GET\":{\"burstLimit\":\"7.5\"}}", stageThrottle),
+                Arguments.of("{\"/pets/GET\":{\"rateLimit\":\"abc\"}}", stageThrottle),
+                Arguments.of("{\"/pets/GET\":{\"burstLimit\":true}}", stageThrottle),
+                Arguments.of("{\"/pets/GET\":{\"rateLimit\":true}}", stageThrottle),
+                Arguments.of("{\"/pets/GET\":{\"burstLimit\":[]}}", stageThrottle),
+                Arguments.of("{\"/pets/GET\":{\"burstLimit\":1,\"rateLimit\":2,\"foo\":3}}", stageThrottle),
+                Arguments.of("{\"/pets/GET\":5}", stageThrottle),
+                // API Gateway answers this with a 500 InternalFailure, a fault rather than a contract.
+                Arguments.of("{\"/pets/GET\":{\"rateLimit\":1e400}}", stageThrottle),
+                Arguments.of("{\"/pets/GET\":null}",
+                        "Invalid throttle setting specified for method {resourcePath: /pets,method: GET}"),
+                Arguments.of("{\"/pets/GET\":{\"burstLimit\":-1}}", throttle),
+                Arguments.of("{\"/pets/GET\":{\"rateLimit\":-2}}", throttle),
+                Arguments.of("{\"/GET\":{\"burstLimit\":1}}",
+                        "Invalid method {resourcePath: /GET,method: } specified"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("refusedStageThrottleValues")
+    void aStageThrottleValueApiGatewayCannotReadIsRefused(String value, String message) {
+        assertRefused(() -> patch(fixture(), "replace", "/apiStages/a:v1/throttle", value), "BadRequestException",
+                400, message);
+    }
+
+    // A single limit is read as before: outside the int range it is an invalid throttle, not a stage throttle.
+    @Test
+    void aSingleBurstLimitOutsideTheIntRangeIsAnInvalidThrottle() {
+        assertRefused(() -> patch(fixture(), "replace", "/apiStages/a:v1/throttle//pets/GET/burstLimit",
+                        "3000000000"), "BadRequestException", 400,
+                "Usage Plan throttle rate limit and burst limit must be numeric and greater than zero");
+    }
+
     @Test
     void aMethodThrottleNeedsAPlanThrottle() {
         UsagePlan plan = new UsagePlan();

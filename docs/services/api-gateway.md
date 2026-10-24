@@ -584,6 +584,10 @@ as `[]` for a plan with none, with each stage's per-method `throttle`, and the p
 `/apiStages` add and remove, `/apiStages/<apiId>:<stage>/throttle` and its
 `/<resourcePath>/<httpMethod>[/burstLimit|/rateLimit]` paths, `/throttle/burstLimit`,
 `/throttle/rateLimit`, `/throttle`, `/quota/limit`, `/quota/offset`, `/quota/period` and `/quota`.
+A whole `/apiStages/<apiId>:<stage>/throttle` value is a JSON map of method key to `burstLimit` and
+`rateLimit`, read as API Gateway reads it: a fractional burst limit is truncated, numeric text is
+taken, and a burst limit outside the int range, non-numeric text, another JSON type or an unknown
+member is `Invalid API Stage throttle specified for usageplan`.
 Usage plan product codes are not supported, so an `add`, `replace` or `remove` of `/productCode` is a
 `BadRequestException`.
 Values are validated with API Gateway's messages: a quota needs a `DAY`, `WEEK` or `MONTH` period and
