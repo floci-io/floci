@@ -68,9 +68,19 @@ public class IamQueryHandler {
     private static final int MAX_MAX_ITEMS = 1000;
     /** {@code jobIDType} on every report reader: min 36 and max 36, which is a UUID string. */
     private static final int JOB_ID_LENGTH = 36;
-    /** {@code arnType} on {@code PolicySourceArn}: 20 to 2048, with no pattern. */
+    /** {@code arnType} on {@code PolicySourceArn} and {@code TemplateArn}: 20 to 2048, no pattern. */
     private static final int ARN_MIN_LENGTH = 20;
     private static final int ARN_MAX_LENGTH = 2048;
+    /** {@code serialNumberType} on every MFA member: 9 to 256, pattern {@code [\w+=/:,.@-]+}. */
+    private static final int SERIAL_NUMBER_MIN_LENGTH = 9;
+    private static final int SERIAL_NUMBER_MAX_LENGTH = 256;
+    private static final Pattern SERIAL_NUMBER_PATTERN = Pattern.compile("[\\w+=/:,.@-]+");
+    /** {@code userNameType}: 1 to 64, pattern {@code [\w+=,.@-]+}. */
+    private static final int USER_NAME_MIN_LENGTH = 1;
+    private static final int USER_NAME_MAX_LENGTH = 64;
+    private static final Pattern USER_NAME_PATTERN = Pattern.compile("[\\w+=,.@-]+");
+    /** {@code mapStringReplacementValueEntry} on {@code AcquireRole}: at most 30 entries. */
+    private static final int REPLACEMENT_VALUES_MAX_ENTRIES = 30;
     /** {@code sortKeyType} on {@code GetOrganizationsAccessReport}. */
     private static final Set<String> SORT_KEYS = Set.of("SERVICE_NAMESPACE_ASCENDING",
             "SERVICE_NAMESPACE_DESCENDING", "LAST_AUTHENTICATED_TIME_ASCENDING",
@@ -159,6 +169,7 @@ public class IamQueryHandler {
             case "DeactivateMFADevice" -> handleDeactivateMFADevice(params, authorization);
             case "ResyncMFADevice" -> handleResyncMFADevice(params);
             case "ListMFADevices" -> handleListMFADevices(params, authorization);
+            case "GetMFADevice" -> handleGetMFADevice(params);
             case "TagMFADevice" -> handleTagMFADevice(params);
             case "UntagMFADevice" -> handleUntagMFADevice(params);
             case "ListMFADeviceTags" -> handleListMFADeviceTags(params);
@@ -229,6 +240,10 @@ public class IamQueryHandler {
             case "UntagInstanceProfile" -> handleUntagInstanceProfile(params);
             case "ListInstanceProfileTags" -> handleListInstanceProfileTags(params);
             case "ListRoleTags" -> handleListRoleTags(params);
+
+            // Role templates
+            case "AcquireRole" -> handleAcquireRole(params);
+            case "GetRoleTemplateVersion" -> handleGetRoleTemplateVersion(params);
 
             // Managed Policies
             case "CreatePolicy" -> handleCreatePolicy(params);
@@ -566,6 +581,40 @@ public class IamQueryHandler {
             xml.elem("Marker", page.marker());
         }
         return Response.ok(AwsQueryResponse.envelope("ListMFADeviceTags", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * {@code GetMFADevice} reads a FIDO security key, and no IAM operation creates one, so
+     * {@code NoSuchEntity} is the only answer it can give. The reference says of
+     * {@code SerialNumber} that "For this API, we only accept FIDO security key ARNs", and the
+     * page models that 404 and {@code ServiceFailure} and nothing else, so there is no other
+     * refusal to prefer for a serial naming nothing.
+     *
+     * <p>A virtual device's serial is refused the same way, deliberately.
+     * {@code CreateVirtualMFADevice} is the only operation here that mints a device and it mints
+     * one under {@code mfa/}, which is not a FIDO key, so answering with it would hand back a
+     * device AWS would not return for the same request. Reading one is still better than refusing
+     * the action outright, which is what this answered before: a 404 the SDK models beats an
+     * {@code UnsupportedOperation} it does not.
+     *
+     * <p>The declared shapes are read first, as the validation ahead of the operation does. A
+     * {@code UserName} the request carries is a value even when it is blank, the member being
+     * present whatever it holds, so an empty name breaks {@code userNameType}'s lower bound
+     * rather than reading as no name at all. The user is resolved when the request names one, an
+     * absent user being the same 404 under a message of its own.
+     */
+    private Response handleGetMFADevice(MultivaluedMap<String, String> params) {
+        String serialNumber = requireParam(params, "SerialNumber");
+        requireMemberShape(serialNumber, "serialNumber", SERIAL_NUMBER_MIN_LENGTH,
+                SERIAL_NUMBER_MAX_LENGTH, SERIAL_NUMBER_PATTERN);
+        String userName = getParam(params, "UserName");
+        if (userName != null) {
+            requireMemberShape(userName, "userName", USER_NAME_MIN_LENGTH, USER_NAME_MAX_LENGTH,
+                    USER_NAME_PATTERN);
+            iamService.getUser(userName);
+        }
+        throw new AwsException("NoSuchEntity",
+                "The MFA device with serial number " + serialNumber + " cannot be found.", 404);
     }
 
     private Response handleCreateLoginProfile(MultivaluedMap<String, String> params, String authorization) {
@@ -1480,6 +1529,68 @@ public class IamQueryHandler {
         String result = new XmlBuilder().start("Tags").raw(tagsXml(tags)).end("Tags")
                 .elem("IsTruncated", false).build();
         return Response.ok(AwsQueryResponse.envelope("ListRoleTags", AwsNamespaces.IAM, result)).build();
+    }
+
+    // =========================================================================
+    // Role templates
+    // =========================================================================
+
+    /**
+     * {@code GetRoleTemplateVersion} reads a template AWS publishes, and the model has no
+     * operation that creates, lists, updates or deletes one, so no account holds a template and
+     * {@code NoSuchEntity} is the only answer. The user guide has role manager using "AWS-managed
+     * role templates" and a role created from one "with the {@code iam:AcquireRole} API with the
+     * template's ARN", so a template is AWS's rather than the customer's, and what the guide
+     * publishes is a directory of template ARNs rather than their bodies: there is nothing
+     * recorded to answer with.
+     *
+     * <p>{@code TemplateArn} is held to its declared length first and {@code MinorVersion} is read
+     * as the integer it is declared to be, so a request malformed in either is the 400 ahead of
+     * the lookup rather than this 404.
+     */
+    private Response handleGetRoleTemplateVersion(MultivaluedMap<String, String> params) {
+        String templateArn = requiredArn(params, "TemplateArn");
+        requireIntegerIfPresent(params, "MinorVersion");
+        throw noSuchRoleTemplate(templateArn);
+    }
+
+    /**
+     * {@code AcquireRole} creates a role from a template, and there is never a template to create
+     * it from, for the reason {@link #handleGetRoleTemplateVersion} gives, so this answers
+     * {@code NoSuchEntity} for the ARN it was handed.
+     *
+     * <p>{@code RoleTemplateDisabled} is the other refusal the operation models and it is not this
+     * one: it reads "the specified role template is disabled", which is an answer about a template
+     * that exists, and role manager's own switch, the {@code RoleManager/Enabled} account property,
+     * is a different question again. An ARN naming no template is the 404.
+     */
+    private Response handleAcquireRole(MultivaluedMap<String, String> params) {
+        String templateArn = requiredArn(params, "TemplateArn");
+        requireIntegerIfPresent(params, "TemplateMinorVersion");
+        requireReplacementValuesWithinDeclaredSize(params);
+        throw noSuchRoleTemplate(templateArn);
+    }
+
+    /**
+     * {@code ReplacementValues} is declared with at most 30 entries, and a Query map arrives as
+     * {@code ReplacementValues.entry.N.key}, so the keys are counted rather than the indices
+     * walked: a caller numbering them sparsely still sends as many values as it sends.
+     */
+    private static void requireReplacementValuesWithinDeclaredSize(
+            MultivaluedMap<String, String> params) {
+        long entries = params.keySet().stream()
+                .filter(name -> name.startsWith("ReplacementValues.entry.") && name.endsWith(".key"))
+                .count();
+        if (entries > REPLACEMENT_VALUES_MAX_ENTRIES) {
+            throw SmithyValidationErrors.validationError("Value at 'replacementValues' failed to "
+                    + "satisfy constraint: Member must have length less than or equal to "
+                    + REPLACEMENT_VALUES_MAX_ENTRIES);
+        }
+    }
+
+    private static AwsException noSuchRoleTemplate(String templateArn) {
+        return new AwsException("NoSuchEntity",
+                "The role template with ARN " + templateArn + " cannot be found.", 404);
     }
 
     // =========================================================================
@@ -2481,12 +2592,25 @@ public class IamQueryHandler {
         if (arn == null || arn.isBlank()) {
             return arn;
         }
+        return arnOfDeclaredLength(arn, "policySourceArn");
+    }
+
+    /**
+     * A required {@code arnType} member, held to the same 20 to 2048 characters before whatever it
+     * names is looked up. {@code TemplateArn} is read through here on both role template
+     * operations, which have nothing to look it up in.
+     */
+    private String requiredArn(MultivaluedMap<String, String> params, String name) {
+        return arnOfDeclaredLength(requireParam(params, name), memberPath(name));
+    }
+
+    private static String arnOfDeclaredLength(String arn, String path) {
         if (arn.length() < ARN_MIN_LENGTH) {
-            throw SmithyValidationErrors.validationError("Value at 'policySourceArn' failed to satisfy "
+            throw SmithyValidationErrors.validationError("Value at '" + path + "' failed to satisfy "
                     + "constraint: Member must have length greater than or equal to " + ARN_MIN_LENGTH);
         }
         if (arn.length() > ARN_MAX_LENGTH) {
-            throw SmithyValidationErrors.validationError("Value at 'policySourceArn' failed to satisfy "
+            throw SmithyValidationErrors.validationError("Value at '" + path + "' failed to satisfy "
                     + "constraint: Member must have length less than or equal to " + ARN_MAX_LENGTH);
         }
         return arn;
@@ -3587,9 +3711,57 @@ public class IamQueryHandler {
         String value = params.getFirst(name);
         if (value == null || value.isBlank()) {
             throw SmithyValidationErrors.validationError(
-                    SmithyValidationErrors.notNull(Character.toLowerCase(name.charAt(0)) + name.substring(1)));
+                    SmithyValidationErrors.notNull(memberPath(name)));
         }
         return value;
+    }
+
+    /** The member's name as a validation message spells it, which is the request's with a lower
+     * first letter. */
+    private static String memberPath(String name) {
+        return Character.toLowerCase(name.charAt(0)) + name.substring(1);
+    }
+
+    /**
+     * A member held to the length and the pattern its shape declares, reporting one violation per
+     * constraint broken and naming only the length bound the value missed, which is how every
+     * recorded IAM length violation reads.
+     */
+    private static void requireMemberShape(String value, String path, int min, int max,
+                                           Pattern pattern) {
+        List<String> violations = new ArrayList<>();
+        if (value.length() < min) {
+            violations.add("Member must have length greater than or equal to " + min);
+        } else if (value.length() > max) {
+            violations.add("Member must have length less than or equal to " + max);
+        }
+        if (!pattern.matcher(value).matches()) {
+            violations.add("Member must satisfy regular expression pattern: " + pattern.pattern());
+        }
+        if (violations.isEmpty()) {
+            return;
+        }
+        throw SmithyValidationErrors.validationError(violations.stream()
+                .map(violation -> "Value at '" + path + "' failed to satisfy constraint: " + violation)
+                .toList());
+    }
+
+    /**
+     * An integer member read before the lookup it precedes. A value that is not a number answers
+     * {@code InvalidInput}, as {@code MaxItems} does, since neither of the two members read here
+     * publishes bounds to report a range against.
+     */
+    private void requireIntegerIfPresent(MultivaluedMap<String, String> params, String name) {
+        String raw = params.getFirst(name);
+        if (raw == null || raw.isBlank()) {
+            return;
+        }
+        try {
+            Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidInput",
+                    "The value " + raw + " at '" + memberPath(name) + "' is not a number.", 400);
+        }
     }
 
     private int getIntParam(MultivaluedMap<String, String> params, String name, int defaultValue) {

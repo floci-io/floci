@@ -249,6 +249,11 @@ public class ResourceArnBuilder {
      * belongs to an action the handler does not dispatch, so there is no request to name a
      * resource for.
      *
+     * <p>Empty since {@code GetRoleTemplateVersion} was dispatched: {@code role-template} was the
+     * last entry and the action carries its ARN, so the type is resolved through
+     * {@link #IAM_ARN_PARAMETERS} like any other the request names. The map stays because the next
+     * action AWS publishes a type for arrives before Floci dispatches it.
+     *
      * <p>Declared rather than implied so that a type which is neither resolved nor listed here
      * fails a test naming it, instead of quietly putting that action back on {@code *}. The
      * resolver's fallback for a type it does not know is the permissive answer, so a regeneration
@@ -260,8 +265,7 @@ public class ResourceArnBuilder {
      * its type would leave it evaluated against {@code *}, which is the fail-open this class
      * exists to close.
      */
-    static final Map<String, String> UNRESOLVED_TYPES = Map.of(
-            "role-template", "GetRoleTemplateVersion is not dispatched");
+    static final Map<String, String> UNRESOLVED_TYPES = Map.of();
 
     /**
      * The IAM actions whose target the request carries as an ARN, and the parameter holding it.
@@ -342,6 +346,9 @@ public class ResourceArnBuilder {
                 "GenerateServiceLastAccessedDetails", "ListPoliciesGrantingServiceAccess");
         arnParameter(parameters, "PolicySourceArn",
                 "GetContextKeysForPrincipalPolicy", "SimulatePrincipalPolicy");
+        // AWS owns role templates, so the ARN names one in the aws account rather than the
+        // caller's, and it is still the resource the action is authorized against.
+        arnParameter(parameters, "TemplateArn", "GetRoleTemplateVersion");
         return Map.copyOf(parameters);
     }
 

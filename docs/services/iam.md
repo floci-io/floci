@@ -83,6 +83,40 @@ or at the AWS Sign-In host of a region in the deployment's partition; any other 
 
 A role `Description` is held to the shape AWS publishes for it on every action that takes one, `CreateRole`, `UpdateRole`, `UpdateRoleDescription` and `CreateServiceLinkedRole`: at most 1000 characters of `[\u0009\u000A\u000D\u0020-\u007E\u00A1-\u00FF]`, which admits tab, newline and carriage return and no other control character, otherwise `ValidationError`. The check runs before the role is looked up or created, so a refused description never reaches a stored role, and the `Role` these actions and `GetRole` answer always stays parsable XML.
 
+### Role Templates
+
+| Action | Description |
+|--------|-------------|
+| AcquireRole | Creates a role from a role template. Answers `NoSuchEntity` for every template ARN, since no account holds a template. |
+| GetRoleTemplateVersion | Reads one version of a role template. Answers `NoSuchEntity` for the same reason. |
+
+Role templates are AWS's own rather than an account's. The IAM User Guide has role manager using
+"AWS-managed role templates", publishes a directory of template ARNs with the parameters each one
+takes, and says versions are immutable, AWS publishing a new version rather than changing one. The
+API agrees from the other side: `GetRoleTemplateVersion` is the only operation in the model that
+names a template, and there is no create, list, update or delete, so nothing a client can call
+puts a template into an account.
+
+Floci therefore holds no templates, and both operations answer `NoSuchEntity` 404 naming the ARN
+they were given. They are dispatched rather than left out because the alternative is worse: an
+action Floci does not dispatch answers `UnsupportedOperation` 400, which neither operation models,
+so a client receives an error its SDK cannot map, where the 404 is modeled by both.
+
+This is Floci's reading of an API whose data AWS has not published, and these are the parts that
+would change if it did. The guide names the template ARNs but not their bodies, so there is
+nothing to answer `GetRoleTemplateVersion` with even for the ARNs in that directory; a published
+body would turn those into answers and leave the 404 for every other ARN. `AcquireRole` also
+models `RoleTemplateDisabled`, which Floci never answers: that error reads "the specified role
+template is disabled", a statement about a template that exists, so an ARN naming none is the 404
+instead. Role manager's own switch, the `RoleManager/Enabled` account property, is a separate
+question and is not read here either.
+
+The declared constraints are read before the template is looked for, which is the order AWS
+validates in: `TemplateArn` is held to `arnType`'s 20 to 2048 characters, `MinorVersion` and
+`TemplateMinorVersion` are held to being integers and answer `InvalidInput` for a value that is
+not a number, and `ReplacementValues` is held to the 30 entries it declares. A request malformed
+in any of those is a 400 rather than the 404.
+
 ### Policies
 
 | Action | Description |
@@ -629,6 +663,7 @@ never overlap.
 | DeactivateMFADevice | Detaches a device from its user, leaving the device itself in place. |
 | ResyncMFADevice | Re-synchronizes an assigned device, again against two consecutive codes. |
 | ListMFADevices | Lists the devices assigned to a user. |
+| GetMFADevice | Reads one device by serial number. Answers `NoSuchEntity` for every serial, since the API accepts FIDO security key ARNs only and Floci mints virtual devices. |
 | TagMFADevice / UntagMFADevice / ListMFADeviceTags | Manage a device's tags. |
 
 The seed is real. `CreateVirtualMFADevice` generates a 160-bit secret from `SecureRandom` and
@@ -671,9 +706,20 @@ encoder dependency for a field whose content is derivable: it encodes
 `Base32StringSeed` that *is* returned. `aws iam create-virtual-mfa-device` works against Floci with
 `--bootstrap-method Base32StringSeed`, and fails only when asked for the QR code specifically.
 
-`GetMFADevice` is not implemented: AWS states "for this API, we only accept FIDO security key
-ARNs", and Floci models virtual devices only. Hardware TOTP tokens and FIDO security keys are not
-modeled either, so `ListMFADevices` returns only virtual devices where AWS would return every type.
+`GetMFADevice` is dispatched and answers `NoSuchEntity` for every serial number. AWS states "for
+this API, we only accept FIDO security key ARNs", and nothing in the IAM API creates a FIDO key:
+`CreateVirtualMFADevice` is the only operation that mints a device here and it mints an `mfa/`
+one, so there is never a device for this reader to find. A virtual device's serial is refused the
+same way, deliberately, because answering with it would hand back a device AWS would not return
+for the same request. That 404 is also the only refusal the operation models, together with
+`ServiceFailure`, which is why it is dispatched at all: an action Floci does not dispatch answers
+`UnsupportedOperation` 400, and no SDK models that for this operation, so a client gets an error
+it cannot map. The declared shapes are read first, so a `SerialNumber` outside 9 to 256 characters
+or outside its pattern is a `ValidationError`, and a request naming a user the account does not
+hold reports that user instead.
+
+Hardware TOTP tokens and FIDO security keys are not modeled, so `ListMFADevices` returns only
+virtual devices where AWS would return every type.
 
 #### What a device does not yet affect
 
