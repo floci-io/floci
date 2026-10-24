@@ -566,6 +566,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS` | `1000` | Event-source mapping poll interval (milliseconds) |
 | `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` | `60` | Wait before the first retry of a failed asynchronous invocation (seconds); the second waits twice this, `0` retries back to back |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` | `300` | Idle container shutdown timeout (seconds) |
+| `FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS` | `10` | Time a newly started runtime has to finish its init and request its first invocation (seconds). A function whose `Timeout` plus 2 seconds is longer waits that long instead. See the note below |
 | `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION` | `max(4, cpus)` | Maximum idle (warm) containers kept per function |
 | `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL` | `0` | Maximum idle (warm) containers kept across all functions, LRU-evicted beyond it. `0` = unbounded. See the note below |
 | `FLOCI_SERVICES_LAMBDA_REGION_CONCURRENCY_LIMIT` | `1000` | Maximum concurrent executions per region |
@@ -643,6 +644,31 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
     active region. A cap that is smaller than the number of functions invoked in a tight loop
     trades some warm hits for the memory bound. A negative value is ignored with a warning and
     leaves the total unbounded, like `0`.
+
+!!! note "Slow cold starts"
+    A cold start has two budgets, as in AWS. The Init phase runs from the moment the container
+    has started until its runtime requests the first invocation, which covers runtime startup
+    and the function's static initialization. The function's `Timeout` starts only when the
+    invocation is handed to the runtime, so a slow init never shortens the handler's time and
+    `getRemainingTimeInMillis()` reports the full `Timeout`.
+
+    The Init phase may last `init-timeout-seconds` (default 10, the limit AWS applies), counted
+    from the container's start, so launching extensions and attaching logs use part of it. A
+    function whose `Timeout` plus 2 seconds is longer than what is left of the budget waits that
+    long instead. A runtime that has not asked for its invocation by then is stopped, the
+    invocation fails with `Function.TimedOut`, and Floci logs a warning naming the setting. Java
+    and other JVM runtimes on a busy CI host can need more than 10 seconds; raise the budget there:
+
+    ```bash
+    FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS=120
+    ```
+
+    Image pulls and container creation happen before the Init phase and are not counted
+    against it. The budget applies only until the runtime first requests an invocation: a warm
+    or provisioned container whose runtime stops asking is given its `Timeout` plus 2 seconds.
+    SQS event source mappings add the budget to the visibility timeout they receive messages
+    with, so a message is not delivered to another consumer while its cold start is still within
+    the budget.
 
 ### Runtime API host override
 

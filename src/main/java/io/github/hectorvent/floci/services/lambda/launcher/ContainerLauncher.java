@@ -439,6 +439,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
+        runtimeApiServer.markContainerStarted();
         watchForUnexpectedExit(dockerClient, containerId, runtimeApiServer);
 
         // Extensions can log as soon as they start, which is before the container's own log stream

@@ -3011,6 +3011,17 @@ public interface EmulatorConfig {
         int containerIdleTimeoutSeconds();
 
         /**
+         * Seconds a newly started runtime has to finish its init and request its first invocation,
+         * matching the 10 second Init phase AWS allows. A function whose Timeout is longer waits
+         * that long instead, as AWS re-runs a slow init inside the invoke. The function's Timeout
+         * itself starts when the invocation is dispatched.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS
+         */
+        @WithDefault("10")
+        int initTimeoutSeconds();
+
+        /**
          * One shutdown drain budget shared by provisioned and on-demand Lambda containers.
          * Values outside 1 through 300 seconds fail initialization.
          *

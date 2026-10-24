@@ -641,6 +641,37 @@ class SqsEventSourcePollerTest {
     }
 
     @Test
+    void visibilityTimeoutAlsoCoversTheInitBudget() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambdaConfig = mock(EmulatorConfig.LambdaServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.lambda()).thenReturn(lambdaConfig);
+        when(lambdaConfig.pollIntervalMs()).thenReturn(1000L);
+        when(lambdaConfig.initTimeoutSeconds()).thenReturn(120);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        SqsEventSourcePoller slowInitPoller = new SqsEventSourcePoller(mock(Vertx.class), sqsService,
+                executorService, new LambdaTargetResolver(functionStore, aliasStore), mock(EsmStore.class),
+                config, OBJECT_MAPPER, new PipesFilterMatcher(OBJECT_MAPPER));
+        EventSourceMapping esm = esm();
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("throwfn");
+        fn.setTimeout(3);
+        when(functionStore.getForAccount("000000000000", "us-east-1", "throwfn"))
+                .thenReturn(Optional.of(fn));
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of());
+
+        slowInitPoller.pollAndInvoke(esm);
+
+        ArgumentCaptor<Integer> visibility = ArgumentCaptor.forClass(Integer.class);
+        verify(sqsService, timeout(2000)).receiveMessage(
+                eq(esm.getQueueUrl()), anyInt(), visibility.capture(), anyInt(), eq("us-east-1"));
+        // up to 120s for a cold runtime to request the invocation, then 3s executing, plus the 30s margin
+        assertEquals(3 + 120 + 30, visibility.getValue());
+    }
+
+    @Test
     void turningTheBatchingWindowOffDeliversAnAlreadyBufferedBatch() {
         LambdaFunction fn = stubThrowFn();
         EventSourceMapping esm = esm();

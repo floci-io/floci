@@ -218,6 +218,94 @@ class LambdaExecutorServiceTest {
     }
 
     @Test
+    void coldRuntimeSlowerThanTheTimeout_isDispatchedWithinTheInitBudget() {
+        executor.shutdown();
+        executor = new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, 6);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-cold", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        AtomicReference<Long> remainingAtDispatch = new AtomicReference<>();
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            // Past the function's Timeout plus the dispatch grace (1 + 2 seconds), inside the Init budget.
+            CompletableFuture.delayedExecutor(3500, TimeUnit.MILLISECONDS).execute(() -> {
+                pi.prepareForDispatch();
+                remainingAtDispatch.set(pi.getDeadlineMs() - System.currentTimeMillis());
+                pi.markDispatched();
+                pi.getResultFuture().complete(new InvokeResult(200, null, "{}".getBytes(), null, "req-cold"));
+            });
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+
+        assertNull(result.getFunctionError());
+        verify(warmPool).release(handle);
+        verify(warmPool, never()).destroyHandle(handle);
+        assertTrue(remainingAtDispatch.get() > 900,
+                "the function's Timeout should start at dispatch, was " + remainingAtDispatch.get() + "ms");
+    }
+
+    @Test
+    void runtimeThatNeverAsksForItsInvocation_timesOutAfterTheInitBudget() {
+        executor.shutdown();
+        executor = new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, 4);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-stuck", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        when(rtas.enqueue(any())).thenReturn(new CompletableFuture<>());
+
+        long start = System.nanoTime();
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        assertTrue(elapsedMs >= 4000, "should wait the Init budget, waited " + elapsedMs + "ms");
+        verify(warmPool).destroyHandle(handle);
+        assertTrue(new String(result.getPayload()).contains("\"errorType\":\"Function.TimedOut\""));
+    }
+
+    @Test
+    void initBudget_countsFromTheContainersStart() {
+        executor.shutdown();
+        executor = new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, 8);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-late-launch", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        when(rtas.enqueue(any())).thenReturn(new CompletableFuture<>());
+        // The launcher spent 4 of the 8 seconds after the start (extensions, log attach).
+        when(rtas.getContainerStartedAtMs()).thenReturn(System.currentTimeMillis() - 4000);
+
+        long start = System.nanoTime();
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        assertTrue(elapsedMs >= 3500 && elapsedMs < 7000,
+                "should wait what is left of the Init budget, waited " + elapsedMs + "ms");
+        verify(warmPool).destroyHandle(handle);
+        assertTrue(new String(result.getPayload()).contains("\"errorType\":\"Function.TimedOut\""));
+    }
+
+    @Test
+    void warmRuntimeThatStopsPolling_timesOutAfterTheFunctionTimeoutNotTheInitBudget() {
+        executor.shutdown();
+        executor = new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, 8);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-hung", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        when(rtas.enqueue(any())).thenReturn(new CompletableFuture<>());
+        when(rtas.hasRuntimePolled()).thenReturn(true);
+
+        long start = System.nanoTime();
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        // Timeout 1 + 2 seconds of dispatch grace, as before the Init budget existed.
+        assertTrue(elapsedMs < 6000, "should not wait the Init budget, waited " + elapsedMs + "ms");
+        verify(warmPool).destroyHandle(handle);
+        assertTrue(new String(result.getPayload()).contains("\"errorType\":\"Function.TimedOut\""));
+    }
+
+    @Test
     void resultAfterConfiguredDeadline_timesOutAndDestroysHandle() {
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("cid-late", "test-fn", rtas, ContainerState.WARM);

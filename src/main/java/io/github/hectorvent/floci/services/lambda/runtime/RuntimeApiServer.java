@@ -114,6 +114,8 @@ public class RuntimeApiServer {
     private final Object lock = new Object();
     private final CompletableFuture<Void> initialization = new CompletableFuture<>();
     private boolean runtimeNextReceived;
+    // When the launcher started this runtime's container, in epoch millis; 0 until then.
+    private volatile long containerStartedAtMs;
 
     // Invocations queued before a /next poller arrived. Guarded by lock.
     private final ArrayDeque<PendingInvocation> pendingQueue = new ArrayDeque<>();
@@ -306,6 +308,26 @@ public class RuntimeApiServer {
     public boolean isInitialized() {
         synchronized (lock) {
             return initialization.isDone() && !initialization.isCompletedExceptionally() && !stopped && !faulted;
+        }
+    }
+
+    /** Records that the container running this runtime has started, which opens its Init phase. */
+    public void markContainerStarted() {
+        containerStartedAtMs = System.currentTimeMillis();
+    }
+
+    /** Epoch millis at which the container started, or 0 when no launcher has recorded it. */
+    public long getContainerStartedAtMs() {
+        return containerStartedAtMs;
+    }
+
+    /**
+     * Whether the runtime has polled {@code /next} at least once, which ends its Init phase.
+     * Unlike {@link #isInitialized()} this does not wait for extensions.
+     */
+    public boolean hasRuntimePolled() {
+        synchronized (lock) {
+            return runtimeNextReceived;
         }
     }
 

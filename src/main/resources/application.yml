@@ -440,6 +440,7 @@ floci:
       poll-interval-ms: 1000
       async-retry-delay-seconds: 60           # FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS - a failed Event invocation waits this before its first retry and twice this before its second (AWS: 1 min, then 2); 0 retries back to back
       container-idle-timeout-seconds: 300
+      init-timeout-seconds: 10                # FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS - time a cold runtime has to request its first invocation; the function's Timeout wins when longer
       container-drain-timeout-seconds: 15      # FLOCI_SERVICES_LAMBDA_CONTAINER_DRAIN_TIMEOUT_SECONDS - shared shutdown budget for both Lambda pools
       # warm-pool-max-per-function:           # FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION - idle containers kept per function (default max(4, cpus))
       warm-pool-max-total: 0                  # FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL - idle containers kept across all functions, LRU evicted beyond it; 0 = unbounded

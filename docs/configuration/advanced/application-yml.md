@@ -172,6 +172,7 @@ floci:
       poll-interval-ms: 1000
       async-retry-delay-seconds: 60           # Wait before the first retry of a failed Event invocation; the second waits twice this
       container-idle-timeout-seconds: 300     # Remove idle containers after this
+      init-timeout-seconds: 10                # Time a cold runtime has to request its first invocation; the function's Timeout wins when longer
       # warm-pool-max-per-function:           # Idle containers kept per function (default max(4, cpus))
       warm-pool-max-total: 0                  # Idle containers kept across all functions; 0 = unbounded
       region-concurrency-limit: 1000          # Concurrent executions ceiling per region

@@ -87,6 +87,21 @@ class RuntimeApiServerTest {
     }
 
     @Test
+    @Timeout(10)
+    void nextEndpoint_firstPollEndsTheInitPhase() throws Exception {
+        assertFalse(server.hasRuntimePolled());
+
+        httpClient.sendAsync(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        awaitWaitingContexts(1);
+
+        assertTrue(server.hasRuntimePolled());
+    }
+
+    @Test
     @Timeout(15)
     void nextEndpoint_blocksUntilInvocationArrives() throws Exception {
         PendingInvocation invocation = new PendingInvocation(
