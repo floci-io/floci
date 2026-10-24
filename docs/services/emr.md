@@ -55,25 +55,45 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 
 ## Cluster lifecycle
 
-Steps complete immediately in this metadata-only emulator, in the order the Management Guide gives:
-a request's steps are all created `PENDING`, then each completes before the next starts. A cluster
-created with `Instances.KeepJobFlowAliveWhenNoSteps` set to `false` terminates after its initial steps or
-steps added later complete, reporting `ALL_STEPS_COMPLETED`. A cluster with no steps remains
-`WAITING` until steps are added. Set `KeepJobFlowAliveWhenNoSteps` to `true` to keep the cluster
-`WAITING` after its steps complete. Automatic step-completion termination also applies when
-termination protection is enabled.
-`AddJobFlowSteps` rejects a terminated cluster without adding steps or changing its
+Nothing runs in this metadata-only emulator, but a cluster and its steps go through the states of the
+Management Guide's cluster lifecycle, each held for as long as the [configuration](#configuration)
+says. A cluster is `STARTING` for the first half of `cluster-startup-delay-seconds` and `BOOTSTRAPPING`
+for the second, then `RUNNING` while it runs steps and `WAITING` once it has none left. A request's
+steps are all created `PENDING`, then start in the order they were added, at most `StepConcurrencyLevel`
+at a time, each `RUNNING` for `step-duration-seconds`. Steps added while the cluster starts wait for it
+to be ready. Raising the level with `ModifyCluster` starts the steps that now fit at once, and lowering
+it lets the running ones complete. `TerminateJobFlows` makes a cluster `TERMINATING` for
+`cluster-termination-delay-seconds` and then `TERMINATED`, and cancels any step not yet completed, as its
+API reference says. Each call finds the clusters it reads as they stand at that moment. With every
+duration at its default of 0, a cluster is ready, and its steps complete, before the call that started
+them returns.
+
+`CancelSteps` cancels a `PENDING` step, and a `RUNNING` one from release `emr-5.28.0`, as its API
+reference says. A cancelled `RUNNING` step makes room for the next `PENDING` one. On an earlier release
+a `RUNNING` step answers `FAILED` with "Step is not in a cancellable state: RUNNING".
+
+A cluster created with `Instances.KeepJobFlowAliveWhenNoSteps` set to `false` terminates after its
+initial steps or steps added later complete, reporting `ALL_STEPS_COMPLETED`, without waiting first. A
+cluster with no steps remains `WAITING` until steps are added. Set `KeepJobFlowAliveWhenNoSteps` to
+`true` to keep the cluster `WAITING` after its steps complete. Automatic step-completion termination
+also applies when termination protection is enabled.
+`AddJobFlowSteps` rejects a `TERMINATING` or `TERMINATED` cluster without adding steps or changing its
 termination status, and answers an unknown cluster with `ValidationException` "Specified job flow ID
 does not exist.", as AWS does.
-After automatic or manual termination, instance groups and fleets report `TERMINATED` with zero
-running or provisioned capacity; their requested and target capacities remain recorded.
-`ListInstances` retains each group's instances with their original synthetic IDs and `TERMINATED`
-status for 30 days after termination. Capacity modifications and new groups or fleets are rejected
+Instance groups and fleets report `RUNNING` from the cluster's creation until it is `TERMINATED`. Then
+they report `TERMINATED` with zero running or provisioned capacity; their requested and target
+capacities remain recorded. `ListInstances` retains each group's instances with their original
+synthetic IDs and `TERMINATED` status for 30 days after termination. New groups or fleets are rejected
 on terminated clusters. As on AWS, `ModifyInstanceGroups` answers `ValidationException` "An instance
-group may only be modified when the cluster is running or waiting.", and `ModifyInstanceFleet` answers
-`InvalidRequestException` "A job flow that is shutting down, terminated, or finished may not be
-modified." with `ErrorCode` `INVALID_JOB_SHUT_DOWN`. `InstanceStates` filters the modeled `RUNNING` and
-`TERMINATED` instances.
+group may only be modified when the cluster is running or waiting." for a cluster in any other state,
+and `ModifyInstanceFleet` answers `InvalidRequestException` "A job flow that is shutting down,
+terminated, or finished may not be modified." with `ErrorCode` `INVALID_JOB_SHUT_DOWN` for a
+`TERMINATING` or `TERMINATED` one, and "An instance fleet may only be modified when the cluster is
+running or waiting." with `ErrorCode` `MODIFY_INSTANCE_FLEET_OF_RUNNING_JOBFLOW_ONLY` for one in any
+other state, such as `STARTING` or `BOOTSTRAPPING`. `AddInstanceFleet` gives a `TERMINATING` cluster
+the "shutting down" answer, and `AddInstanceGroups` gives it as `ValidationException`, as
+`AddJobFlowSteps` does. `InstanceStates` filters the modeled `RUNNING` and `TERMINATED`
+instances.
 
 `TerminateJobFlows`, the four `Set*` cluster setters and `CancelSteps` refuse a request without a
 member their model requires (`JobFlowIds` and the setting, or `StepIds`) with `ValidationException`
@@ -95,28 +115,42 @@ examples. A cluster's detail holds `severity`, `stateChangeReason`, `name`, `clu
 `message`. The severity and message are the ones the guide's "Monitoring Amazon EMR events" tables
 give each state, with times to the minute (`2026-10-24 09:41 UTC`).
 
-Since steps complete at once, each call sends:
+Each change sends its events:
 
-| Call | Events, in order |
+| Change | Events, in order |
 |---|---|
-| `RunJobFlow` | the cluster `STARTING`; each step `PENDING`, then each `COMPLETED`; then the cluster `WAITING`, or `TERMINATED` with `ALL_STEPS_COMPLETED` when it ends after its steps |
-| `AddJobFlowSteps` | each step `PENDING`, then each `COMPLETED`; then the cluster `TERMINATED` with `ALL_STEPS_COMPLETED` when it ends after them |
-| `TerminateJobFlows` | `TERMINATED` with `USER_REQUEST` for each cluster it ends, also when a protected cluster fails the call |
-| `CancelSteps` | `CANCELLED` for each step it cancels, none while steps complete at once |
+| `RunJobFlow` | the cluster `STARTING`, then each step `PENDING` |
+| `AddJobFlowSteps` | each step `PENDING` |
+| The cluster is ready, or a step completes | the step `COMPLETED`; each step it makes room for `RUNNING`; once none is left, the cluster `WAITING`, or `TERMINATED` with `ALL_STEPS_COMPLETED` when it ends after its steps |
+| `TerminateJobFlows` | `CANCELLED` for each step not yet completed; the cluster `TERMINATED` with `USER_REQUEST` once it has been `TERMINATING` for the delay, also when a protected cluster fails the call |
+| `CancelSteps` | `CANCELLED` for each step it cancels, and `RUNNING` for the step a cancelled `RUNNING` one makes room for |
+
+A change that falls due between calls, such as a step completing after `step-duration-seconds`, is
+made at that time and its events sent then, whether or not anything reads the cluster.
 
 A `STARTING` or `WAITING` cluster's `stateChangeReason` is `{"code":""}`, as in the guide's example,
 and a `TERMINATED` one's carries the reason's code and message, such as
 `{"code":"USER_REQUEST","message":"Terminated by user request"}`. `TERMINATED` is `INFO` for
 `USER_REQUEST` and `ALL_STEPS_COMPLETED` and `CRITICAL` for any other reason; a cancelled step is
 `WARN`. The tables have no row for a cluster's `BOOTSTRAPPING`, `RUNNING` or `TERMINATING`, which
-send nothing. A step is never seen `RUNNING`, and a `WAITING` cluster that runs added steps stays
-`WAITING`, so neither sends an event for it. The guide gives two `WAITING` messages without saying
-when each applies: a cluster that ran steps reports it "finished running all pending steps", one that
-did not that it "was created ... and is ready for use".
+send nothing, so a `WAITING` cluster that runs added steps sends `WAITING` again when they are done.
+The guide gives two `WAITING` messages without saying when each applies: a cluster that ran steps
+reports it "finished running all pending steps", one that did not that it "was created ... and is
+ready for use".
 
 Events go out in the order their changes were made, once the call that made them no longer holds the
 cluster. A rule's target that calls EMR while an event is delivered, such as one ending the cluster on
 its `STARTING` event, has its events sent after the rest of that call's.
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_EMR_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_EMR_DEFAULT_RELEASE_LABEL` | `emr-7.5.0` | The release label of a cluster created without one; see [Release catalogue](#release-catalogue) |
+| `FLOCI_SERVICES_EMR_CLUSTER_STARTUP_DELAY_SECONDS` | `0` | Seconds a new cluster takes to be ready to run steps, the first half `STARTING` and the second `BOOTSTRAPPING`; `0` makes it ready as soon as it is created |
+| `FLOCI_SERVICES_EMR_STEP_DURATION_SECONDS` | `0` | Seconds a step stays `RUNNING` before it completes; `0` completes it as soon as it starts |
+| `FLOCI_SERVICES_EMR_CLUSTER_TERMINATION_DELAY_SECONDS` | `0` | Seconds a cluster stays `TERMINATING` before it is `TERMINATED`; `0` ends it at once |
 
 ## Release catalogue
 

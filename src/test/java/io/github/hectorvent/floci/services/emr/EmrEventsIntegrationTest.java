@@ -13,9 +13,6 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
-import java.util.Map;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 import static io.github.hectorvent.floci.testing.EmrRequests.emr;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -52,24 +49,32 @@ class EmrEventsIntegrationTest {
                     + "\"Steps\":[{\"Name\":\"load\",\"ActionOnFailure\":\"CONTINUE\","
                     + "\"HadoopJarStep\":{\"Jar\":\"command-runner.jar\"}}]}")
                     .then().statusCode(200).extract().path("JobFlowId");
-            emr(region, "AddJobFlowSteps", "{\"JobFlowId\":\"" + clusterId + "\",\"Steps\":[{\"Name\":\"report\","
-                    + "\"ActionOnFailure\":\"CONTINUE\",\"HadoopJarStep\":{\"Jar\":\"command-runner.jar\"}}]}")
-                    .then().statusCode(200);
+            String reportId = emr(region, "AddJobFlowSteps", "{\"JobFlowId\":\"" + clusterId + "\","
+                    + "\"Steps\":[{\"Name\":\"report\",\"ActionOnFailure\":\"CONTINUE\","
+                    + "\"HadoopJarStep\":{\"Jar\":\"command-runner.jar\"}}]}")
+                    .then().statusCode(200).extract().path("StepIds[0]");
+            Instant reportEnded = stepEnd(region, clusterId, reportId);
             emr(region, "TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}").then().statusCode(200);
 
-            Map<String, JsonNode> events = byState(queue.drain(), region, clusterId);
-            assertThat(events.keySet(), containsInAnyOrder("STARTING", "PENDING load", "COMPLETED load", "WAITING",
-                    "PENDING report", "COMPLETED report", "TERMINATED"));
-            JsonNode waiting = events.get("WAITING").path("detail");
-            assertEquals("{\"code\":\"\"}", waiting.path("stateChangeReason").asText());
-            assertEquals("Amazon EMR cluster " + clusterId + " (kept) finished running all pending steps at "
-                    + minute(timeline(region, clusterId, "ReadyDateTime")) + ".", waiting.path("message").asText());
-            JsonNode completed = events.get("COMPLETED report").path("detail");
+            List<JsonNode> events = checked(queue.drain(), region, clusterId);
+            assertThat(events.stream().map(EmrEventsIntegrationTest::state).toList(), containsInAnyOrder(
+                    "STARTING", "PENDING load", "RUNNING load", "COMPLETED load", "WAITING",
+                    "PENDING report", "RUNNING report", "COMPLETED report", "WAITING", "TERMINATED"));
+            // Once after the first step, and again after the one added later.
+            List<JsonNode> waiting = withState(events, "WAITING");
+            for (JsonNode event : waiting) {
+                assertEquals("{\"code\":\"\"}", event.path("detail").path("stateChangeReason").asText());
+            }
+            String finished = "Amazon EMR cluster " + clusterId + " (kept) finished running all pending steps at ";
+            assertThat(waiting.stream().map(event -> event.path("detail").path("message").asText()).toList(),
+                    containsInAnyOrder(finished + minute(timeline(region, clusterId, "ReadyDateTime")) + ".",
+                            finished + minute(reportEnded) + "."));
+            JsonNode completed = withState(events, "COMPLETED report").get(0).path("detail");
             assertEquals("INFO", completed.path("severity").asText());
             assertEquals("CONTINUE", completed.path("actionOnFailure").asText());
             assertTrue(completed.path("message").asText().endsWith(" and took 0 minutes to complete."),
                     completed.path("message").asText());
-            JsonNode terminated = events.get("TERMINATED").path("detail");
+            JsonNode terminated = withState(events, "TERMINATED").get(0).path("detail");
             assertEquals("INFO", terminated.path("severity").asText());
             assertEquals("{\"code\":\"USER_REQUEST\",\"message\":\"Terminated by user request\"}",
                     terminated.path("stateChangeReason").asText());
@@ -87,24 +92,23 @@ class EmrEventsIntegrationTest {
                     + "\"Steps\":[{\"Name\":\"only\",\"HadoopJarStep\":{\"Jar\":\"command-runner.jar\"}}]}")
                     .then().statusCode(200).extract().path("JobFlowId");
 
-            Map<String, JsonNode> events = byState(queue.drain(), region, clusterId);
-            assertThat(events.keySet(),
-                    containsInAnyOrder("STARTING", "PENDING only", "COMPLETED only", "TERMINATED"));
-            JsonNode terminated = events.get("TERMINATED").path("detail");
+            List<JsonNode> events = checked(queue.drain(), region, clusterId);
+            assertThat(events.stream().map(EmrEventsIntegrationTest::state).toList(), containsInAnyOrder(
+                    "STARTING", "PENDING only", "RUNNING only", "COMPLETED only", "TERMINATED"));
+            JsonNode terminated = withState(events, "TERMINATED").get(0).path("detail");
             assertEquals("INFO", terminated.path("severity").asText());
             assertEquals("{\"code\":\"ALL_STEPS_COMPLETED\",\"message\":\"All steps completed.\"}",
                     terminated.path("stateChangeReason").asText());
             assertEquals("TERMINATE_CLUSTER",
-                    events.get("PENDING only").path("detail").path("actionOnFailure").asText());
+                    withState(events, "PENDING only").get(0).path("detail").path("actionOnFailure").asText());
         }
     }
 
     /**
-     * The events by state, a step's followed by its name, once each is checked to be one of
-     * {@code clusterId}'s, sent by EMR to {@code region}'s default bus with no resources. A state seen
-     * twice fails, so the keys are every event.
+     * The events, once each is checked to be one of {@code clusterId}'s, sent by EMR to {@code region}'s
+     * default bus with no resources.
      */
-    private static Map<String, JsonNode> byState(List<JsonNode> events, String region, String clusterId) {
+    private static List<JsonNode> checked(List<JsonNode> events, String region, String clusterId) {
         for (JsonNode event : events) {
             assertEquals("aws.emr", event.path("source").asText());
             assertEquals(ACCOUNT, event.path("account").asText());
@@ -114,18 +118,32 @@ class EmrEventsIntegrationTest {
             assertEquals(event.path("detail").has("stepId") ? "EMR Step Status Change" : "EMR Cluster State Change",
                     event.path("detail-type").asText());
         }
-        return events.stream().collect(Collectors.toMap(event -> {
-            JsonNode detail = event.path("detail");
-            return detail.has("stepId")
-                    ? detail.path("state").asText() + " " + detail.path("name").asText()
-                    : detail.path("state").asText();
-        }, Function.identity()));
+        return events;
+    }
+
+    /** The event's state, a step's followed by its name. */
+    private static String state(JsonNode event) {
+        JsonNode detail = event.path("detail");
+        return detail.has("stepId")
+                ? detail.path("state").asText() + " " + detail.path("name").asText()
+                : detail.path("state").asText();
+    }
+
+    private static List<JsonNode> withState(List<JsonNode> events, String state) {
+        return events.stream().filter(event -> state.equals(state(event))).toList();
     }
 
     private static Instant timeline(String region, String clusterId, String field) {
         BigDecimal seconds = emr(region, "DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}").then()
                 .statusCode(200).extract().response().jsonPath(DECIMAL_NUMBERS)
                 .get("Cluster.Status.Timeline." + field);
+        return Instant.ofEpochMilli(seconds.movePointRight(3).longValue());
+    }
+
+    private static Instant stepEnd(String region, String clusterId, String stepId) {
+        BigDecimal seconds = emr(region, "DescribeStep", "{\"ClusterId\":\"" + clusterId + "\",\"StepId\":\""
+                + stepId + "\"}").then().statusCode(200).extract().response().jsonPath(DECIMAL_NUMBERS)
+                .get("Step.Status.Timeline.EndDateTime");
         return Instant.ofEpochMilli(seconds.movePointRight(3).longValue());
     }
 

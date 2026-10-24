@@ -59,8 +59,8 @@ public class EmrEventPublisher {
         this.regionResolver = regionResolver;
     }
 
-    /** {@code cluster} entering {@code state}: STARTING, WAITING or TERMINATED. */
-    Event clusterStateChange(EmrCluster cluster, String state) {
+    /** {@code cluster} entering {@code state} at {@code at}: STARTING, WAITING or TERMINATED. */
+    Event clusterStateChange(EmrCluster cluster, String state, Instant at) {
         boolean terminated = "TERMINATED".equals(state);
         String code = cluster.getStateChangeReasonCode();
         // The examples' reason is a JSON string: {"code":""} for a WAITING cluster, and the reason's code
@@ -76,11 +76,11 @@ public class EmrEventPublisher {
         detail.put("name", cluster.getName());
         detail.put("clusterId", cluster.getId());
         detail.put("state", state);
-        detail.put("message", clusterMessage(cluster, state));
+        detail.put("message", clusterMessage(cluster, state, at));
         return new Event(CLUSTER_STATE_CHANGE, detail.toString());
     }
 
-    /** {@code step} of {@code cluster} entering {@code state}: PENDING, COMPLETED or CANCELLED. */
+    /** {@code step} of {@code cluster} entering {@code state}: PENDING, RUNNING, COMPLETED or CANCELLED. */
     Event stepStatusChange(EmrCluster cluster, EmrStep step, String state) {
         ObjectNode detail = objectMapper.createObjectNode();
         detail.put("severity", "CANCELLED".equals(state) ? "WARN" : "INFO");
@@ -126,17 +126,15 @@ public class EmrEventPublisher {
                 SOURCE, queued.event().detailType(), queued.event().detail(), null, queued.region()));
     }
 
-    private static String clusterMessage(EmrCluster cluster, String state) {
+    private static String clusterMessage(EmrCluster cluster, String state, Instant at) {
         String named = cluster.getId() + " (" + cluster.getName() + ")";
         return switch (state) {
-            case "STARTING" -> "Amazon EMR cluster " + named + " was requested at "
-                    + time(cluster.getCreationDateTime()) + " and is being created.";
+            case "STARTING" -> "Amazon EMR cluster " + named + " was requested at " + time(at)
+                    + " and is being created.";
             case "WAITING" -> cluster.getSteps().isEmpty()
-                    ? "Amazon EMR cluster " + named + " was created at " + time(cluster.getReadyDateTime())
-                            + " and is ready for use."
-                    : "Amazon EMR cluster " + named + " finished running all pending steps at "
-                            + time(cluster.getReadyDateTime()) + ".";
-            case "TERMINATED" -> "Amazon EMR Cluster " + named + " has terminated at " + time(cluster.getEndDateTime())
+                    ? "Amazon EMR cluster " + named + " was created at " + time(at) + " and is ready for use."
+                    : "Amazon EMR cluster " + named + " finished running all pending steps at " + time(at) + ".";
+            case "TERMINATED" -> "Amazon EMR Cluster " + named + " has terminated at " + time(at)
                     + " with a reason of " + cluster.getStateChangeReasonCode() + ".";
             default -> throw new IllegalArgumentException("No cluster event for state " + state);
         };
@@ -148,6 +146,8 @@ public class EmrEventPublisher {
         return switch (state) {
             case "PENDING" -> "Step " + stepNamed + " was added to Amazon EMR cluster " + clusterNamed + " at "
                     + time(step.getCreationDateTime()) + " and is pending execution.";
+            case "RUNNING" -> "Step " + stepNamed + " in Amazon EMR cluster " + clusterNamed + " started running at "
+                    + time(step.getStartDateTime()) + ".";
             case "COMPLETED" -> "Step " + stepNamed + " in Amazon EMR cluster " + clusterNamed
                     + " completed execution at " + time(step.getEndDateTime()) + ". The step started running at "
                     + time(step.getStartDateTime())

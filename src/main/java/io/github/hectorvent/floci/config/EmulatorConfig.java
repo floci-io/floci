@@ -1934,9 +1934,20 @@ public interface EmulatorConfig {
         @WithDefault("emr-7.5.0")
         String defaultReleaseLabel();
 
-        /** Delay before a cluster reaches WAITING; 0 = advance synchronously. */
+        /**
+         * How long a new cluster takes to be ready to run steps, the first half STARTING and the second
+         * BOOTSTRAPPING; 0 makes it ready as soon as it is created.
+         */
         @WithDefault("0")
         int clusterStartupDelaySeconds();
+
+        /** How long a step stays RUNNING before it completes; 0 completes it as soon as it starts. */
+        @WithDefault("0")
+        int stepDurationSeconds();
+
+        /** How long a cluster stays TERMINATING before it is TERMINATED; 0 ends it at once. */
+        @WithDefault("0")
+        int clusterTerminationDelaySeconds();
     }
 
     interface WafV2ServiceConfig {

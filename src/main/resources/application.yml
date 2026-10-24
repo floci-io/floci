@@ -577,6 +577,9 @@ floci:
       enabled: true
     emr:
       enabled: true
+      cluster-startup-delay-seconds: 0      # 0 = a cluster is ready as soon as it is created
+      step-duration-seconds: 0              # 0 = a step completes as soon as it starts
+      cluster-termination-delay-seconds: 0  # 0 = a cluster is TERMINATED as soon as it is TERMINATING
     wafv2:
       enabled: true
     scheduler:
