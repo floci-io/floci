@@ -1701,6 +1701,7 @@ public class Ec2QueryHandler {
             configurations.add(new DhcpConfiguration(key, values));
         }
         List<Tag> tags = parseTagsForResource(p, "dhcp-options");
+        checkDryRun(p);
         DhcpOptions options = service.createDhcpOptions(region, configurations);
         try {
             applyResourceTags(tags, region, options.getDhcpOptionsId());
@@ -1763,11 +1764,13 @@ public class Ec2QueryHandler {
     }
 
     private Response handleAssociateDhcpOptions(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         service.associateDhcpOptions(region, p.getFirst("DhcpOptionsId"), p.getFirst("VpcId"));
         return booleanResponse("AssociateDhcpOptions");
     }
 
     private Response handleDeleteDhcpOptions(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         service.deleteDhcpOptions(region, p.getFirst("DhcpOptionsId"));
         return booleanResponse("DeleteDhcpOptions");
     }

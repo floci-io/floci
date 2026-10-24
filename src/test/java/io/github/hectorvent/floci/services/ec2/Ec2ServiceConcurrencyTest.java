@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.model.DhcpOptions;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -51,6 +53,81 @@ class Ec2ServiceConcurrencyTest {
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
+    }
+
+    @Test
+    void concurrentDefaultSeedingWritesDhcpOptionsOnlyOnce() throws Exception {
+        CountingDhcpOptionsStorage dhcpStore = new CountingDhcpOptionsStorage();
+        StorageFactory factory = new StorageFactory(null, null) {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                                                              TypeReference<Map<String, V>> typeReference) {
+                if ("ec2-dhcp-options.json".equals(fileName)) {
+                    return (AccountAwareStorageBackend<V>) dhcpStore;
+                }
+                return AccountAwareStorageBackend.inMemory("000000000000");
+            }
+        };
+        Ec2Service service = new Ec2Service(mockConfig(), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class),
+                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), factory);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<?> first = pool.submit(() -> {
+                start.await();
+                service.ensureDefaultResources("us-west-2");
+                return null;
+            });
+            Future<?> second = pool.submit(() -> {
+                start.await();
+                service.ensureDefaultResources("us-west-2");
+                return null;
+            });
+            start.countDown();
+            first.get(20, TimeUnit.SECONDS);
+            second.get(20, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
+        }
+        assertEquals(1, dhcpStore.defaultWrites.get());
+        assertEquals(1, service.describeVpcs("us-west-2", List.of(), List.of()).stream()
+                .filter(vpc -> vpc.isDefault()).count());
+    }
+
+    private static final class CountingDhcpOptionsStorage extends AccountAwareStorageBackend<DhcpOptions> {
+        private final CountDownLatch firstReads = new CountDownLatch(2);
+        private final AtomicInteger reads = new AtomicInteger();
+        private final AtomicInteger defaultWrites = new AtomicInteger();
+
+        private CountingDhcpOptionsStorage() {
+            super(new InMemoryStorage<>(), null, "000000000000");
+        }
+
+        @Override
+        public Optional<DhcpOptions> get(String key) {
+            Optional<DhcpOptions> result = super.get(key);
+            if (key.endsWith("::dopt-default") && reads.incrementAndGet() <= 2) {
+                firstReads.countDown();
+                try {
+                    firstReads.await(300, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+            }
+            return result;
+        }
+
+        @Override
+        public void put(String key, DhcpOptions value) {
+            if (key.endsWith("::dopt-default")) {
+                defaultWrites.incrementAndGet();
+            }
+            super.put(key, value);
+        }
     }
 
     @Test

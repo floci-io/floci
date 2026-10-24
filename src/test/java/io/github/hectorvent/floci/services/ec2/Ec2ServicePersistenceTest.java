@@ -83,6 +83,24 @@ class Ec2ServicePersistenceTest {
     }
 
     @Test
+    void startupRestoresDeletedDefaultDhcpOptions(@TempDir Path dir) {
+        Ec2Service original = newService(dir);
+        original.ensureDefaultResources(REGION);
+        String defaultVpcId = original.describeVpcs(REGION, List.of(), List.of()).stream()
+                .filter(Vpc::isDefault).findFirst().orElseThrow().getVpcId();
+        original.associateDhcpOptions(REGION, "default", defaultVpcId);
+        original.deleteDhcpOptions(REGION, "dopt-default");
+
+        Ec2Service restarted = newService(dir);
+        restarted.ensureDefaultResources(REGION);
+        DhcpOptions restored = restarted.describeDhcpOptions(REGION, List.of("dopt-default"), List.of(), 0, null)
+                .items().getFirst();
+        assertEquals("dopt-default", restored.getDhcpOptionsId());
+        assertEquals("default", restarted.requireVpc(REGION, defaultVpcId).getDhcpOptionsId());
+        assertEquals("dopt-default", restarted.createVpc(REGION, "10.78.0.0/16", false).getDhcpOptionsId());
+    }
+
+    @Test
     void elasticIpMetadataSurvivesRestart(@TempDir Path dir) {
         String region = "us-west-2";
         String pool = "ipv4pool-ec2-0123456789abcdef0";

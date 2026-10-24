@@ -235,6 +235,136 @@ class Ec2DhcpOptionsIntegrationTest {
     }
 
     @Test
+    void dryRunDhcpOptionsWritesDoNotMutateState() {
+        String domain = "dry-run-" + System.nanoTime() + ".example";
+        String id = createOptions(domain);
+        String vpcId = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.254.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/").then().statusCode(200).extract()
+            .xmlPath().getString("CreateVpcResponse.vpc.vpcId");
+        try {
+            given()
+                .formParam("Action", "CreateDhcpOptions")
+                .formParam("DhcpConfiguration.1.Key", "domain-name")
+                .formParam("DhcpConfiguration.1.Value.1", domain)
+                .formParam("DryRun", "true")
+                .header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(412).body(containsString("DryRunOperation"));
+            given()
+                .formParam("Action", "DescribeDhcpOptions")
+                .formParam("Filter.1.Name", "value")
+                .formParam("Filter.1.Value.1", domain)
+                .header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(200)
+                .body("DescribeDhcpOptionsResponse.dhcpOptionsSet.item.dhcpOptionsId", equalTo(id));
+
+            given()
+                .formParam("Action", "AssociateDhcpOptions")
+                .formParam("DhcpOptionsId", id)
+                .formParam("VpcId", vpcId)
+                .formParam("DryRun", "true")
+                .header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(412).body(containsString("DryRunOperation"));
+            given()
+                .formParam("Action", "DescribeVpcs")
+                .formParam("VpcId.1", vpcId)
+                .header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(200)
+                .body("DescribeVpcsResponse.vpcSet.item.dhcpOptionsId", equalTo("dopt-default"));
+
+            given()
+                .formParam("Action", "DeleteDhcpOptions")
+                .formParam("DhcpOptionsId", id)
+                .formParam("DryRun", "true")
+                .header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(412).body(containsString("DryRunOperation"));
+            given()
+                .formParam("Action", "DescribeDhcpOptions")
+                .formParam("DhcpOptionsId.1", id)
+                .header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(200)
+                .body("DescribeDhcpOptionsResponse.dhcpOptionsSet.item.dhcpOptionsId", equalTo(id));
+        } finally {
+            deleteOptions(id);
+            given()
+                .formParam("Action", "DeleteVpc")
+                .formParam("VpcId", vpcId)
+                .header("Authorization", AUTH_HEADER)
+            .when().post("/").then().statusCode(200);
+        }
+    }
+
+    @Test
+    void createVpcRestoresDeletedRegionalDefaultDhcpOptions() {
+        String isolatedAuth =
+                "AWS4-HMAC-SHA256 Credential=000000000099/20260908/us-east-1/ec2/aws4_request";
+        String defaultVpcId = given()
+            .formParam("Action", "DescribeVpcs")
+            .formParam("Filter.1.Name", "is-default")
+            .formParam("Filter.1.Value.1", "true")
+            .header("Authorization", isolatedAuth)
+        .when().post("/").then().statusCode(200).extract()
+            .xmlPath().getString("DescribeVpcsResponse.vpcSet.item.vpcId");
+        String firstVpcId = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.255.0.0/16")
+            .header("Authorization", isolatedAuth)
+        .when().post("/").then().statusCode(200).extract()
+            .xmlPath().getString("CreateVpcResponse.vpc.vpcId");
+        String secondVpcId = null;
+        try {
+            for (String vpcId : List.of(defaultVpcId, firstVpcId)) {
+                given()
+                    .formParam("Action", "AssociateDhcpOptions")
+                    .formParam("DhcpOptionsId", "default")
+                    .formParam("VpcId", vpcId)
+                    .header("Authorization", isolatedAuth)
+                .when().post("/").then().statusCode(200);
+            }
+            given()
+                .formParam("Action", "DeleteDhcpOptions")
+                .formParam("DhcpOptionsId", "dopt-default")
+                .header("Authorization", isolatedAuth)
+            .when().post("/").then().statusCode(200);
+
+            secondVpcId = given()
+                .formParam("Action", "CreateVpc")
+                .formParam("CidrBlock", "10.252.0.0/16")
+                .header("Authorization", isolatedAuth)
+            .when().post("/").then().statusCode(200)
+                .body("CreateVpcResponse.vpc.dhcpOptionsId", equalTo("dopt-default"))
+                .extract().xmlPath().getString("CreateVpcResponse.vpc.vpcId");
+            given()
+                .formParam("Action", "DescribeDhcpOptions")
+                .formParam("DhcpOptionsId.1", "dopt-default")
+                .header("Authorization", isolatedAuth)
+            .when().post("/").then().statusCode(200)
+                .body("DescribeDhcpOptionsResponse.dhcpOptionsSet.item.dhcpOptionsId", equalTo("dopt-default"));
+        } finally {
+            if (secondVpcId != null) {
+                given()
+                    .formParam("Action", "DeleteVpc")
+                    .formParam("VpcId", secondVpcId)
+                    .header("Authorization", isolatedAuth)
+                .when().post("/").then().statusCode(200);
+            }
+            given()
+                .formParam("Action", "DeleteVpc")
+                .formParam("VpcId", firstVpcId)
+                .header("Authorization", isolatedAuth)
+            .when().post("/").then().statusCode(200);
+            given()
+                .formParam("Action", "AssociateDhcpOptions")
+                .formParam("DhcpOptionsId", "dopt-default")
+                .formParam("VpcId", defaultVpcId)
+                .header("Authorization", isolatedAuth)
+            .when().post("/").then().statusCode(200);
+        }
+    }
+
+    @Test
     void numberedConfigurationsDoNotSilentlyDiscardLaterEntries() {
         String id = given()
             .formParam("Action", "CreateDhcpOptions")
@@ -361,6 +491,14 @@ class Ec2DhcpOptionsIntegrationTest {
         given()
             .formParam("Action", "DeleteDhcpOptions")
             .formParam("DhcpOptionsId", id)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/").then().statusCode(200);
+    }
+
+    private void deleteVpc(String id) {
+        given()
+            .formParam("Action", "DeleteVpc")
+            .formParam("VpcId", id)
             .header("Authorization", AUTH_HEADER)
         .when().post("/").then().statusCode(200);
     }
