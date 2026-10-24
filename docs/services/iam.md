@@ -40,7 +40,7 @@ or at the AWS Sign-In host of a region in the deployment's partition; any other 
 | CreateUser | Creates an IAM user in the local account. |
 | GetUser | Returns a stored IAM user. |
 | DeleteUser | Deletes an IAM user from the local IAM store. |
-| ListUsers | Lists IAM users in the local account. |
+| ListUsers | Lists IAM users in the local account, with `Marker` and `MaxItems` paging. |
 | UpdateUser | Updates mutable IAM user fields. |
 | TagUser | Adds tags to an IAM user. |
 | UntagUser | Removes tags from an IAM user. |
@@ -54,7 +54,7 @@ or at the AWS Sign-In host of a region in the deployment's partition; any other 
 | GetGroup | Returns an IAM group and its users. |
 | UpdateGroup | Renames a group and/or changes its path; ARN and stored users move with it. |
 | DeleteGroup | Deletes an IAM group from the local IAM store. |
-| ListGroups | Lists IAM groups in the local account. |
+| ListGroups | Lists IAM groups in the local account, with `Marker` and `MaxItems` paging. |
 | AddUserToGroup | Adds a user to an IAM group. |
 | RemoveUserFromGroup | Removes a user from an IAM group. |
 | ListGroupsForUser | Lists groups that contain a user. |
@@ -105,9 +105,12 @@ A role `Description` is held to the shape AWS publishes for it on every action t
 `PathPrefix`, `PolicyUsageFilter`, and pagination are not yet applied; responses return
 `IsTruncated=false`.
 
-`ListRoles` and `ListPolicies` return 100 items when `MaxItems` is omitted and reject a value
-outside 1 to 1000. `PathPrefix` and `Scope` filter before paging, and roles and customer managed
-policies are listed in name order so a `Marker` resumes where the previous page stopped.
+`ListRoles`, `ListPolicies`, `ListUsers` and `ListGroups` return 100 items when `MaxItems` is
+omitted and reject a value outside 1 to 1000. `PathPrefix` and `Scope` filter before paging, and
+roles, users, groups and customer managed policies are listed in name order so a `Marker` resumes
+where the previous page stopped. `ListUsers`, `ListGroups` and the attached and inline policy lists
+accept only a `Marker` issued by the same action for the same principal in the same account; any other value, a bare
+number included, is `InvalidInput`.
 `ListPolicies` does not yet apply `OnlyAttached` or `PolicyUsageFilter`.
 
 ### Permission Boundaries
@@ -125,13 +128,16 @@ policies are listed in name order so a `Marker` resumes where the previous page 
 |--------|-------------|
 | AttachUserPolicy | Attaches a managed policy to a user. |
 | DetachUserPolicy | Detaches a managed policy from a user. |
-| ListAttachedUserPolicies | Lists managed policies attached to a user. |
+| ListAttachedUserPolicies | Lists managed policies attached to a user, with `Marker` and `MaxItems` paging. |
 | AttachGroupPolicy | Attaches a managed policy to a group. |
 | DetachGroupPolicy | Detaches a managed policy from a group. |
-| ListAttachedGroupPolicies | Lists managed policies attached to a group. |
+| ListAttachedGroupPolicies | Lists managed policies attached to a group, with `Marker` and `MaxItems` paging. |
 | AttachRolePolicy | Attaches a managed policy to a role. |
 | DetachRolePolicy | Detaches a managed policy from a role. |
-| ListAttachedRolePolicies | Lists managed policies attached to a role. |
+| ListAttachedRolePolicies | Lists managed policies attached to a role, with `Marker` and `MaxItems` paging. |
+
+The attached-policy lists page the same way, in policy ARN order, so a `Marker` naming a policy
+detached between calls still resumes after it.
 
 ### Inline Policies
 
@@ -140,15 +146,17 @@ policies are listed in name order so a `Marker` resumes where the previous page 
 | PutUserPolicy | Stores or replaces an inline policy on a user. |
 | GetUserPolicy | Returns an inline policy stored on a user. |
 | DeleteUserPolicy | Deletes an inline policy from a user. |
-| ListUserPolicies | Lists inline policy names stored on a user. |
+| ListUserPolicies | Lists inline policy names stored on a user, with `Marker` and `MaxItems` paging. |
 | PutGroupPolicy | Stores or replaces an inline policy on a group. |
 | GetGroupPolicy | Returns an inline policy stored on a group. |
 | DeleteGroupPolicy | Deletes an inline policy from a group. |
-| ListGroupPolicies | Lists inline policy names stored on a group. |
+| ListGroupPolicies | Lists inline policy names stored on a group, with `Marker` and `MaxItems` paging. |
 | PutRolePolicy | Stores or replaces an inline policy on a role. |
 | GetRolePolicy | Returns an inline policy stored on a role. |
 | DeleteRolePolicy | Deletes an inline policy from a role. |
-| ListRolePolicies | Lists inline policy names stored on a role. |
+| ListRolePolicies | Lists inline policy names stored on a role, with `Marker` and `MaxItems` paging. |
+
+The inline policy lists page the same way, in policy name order.
 
 Inline policies share an aggregate size limit per principal: 2,048 characters for a user,
 5,120 for a group, and 10,240 for a role. Whitespace does not count. A replacement counts

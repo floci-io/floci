@@ -817,6 +817,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return accessKeys.get(accessKeyId).map(AccessKey::getUserName);
     }
 
+    /** The account this request's IAM entities are read from, or null outside account-aware storage. */
+    public String requestAccountId() {
+        return users instanceof AccountAwareStorageBackend<IamUser> aware ? aware.accountId() : null;
+    }
+
     /**
      * The owner of a key in the calling account, for a read that is not the owner's own request.
      * Unlike {@link #findUserNameByAccessKeyId}, this never migrates: an unprefixed
@@ -904,6 +909,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         String prefix = pathPrefix != null ? pathPrefix : "/";
         return users.scan(k -> true).stream()
                 .filter(u -> u.getPath().startsWith(prefix))
+                .sorted(Comparator.comparing(IamUser::getUserName))
                 .toList();
     }
 
@@ -1125,6 +1131,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         String prefix = pathPrefix != null ? pathPrefix : "/";
         return groups.scan(k -> true).stream()
                 .filter(g -> g.getPath().startsWith(prefix))
+                .sorted(Comparator.comparing(IamGroup::getGroupName))
                 .toList();
     }
 
