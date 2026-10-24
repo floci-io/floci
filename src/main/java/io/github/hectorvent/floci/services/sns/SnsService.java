@@ -705,6 +705,22 @@ public class SnsService implements Resettable, ResourceProvider {
         topicStore.put(key, topic);
     }
 
+    /** Restores stored topic settings exactly, including attributes absent before a stack update. */
+    public synchronized void restoreTopicAttributes(String topicArn, Map<String, String> previous,
+                                                    Set<String> names, String region) {
+        String key = topicKey(region, topicArn);
+        Topic topic = topicStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
+        for (String name : names) {
+            if (previous.containsKey(name)) {
+                topic.getAttributes().put(name, previous.get(name));
+            } else {
+                topic.getAttributes().remove(name);
+            }
+        }
+        topicStore.put(key, topic);
+    }
+
     /**
      * Adds a statement to the topic's policy granting {@code accountIds} the named SNS actions,
      * written as AWS writes it: the label is its {@code Sid}, each account becomes its

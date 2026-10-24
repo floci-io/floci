@@ -2,7 +2,11 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -207,6 +211,55 @@ class SnsCfnProvisionerTest {
         verify(sns).unsubscribe("arn:new", REGION);
         verify(sns, times(2)).subscribe(TOPIC_ARN, "sqs", "arn:old-queue", REGION, Map.of());
         assertTrue(r.getAttributes().containsKey("__FlociInlineSubscription:arn:restored"));
+    }
+
+    @Test
+    void topicUpdateRollbackRestoresPriorTopicSettings() {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(i -> AccountAwareStorageBackend.inMemory("000000000000"));
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        SnsService realSns = new SnsService(storageFactory, config,
+                new RegionResolver(REGION, "000000000000"), null, null, null, MAPPER, null);
+        Topic topic = realSns.createTopic("events.fifo", Map.of(
+                "ContentBasedDeduplication", "false",
+                "FifoThroughputScope", "Topic",
+                "MaximumMessageSize", "131072"), Map.of(), REGION);
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Topic");
+        resource.setResourceType("AWS::SNS::Topic");
+        resource.setPhysicalId(topic.getTopicArn());
+        resource.setAttributes(new HashMap<>(Map.of("TopicName", "events.fifo")));
+
+        new SnsCfnProvisioner(realSns).provision(resource, props("""
+                {"TopicName":"events.fifo","FifoTopic":true,
+                 "ContentBasedDeduplication":true,"FifoThroughputScope":"MessageGroup",
+                 "MaximumMessageSize":65536}
+                """), new ProvisionContext(engine, REGION, "000000000000", "my-stack",
+                topic.getTopicArn()));
+        assertEquals("true", realSns.getTopicAttributes(topic.getTopicArn(), REGION)
+                .get("ContentBasedDeduplication"));
+        assertTrue(new SnsCfnProvisioner(realSns).rollbackUpdate(resource));
+
+        Map<String, String> restored = realSns.getTopicAttributes(topic.getTopicArn(), REGION);
+        assertEquals("false", restored.get("ContentBasedDeduplication"));
+        assertEquals("Topic", restored.get("FifoThroughputScope"));
+        assertEquals("131072", restored.get("MaximumMessageSize"));
+
+        Topic plain = realSns.createTopic("plain", Map.of(), Map.of(), REGION);
+        StackResource plainResource = new StackResource();
+        plainResource.setLogicalId("PlainTopic");
+        plainResource.setResourceType("AWS::SNS::Topic");
+        plainResource.setPhysicalId(plain.getTopicArn());
+        plainResource.setAttributes(new HashMap<>(Map.of("TopicName", "plain")));
+        new SnsCfnProvisioner(realSns).provision(plainResource, props("""
+                {"TopicName":"plain","MaximumMessageSize":65536}
+                """), new ProvisionContext(engine, REGION, "000000000000", "my-stack",
+                plain.getTopicArn()));
+        assertTrue(new SnsCfnProvisioner(realSns).rollbackUpdate(plainResource));
+        assertFalse(realSns.getTopicAttributes(plain.getTopicArn(), REGION)
+                .containsKey("MaximumMessageSize"));
     }
 
     @Test

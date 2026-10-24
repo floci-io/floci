@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.ArrayList;
@@ -30,6 +31,8 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     private static final int TOPIC_NAME_MAX_LENGTH = 256;
     private static final String FIFO_SUFFIX = ".fifo";
     private static final String INLINE_SUBSCRIPTION_PREFIX = "__FlociInlineSubscription:";
+    private static final Set<String> MUTABLE_TOPIC_ATTRIBUTES = Set.of(
+            "ContentBasedDeduplication", "FifoThroughputScope", "MaximumMessageSize");
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final SnsService snsService;
@@ -119,7 +122,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         boolean created = creation.created();
         List<Subscription> existing = snsService.listSubscriptionsByTopic(topic.getTopicArn(), ctx.region());
         if (ctx.isUpdate() && !created) {
-            snapshotInlineSubscriptions(r, topic.getTopicArn(), ctx.region(), existing);
+            snapshotInlineSubscriptions(r, topic, ctx.region(), existing);
         }
         // createTopic leaves an existing topic untouched, so an update writes the mutable
         // attributes itself. A property the template dropped is reset, not left standing.
@@ -162,13 +165,20 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
                         desiredSubscriptions, existing, added));
     }
 
-    private void snapshotInlineSubscriptions(StackResource r, String topicArn, String region,
+    private void snapshotInlineSubscriptions(StackResource r, Topic topic, String region,
                                              List<Subscription> existing) {
         List<Subscription> owned = existing.stream()
                 .filter(sub -> r.getAttributes().containsKey(
                         INLINE_SUBSCRIPTION_PREFIX + sub.getSubscriptionArn()))
                 .toList();
-        InlineSubscriptionSnapshot snapshot = new InlineSubscriptionSnapshot(topicArn, region, owned);
+        Map<String, String> previousAttributes = new HashMap<>();
+        MUTABLE_TOPIC_ATTRIBUTES.forEach(name -> {
+            if (topic.getAttributes().containsKey(name)) {
+                previousAttributes.put(name, topic.getAttributes().get(name));
+            }
+        });
+        InlineSubscriptionSnapshot snapshot = new InlineSubscriptionSnapshot(
+                topic.getTopicArn(), region, owned, previousAttributes);
         try {
             r.getAttributes().put(CfnRollback.SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR,
                     MAPPER.writeValueAsString(snapshot));
@@ -177,8 +187,10 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    @RegisterForReflection
     private record InlineSubscriptionSnapshot(String topicArn, String region,
-                                              List<Subscription> owned) {
+                                              List<Subscription> owned,
+                                              Map<String, String> topicAttributes) {
     }
 
     private void restoreInlineSubscriptions(StackResource r) {
@@ -191,6 +203,10 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
             snapshot = MAPPER.readValue(raw, InlineSubscriptionSnapshot.class);
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Could not read inline SNS subscription snapshot", e);
+        }
+        if (snapshot.topicAttributes() != null) {
+            snsService.restoreTopicAttributes(snapshot.topicArn(), snapshot.topicAttributes(),
+                    MUTABLE_TOPIC_ATTRIBUTES, snapshot.region());
         }
         Set<String> priorArns = snapshot.owned().stream()
                 .map(Subscription::getSubscriptionArn).collect(Collectors.toSet());

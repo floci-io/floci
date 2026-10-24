@@ -6845,12 +6845,14 @@ class CloudFormationIntegrationTest {
         String initial = """
             {"Resources":{"ATopic":{"Type":"AWS::SNS::Topic","Properties":{
               "TopicName":"cfn-sns-inline-rollback-topic",
+              "MaximumMessageSize":131072,
               "Subscription":[{"Protocol":"email","Endpoint":"old@example.com"}]}}}}
             """;
         String failingUpdate = """
             {"Resources":{
               "ATopic":{"Type":"AWS::SNS::Topic","Properties":{
                 "TopicName":"cfn-sns-inline-rollback-topic",
+                "MaximumMessageSize":65536,
                 "Subscription":[{"Protocol":"email","Endpoint":"new@example.com"}]}},
               "ZBroken":{"Type":"AWS::CloudFormation::Stack","DependsOn":"ATopic",
                 "Properties":{}}}}
@@ -6878,6 +6880,14 @@ class CloudFormationIntegrationTest {
         .when().post("/").then().statusCode(200)
             .body(containsString("old@example.com"))
             .body(not(containsString("new@example.com")));
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetTopicAttributes")
+            .formParam("TopicArn", topicArn)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("MaximumMessageSize"))
+            .body(containsString("<value>131072</value>"))
+            .body(not(containsString("<value>65536</value>")));
     }
 
     @Test
