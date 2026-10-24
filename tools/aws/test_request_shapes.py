@@ -1,5 +1,6 @@
-"""Tests for request_shapes, the generator behind regen_dynamodb_shapes, regen_sesv2_shapes, regen_ecs_shapes and
-regen_emr_serverless_shapes, and of the constraints regen_resource_groups_shapes and regen_ecr_shapes vendor.
+"""Tests for request_shapes, the generator behind regen_dynamodb_shapes, regen_sesv2_shapes, regen_apigateway_shapes,
+regen_ecs_shapes and regen_emr_serverless_shapes, and of the constraints regen_resource_groups_shapes and
+regen_ecr_shapes vendor.
 
 Run with: pytest tools/aws -q  (or: make aws-data-test)
 """
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import regen_apigateway_shapes
 import regen_dynamodb_shapes
 import regen_ecr_shapes
 import regen_ecs_shapes
@@ -167,6 +169,7 @@ def test_output_is_stable():
 def test_generator_name_is_the_scripts_path_from_the_repository_root():
     assert r.generator_name(regen_dynamodb_shapes.__file__) == "tools/aws/regen_dynamodb_shapes.py"
     assert r.generator_name(regen_sesv2_shapes.__file__) == "tools/aws/regen_sesv2_shapes.py"
+    assert r.generator_name(regen_apigateway_shapes.__file__) == "tools/aws/regen_apigateway_shapes.py"
     assert r.generator_name(regen_ecs_shapes.__file__) == "tools/aws/regen_ecs_shapes.py"
 
 
@@ -191,6 +194,7 @@ def test_load_model_without_a_service_model_exits(tmp_path):
 @pytest.mark.parametrize("script, model, output", [
     (regen_dynamodb_shapes, "dynamodb/2012-08-10", "dynamodb-request-shapes.json"),
     (regen_sesv2_shapes, "sesv2/2019-09-27", "sesv2-request-shapes.json"),
+    (regen_apigateway_shapes, "apigateway/2015-07-09", "apigateway-request-shapes.json"),
     (regen_ecs_shapes, "ecs/2014-11-13", "ecs-request-shapes.json"),
 ])
 def test_each_script_runs_the_shared_main_with_its_model_and_output(script, model, output, monkeypatch):
