@@ -112,20 +112,29 @@ final class PassedRoleMembers {
 
     private static Member member(String operation, JsonNode role) {
         String path = role.path("member").asText("");
+        List<Step> steps = steps(path);
+        if (steps == null) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads " + operation + " at " + path
+                    + ", which is no member path");
+        }
+        String passedTo = role.hasNonNull("passedTo") ? role.get("passedTo").asText() : null;
+        return new Member(path, steps, queryKeys(steps), passedTo, role.path("byName").asBoolean(false));
+    }
+
+    /** The steps of a vendored member path; null when {@code path} is none. */
+    static List<Step> steps(String path) {
         List<Step> steps = new ArrayList<>();
         for (String step : path.split("\\.", -1)) {
             Matcher matcher = STEP.matcher(step);
             if (!matcher.matches()) {
-                throw new IllegalStateException(RESOURCE_NAME + " reads " + operation + " at " + path
-                        + ", which is no member path");
+                return null;
             }
             Into into = matcher.group(2) != null ? Into.LIST : matcher.group(3) == null ? Into.NONE
                     : matcher.group(3).isEmpty() ? Into.MAP : Into.KEY;
             String key = into == Into.LIST ? matcher.group(2) : into == Into.KEY ? matcher.group(3) : null;
             steps.add(new Step(matcher.group(1), into, key));
         }
-        String passedTo = role.hasNonNull("passedTo") ? role.get("passedTo").asText() : null;
-        return new Member(path, List.copyOf(steps), queryKeys(steps), passedTo, role.path("byName").asBoolean(false));
+        return List.copyOf(steps);
     }
 
     /**

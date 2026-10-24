@@ -888,7 +888,7 @@ final class PassedRoles {
      * A gzip-encoded body is decompressed first, as {@code AwsJsonCborController} decompresses it before
      * running the request.
      */
-    private static JsonNode jsonBody(ContainerRequestContext ctx) {
+    static JsonNode jsonBody(ContainerRequestContext ctx) {
         if (ctx.getProperty(IamConditionContextResolver.BUFFERED_JSON_BODY) instanceof JsonNode cached) {
             return cached;
         }

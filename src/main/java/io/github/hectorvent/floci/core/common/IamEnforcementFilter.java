@@ -501,11 +501,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
             callerArns.get().putPrincipalKeys(conditionContext);
         }
+        // A create that carries tags is checked with them where its own action takes them, as the tagging
+        // action it also needs is (see TagOnCreate); keys the service's own resolver gives are kept.
+        Optional<TagOnCreate.Tagging> tagOnCreate = TagOnCreate.of(resolvedAuthorization.operation(), ctx);
+        Map<String, List<String>> requestTags = tagOnCreate.filter(TagOnCreate.Tagging::requestTags)
+                .map(TagOnCreate::requestTagContext).orElse(Map.of());
+        if (!requestTags.isEmpty()) {
+            conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
+            requestTags.forEach(conditionContext::putIfAbsent);
+        }
         List<Map<String, List<String>>> targetContexts = new ArrayList<>();
         targetContexts.add(conditionContext);
         for (Map<String, List<String>> target : remainingTargets) {
             Map<String, List<String>> targetContext = new HashMap<>(target);
             callerArns.ifPresent(arns -> arns.putPrincipalKeys(targetContext));
+            requestTags.forEach(targetContext::putIfAbsent);
             targetContexts.add(targetContext);
         }
 
@@ -532,6 +542,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
         if (abortIfRolePassDenied(ctx, caller, principal, callerArns.orElse(null), action, credentialScope,
                 region, accountId, akid)) {
+            return;
+        }
+        if (tagOnCreate.isPresent() && abortIfTagOnCreateDenied(ctx, caller, principal, callerArns.orElse(null),
+                action, resolvedAuthorization.operation(), tagOnCreate.get(), credentialScope, resources, region,
+                accountId, akid)) {
             return;
         }
 
@@ -733,7 +748,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     .map(descriptor -> iamServiceScope(descriptor, claimedScope))
                     .orElseGet(() -> catalog.canonicalCredentialScope(service));
             return new ResolvedAuthorization(servingScope,
-                    IamAuthorizedActions.actionFor(servingScope, queryAction));
+                    IamAuthorizedActions.actionFor(servingScope, queryAction), servingScope + ":" + queryAction);
         }
 
         // Read from the route rather than the claim: a path the claim filter takes for RPC v2 can
@@ -745,7 +760,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
             String servingScope = iamServiceScope(rpcV2Route.service(), claimedScope);
             return new ResolvedAuthorization(servingScope,
-                    actionRegistry.resolveOperation(servingScope, rpcV2Route.operation(), ctx));
+                    actionRegistry.resolveOperation(servingScope, rpcV2Route.operation(), ctx),
+                    servingScope + ":" + rpcV2Route.operation());
         }
 
         ResolvedAuthorization routeAuthorization = restRouteAuthorization(ctx);
@@ -756,9 +772,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // A REST request is authorized by its route alone, never by an X-Amz-Target it carries.
         boolean rest = claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST;
         String servingScope = servingCredentialScope(claimedScope, ctx);
-        return new ResolvedAuthorization(servingScope, rest
-                ? actionRegistry.resolveRoute(servingScope, ctx)
-                : actionRegistry.resolve(servingScope, ctx));
+        if (rest) {
+            return new ResolvedAuthorization(servingScope, actionRegistry.resolveRoute(servingScope, ctx));
+        }
+        String targetOperation = IamActionRegistry.targetOperation(ctx);
+        String action = actionRegistry.resolve(servingScope, ctx);
+        return targetOperation == null ? new ResolvedAuthorization(servingScope, action)
+                : new ResolvedAuthorization(servingScope, action, servingScope + ":" + targetOperation);
     }
 
     /**
@@ -896,7 +916,15 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 .orElse(null);
     }
 
-    private record ResolvedAuthorization(String credentialScope, String action) {
+    /**
+     * The scope and action a request is authorized as, and the operation it calls as
+     * {@code <namespace>:<Operation>}, which differs from the action for one AWS authorizes under another name.
+     * A REST route maps straight to its action, which names the operation.
+     */
+    private record ResolvedAuthorization(String credentialScope, String action, String operation) {
+        ResolvedAuthorization(String credentialScope, String action) {
+            this(credentialScope, action, action);
+        }
     }
 
     /** Floci's account-root principal, which is both the caller and the request's aws:PrincipalArn. */
@@ -931,6 +959,26 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
         return false;
+    }
+
+    /**
+     * A request that tags what it creates also needs the service's tagging action (see {@link TagOnCreate}),
+     * checked as the caller on the resources the operation is checked on, with the tags as
+     * {@code aws:RequestTag/<key>} and {@code aws:TagKeys}, the operation as the namespace's
+     * {@code CreateAction} key where the tagging action takes one, and the keys that say who is calling.
+     * Returns true when the request was aborted.
+     */
+    private boolean abortIfTagOnCreateDenied(ContainerRequestContext ctx, CallerContext caller,
+                                             RequestPrincipal principal, CallerArns callerArns, String action,
+                                             String operation, TagOnCreate.Tagging tagging,
+                                             String credentialScope, List<String> resources,
+                                             String region, String accountId, String akid) {
+        Map<String, List<String>> context = TagOnCreate.conditionContext(tagging, operation);
+        if (callerArns != null) {
+            callerArns.putPrincipalKeys(context);
+        }
+        return abortIfDenied(ctx, caller, principal, tagging.action(), action, credentialScope, resources,
+                List.of(context), region, accountId, akid);
     }
 
     /** What {@link PassedRoles} looks up, in the request's account and Region. */

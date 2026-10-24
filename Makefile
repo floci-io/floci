@@ -65,7 +65,8 @@ PREFIX ?= $(HOME)/.local
         iam-action-resources-test iam-authorized-actions-sync iam-authorized-actions-check \
         cfn-property-types-sync cfn-property-types-check cfn-property-types-verify cfn-property-types-test \
         iam-authorized-actions-verify iam-authorized-actions-test iam-passed-roles-sync iam-passed-roles-check \
-        iam-passed-roles-verify iam-passed-roles-test iam-data-verify
+        iam-passed-roles-verify iam-passed-roles-test iam-tag-on-create-sync iam-tag-on-create-check \
+        iam-tag-on-create-verify iam-tag-on-create-test iam-data-verify
 
 help: ## List the targets below
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -307,6 +308,7 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 		exit 1; \
 	}
 	@$(MAKE) --no-print-directory iam-passed-roles-check
+	@$(MAKE) --no-print-directory iam-tag-on-create-check
 
 aws-data-test: ## Run the AWS data generators' unit tests
 	$(PYTHON) -m pytest tools/aws -q
@@ -367,12 +369,14 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	@# Both halves run even when the first fails, so one file's drift cannot hide the other's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
-	@namespaces=0; actions=0; authorized=0; passed=0; \
+	@namespaces=0; actions=0; authorized=0; passed=0; tagged=0; \
 	$(MAKE) --no-print-directory iam-namespaces-verify || namespaces=$$?; \
 	$(MAKE) --no-print-directory iam-action-resources-verify || actions=$$?; \
 	$(MAKE) --no-print-directory iam-authorized-actions-verify || authorized=$$?; \
 	$(MAKE) --no-print-directory iam-passed-roles-verify || passed=$$?; \
-	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || [ $$passed -ne 0 ]; then \
+	$(MAKE) --no-print-directory iam-tag-on-create-verify || tagged=$$?; \
+	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || [ $$passed -ne 0 ] \
+			|| [ $$tagged -ne 0 ]; then \
 		echo ""; \
 		echo "error: vendored IAM data does not match upstream:"; \
 		if [ $$namespaces -ne 0 ]; then \
@@ -386,6 +390,9 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 		fi; \
 		if [ $$passed -ne 0 ]; then \
 			echo "       the table of the roles operations pass, see its message above"; \
+		fi; \
+		if [ $$tagged -ne 0 ]; then \
+			echo "       the table of the tagging actions creates need, see its message above"; \
 		fi; \
 		exit 1; \
 	fi
@@ -447,6 +454,33 @@ iam-passed-roles-verify: ## CI gate (online): every vendored operation must stil
 
 iam-passed-roles-test: ## Run the IAM passed role generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_iam_passed_roles.py -q
+
+iam-tag-on-create-sync: ## Regenerate src/main/resources/aws/iam-tag-on-create.json from AWS and botocore (commit the result)
+	$(PYTHON) tools/aws/regen_iam_tag_on_create.py
+
+iam-tag-on-create-check: ## CI gate (offline): every vendored tag member must be what the pinned botocore gives
+	@$(PYTHON) tools/aws/regen_iam_tag_on_create.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-tag-on-create.json is malformed or out of date."; \
+		echo "       Run 'make iam-tag-on-create-sync' and commit the result."; \
+		exit 1; \
+	}
+
+iam-tag-on-create-verify: ## CI gate (online): every vendored operation must still need its tagging action as AWS says
+	@$(PYTHON) tools/aws/regen_iam_tag_on_create.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not reach AWS's service reference, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: the vendored table checks a tagging action for an operation AWS does not check it for."; \
+		echo "       Run 'make iam-tag-on-create-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+iam-tag-on-create-test: ## Run the IAM tag-on-create generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_iam_tag_on_create.py -q
 
 cfn-property-types-sync: ## Regenerate src/main/resources/aws/cfn-property-types.json from AWS's resource schemas (commit the result)
 	$(PYTHON) tools/aws/regen_cfn_property_types.py
