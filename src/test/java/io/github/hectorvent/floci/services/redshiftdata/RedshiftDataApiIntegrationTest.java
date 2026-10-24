@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshiftdata;
 
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
+import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -16,6 +17,8 @@ import org.junit.jupiter.api.TestInstance;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
+import software.amazon.awssdk.services.cloudwatchlogs.model.GetLogEventsRequest;
 import software.amazon.awssdk.services.redshiftdata.RedshiftDataClient;
 import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementResponse;
 import software.amazon.awssdk.services.redshiftdata.model.ResourceNotFoundException;
@@ -125,6 +128,35 @@ class RedshiftDataApiIntegrationTest {
             awaitFinished(last);
             assertThrows(ResourceNotFoundException.class,
                     () -> data.executeStatement(request -> request.sessionId(session).sql("SELECT 1")));
+        }
+    }
+
+    @Test
+    void sdkExecuteStatementPublishesUserActivityToCloudWatchLogs() {
+        String parameterGroup = "it-rs-audit-" + clusterId;
+        redshift.createClusterParameterGroup(parameterGroup, "redshift-1.0", "Audit logging integration test");
+        redshift.modifyClusterParameterGroup(parameterGroup,
+                List.of(new Parameter("enable_user_activity_logging", "true")));
+        redshift.modifyCluster(clusterId, null, null, null, parameterGroup, null);
+        redshift.enableLogging(clusterId, null, null, "cloudwatch", List.of("useractivitylog"));
+        String group = "/aws/redshift/cluster/" + clusterId + "/useractivitylog";
+
+        try (RedshiftDataClient data = RedshiftDataClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build();
+             CloudWatchLogsClient logs = CloudWatchLogsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                     .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build()) {
+            String statementId = data.executeStatement(request -> request.clusterIdentifier(clusterId)
+                    .dbUser("admin").database("dev").sql("SELECT 741")).id();
+            awaitFinished(statementId);
+
+            Awaitility.await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(100)).until(() ->
+                    logs.getLogEvents(GetLogEventsRequest.builder().logGroupName(group).logStreamName(clusterId).build())
+                            .events().stream().anyMatch(event -> event.message().contains("LOG: SELECT 741")));
+        } finally {
+            redshift.disableLogging(clusterId);
+            redshift.modifyCluster(clusterId, null, null, null,
+                    "default.redshift-1.0", null);
+            redshift.deleteClusterParameterGroup(parameterGroup);
         }
     }
 

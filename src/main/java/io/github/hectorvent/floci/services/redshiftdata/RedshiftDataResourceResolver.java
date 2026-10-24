@@ -153,7 +153,7 @@ class RedshiftDataResourceResolver {
         String accountId = AwsArnUtils.parse(arn).accountId();
         SpectrumSession spectrum = new SpectrumSession(accountId, accountId + ":" + cluster.getClusterIdentifier(),
                 database, cluster.getIamRoleArns(), false);
-        return new DatabaseTarget(arn, host, port, database, user, password, spectrum);
+        return new DatabaseTarget(arn, host, port, database, user, password, spectrum, cluster);
     }
 
     private String clusterArn(String clusterId, String region) {
@@ -184,9 +184,14 @@ class RedshiftDataResourceResolver {
     }
 
     record DatabaseTarget(String arn, String host, int port, String database, String user, String password,
-                          SpectrumSession spectrum) {
+                          SpectrumSession spectrum, Cluster cluster) {
         DatabaseTarget(String arn, String host, int port, String database, String user, String password) {
-            this(arn, host, port, database, user, password, null);
+            this(arn, host, port, database, user, password, null, null);
+        }
+
+        DatabaseTarget(String arn, String host, int port, String database, String user, String password,
+                       SpectrumSession spectrum) {
+            this(arn, host, port, database, user, password, spectrum, null);
         }
     }
 

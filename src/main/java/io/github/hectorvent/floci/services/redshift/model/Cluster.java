@@ -50,7 +50,7 @@ public class Cluster {
     public String getDefaultIamRoleArn() { return defaultIamRoleArn; }
     public void setDefaultIamRoleArn(String defaultIamRoleArn) { this.defaultIamRoleArn = defaultIamRoleArn; }
 
-    // Audit logging config as set by EnableLogging; no log delivery is emulated.
+    // Audit logging configuration set by EnableLogging.
     private boolean loggingEnabled = false;
     private String loggingBucketName;
     private String loggingS3KeyPrefix;
@@ -64,6 +64,7 @@ public class Cluster {
 
     private String loggingDestinationType;
     private List<String> loggingExports;
+    private boolean userActivityLoggingEnabled;
     private String loggingS3TableKmsKeyId;
     private String loggingS3TableGranularity;
 
@@ -71,6 +72,10 @@ public class Cluster {
     public void setLoggingDestinationType(String loggingDestinationType) { this.loggingDestinationType = loggingDestinationType; }
     public List<String> getLoggingExports() { return loggingExports; }
     public void setLoggingExports(List<String> loggingExports) { this.loggingExports = loggingExports; }
+    public boolean isUserActivityLoggingEnabled() { return userActivityLoggingEnabled; }
+    public void setUserActivityLoggingEnabled(boolean userActivityLoggingEnabled) {
+        this.userActivityLoggingEnabled = userActivityLoggingEnabled;
+    }
     public String getLoggingS3TableKmsKeyId() { return loggingS3TableKmsKeyId; }
     public void setLoggingS3TableKmsKeyId(String loggingS3TableKmsKeyId) { this.loggingS3TableKmsKeyId = loggingS3TableKmsKeyId; }
     public String getLoggingS3TableGranularity() { return loggingS3TableGranularity; }

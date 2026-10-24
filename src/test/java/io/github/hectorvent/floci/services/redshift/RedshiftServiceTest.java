@@ -1929,8 +1929,9 @@ class RedshiftServiceTest {
         assertEquals("0", parameters.get(0).getParameterValue());
         assertEquals("engine-default", parameters.get(0).getSource());
         assertEquals("integer", parameters.get(0).getDataType());
-        assertEquals("custom", parameters.get(1).getParameterValue());
-        assertEquals("user", parameters.get(1).getSource());
+        assertEquals("false", parameters.get(1).getParameterValue());
+        assertEquals("custom", parameters.get(2).getParameterValue());
+        assertEquals("user", parameters.get(2).getSource());
         verify(parameterGroupBackend, times(2)).flush();
     }
 
@@ -1945,9 +1946,10 @@ class RedshiftServiceTest {
         service.resetClusterParameterGroup("reset-pg", true, List.of());
 
         List<Parameter> parameters = service.describeClusterParameters("reset-pg");
-        assertEquals(2, parameters.size());
+        assertEquals(3, parameters.size());
         assertEquals("0", parameters.get(0).getParameterValue());
-        assertEquals("{}", parameters.get(1).getParameterValue());
+        assertEquals("false", parameters.get(1).getParameterValue());
+        assertEquals("{}", parameters.get(2).getParameterValue());
         assertTrue(parameters.stream().allMatch(parameter -> "engine-default".equals(parameter.getSource())));
         assertEquals("analytics", group.getTags().get("owner"));
         assertEquals("description", group.getDescription());

@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
 import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
@@ -55,6 +56,10 @@ public class RedshiftDataService implements Resettable {
             "(?is)\\A(BEGIN|START\\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT)(?:\\s+(?:WORK|TRANSACTION))?\\s*;?\\s*\\z");
     private static final Pattern TRANSACTION_PREFIX = Pattern.compile("(?is)\\A(?:BEGIN|START|COMMIT|END|ROLLBACK|ABORT)\\b");
     private static final Pattern TRANSACTION_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/|--[^\\r\\n]*");
+    private static final Pattern USER_DDL = Pattern.compile(
+            "(?is)^\\s*(CREATE|DROP|ALTER)\\s+USER\\s+(?:(?:IF\\s+(?:NOT\\s+)?EXISTS)\\s+)?"
+                    + "(\"(?:\"\"|[^\"])*\"|[^\\s;]+)"
+                    + "(?:\\s+RENAME\\s+TO\\s+(\"(?:\"\"|[^\"])*\"|[^\\s;]+))?");
 
     private final RedshiftDataResourceResolver resolver;
     private final RedshiftDataConnectionFactory connectionFactory;
@@ -63,6 +68,7 @@ public class RedshiftDataService implements Resettable {
     private final SpectrumQueryPreparation preparation;
     private final RedshiftDataExecutor executor;
     private final RedshiftDataEventPublisher publisher;
+    private final RedshiftAuditLogPublisher auditLogPublisher;
     private final RequestContext requestContext;
     private final IamService iamService;
     private final RedshiftDataIdempotencyStore idempotency;
@@ -74,7 +80,16 @@ public class RedshiftDataService implements Resettable {
                         RedshiftDataExecutor executor, RedshiftDataEventPublisher publisher) {
         this(resolver, connectionFactory, store, objectMapper, preparation, executor, publisher, null,
                 null, new RedshiftDataIdempotencyStore(AccountAwareStorageBackend.inMemory("000000000000"),
-                        Clock.systemUTC()));
+                        Clock.systemUTC()), new RedshiftDataSessions(), null);
+    }
+
+    RedshiftDataService(RedshiftDataResourceResolver resolver, RedshiftDataConnectionFactory connectionFactory,
+                        RedshiftDataStatementStore store, ObjectMapper objectMapper, SpectrumQueryPreparation preparation,
+                        RedshiftDataExecutor executor, RedshiftDataEventPublisher publisher,
+                        RequestContext requestContext, IamService iamService, RedshiftDataIdempotencyStore idempotency,
+                        RedshiftDataSessions sessions) {
+        this(resolver, connectionFactory, store, objectMapper, preparation, executor, publisher, requestContext,
+                iamService, idempotency, sessions, null);
     }
 
     RedshiftDataService(RedshiftDataResourceResolver resolver, RedshiftDataConnectionFactory connectionFactory,
@@ -82,7 +97,7 @@ public class RedshiftDataService implements Resettable {
                                RedshiftDataExecutor executor, RedshiftDataEventPublisher publisher,
                                RequestContext requestContext, IamService iamService, RedshiftDataIdempotencyStore idempotency) {
         this(resolver, connectionFactory, store, objectMapper, preparation, executor, publisher,
-                requestContext, iamService, idempotency, new RedshiftDataSessions());
+                requestContext, iamService, idempotency, new RedshiftDataSessions(), null);
     }
 
     @Inject
@@ -90,7 +105,7 @@ public class RedshiftDataService implements Resettable {
                                RedshiftDataStatementStore store, ObjectMapper objectMapper, SpectrumQueryPreparation preparation,
                                RedshiftDataExecutor executor, RedshiftDataEventPublisher publisher,
                                RequestContext requestContext, IamService iamService, RedshiftDataIdempotencyStore idempotency,
-                               RedshiftDataSessions sessions) {
+                               RedshiftDataSessions sessions, RedshiftAuditLogPublisher auditLogPublisher) {
         this.resolver = resolver;
         this.connectionFactory = connectionFactory;
         this.store = store;
@@ -98,6 +113,7 @@ public class RedshiftDataService implements Resettable {
         this.preparation = preparation;
         this.executor = executor;
         this.publisher = publisher;
+        this.auditLogPublisher = auditLogPublisher;
         this.requestContext = requestContext;
         this.iamService = iamService;
         this.idempotency = idempotency;
@@ -440,6 +456,11 @@ public class RedshiftDataService implements Resettable {
             Connection connection = use.connection();
             execution.track(connection);
             try {
+                if (auditLogPublisher != null && target.cluster() != null) {
+                    AwsArnUtils.Arn arn = AwsArnUtils.parse(stored.resourceArn);
+                    auditLogPublisher.publishActivity(target.cluster(), arn.accountId(), stored.region,
+                            target.database(), target.user(), sql);
+                }
                 if (session != null && transactionControl(stored, sql, connection, session, execution)) {
                     return;
                 }
@@ -455,6 +476,7 @@ public class RedshiftDataService implements Resettable {
                     }
                     execution.commit(() -> runOnConnection(stored, connection, sql, parameters,
                             target.spectrum(), execution, true));
+                    publishSuccessfulUserChange(stored, target, sql, session == null || !session.inTransaction());
                 } else {
                     runOnConnection(stored, connection, sql, parameters, target.spectrum(), execution, false);
                     execution.commit(() -> {
@@ -462,6 +484,7 @@ public class RedshiftDataService implements Resettable {
                             connection.commit();
                         }
                     });
+                    publishSuccessfulUserChange(stored, target, sql, session == null || !session.inTransaction());
                 }
             } catch (SQLException failure) {
                 if (session != null && failure.getSQLState() != null && failure.getSQLState().startsWith("08")) {
@@ -485,6 +508,42 @@ public class RedshiftDataService implements Resettable {
             stored.error = e.getMessage();
         }
         stored.updatedAt = Instant.now();
+    }
+
+    private void publishSuccessfulUserChange(RedshiftDataStatementStore.StoredStatement stored,
+                                             RedshiftDataResourceResolver.DatabaseTarget target, String sql,
+                                             boolean committed) {
+        if (!committed || auditLogPublisher == null || target.cluster() == null) {
+            return;
+        }
+        Matcher matcher = USER_DDL.matcher(sql);
+        if (!matcher.find()) {
+            return;
+        }
+        String operation = matcher.group(1).toUpperCase(Locale.ROOT);
+        String oldUsername = null;
+        String username = unquoteIdentifier(matcher.group(2));
+        String action = switch (operation) {
+            case "CREATE" -> "Create";
+            case "DROP" -> "Drop";
+            case "ALTER" -> "Alter";
+            default -> throw new IllegalStateException("Unexpected user DDL operation");
+        };
+        if ("ALTER".equals(operation) && matcher.group(3) != null) {
+            oldUsername = username;
+            username = unquoteIdentifier(matcher.group(3));
+            action = "Rename";
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(stored.resourceArn);
+        auditLogPublisher.publishUserChange(target.cluster(), arn.accountId(), stored.region,
+                target.database(), username, action, oldUsername);
+    }
+
+    private static String unquoteIdentifier(String identifier) {
+        if (identifier.length() >= 2 && identifier.startsWith("\"") && identifier.endsWith("\"")) {
+            return identifier.substring(1, identifier.length() - 1).replace("\"\"", "\"");
+        }
+        return identifier;
     }
 
     private boolean transactionControl(RedshiftDataStatementStore.StoredStatement stored, String sql,

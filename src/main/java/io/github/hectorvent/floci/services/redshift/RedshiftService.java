@@ -91,6 +91,7 @@ public class RedshiftService {
     private final SecretsManagerService secretsManagerService;
     private final ObjectMapper objectMapper;
     private final DynamoDbStreamReader streamReader;
+    private final RedshiftAuditLogPublisher auditLogPublisher;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
@@ -133,7 +134,7 @@ public class RedshiftService {
                             RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
                             RedshiftCredentialBroker credentialBroker,
                             SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
-                            DynamoDbStreamReader streamReader) {
+                            DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
@@ -150,6 +151,16 @@ public class RedshiftService {
         this.secretsManagerService = secretsManagerService;
         this.objectMapper = objectMapper;
         this.streamReader = streamReader;
+        this.auditLogPublisher = auditLogPublisher;
+    }
+
+    RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                    EmulatorConfig config, RegionResolver regionResolver, RedshiftProxyManager proxyManager,
+                    DockerHostResolver dockerHostResolver, RedshiftCredentialBroker credentialBroker,
+                    SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                    DynamoDbStreamReader streamReader) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, objectMapper, streamReader, null);
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
@@ -168,6 +179,9 @@ public class RedshiftService {
                         .toList();
         for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : availableClusters) {
             Cluster cluster = entry.value();
+            if (auditLogPublisher != null) {
+                auditLogPublisher.register(entry.accountId(), regionResolver.getRegion(), cluster);
+            }
             if (containerManager.getContainer(entry.accountId(), cluster.getClusterIdentifier()).isPresent()) {
                 continue;
             }
@@ -262,6 +276,7 @@ public class RedshiftService {
         cluster.setDefaultIamRoleArn(defaultRole);
         // A group named at create time is applied afterwards via modifyCluster.
         cluster.setClusterParameterGroupName(DEFAULT_PARAMETER_GROUP_NAME);
+        cluster.setUserActivityLoggingEnabled(userActivityLoggingEnabled(DEFAULT_PARAMETER_GROUP_NAME));
         cluster.setClusterStatus("creating");
         clusters.put(identifier, cluster);
         clusters.flush();
@@ -735,6 +750,9 @@ public class RedshiftService {
         proxyManager.forgetSpectrumRuntime(relayKey(clusters.accountId(), identifier));
         clusters.delete(identifier);
         clusters.flush();
+        if (auditLogPublisher != null) {
+            auditLogPublisher.unregister(clusters.accountId(), identifier);
+        }
         // Invalidate any GetClusterCredentials passwords so a cluster later recreated with this
         // identifier does not accept them as master-equivalent.
         credentialBroker.revokeCluster(clusters.accountId(), identifier);
@@ -792,6 +810,7 @@ public class RedshiftService {
         }
         if (clusterParameterGroupName != null && !clusterParameterGroupName.isBlank()) {
             cluster.setClusterParameterGroupName(clusterParameterGroupName);
+            cluster.setUserActivityLoggingEnabled(userActivityLoggingEnabled(clusterParameterGroupName));
         }
         if (vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty()) {
             cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
@@ -802,6 +821,9 @@ public class RedshiftService {
 
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
+        if (auditLogPublisher != null) {
+            auditLogPublisher.register(clusters.accountId(), regionResolver.getRegion(), cluster);
+        }
         return cluster;
     }
 
@@ -839,6 +861,9 @@ public class RedshiftService {
         proxyManager.updateIamRoles(relayKey(clusters.accountId(), clusterIdentifier), cluster.getIamRoleArns(), defaultRole);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
+        if (auditLogPublisher != null) {
+            auditLogPublisher.register(clusters.accountId(), regionResolver.getRegion(), cluster);
+        }
         return cluster;
     }
 
@@ -935,6 +960,9 @@ public class RedshiftService {
         cluster.setLoggingS3TableGranularity(s3TableGranularity);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
+        if (auditLogPublisher != null) {
+            auditLogPublisher.register(clusters.accountId(), regionResolver.getRegion(), cluster);
+        }
         return cluster;
     }
 
@@ -954,6 +982,9 @@ public class RedshiftService {
         cluster.setLoggingS3TableGranularity(null);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
+        if (auditLogPublisher != null) {
+            auditLogPublisher.register(clusters.accountId(), regionResolver.getRegion(), cluster);
+        }
         return cluster;
     }
 
@@ -1302,6 +1333,7 @@ public class RedshiftService {
         cluster.setMasterUsername(username);
         cluster.setMasterPassword(password);
         cluster.setClusterParameterGroupName(DEFAULT_PARAMETER_GROUP_NAME);
+        cluster.setUserActivityLoggingEnabled(userActivityLoggingEnabled(DEFAULT_PARAMETER_GROUP_NAME));
         cluster.setClusterStatus("creating");
         storeCluster(cluster);
 
@@ -1427,7 +1459,32 @@ public class RedshiftService {
         group.setParameters(current);
         parameterGroups.put(parameterGroupName, group);
         parameterGroups.flush();
+        boolean activityLoggingEnabled = userActivityLoggingEnabled(group);
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : clusters.scanAllAccountEntries(key -> true).stream()
+                .filter(entry -> parameterGroupName.equals(entry.value().getClusterParameterGroupName())).toList()) {
+            entry.value().setUserActivityLoggingEnabled(activityLoggingEnabled);
+            clusters.putForAccount(entry.accountId(), entry.key(), entry.value());
+            if (auditLogPublisher != null) {
+                auditLogPublisher.register(entry.accountId(), regionResolver.getRegion(), entry.value());
+            }
+        }
+        clusters.flush();
         return group;
+    }
+
+    private boolean userActivityLoggingEnabled(String parameterGroupName) {
+        ClusterParameterGroup group = parameterGroups.get(parameterGroupName)
+                .or(() -> DEFAULT_PARAMETER_GROUP_NAME.equals(parameterGroupName)
+                        ? Optional.of(defaultParameterGroup()) : Optional.empty())
+                .orElse(null);
+        return group != null && userActivityLoggingEnabled(group);
+    }
+
+    private static boolean userActivityLoggingEnabled(ClusterParameterGroup group) {
+        return group.getParameters().stream()
+                .filter(parameter -> "enable_user_activity_logging".equalsIgnoreCase(parameter.getParameterName()))
+                .map(Parameter::getParameterValue)
+                .anyMatch(value -> Boolean.parseBoolean(value));
     }
 
     public synchronized void resetClusterParameterGroup(String parameterGroupName, boolean resetAllParameters,
@@ -1471,6 +1528,21 @@ public class RedshiftService {
         group.setParameters(reset);
         parameterGroups.put(parameterGroupName, group);
         parameterGroups.flush();
+        refreshClustersForActivityParameter(parameterGroupName, group);
+    }
+
+    private void refreshClustersForActivityParameter(String parameterGroupName, ClusterParameterGroup group) {
+        boolean enabled = userActivityLoggingEnabled(group);
+        List<AccountAwareStorageBackend.AccountEntry<Cluster>> affected = clusters.scanAllAccountEntries(key -> true).stream()
+                .filter(entry -> parameterGroupName.equals(entry.value().getClusterParameterGroupName())).toList();
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : affected) {
+            entry.value().setUserActivityLoggingEnabled(enabled);
+            clusters.putForAccount(entry.accountId(), entry.key(), entry.value());
+            if (auditLogPublisher != null) {
+                auditLogPublisher.register(entry.accountId(), regionResolver.getRegion(), entry.value());
+            }
+        }
+        clusters.flush();
     }
 
     private void requireMutableParameterGroup(String name) {
