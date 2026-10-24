@@ -46,6 +46,11 @@
 definition, role, logging, tracing, encryption, and tags without replacing the state machine;
 changes to `StateMachineName` or `StateMachineType` use replacement semantics.
 
+`ListExecutions` honors `statusFilter` when listing a state machine's executions.
+Omitting the filter returns all statuses. Invalid filter values or types return
+`ValidationException`. Map Run execution listing and `PENDING_REDRIVE` filtering are not
+supported; `PENDING_REDRIVE` returns `ValidationException` even when a `mapRunArn` is supplied.
+
 ## Nested task credentials
 
 Nested `states:startExecution` tasks, including `.sync` and `.sync:2`, and the SDK
