@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
+import io.quarkus.test.junit.QuarkusMock;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
 import org.hamcrest.Matcher;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -8,11 +11,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -748,6 +755,99 @@ class S3VersioningIntegrationTest {
 
     private static int occurrences(String value, String needle) {
         return value.split(Pattern.quote(needle), -1).length - 1;
+    }
+
+    @Test
+    @Order(29)
+    void readingADeleteMarkerSaysSo() {
+        String bucket = "versioned-read-marker-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given().body("data").when().put("/" + bucket + "/key").then().statusCode(200);
+        String markerId = given().when().delete("/" + bucket + "/key")
+                .then().statusCode(204).extract().header("x-amz-version-id");
+
+        // The current version is the marker: 404 as if the object were deleted, saying why.
+        String path = "/" + bucket + "/key";
+        given().when().get(path).then().statusCode(404)
+                .header("x-amz-delete-marker", "true").header("x-amz-version-id", markerId)
+                .body(containsString("<Code>NoSuchKey</Code>"));
+        given().when().head(path).then().statusCode(404)
+                .header("x-amz-delete-marker", "true").header("x-amz-version-id", markerId);
+
+        // Naming the marker's version is refused.
+        String markerPath = path + "?versionId=" + markerId;
+        given().when().get(markerPath).then().statusCode(405)
+                .header("x-amz-delete-marker", "true").header("x-amz-version-id", markerId)
+                .header("Last-Modified", notNullValue()).header("Allow", "DELETE")
+                .body(deleteMarkerRefused("GET"));
+        given().when().head(markerPath).then().statusCode(405)
+                .header("x-amz-delete-marker", "true").header("x-amz-version-id", markerId)
+                .header("Last-Modified", notNullValue()).header("Allow", "DELETE");
+
+        // A key that never existed answers without the header.
+        given().when().get("/" + bucket + "/missing").then().statusCode(404)
+                .header("x-amz-delete-marker", nullValue());
+    }
+
+    @Test
+    @Order(30)
+    void readingADeleteMarkerRecordsAFailedDataEvent() {
+        List<String> reads = new CopyOnWriteArrayList<>();
+        CloudTrailService cloudTrail = mock(CloudTrailService.class);
+        doAnswer(invocation -> {
+            CloudTrailService.S3EventInput event = invocation.getArgument(0);
+            if (event.eventName().equals("GetObject") || event.eventName().equals("HeadObject")) {
+                reads.add(event.eventName() + " " + event.errorCode());
+            }
+            return null;
+        }).when(cloudTrail).emitS3DataEvent(any());
+        QuarkusMock.installMockForType(cloudTrail, CloudTrailService.class);
+
+        String bucket = "versioned-read-marker-event-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given().body("data").when().put("/" + bucket + "/key").then().statusCode(200);
+        String markerId = given().when().delete("/" + bucket + "/key")
+                .then().statusCode(204).extract().header("x-amz-version-id");
+
+        String path = "/" + bucket + "/key";
+        given().when().get(path).then().statusCode(404);
+        given().when().head(path).then().statusCode(404);
+        given().when().get(path + "?versionId=" + markerId).then().statusCode(405);
+        given().when().head(path + "?versionId=" + markerId).then().statusCode(405);
+
+        // Each read is recorded with the error code its caller got.
+        assertEquals(List.of("GetObject NoSuchKey", "HeadObject NoSuchKey",
+                "GetObject MethodNotAllowed", "HeadObject MethodNotAllowed"), reads);
+    }
+
+    @Test
+    @Order(31)
+    void aDeletedWebsitePageServesTheErrorDocument() {
+        String bucket = "versioned-website-marker-test";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given().contentType("application/xml")
+                .body("<WebsiteConfiguration><IndexDocument><Suffix>index.html</Suffix></IndexDocument>"
+                        + "<ErrorDocument><Key>error.html</Key></ErrorDocument></WebsiteConfiguration>")
+                .when().put("/" + bucket + "?website").then().statusCode(200);
+        given().contentType("text/html").body("<html><body>Custom Error</body></html>")
+                .when().put("/" + bucket + "/error.html").then().statusCode(200);
+        given().contentType("text/html").body("<html><body>Page</body></html>")
+                .when().put("/" + bucket + "/page.html").then().statusCode(200);
+        given().when().delete("/" + bucket + "/page.html").then().statusCode(204);
+
+        // The website endpoint answers a deleted page with the error document, as for any missing page.
+        String host = bucket + ".s3-website-us-east-1.localhost:" + RestAssured.port;
+        given().header("Host", host).when().get("/page.html").then().statusCode(404)
+                .contentType("text/html").header("x-amz-error-code", "NoSuchKey")
+                .body(equalTo("<html><body>Custom Error</body></html>"));
+        given().header("Host", host).when().head("/page.html").then().statusCode(404)
+                .contentType("text/html").header("x-amz-error-code", "NoSuchKey");
     }
 
     private static Matcher<String> deleteMarkerRefused(String method) {
