@@ -1497,9 +1497,11 @@ public class S3Controller {
             builder.header("Access-Control-Max-Age", cors.maxAgeSeconds());
         }
         if (!cors.allowedHeaders().isEmpty()) {
+            // An AllowedHeader such as x-amz-* is a pattern, not a header name a browser can match,
+            // so the headers the preflight asked for are allowed by name.
             String hdrs = cors.allowedHeaders().contains("*")
                     ? "*"
-                    : String.join(", ", cors.allowedHeaders());
+                    : String.join(", ", requestHeaders.isEmpty() ? cors.allowedHeaders() : requestHeaders);
             builder.header("Access-Control-Allow-Headers", hdrs);
         }
         if (!cors.exposeHeaders().isEmpty()) {

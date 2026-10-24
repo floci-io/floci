@@ -5534,7 +5534,7 @@ public class S3Service implements Resettable, ResourceProvider {
             if (requestHeaders != null && !requestHeaders.isEmpty()) {
                 boolean headersOk = allowedHeaders.contains("*")
                     || requestHeaders.stream().allMatch(rh ->
-                        allowedHeaders.stream().anyMatch(ah -> ah.equalsIgnoreCase(rh)));
+                        allowedHeaders.stream().anyMatch(ah -> matchesCorsHeader(ah, rh)));
                 if (!headersOk) continue;
             }
 
@@ -5542,6 +5542,15 @@ public class S3Service implements Resettable, ResourceProvider {
             return Optional.of(new CorsEvalResult(echoOrigin, allowedMethods, allowedHeaders, exposeHeaders, maxAge));
         }
         return Optional.empty();
+    }
+
+    /**
+     * Matches an AllowedHeader against a header named in Access-Control-Request-Headers. Header
+     * names are case-insensitive, and like an AllowedOrigin an AllowedHeader may hold one {@code *}
+     * wildcard, as in {@code x-amz-*}.
+     */
+    private static boolean matchesCorsHeader(String pattern, String header) {
+        return matchesCorsOrigin(pattern.toLowerCase(Locale.ROOT), header.toLowerCase(Locale.ROOT));
     }
 
     /**
