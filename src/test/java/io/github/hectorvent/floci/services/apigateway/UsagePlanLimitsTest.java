@@ -25,8 +25,31 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class UsagePlanLimitsTest {
+
+    // "apidId" is AWS's own spelling in these lists.
+    private static final String ADD_PATHS = "[/apiStages, /productCode, /quota/period, /quota/limit, /quota/offset, "
+            + "/throttle/rateLimit, /throttle/burstLimit, "
+            + "/apiStages/<apidId:stageName>/throttle/<resourcePath>/<httpMethod>/rateLimit, "
+            + "/apiStages/<apidId:stageName>/throttle/<resourcePath>/<httpMethod>/burstLimit, "
+            + "/apiStages/<apidId:stageName>/throttle]";
+    private static final String REPLACE_PATHS = "[/name, /description, /productCode, /quota/period, /quota/limit, "
+            + "/quota/offset, /throttle/rateLimit, /throttle/burstLimit, "
+            + "/apiStages/<apidId:stageName>/throttle/<resourcePath>/<httpMethod>/rateLimit, "
+            + "/apiStages/<apidId:stageName>/throttle/<resourcePath>/<httpMethod>/burstLimit, "
+            + "/apiStages/<apidId:stageName>/throttle]";
+    private static final String REMOVE_PATHS = "[/apiStages, /quota, /throttle, /productCode, "
+            + "/apiStages/<apidId:stageName>/throttle/<resourcePath>/<httpMethod>, "
+            + "/apiStages/<apidId:stageName>/throttle]";
+
+    private static final String INVALID_OP = "Invalid patch operation specified. Must be 'add'|'remove'|'replace'";
+
+    /** API Gateway's message for a path the op does not allow; note the two spaces after "path". */
+    private static String invalidPath(String op, String path, String allowed) {
+        return "Invalid patch path  '" + path + "' specified for op '" + op + "'. Must be one of: " + allowed;
+    }
 
     private static Map<String, Object> request(Object... keyValues) {
         Map<String, Object> request = new HashMap<>();
@@ -235,6 +258,8 @@ class UsagePlanLimitsTest {
                 UsagePlanLimits.fromRequest(stageThrottle("//GET")).apiStages().get(0).throttle());
         assertEquals(Map.of("/pets/GET/extra", new Throttle(5, 2.0)),
                 UsagePlanLimits.fromRequest(stageThrottle("/pets/GET/extra")).apiStages().get(0).throttle());
+        assertEquals(new Throttle(0, 1.0), patch(fixture(), "replace", "/apiStages/a:v1/throttle///GET/rateLimit", "1")
+                .apiStages().get(0).throttle().get("//GET"));
     }
 
     @Test
@@ -249,5 +274,243 @@ class UsagePlanLimitsTest {
     @MethodSource("refusedCreates")
     void createRefusesWhatApiGatewayRefuses(Map<String, Object> request, String code, int status, String message) {
         assertRefused(() -> UsagePlanLimits.fromRequest(request), code, status, message);
+    }
+
+    /** id plan1; stage a:v1 with /pets/GET at 10/5.0; plan throttle 20/10.0; quota 1000/3/MONTH. */
+    private static UsagePlan fixture() {
+        UsagePlan plan = new UsagePlan();
+        plan.setId("plan1");
+        plan.applyLimits(new Limits(List.of(new ApiStage("a", "v1", Map.of("/pets/GET", new Throttle(10, 5.0)))),
+                new Throttle(20, 10.0), new Quota(1000, 3, "MONTH")));
+        return plan;
+    }
+
+    /** Applies op/path/value triples (value may be null) the way updateUsagePlan does. */
+    private static Limits patch(UsagePlan plan, String... opPathValue) {
+        UsagePlanLimits.Patch patch = new UsagePlanLimits.Patch(plan);
+        for (int i = 0; i < opPathValue.length; i += 3) {
+            assertTrue(patch.apply(opPathValue[i], opPathValue[i + 1], opPathValue[i + 2]), opPathValue[i + 1]);
+        }
+        return patch.result();
+    }
+
+    @Test
+    void addAndRemoveStagesInOneRequest() {
+        Limits limits = patch(fixture(), "add", "/apiStages", "a:v2", "add", "/apiStages", "a:v3",
+                "remove", "/apiStages", "a:v3");
+        assertEquals(List.of(new ApiStage("a", "v1", Map.of("/pets/GET", new Throttle(10, 5.0))),
+                new ApiStage("a", "v2")), limits.apiStages());
+    }
+
+    @Test
+    void throttleFieldsCreateAPlanThrottleWhenThereIsNone() {
+        UsagePlan plan = new UsagePlan();
+        plan.setId("p");
+        assertEquals(new Throttle(30, 0.0), patch(plan, "replace", "/throttle/burstLimit", "30").throttle());
+        assertEquals(new Throttle(30, 15.0), patch(plan, "replace", "/throttle/burstLimit", "30",
+                "add", "/throttle/rateLimit", "15").throttle());
+    }
+
+    @Test
+    void aQuotaIsBuiltFromSeparateOpsAndRemovedWithoutAValue() {
+        UsagePlan plan = new UsagePlan();
+        plan.setId("p");
+        assertEquals(new Quota(10, 0, "DAY"), patch(plan, "replace", "/quota/limit", "10",
+                "replace", "/quota/period", "DAY").quota());
+        assertNull(patch(fixture(), "replace", "/quota/limit", "5", "remove", "/quota", null).quota());
+        assertNull(patch(plan, "remove", "/quota", null).quota());
+        assertEquals(new Quota(2000, 1, "WEEK"), patch(fixture(), "replace", "/quota/limit", "2000",
+                "replace", "/quota/period", "WEEK", "replace", "/quota/offset", "1").quota());
+    }
+
+    @Test
+    void methodThrottleOpsUseTheRawResourcePathAsKey() {
+        Limits limits = patch(fixture(),
+                "replace", "/apiStages/a:v1/throttle//pets/GET/burstLimit", "8",
+                "add", "/apiStages/a:v1/throttle//pets/POST/rateLimit", "3");
+        assertEquals(Map.of("/pets/GET", new Throttle(8, 5.0), "/pets/POST", new Throttle(0, 3.0)),
+                limits.apiStages().get(0).throttle());
+    }
+
+    @Test
+    void removingTheLastMethodLeavesAnEmptyStageThrottle() {
+        Limits limits = patch(fixture(), "remove", "/apiStages/a:v1/throttle//pets/GET", null);
+        assertEquals(Map.of(), limits.apiStages().get(0).throttle());
+        // An empty stage throttle is not fine-grain throttling, so the plan throttle can go.
+        assertNull(patch(fixture(), "remove", "/apiStages/a:v1/throttle//pets/GET", null,
+                "remove", "/throttle", null).throttle());
+    }
+
+    @Test
+    void aWholeStageThrottleIsReplacedAndRemoved() {
+        assertEquals(Map.of("/a/GET", new Throttle(1, 2.0)), patch(fixture(), "replace", "/apiStages/a:v1/throttle",
+                "{\"/a/GET\":{\"burstLimit\":1,\"rateLimit\":2}}").apiStages().get(0).throttle());
+        assertNull(patch(fixture(), "remove", "/apiStages/a:v1/throttle", null,
+                "remove", "/apiStages/a:v1/throttle", null).apiStages().get(0).throttle());
+    }
+
+    @Test
+    void aWholeStageThrottleIsReplacedOnlyWhereOneExists() {
+        assertRefused(() -> patch(fixture(), "add", "/apiStages", "a:v2",
+                        "replace", "/apiStages/a:v2/throttle", "{\"/pets/POST\":{\"burstLimit\":3,\"rateLimit\":2}}"),
+                "NotFoundException", 404, "API Stage throttle not found for usageplan plan1");
+        assertEquals(Map.of("/pets/POST", new Throttle(3, 2.0)), patch(fixture(), "add", "/apiStages", "a:v2",
+                "add", "/apiStages/a:v2/throttle", "{\"/pets/POST\":{\"burstLimit\":3,\"rateLimit\":2}}")
+                .apiStages().get(1).throttle());
+    }
+
+    @Test
+    void aPlanThrottleMayPassThroughANegativeValueWithinOnePatch() {
+        assertEquals(new Throttle(20, 5.0), patch(fixture(), "replace", "/throttle/rateLimit", "-1",
+                "replace", "/throttle/rateLimit", "5").throttle());
+        assertEquals(new Throttle(5, 10.0), patch(fixture(), "replace", "/throttle/burstLimit", "-1",
+                "replace", "/throttle/burstLimit", "5").throttle());
+    }
+
+    @Test
+    void aPlanThrottleIsNumericAtEachOpAndNonNegativeAtTheEnd() {
+        String throttle = "Usage Plan throttle rate limit and burst limit must be numeric and greater than zero";
+        assertRefused(() -> patch(fixture(), "replace", "/throttle/rateLimit", "5",
+                "replace", "/throttle/rateLimit", "-1"), "BadRequestException", 400, throttle);
+        assertRefused(() -> patch(fixture(), "replace", "/throttle/rateLimit", "-1"), "BadRequestException", 400,
+                throttle);
+        UsagePlan plan = new UsagePlan();
+        plan.setId("p");
+        plan.applyLimits(new Limits(List.of(), new Throttle(20, 10.0), null));
+        assertRefused(() -> patch(plan, "replace", "/throttle/burstLimit", "abc", "remove", "/throttle", null),
+                "BadRequestException", 400, throttle);
+        // A method throttle limit is checked in full at every op.
+        assertRefused(() -> patch(fixture(), "replace", "/apiStages/a:v1/throttle//pets/GET/rateLimit", "-1",
+                "replace", "/apiStages/a:v1/throttle//pets/GET/rateLimit", "5"), "BadRequestException", 400, throttle);
+    }
+
+    @Test
+    void removingThePlanThrottleIsCheckedAgainstTheStagesAtThatOp() {
+        assertRefused(() -> patch(fixture(), "remove", "/throttle", null, "replace", "/throttle/burstLimit", "5"),
+                "BadRequestException", 400,
+                "Can not remove usage plan throttling if fine grain throttling is defined for one or more api-stages.");
+        Limits limits = patch(fixture(), "remove", "/apiStages", "a:v1", "remove", "/throttle", null);
+        assertNull(limits.throttle());
+        assertEquals(List.of(), limits.apiStages());
+    }
+
+    @Test
+    void aWholeStageThrottleAddRefusesAKeyWithoutAMethod() {
+        assertRefused(() -> patch(fixture(), "add", "/apiStages", "a:v2", "add", "/apiStages/a:v2/throttle",
+                        "{\"\":{\"burstLimit\":1,\"rateLimit\":1}}"),
+                "BadRequestException", 400, "Invalid method {resourcePath: ,method: } specified");
+    }
+
+    @Test
+    void anEmptyWholeStageThrottleIsKeptAsAnEmptyMap() {
+        assertEquals(Map.of(), patch(fixture(), "replace", "/apiStages/a:v1/throttle", "{}")
+                .apiStages().get(0).throttle());
+        assertEquals(Map.of(), patch(fixture(), "add", "/apiStages", "a:v2", "add", "/apiStages/a:v2/throttle", "{}")
+                .apiStages().get(1).throttle());
+    }
+
+    @Test
+    void aValuelessStageThrottleAddIsRefused() {
+        assertRefused(() -> patch(fixture(), "add", "/apiStages", "a:v2", "add", "/apiStages/a:v2/throttle", null),
+                "BadRequestException", 400, "Invalid API Stage throttle specified for usageplan");
+    }
+
+    @Test
+    void nameAndDescriptionAreNotLimitPaths() {
+        assertFalse(new UsagePlanLimits.Patch(fixture()).apply("replace", "/name", "x"));
+        assertFalse(new UsagePlanLimits.Patch(fixture()).apply("replace", "/description", "x"));
+    }
+
+    static Stream<Arguments> refusedPatches() {
+        String throttle = "Usage Plan throttle rate limit and burst limit must be numeric and greater than zero";
+        return Stream.of(
+                Arguments.of("add", "/apiStages", "a:v1", "ConflictException", 409,
+                        "API Stage is already defined for Usage Plan: a:v1"),
+                Arguments.of("remove", "/apiStages", "a:v9", "NotFoundException", 404,
+                        "Invalid API Stage {api: a, stage: v9} specified for usageplan plan1"),
+                Arguments.of("add", "/apiStages", "bad", "BadRequestException", 400, "Invalid API Stage specified"),
+                Arguments.of("replace", "/apiStages", "a:v2", "BadRequestException", 400,
+                        invalidPath("replace", "/apiStages", REPLACE_PATHS)),
+                Arguments.of("remove", "/throttle", null, "BadRequestException", 400,
+                        "Can not remove usage plan throttling if fine grain throttling is defined for one or more "
+                                + "api-stages."),
+                Arguments.of("replace", "/throttle/burstLimit", "abc", "BadRequestException", 400, throttle),
+                Arguments.of("replace", "/throttle/burstLimit", "-1", "BadRequestException", 400, throttle),
+                Arguments.of("replace", "/throttle/burstLimit", "1.5", "BadRequestException", 400, throttle),
+                Arguments.of("replace", "/quota/period", "YEAR", "BadRequestException", 400,
+                        "Invalid Usage Plan quota period specified. Must be one of [DAY, WEEK, MONTH]"),
+                Arguments.of("replace", "/quota/period", "DAY", "BadRequestException", 400,
+                        "Usage Plan quota offset must be zero in the DAY period"),
+                Arguments.of("replace", "/quota/offset", "x", "BadRequestException", 400,
+                        "Usage Plan quota offset must be numeric and less than the number of time units in the period"),
+                Arguments.of("replace", "/quota/limit", "-5", "BadRequestException", 400,
+                        "Usage Plan quota limit must be a non-negative numeric"),
+                Arguments.of("replace", "/quota/offset", null, "BadRequestException", 400,
+                        "Usage Plan quota offset must be numeric and less than the number of time units in the period"),
+                Arguments.of("add", "/apiStages", null, "BadRequestException", 400, "Invalid API Stage specified"),
+                Arguments.of("replace", "/apiStages/a:v1/throttle", null, "BadRequestException", 400,
+                        "Invalid API Stage throttle specified for usageplan"),
+                // API Gateway answers this with a 500 InternalFailure, a fault rather than a contract, so it stays a 400.
+                Arguments.of("replace", "/throttle/rateLimit", null, "BadRequestException", 400, throttle),
+                Arguments.of("replace", "/quota", "x", "BadRequestException", 400,
+                        invalidPath("replace", "/quota", REPLACE_PATHS)),
+                Arguments.of("replace", "/throttle", "x", "BadRequestException", 400,
+                        invalidPath("replace", "/throttle", REPLACE_PATHS)),
+                Arguments.of("remove", "/throttle/rateLimit", null, "BadRequestException", 400,
+                        invalidPath("remove", "/throttle/rateLimit", REMOVE_PATHS)),
+                Arguments.of("add", "/quota", "x", "BadRequestException", 400, invalidPath("add", "/quota", ADD_PATHS)),
+                // Any op but add, remove and replace is refused before the path is looked at.
+                Arguments.of("move", "/quota/limit", "1", "BadRequestException", 400, INVALID_OP),
+                Arguments.of("copy", "/apiStages", "a:v2", "BadRequestException", 400, INVALID_OP),
+                Arguments.of("test", "/apiStages/a:v1/throttle", "{}", "BadRequestException", 400, INVALID_OP),
+                Arguments.of(null, "/throttle", null, "BadRequestException", 400, INVALID_OP),
+                Arguments.of("move", "/nope", "x", "BadRequestException", 400, INVALID_OP),
+                Arguments.of("replace", "/apiStages/a:v2/throttle//pets/GET/rateLimit", "1", "NotFoundException", 404,
+                        "Invalid API Stage {api: a, stage: v2} specified for usageplan plan1"),
+                Arguments.of("add", "/apiStages/a:v1/throttle", "{\"/a/GET\":{\"burstLimit\":4}}", "ConflictException",
+                        409, "API Stage throttle is already defined for usageplan plan1"),
+                Arguments.of("replace", "/apiStages/a:v1/throttle", "not-json", "BadRequestException", 400,
+                        "Invalid API Stage throttle specified for usageplan"),
+                Arguments.of("replace", "/apiStages/a:v1/throttle", "{\"/a/GET\":5}", "BadRequestException", 400,
+                        "Invalid API Stage throttle specified for usageplan"),
+                Arguments.of("remove", "/apiStages/a:v1/throttle//pets/GET/rateLimit", null, "BadRequestException", 400,
+                        invalidPath("remove", "/apiStages/a:v1/throttle//pets/GET/rateLimit", REMOVE_PATHS)),
+                Arguments.of("remove", "/apiStages/a:v1/throttle//pets/GET/burstLimit", null, "BadRequestException",
+                        400, invalidPath("remove", "/apiStages/a:v1/throttle//pets/GET/burstLimit", REMOVE_PATHS)),
+                Arguments.of("remove", "/apiStages/a:v1/throttle//pets/POST", null, "NotFoundException", 404,
+                        "Method throttle does not exist for {resourcePath: /pets, method: POST} for usageplan plan1"),
+                Arguments.of("replace", "/apiStages/a:v1/throttle//pets/GET/rateLimit", "abc", "BadRequestException",
+                        400, throttle),
+                Arguments.of("replace", "/apiStages/a:v1/limits", "1", "BadRequestException", 400,
+                        invalidPath("replace", "/apiStages/a:v1/limits", REPLACE_PATHS)),
+                Arguments.of("replace", "/apiStages/a:v1/throttle", "{\"/GET\":{\"burstLimit\":1,\"rateLimit\":1}}",
+                        "BadRequestException", 400, "Invalid method {resourcePath: /GET,method: } specified"),
+                Arguments.of("replace", "/apiStages/a:v1/throttle//rateLimit", "1", "BadRequestException", 400,
+                        invalidPath("replace", "/apiStages/a:v1/throttle//rateLimit", REPLACE_PATHS)),
+                Arguments.of("replace", "/apiStages/a:v1/throttle/rateLimit", "1", "BadRequestException", 400,
+                        invalidPath("replace", "/apiStages/a:v1/throttle/rateLimit", REPLACE_PATHS)),
+                Arguments.of("add", "/apiStages/a:v1/throttle//GET/burstLimit", "1", "BadRequestException", 400,
+                        invalidPath("add", "/apiStages/a:v1/throttle//GET/burstLimit", ADD_PATHS)),
+                Arguments.of("replace", "/apiStages/a:v1/throttle//pets//rateLimit", "1", "BadRequestException", 400,
+                        invalidPath("replace", "/apiStages/a:v1/throttle//pets//rateLimit", REPLACE_PATHS)));
+    }
+
+    @ParameterizedTest
+    @MethodSource("refusedPatches")
+    void patchRefusesWhatApiGatewayRefuses(String op, String path, String value, String code, int status,
+                                           String message) {
+        assertRefused(() -> patch(fixture(), op, path, value), code, status, message);
+    }
+
+    @Test
+    void aMethodThrottleNeedsAPlanThrottle() {
+        UsagePlan plan = new UsagePlan();
+        plan.setId("p");
+        plan.applyLimits(new Limits(List.of(new ApiStage("a", "v1")), null, null));
+        assertRefused(() -> patch(plan, "replace", "/apiStages/a:v1/throttle//pets/GET/rateLimit", "1"),
+                "BadRequestException", 400, "Can not define fine grain throttling if usage plan throttle is not defined.");
+        assertRefused(() -> patch(plan, "add", "/apiStages/a:v1/throttle",
+                        "{\"/pets/GET\":{\"burstLimit\":3,\"rateLimit\":2}}"),
+                "BadRequestException", 400, "Can not define fine grain throttling if usage plan throttle is not defined.");
     }
 }

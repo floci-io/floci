@@ -42,12 +42,16 @@ public class UsagePlan {
     public Quota getQuota() { return quota; }
     public void setQuota(Quota quota) { this.quota = quota; }
 
-    /** The plan's stages, throttle and quota as one value, for comparing and replacing them together. */
-    public Limits limits() {
+    /**
+     * The plan's stages, throttle and quota as one value, for comparing and replacing them together.
+     * Synchronised with {@link #applyLimits} so a reader never sees parts of two revisions.
+     */
+    public synchronized Limits limits() {
         return new Limits(List.copyOf(apiStages), throttle, quota);
     }
 
-    public void applyLimits(Limits limits) {
+    /** Synchronised with {@link #limits} because it writes three fields that are only valid together. */
+    public synchronized void applyLimits(Limits limits) {
         this.apiStages = new ArrayList<>(limits.apiStages());
         this.throttle = limits.throttle();
         this.quota = limits.quota();

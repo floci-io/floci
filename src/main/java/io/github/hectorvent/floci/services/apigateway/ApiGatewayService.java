@@ -131,6 +131,11 @@ public class ApiGatewayService implements ResourceProvider {
      */
     private final Object domainNameLock = new Object();
     private final Object vpcLinkTagLock = new Object();
+    /**
+     * Guards a usage plan patch. A patch writes back the stages, throttle and quota it read, so two at
+     * once would restore one another's stale values.
+     */
+    private final Object usagePlanLock = new Object();
     private final TlsCertificateManager certificateManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -1542,62 +1547,56 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     public UsagePlan updateUsagePlan(String region, String usagePlanId, List<Map<String, String>> patchOperations) {
-        UsagePlan plan = getUsagePlan(region, usagePlanId);
-        // The store hands back live objects, so every op is validated against pending values first and
-        // only applied once the whole patch is known to be good.
-        String newName = plan.getName();
-        String newDescription = plan.getDescription();
-        List<UsagePlan.ApiStage> newApiStages = new ArrayList<>(plan.getApiStages());
-        if (patchOperations != null) {
-            for (Map<String, String> op : patchOperations) {
-                if (op == null) {
-                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
-                }
-                String opType = op.get("op");
-                String path = op.get("path");
-                String value = op.get("value");
-                if (path == null || value == null) {
-                    throw new AwsException("BadRequestException", "Missing path or value", 400);
-                }
-                if ("/apiStages".equals(path)) {
-                    // AWS models stage membership as add/remove of an "apiId:stage" pair.
-                    if (!"add".equals(opType) && !"remove".equals(opType)) {
-                        throw new AwsException("BadRequestException", "Invalid operation", 400);
+        synchronized (usagePlanLock) {
+            UsagePlan plan = getUsagePlan(region, usagePlanId);
+            // The store hands back live objects, so every op is validated against pending values first and
+            // the plan only changes once the whole patch is known to be good.
+            String newName = plan.getName();
+            String newDescription = plan.getDescription();
+            UsagePlanLimits.Patch limits = new UsagePlanLimits.Patch(plan);
+            if (patchOperations != null) {
+                for (Map<String, String> op : patchOperations) {
+                    if (op == null) {
+                        throw new AwsException("BadRequestException", "Invalid patch operation", 400);
                     }
-                    String[] parts = value.split(":", 2);
-                    if (parts.length != 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
+                    String opType = op.get("op");
+                    String path = op.get("path");
+                    String value = op.get("value");
+                    UsagePlanLimits.requirePatchOp(opType);
+                    if (path == null) {
+                        throw new AwsException("BadRequestException", "Missing path or value", 400);
+                    }
+                    // A remove of /throttle, /quota or a stage throttle carries no value, so only the name
+                    // and description ops below insist on one.
+                    if (limits.apply(opType, path, value)) {
+                        continue;
+                    }
+                    // API Gateway allows /productCode on add, remove and replace; Floci has no product codes to set.
+                    if ("/productCode".equals(path)) {
+                        throw new AwsException("BadRequestException", "Usage plan product codes are not supported", 400);
+                    }
+                    // API Gateway takes /name and /description through replace only.
+                    if (!"replace".equals(opType) || (!"/name".equals(path) && !"/description".equals(path))) {
+                        throw UsagePlanLimits.invalidPatchPath(opType, path);
+                    }
+                    if (value == null) {
                         throw new AwsException("BadRequestException",
-                                "apiStages value must be in the form apiId:stage", 400);
+                                "/name".equals(path) ? "Usage Plan name must be specified" : "Missing path or value", 400);
                     }
-                    // Matched by API and stage alone: a stage's method throttle is not part of its identity.
-                    int index = UsagePlanLimits.indexOf(newApiStages, parts[0], parts[1]);
-                    if ("add".equals(opType)) {
-                        if (index < 0) {
-                            newApiStages.add(new UsagePlan.ApiStage(parts[0], parts[1]));
-                        }
-                    } else if (index >= 0) {
-                        newApiStages.remove(index);
+                    if ("/name".equals(path)) {
+                        newName = value;
+                    } else {
+                        newDescription = value;
                     }
-                    continue;
-                }
-                if (!"add".equals(opType) && !"replace".equals(opType)) {
-                    throw new AwsException("BadRequestException", "Invalid operation", 400);
-                }
-                if ("/name".equals(path)) {
-                    newName = value;
-                } else if ("/description".equals(path)) {
-                    newDescription = value;
-                } else {
-                    throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
                 }
             }
+            UsagePlan.Limits newLimits = limits.result();
+            plan.setName(newName);
+            plan.setDescription(newDescription);
+            plan.applyLimits(newLimits);
+            usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
+            return plan;
         }
-        plan.setName(newName);
-        plan.setDescription(newDescription);
-        // A new list, not an in-place refill, so a concurrent read copies either the old stages or the new ones.
-        plan.setApiStages(newApiStages);
-        usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
-        return plan;
     }
 
     public List<UsagePlan> getUsagePlans(String region) {

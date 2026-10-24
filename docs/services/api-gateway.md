@@ -580,9 +580,15 @@ curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 
 `CreateUsagePlan`, `GetUsagePlan`, `GetUsagePlans` and `UpdateUsagePlan` return a plan's `apiStages`,
 as `[]` for a plan with none, with each stage's per-method `throttle`, and the plan's `throttle` and
-`quota`. `CreateUsagePlan` validates them with API Gateway's messages: a quota needs a `DAY`, `WEEK`
-or `MONTH` period and an offset inside it, a per-method throttle needs a plan throttle, and listing a
-stage twice is a `ConflictException`.
+`quota`. `UpdateUsagePlan` supports every patch path AWS documents for them except `/productCode`:
+`/apiStages` add and remove, `/apiStages/<apiId>:<stage>/throttle` and its
+`/<resourcePath>/<httpMethod>[/burstLimit|/rateLimit]` paths, `/throttle/burstLimit`,
+`/throttle/rateLimit`, `/throttle`, `/quota/limit`, `/quota/offset`, `/quota/period` and `/quota`.
+Usage plan product codes are not supported, so an `add`, `replace` or `remove` of `/productCode` is a
+`BadRequestException`.
+Values are validated with API Gateway's messages: a quota needs a `DAY`, `WEEK` or `MONTH` period and
+an offset inside it, a per-method throttle needs a plan throttle, and adding a stage the plan already
+lists is a `ConflictException`.
 
 Floci does not check that a stage's API, stage or method exists, does not filter `GetUsagePlans` by
 `keyId`, and does not enforce throttles or quotas.
