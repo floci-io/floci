@@ -35,6 +35,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -382,6 +383,18 @@ class RedshiftContainerManagerTest {
         order.verify(lifecycleManager).createAndStartEphemeral(any());
         // A legacy-named container may still hold a cluster's data.
         verify(lifecycleManager, never()).removeIfExistsStrict("floci-redshift-" + ACCOUNT_ID + "-test-cluster", true);
+    }
+
+    @Test
+    void startConfiguresMaxConnections() {
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
+        ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
+        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
+
+        manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
+
+        verify(specBuilder).withCmd(List.of("postgres", "-c", "allow_system_table_mods=on", "-c", "max_connections=500"));
     }
 
     @Test

@@ -35,6 +35,7 @@ public class RedshiftContainerManager {
 
     private static final Logger LOG = Logger.getLogger(RedshiftContainerManager.class);
     private static final String DEFAULT_DATABASE = "dev";
+    static final int MAX_CONNECTIONS = 500;
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -89,7 +90,7 @@ public class RedshiftContainerManager {
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv(envVars)
-                .withCmd(List.of("postgres", "-c", "allow_system_table_mods=on"))
+                .withCmd(List.of("postgres", "-c", "allow_system_table_mods=on", "-c", "max_connections=" + MAX_CONNECTIONS))
                 .withDockerNetwork(config.services().redshift().dockerNetwork())
                 .withLogRotation();
 

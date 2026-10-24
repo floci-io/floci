@@ -15,6 +15,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,7 +46,7 @@ class RedshiftProxyManagerTest {
         EmulatorConfig.RedshiftServiceConfig redshiftConfig = mock(EmulatorConfig.RedshiftServiceConfig.class);
         when(redshiftConfig.proxyHandshakeTimeoutMillis()).thenReturn(5000);
         when(redshiftConfig.proxyBackendConnectTimeoutMillis()).thenReturn(5000);
-        when(redshiftConfig.proxyMaxConnections()).thenReturn(100);
+        when(redshiftConfig.proxyMaxConnections()).thenReturn(500);
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         when(servicesConfig.redshift()).thenReturn(redshiftConfig);
         EmulatorConfig config = mock(EmulatorConfig.class);
@@ -66,6 +67,22 @@ class RedshiftProxyManagerTest {
             start(manager, KEY, port);
             assertTrue(registry(manager).containsKey(KEY));
             assertPortUnavailable(port);
+        } finally {
+            manager.stopAll();
+        }
+    }
+
+    @Test
+    void startConfiguresProxyMaxConnections() throws Exception {
+        RedshiftProxyManager manager = newManager();
+        int port = FreePorts.anyInterfacePort();
+        try {
+            start(manager, KEY, port);
+            RedshiftAuthProxy proxy = registry(manager).get(KEY);
+            Field permitsField = RedshiftAuthProxy.class.getDeclaredField("connectionPermits");
+            permitsField.setAccessible(true);
+            Semaphore permits = (Semaphore) permitsField.get(proxy);
+            assertEquals(500, permits.availablePermits());
         } finally {
             manager.stopAll();
         }

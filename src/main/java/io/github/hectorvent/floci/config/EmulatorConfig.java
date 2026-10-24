@@ -1726,7 +1726,7 @@ public interface EmulatorConfig {
         int proxyHandshakeTimeoutMillis();
         @WithDefault("5000")
         int proxyBackendConnectTimeoutMillis();
-        @WithDefault("100")
+        @WithDefault("500")
         int proxyMaxConnections();
 
         @WithDefault("1000000")
