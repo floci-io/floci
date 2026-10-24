@@ -167,7 +167,11 @@ class CodePipelineServiceTest {
      * with "not an interface".
      */
     private static EmulatorConfig configWithPollInterval(long intervalMs) {
-        Map<String, Object> answers = Map.of("sourcePollIntervalMs", intervalMs, "workerPollIntervalMs", 1L);
+        return configWithPollIntervals(intervalMs, 1L);
+    }
+
+    private static EmulatorConfig configWithPollIntervals(long sourceMs, long workerMs) {
+        Map<String, Object> answers = Map.of("sourcePollIntervalMs", sourceMs, "workerPollIntervalMs", workerMs);
 
         InvocationHandler handler = new InvocationHandler() {
             @Override
@@ -188,6 +192,128 @@ class CodePipelineServiceTest {
         };
         return (EmulatorConfig) Proxy.newProxyInstance(EmulatorConfig.class.getClassLoader(),
                 new Class<?>[] {EmulatorConfig.class}, handler);
+    }
+
+    @Test
+    void invalidConfiguredWorkerIntervalsAvoidBusySpinAndStopAfterBuildCompletion() throws Exception {
+        for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
+            assertWorkerPollingProgress(interval, false);
+        }
+    }
+
+    @Test
+    void invalidDirectWorkerIntervalsAvoidBusySpinAndStopAfterBuildCompletion() throws Exception {
+        for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
+            assertWorkerPollingProgress(interval, true);
+        }
+    }
+
+    @Test
+    void positiveWorkerIntervalsPreserveFastAndNondefaultPolling() throws Exception {
+        for (boolean direct : new boolean[] {false, true}) {
+            assertWorkerPollingProgress(1L, direct);
+            assertWorkerPollingProgress(739L, direct);
+        }
+    }
+
+    private CodePipelineService workerPollingService(CodeBuildService codeBuild, long interval, boolean direct) {
+        if (direct) {
+            return new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild,
+                    mock(CodeDeployService.class), mock(LambdaService.class), mock(S3Service.class),
+                    new CodePipelineEventPublisher(null, null, mapper), 500L, interval,
+                    TimeUnit.SECONDS.toNanos(5), () -> { });
+        }
+        return new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild,
+                mock(CodeDeployService.class), mock(LambdaService.class), mock(S3Service.class),
+                configWithPollIntervals(500L, interval));
+    }
+
+    private void assertWorkerPollingProgress(long interval, boolean direct) throws Exception {
+        CodeBuildService codeBuild = mock(CodeBuildService.class);
+        AtomicReference<Build> currentBuild = new AtomicReference<>(build("IN_PROGRESS", false));
+        AtomicInteger polls = new AtomicInteger();
+        CountDownLatch firstPoll = new CountDownLatch(1);
+        when(codeBuild.startBuild(anyString(), anyString(), anyString(),
+                any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -> currentBuild.get());
+        when(codeBuild.getBuild(anyString(), anyString(), anyString())).thenAnswer(invocation -> {
+            polls.incrementAndGet();
+            firstPoll.countDown();
+            return currentBuild.get();
+        });
+        CodePipelineService pipelineService = workerPollingService(codeBuild, interval, direct);
+        String pipeline = "worker-poll-guard";
+        try {
+            createExternalActionPipeline(pipelineService, pipeline, """
+                    {"name":"BuildAction","actionTypeId":{
+                      "category":"Build","owner":"AWS","provider":"CodeBuild","version":"1"},
+                     "configuration":{"ProjectName":"build-project"}}
+                    """);
+            String execution = startExecution(pipelineService, pipeline);
+            assertTrue(firstPoll.await(3, TimeUnit.SECONDS), "Worker must actually poll the build");
+            int initialPolls = polls.get();
+            // Observe several fallback cycles, not just startup. No exact wall-clock upper bound:
+            // Awaitility must keep the count bounded throughout this negative observation window.
+            if (interval <= 0) {
+                await().pollInterval(Duration.ofMillis(10)).during(Duration.ofMillis(350))
+                        .atMost(Duration.ofSeconds(2)).untilAsserted(() ->
+                                assertTrue(polls.get() - initialPolls <= 5, "Invalid interval must not busy-spin"));
+                assertTrue(polls.get() > initialPolls, "Fallback must keep making progress");
+            } else if (interval == 1L) {
+                await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofMillis(750))
+                        .until(() -> polls.get() - initialPolls >= 10);
+            } else {
+                await().pollInterval(Duration.ofMillis(10)).during(Duration.ofMillis(350))
+                        .atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals(initialPolls, polls.get(),
+                                "739ms must not be replaced by the 100ms default"));
+            }
+            stopExecution(pipelineService, pipeline, execution, false);
+            waitForExecutionStatus(pipelineService, pipeline, execution, "Stopping");
+            currentBuild.set(build("SUCCEEDED", true));
+            waitForExecutionStatus(pipelineService, pipeline, execution, "Stopped");
+            await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofSeconds(3))
+                    .until(() -> !pipelineService.activeRuns.contains(ACCOUNT + ":" + execution));
+            assertEquals("Succeeded", pipelineState(pipelineService, pipeline).path("stageStates").path(0)
+                    .path("actionStates").path(0).path("latestExecution").path("status").asText());
+            verify(codeBuild, never()).stopBuild(anyString(), anyString(), anyString());
+        } finally {
+            pipelineService.shutdown();
+        }
+    }
+
+    @Test
+    void largePositiveWorkerIntervalIsPreservedAndShutdownInterruptsTheWorker() throws Exception {
+        for (boolean direct : new boolean[] {false, true}) {
+            CodeBuildService codeBuild = mock(CodeBuildService.class);
+            CountDownLatch started = new CountDownLatch(1);
+            AtomicReference<Thread> worker = new AtomicReference<>();
+            when(codeBuild.startBuild(anyString(), anyString(), anyString(),
+                    any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -> {
+                        worker.set(Thread.currentThread());
+                        started.countDown();
+                        return build("IN_PROGRESS", false);
+                    });
+            CodePipelineService pipelineService = workerPollingService(codeBuild, Long.MAX_VALUE, direct);
+            try {
+                createExternalActionPipeline(pipelineService, "large-worker-poll", """
+                        {"name":"BuildAction","actionTypeId":{
+                          "category":"Build","owner":"AWS","provider":"CodeBuild","version":"1"},
+                         "configuration":{"ProjectName":"build-project"}}
+                        """);
+                String execution = startExecution(pipelineService, "large-worker-poll");
+                assertTrue(started.await(3, TimeUnit.SECONDS));
+                await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofSeconds(3))
+                        .until(() -> worker.get().getState() == Thread.State.TIMED_WAITING);
+                // Longer than two default cycles, but never wait for the configured huge sleep.
+                await().pollInterval(Duration.ofMillis(10)).during(Duration.ofMillis(350))
+                        .atMost(Duration.ofSeconds(2)).untilAsserted(() ->
+                                verify(codeBuild, never()).getBuild(anyString(), anyString(), anyString()));
+                pipelineService.shutdown();
+                assertFalse(worker.get().isAlive());
+                assertFalse(pipelineService.activeRuns.contains(ACCOUNT + ":" + execution));
+            } finally {
+                pipelineService.shutdown();
+            }
+        }
     }
 
     @Test

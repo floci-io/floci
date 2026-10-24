@@ -279,7 +279,7 @@ class CodePipelineV2ConditionsTest {
         EventBridgeService eventBridge = mock(EventBridgeService.class);
         service = new CodePipelineService(storageFactory, mapper, mock(CodeBuildService.class),
                 mock(CodeDeployService.class), lambdaService, s3Service,
-                new CodePipelineEventPublisher(eventBridge, null, mapper), 500L,
+                new CodePipelineEventPublisher(eventBridge, null, mapper), 500L, 100L,
                 TimeUnit.SECONDS.toNanos(5), () -> { });
         ObjectNode deploy = lambdaStage("Deploy");
         addRule(deploy, "beforeEntry", "SKIP", "VariableCheck")
@@ -436,7 +436,7 @@ class CodePipelineV2ConditionsTest {
         AtomicReference<ObjectNode> pendingOverride = new AtomicReference<>();
         service = new CodePipelineService(storageFactory, mapper, mock(CodeBuildService.class),
                 mock(CodeDeployService.class), lambdaService, s3Service,
-                new CodePipelineEventPublisher(null, null, mapper), 500L,
+                new CodePipelineEventPublisher(null, null, mapper), 500L, 100L,
                 TimeUnit.MILLISECONDS.toNanos(200), () -> {
                     if (cleanupProbed.compareAndSet(false, true)) {
                         ObjectNode request = pendingOverride.get();
