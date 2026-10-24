@@ -526,6 +526,12 @@ the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, 
 
 ## Custom Message Trigger
 
+`CustomMessage` requests include the `{####}` code placeholder, the `{##Click Here##}`
+link placeholder, and the user's current `cognito:user_status` in `userAttributes`.
+`usernameParameter` is `null` except for an AdminCreateUser invitation, where it is
+`{username}`. The initial `response` contains `emailMessage`, `emailSubject`, and
+`smsMessage`, each set to `null` for the function to customize.
+
 `CustomMessage` events omit `request.clientMetadata` when metadata is absent or empty,
 including `CustomMessage_Authentication`, which does not forward `InitiateAuth`
 metadata. Custom Email Sender events retain the key with `null` when

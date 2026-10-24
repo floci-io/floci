@@ -1727,13 +1727,21 @@ final class CognitoAuthFlowHandler {
             if (user.getAttributes() != null) {
                 userAttributes.putAll(user.getAttributes());
             }
-            if ("PreAuthentication".equals(triggerKey) || "CustomEmailSender".equals(triggerKey)) {
+            if ("PreAuthentication".equals(triggerKey) || "CustomEmailSender".equals(triggerKey)
+                    || "CustomMessage".equals(triggerKey)) {
                 userAttributes.put("cognito:user_status", user.getUserStatus());
             }
             req.put("userAttributes", userAttributes);
         }
         event.put("request", req);
-        event.put("response", new HashMap<>());
+        Map<String, Object> response = new HashMap<>();
+        if ("CustomMessage".equals(triggerKey)) {
+            req.put("linkParameter", "{##Click Here##}");
+            response.put("emailMessage", null);
+            response.put("emailSubject", null);
+            response.put("smsMessage", null);
+        }
+        event.put("response", response);
         return event;
     }
 
@@ -1884,7 +1892,7 @@ final class CognitoAuthFlowHandler {
                                            String triggerSource, Map<String, String> clientMetadata) {
         Map<String, Object> req = new HashMap<>();
         req.put("codeParameter", CUSTOM_MESSAGE_CODE_PARAMETER);
-        req.put("usernameParameter", user.getUsername());
+        req.put("usernameParameter", null);
         putCustomMessageClientMetadata(req, clientMetadata);
         return customMessageResponse(pool, client, user, triggerSource, req);
     }

@@ -55,6 +55,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -2409,7 +2410,7 @@ class CognitoLambdaTriggersTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void customMessageSignUpTriggerReceivesCodeParameterAndUsername() throws Exception {
+    void customMessageSignUpTriggerReceivesCodeParameterAndNullUsername() throws Exception {
         CognitoService svc = customMessageService(mock(SesService.class),
                 VerificationCode.Purpose.SIGNUP_CONFIRMATION, "246962");
         UserPoolClient client = customMessageClient(svc,
@@ -2422,7 +2423,7 @@ class CognitoLambdaTriggersTest {
         assertEquals("CustomMessage_SignUp", event.get("triggerSource"));
         Map<String, Object> request = (Map<String, Object>) event.get("request");
         assertEquals("{####}", request.get("codeParameter"));
-        assertEquals("spike", request.get("usernameParameter"));
+        assertCustomMessageShape(events.getValue(), "UNCONFIRMED", null);
     }
 
     @Test
@@ -2458,6 +2459,27 @@ class CognitoLambdaTriggersTest {
     }
 
     @Test
+    void customMessageEchoKeepsTheDefaultSignUpMessage() throws Exception {
+        SesService ses = mock(SesService.class);
+        CognitoService svc = customMessageService(ses, VerificationCode.Purpose.SIGNUP_CONFIRMATION, "246962");
+        UserPoolClient client = customMessageClient(svc,
+                customMessagePool(svc, Map.of("AutoVerifiedAttributes", List.of("email"))));
+        when(lambdaService.invoke(anyString(), eq(CUSTOM_MESSAGE), any(byte[].class),
+                eq(InvocationType.RequestResponse))).thenAnswer(invocation -> {
+                    byte[] payload = invocation.getArgument(2);
+                    assertCustomMessageShape(payload, "UNCONFIRMED", null);
+                    return new InvokeResult(200, null, payload, null, "req-id");
+                });
+
+        svc.signUp(client.getClientId(), "spike", "Spike@Test1", Map.of("email", "spike@example.com"), Map.of(), Map.of());
+
+        assertVerificationEmail(ses, "spike@example.com", "Your verification code",
+                "Your verification code is 246962.");
+        verify(lambdaService).invoke(anyString(), eq(CUSTOM_MESSAGE), any(byte[].class),
+                eq(InvocationType.RequestResponse));
+    }
+
+    @Test
     void customMessageDoesNotFireWhenNotConfigured() {
         SesService ses = mock(SesService.class);
         CognitoService svc = customMessageService(ses, VerificationCode.Purpose.SIGNUP_CONFIRMATION, "246962");
@@ -2488,6 +2510,7 @@ class CognitoLambdaTriggersTest {
         Map<String, Object> event = MAPPER.readValue(events.getValue(), new TypeReference<>() {});
         assertEquals("CustomMessage_ResendCode", event.get("triggerSource"));
         assertEquals(Map.of("source", "resend"), ((Map<String, Object>) event.get("request")).get("clientMetadata"));
+        assertCustomMessageShape(events.getValue(), "UNCONFIRMED", null);
     }
 
     @Test
@@ -2507,6 +2530,7 @@ class CognitoLambdaTriggersTest {
         Map<String, Object> event = MAPPER.readValue(events.getValue(), new TypeReference<>() {});
         assertEquals("CustomMessage_ForgotPassword", event.get("triggerSource"));
         assertEquals(Map.of("source", "forgot"), ((Map<String, Object>) event.get("request")).get("clientMetadata"));
+        assertCustomMessageShape(events.getValue(), "CONFIRMED", null);
     }
 
     /** Measured (eu-west-1, 2026-10-21): the event carries the user as the whole update leaves them. */
@@ -2525,6 +2549,7 @@ class CognitoLambdaTriggersTest {
 
         JsonNode event = MAPPER.readTree(events.getValue());
         assertEquals("CustomMessage_UpdateUserAttribute", event.path("triggerSource").asText());
+        assertCustomMessageShape(events.getValue(), "CONFIRMED", null);
         assertEquals(client.getClientId(), event.path("callerContext").path("clientId").asText());
         JsonNode request = event.path("request");
         assertEquals("{####}", request.path("codeParameter").asText());
@@ -2550,6 +2575,7 @@ class CognitoLambdaTriggersTest {
 
         JsonNode event = MAPPER.readTree(events.getValue());
         assertEquals("CustomMessage_VerifyUserAttribute", event.path("triggerSource").asText());
+        assertCustomMessageShape(events.getValue(), "CONFIRMED", null);
         assertEquals(client.getClientId(), event.path("callerContext").path("clientId").asText());
         JsonNode request = event.path("request");
         assertEquals("{####}", request.path("codeParameter").asText());
@@ -2829,6 +2855,7 @@ class CognitoLambdaTriggersTest {
         JsonNode event = MAPPER.readTree(events.getValue());
         assertEquals("CustomMessage_Authentication", event.path("triggerSource").asText());
         assertFalse(event.path("request").has("clientMetadata"));
+        assertCustomMessageShape(events.getValue(), "CONFIRMED", null);
     }
 
     @Test
@@ -2863,6 +2890,22 @@ class CognitoLambdaTriggersTest {
         assertEquals("{####}", request.get("codeParameter"));
         assertEquals("{username}", request.get("usernameParameter"));
         assertEquals(Map.of("source", "admin"), request.get("clientMetadata"));
+        assertCustomMessageShape(events.getValue(), "FORCE_CHANGE_PASSWORD", "{username}");
+    }
+
+    private static void assertCustomMessageShape(byte[] payload, String status, String usernameParameter)
+            throws Exception {
+        JsonNode event = MAPPER.readTree(payload);
+        JsonNode request = event.path("request");
+        JsonNode expectedUsername = usernameParameter == null ? MAPPER.nullNode()
+                : MAPPER.getNodeFactory().textNode(usernameParameter);
+        ObjectNode response = MAPPER.createObjectNode().putNull("emailMessage")
+                .putNull("emailSubject").putNull("smsMessage");
+        assertAll(event.path("triggerSource").asText(),
+                () -> assertEquals(expectedUsername, request.get("usernameParameter")),
+                () -> assertEquals("{##Click Here##}", request.path("linkParameter").asText()),
+                () -> assertEquals(status, request.path("userAttributes").path("cognito:user_status").asText()),
+                () -> assertEquals(response, event.path("response")));
     }
 
     @Test
