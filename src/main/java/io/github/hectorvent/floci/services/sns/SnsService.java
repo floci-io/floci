@@ -556,6 +556,14 @@ public class SnsService implements Resettable, ResourceProvider {
 
     public Topic createTopic(String name, Map<String, String> attributes,
                              Map<String, String> tags, String region) {
+        return createTopicWithStatus(name, attributes, tags, region).topic();
+    }
+
+    public record TopicCreation(Topic topic, boolean created) {
+    }
+
+    public synchronized TopicCreation createTopicWithStatus(String name, Map<String, String> attributes,
+                                                            Map<String, String> tags, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameter", "Topic name is required.", 400);
         }
@@ -566,7 +574,7 @@ public class SnsService implements Resettable, ResourceProvider {
         String key = topicKey(region, topicArn);
 
         Topic existing = topicStore.get(key).orElse(null);
-        if (existing != null) return existing;
+        if (existing != null) return new TopicCreation(existing, false);
 
         Topic topic = new Topic(name, topicArn);
         if (attributes != null) topic.getAttributes().putAll(attributes);
@@ -583,7 +591,7 @@ public class SnsService implements Resettable, ResourceProvider {
 
         topicStore.put(key, topic);
         LOG.infov("Created SNS topic: {0} in region {1}", name, region);
-        return topic;
+        return new TopicCreation(topic, true);
     }
 
     public void deleteTopic(String topicArn, String region) {
@@ -694,6 +702,22 @@ public class SnsService implements Resettable, ResourceProvider {
             requireLargePayloadSubscriptions(topicArn, region);
         }
         topic.getAttributes().put(attributeName, attributeValue);
+        topicStore.put(key, topic);
+    }
+
+    /** Restores stored topic settings exactly, including attributes absent before a stack update. */
+    public synchronized void restoreTopicAttributes(String topicArn, Map<String, String> previous,
+                                                    Set<String> names, String region) {
+        String key = topicKey(region, topicArn);
+        Topic topic = topicStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
+        for (String name : names) {
+            if (previous.containsKey(name)) {
+                topic.getAttributes().put(name, previous.get(name));
+            } else {
+                topic.getAttributes().remove(name);
+            }
+        }
         topicStore.put(key, topic);
     }
 

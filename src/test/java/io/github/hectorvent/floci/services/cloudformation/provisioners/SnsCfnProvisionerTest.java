@@ -2,7 +2,11 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -28,6 +32,7 @@ import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -68,6 +73,12 @@ class SnsCfnProvisionerTest {
             }
             return values;
         });
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(i -> i.getArgument(0));
+        when(sns.listTopics(REGION)).thenReturn(List.of());
+        when(sns.createTopicWithStatus(anyString(), anyMap(), anyMap(), eq(REGION)))
+                .thenAnswer(i -> new SnsService.TopicCreation(sns.createTopic(
+                        i.getArgument(0), i.getArgument(1), i.getArgument(2), i.getArgument(3)), false));
+        when(sns.listSubscriptionsByTopic(TOPIC_ARN, REGION)).thenReturn(List.of());
         ctx = new ProvisionContext(engine, REGION, "000000000000", "my-stack");
     }
 
@@ -114,6 +125,245 @@ class SnsCfnProvisionerTest {
         // against earlier releases.
         assertEquals(Map.of("TopicArn", TOPIC_ARN, "Arn", TOPIC_ARN, "TopicName", "events"),
                 r.getAttributes());
+    }
+
+    @Test
+    void topicCreatesInlineSubscriptions() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("lambda"), eq("arn:lambda"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub"));
+
+        provision("AWS::SNS::Topic", """
+                {"TopicName": "events", "Subscription": [
+                  {"Protocol": "lambda", "Endpoint": "arn:lambda"}
+                ]}
+                """);
+
+        verify(sns).subscribe(TOPIC_ARN, "lambda", "arn:lambda", REGION, Map.of());
+    }
+
+    @Test
+    void topicWithoutPropertiesStillCreates() {
+        when(sns.createTopic(anyString(), anyMap(), anyMap(), eq(REGION)))
+                .thenReturn(topic(TOPIC_ARN));
+        StackResource r = new StackResource();
+        r.setLogicalId("Topic");
+        r.setResourceType("AWS::SNS::Topic");
+        r.setAttributes(new HashMap<>());
+
+        provisioner.provision(r, null, ctx);
+
+        assertEquals(TOPIC_ARN, r.getPhysicalId());
+        verify(sns, never()).subscribe(anyString(), anyString(), anyString(), anyString(), anyMap());
+    }
+
+    @Test
+    void topicUpdateRemovesOnlyItsDroppedInlineSubscription() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION)))
+                .thenReturn(topic(TOPIC_ARN));
+        Subscription old = subscription("arn:old");
+        old.setProtocol("sqs");
+        old.setEndpoint("arn:old-queue");
+        Subscription manual = subscription("arn:manual");
+        manual.setProtocol("sqs");
+        manual.setEndpoint("arn:manual-queue");
+        when(sns.listSubscriptionsByTopic(TOPIC_ARN, REGION))
+                .thenReturn(List.of(), List.of(old, manual));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:old-queue"), eq(REGION), anyMap()))
+                .thenReturn(old);
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:new-queue"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:new"));
+
+        StackResource r = provision("AWS::SNS::Topic", """
+                {"TopicName":"events","Subscription":[{"Protocol":"sqs","Endpoint":"arn:old-queue"}]}
+                """);
+        provisioner.provision(r, props("""
+                {"TopicName":"events","Subscription":[{"Protocol":"sqs","Endpoint":"arn:new-queue"}]}
+                """), new ProvisionContext(engine, REGION, "000000000000", "my-stack", TOPIC_ARN));
+
+        verify(sns).unsubscribe("arn:old", REGION);
+        verify(sns, never()).unsubscribe("arn:manual", REGION);
+        verify(sns).subscribe(TOPIC_ARN, "sqs", "arn:new-queue", REGION, Map.of());
+    }
+
+    @Test
+    void topicUpdateRollbackRestoresRemovedInlineSubscription() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION)))
+                .thenReturn(topic(TOPIC_ARN));
+        Subscription old = subscription("arn:old");
+        old.setProtocol("sqs");
+        old.setEndpoint("arn:old-queue");
+        when(sns.listSubscriptionsByTopic(TOPIC_ARN, REGION))
+                .thenReturn(List.of(), List.of(old), List.of(subscription("arn:new")));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:old-queue"), eq(REGION), anyMap()))
+                .thenReturn(old, subscription("arn:restored"));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:new-queue"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:new"));
+
+        StackResource r = provision("AWS::SNS::Topic", """
+                {"TopicName":"events","Subscription":[{"Protocol":"sqs","Endpoint":"arn:old-queue"}]}
+                """);
+        provisioner.provision(r, props("""
+                {"TopicName":"events","Subscription":[{"Protocol":"sqs","Endpoint":"arn:new-queue"}]}
+                """), new ProvisionContext(engine, REGION, "000000000000", "my-stack", TOPIC_ARN));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(sns).unsubscribe("arn:new", REGION);
+        verify(sns, times(2)).subscribe(TOPIC_ARN, "sqs", "arn:old-queue", REGION, Map.of());
+        assertTrue(r.getAttributes().containsKey("__FlociInlineSubscription:arn:restored"));
+    }
+
+    @Test
+    void topicUpdateRollbackRestoresPriorTopicSettings() {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(i -> AccountAwareStorageBackend.inMemory("000000000000"));
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        SnsService realSns = new SnsService(storageFactory, config,
+                new RegionResolver(REGION, "000000000000"), null, null, null, MAPPER, null);
+        Topic topic = realSns.createTopic("events.fifo", Map.of(
+                "ContentBasedDeduplication", "false",
+                "FifoThroughputScope", "Topic",
+                "MaximumMessageSize", "131072"), Map.of(), REGION);
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Topic");
+        resource.setResourceType("AWS::SNS::Topic");
+        resource.setPhysicalId(topic.getTopicArn());
+        resource.setAttributes(new HashMap<>(Map.of("TopicName", "events.fifo")));
+
+        new SnsCfnProvisioner(realSns).provision(resource, props("""
+                {"TopicName":"events.fifo","FifoTopic":true,
+                 "ContentBasedDeduplication":true,"FifoThroughputScope":"MessageGroup",
+                 "MaximumMessageSize":65536}
+                """), new ProvisionContext(engine, REGION, "000000000000", "my-stack",
+                topic.getTopicArn()));
+        assertEquals("true", realSns.getTopicAttributes(topic.getTopicArn(), REGION)
+                .get("ContentBasedDeduplication"));
+        assertTrue(new SnsCfnProvisioner(realSns).rollbackUpdate(resource));
+
+        Map<String, String> restored = realSns.getTopicAttributes(topic.getTopicArn(), REGION);
+        assertEquals("false", restored.get("ContentBasedDeduplication"));
+        assertEquals("Topic", restored.get("FifoThroughputScope"));
+        assertEquals("131072", restored.get("MaximumMessageSize"));
+
+        Topic plain = realSns.createTopic("plain", Map.of(), Map.of(), REGION);
+        StackResource plainResource = new StackResource();
+        plainResource.setLogicalId("PlainTopic");
+        plainResource.setResourceType("AWS::SNS::Topic");
+        plainResource.setPhysicalId(plain.getTopicArn());
+        plainResource.setAttributes(new HashMap<>(Map.of("TopicName", "plain")));
+        new SnsCfnProvisioner(realSns).provision(plainResource, props("""
+                {"TopicName":"plain","MaximumMessageSize":65536}
+                """), new ProvisionContext(engine, REGION, "000000000000", "my-stack",
+                plain.getTopicArn()));
+        assertTrue(new SnsCfnProvisioner(realSns).rollbackUpdate(plainResource));
+        assertFalse(realSns.getTopicAttributes(plain.getTopicArn(), REGION)
+                .containsKey("MaximumMessageSize"));
+    }
+
+    @Test
+    void topicUpdateRemovesInlineSubscriptionWhenPropertyIsDropped() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION)))
+                .thenReturn(topic(TOPIC_ARN));
+        Subscription old = subscription("arn:old");
+        old.setProtocol("sqs");
+        old.setEndpoint("arn:old-queue");
+        when(sns.listSubscriptionsByTopic(TOPIC_ARN, REGION))
+                .thenReturn(List.of(), List.of(old));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:old-queue"), eq(REGION), anyMap()))
+                .thenReturn(old);
+
+        StackResource r = provision("AWS::SNS::Topic", """
+                {"TopicName":"events","Subscription":[{"Protocol":"sqs","Endpoint":"arn:old-queue"}]}
+                """);
+        provisioner.provision(r, props("""
+                {"TopicName":"events"}
+                """),
+                new ProvisionContext(engine, REGION, "000000000000", "my-stack", TOPIC_ARN));
+
+        verify(sns).unsubscribe("arn:old", REGION);
+    }
+
+    @Test
+    void failedInlineSubscriptionRemovesNewTopic() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION)))
+                .thenReturn(topic(TOPIC_ARN));
+        when(sns.createTopicWithStatus(eq("events"), anyMap(), anyMap(), eq(REGION)))
+                .thenReturn(new SnsService.TopicCreation(topic(TOPIC_ARN), true));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:first"));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("https"), eq("http://wrong"), eq(REGION), anyMap()))
+                .thenThrow(new AwsException("InvalidParameter", "Endpoint scheme mismatch", 400));
+
+        assertThrows(AwsException.class, () -> provision("AWS::SNS::Topic", """
+                {"TopicName":"events","Subscription":[
+                  {"Protocol":"sqs","Endpoint":"arn:queue"},
+                  {"Protocol":"https","Endpoint":"http://wrong"}]}
+                """));
+
+        verify(sns).deleteTopic(TOPIC_ARN, REGION);
+    }
+
+    @Test
+    void failedInlineSubscriptionKeepsPreexistingTopic() {
+        Topic preexisting = topic(TOPIC_ARN);
+        preexisting.setName("events");
+        when(sns.listTopics(REGION)).thenReturn(List.of(preexisting));
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION)))
+                .thenReturn(preexisting);
+        when(sns.createTopicWithStatus(eq("events"), anyMap(), anyMap(), eq(REGION)))
+                .thenReturn(new SnsService.TopicCreation(preexisting, false));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:first"));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("https"), eq("http://wrong"), eq(REGION), anyMap()))
+                .thenThrow(new AwsException("InvalidParameter", "Endpoint scheme mismatch", 400));
+
+        assertThrows(AwsException.class, () -> provision("AWS::SNS::Topic", """
+                {"TopicName":"events","Subscription":[
+                  {"Protocol":"sqs","Endpoint":"arn:queue"},
+                  {"Protocol":"https","Endpoint":"http://wrong"}]}
+                """));
+
+        verify(sns).unsubscribe("arn:first", REGION);
+        verify(sns, never()).deleteTopic(TOPIC_ARN, REGION);
+    }
+
+    @Test
+    void failedInlineSubscriptionKeepsTopicCreatedAfterListCheck() {
+        Topic preexisting = topic(TOPIC_ARN);
+        preexisting.setName("events");
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION)))
+                .thenReturn(preexisting);
+        when(sns.createTopicWithStatus(eq("events"), anyMap(), anyMap(), eq(REGION)))
+                .thenReturn(new SnsService.TopicCreation(preexisting, false));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("https"), eq("http://wrong"), eq(REGION), anyMap()))
+                .thenThrow(new AwsException("InvalidParameter", "Endpoint scheme mismatch", 400));
+
+        assertThrows(AwsException.class, () -> provision("AWS::SNS::Topic", """
+                {"TopicName":"events","Subscription":[
+                  {"Protocol":"https","Endpoint":"http://wrong"}]}
+                """));
+
+        verify(sns, never()).deleteTopic(TOPIC_ARN, REGION);
+    }
+
+    @Test
+    void topicResolvesConditionalSubscriptionList() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION)))
+                .thenReturn(topic(TOPIC_ARN));
+        when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:selected"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:selected-sub"));
+        when(engine.resolveNodeOmittingNoValue(any())).thenReturn(props("""
+                [{"Protocol":"sqs","Endpoint":"arn:selected"}]
+                """));
+
+        provision("AWS::SNS::Topic", """
+                {"TopicName":"events","Subscription":{"Fn::If":["Include",
+                  [{"Protocol":"sqs","Endpoint":"arn:selected"}],{"Ref":"AWS::NoValue"}]}}
+                """);
+
+        verify(sns).subscribe(TOPIC_ARN, "sqs", "arn:selected", REGION, Map.of());
     }
 
     @Test

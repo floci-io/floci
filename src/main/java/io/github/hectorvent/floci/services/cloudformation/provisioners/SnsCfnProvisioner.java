@@ -1,18 +1,25 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /** Provisions {@code AWS::SNS::Topic}, {@code AWS::SNS::Subscription} and {@code AWS::SNS::TopicPolicy}. */
 @ApplicationScoped
@@ -23,6 +30,10 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     private static final String TOPIC_POLICY = "AWS::SNS::TopicPolicy";
     private static final int TOPIC_NAME_MAX_LENGTH = 256;
     private static final String FIFO_SUFFIX = ".fifo";
+    private static final String INLINE_SUBSCRIPTION_PREFIX = "__FlociInlineSubscription:";
+    private static final Set<String> MUTABLE_TOPIC_ATTRIBUTES = Set.of(
+            "ContentBasedDeduplication", "FifoThroughputScope", "MaximumMessageSize");
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final SnsService snsService;
 
@@ -47,6 +58,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionTopic(StackResource r, JsonNode props, ProvisionContext ctx) {
+        r.getAttributes().remove(CfnRollback.SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR);
         String topicName = ctx.resolveOptional(props, "TopicName");
         String contentBasedDedupFlag = ctx.resolveOptional(props, "ContentBasedDeduplication");
         String throughputScope = ctx.resolveOptional(props, "FifoThroughputScope");
@@ -90,7 +102,28 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
             attributes.put("MaximumMessageSize", maximumMessageSize);
         }
 
-        Topic topic = snsService.createTopic(topicName, attributes, Map.of(), ctx.region());
+        JsonNode subscriptions = props == null ? null
+                : ctx.engine().resolveNodeOmittingNoValue(props.path("Subscription"));
+        if (subscriptions != null && !subscriptions.isMissingNode() && !subscriptions.isNull()
+                && !subscriptions.isArray()) {
+            throw new AwsException("ValidationError", "Subscription must be a list.", 400);
+        }
+        List<SubscriptionTarget> desiredSubscriptions = new ArrayList<>();
+        if (subscriptions != null && subscriptions.isArray()) {
+            for (JsonNode subscription : subscriptions) {
+                desiredSubscriptions.add(new SubscriptionTarget(ctx.resolveOptional(subscription, "Protocol"),
+                        ctx.resolveOptional(subscription, "Endpoint")));
+            }
+        }
+
+        SnsService.TopicCreation creation = snsService.createTopicWithStatus(
+                topicName, attributes, Map.of(), ctx.region());
+        Topic topic = creation.topic();
+        boolean created = creation.created();
+        List<Subscription> existing = snsService.listSubscriptionsByTopic(topic.getTopicArn(), ctx.region());
+        if (ctx.isUpdate() && !created) {
+            snapshotInlineSubscriptions(r, topic, ctx.region(), existing);
+        }
         // createTopic leaves an existing topic untouched, so an update writes the mutable
         // attributes itself. A property the template dropped is reset, not left standing.
         if (ctx.isUpdate()) {
@@ -117,6 +150,130 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("TopicArn", topic.getTopicArn());
         r.getAttributes().put("Arn", topic.getTopicArn());
         r.getAttributes().put("TopicName", topicName);
+
+        Set<String> added = new HashSet<>();
+        CfnRollback.guarded(r, ctx, created,
+                () -> snsService.deleteTopic(topic.getTopicArn(), ctx.region()),
+                () -> {
+                    if (ctx.isUpdate()) {
+                        restoreInlineSubscriptions(r);
+                    } else {
+                        added.forEach(arn -> snsService.unsubscribe(arn, ctx.region()));
+                    }
+                },
+                () -> reconcileInlineSubscriptions(r, topic.getTopicArn(), ctx.region(),
+                        desiredSubscriptions, existing, added));
+    }
+
+    private void snapshotInlineSubscriptions(StackResource r, Topic topic, String region,
+                                             List<Subscription> existing) {
+        List<Subscription> owned = existing.stream()
+                .filter(sub -> r.getAttributes().containsKey(
+                        INLINE_SUBSCRIPTION_PREFIX + sub.getSubscriptionArn()))
+                .toList();
+        Map<String, String> previousAttributes = new HashMap<>();
+        MUTABLE_TOPIC_ATTRIBUTES.forEach(name -> {
+            if (topic.getAttributes().containsKey(name)) {
+                previousAttributes.put(name, topic.getAttributes().get(name));
+            }
+        });
+        InlineSubscriptionSnapshot snapshot = new InlineSubscriptionSnapshot(
+                topic.getTopicArn(), region, owned, previousAttributes);
+        try {
+            r.getAttributes().put(CfnRollback.SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR,
+                    MAPPER.writeValueAsString(snapshot));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not snapshot inline SNS subscriptions", e);
+        }
+    }
+
+    @RegisterForReflection
+    private record InlineSubscriptionSnapshot(String topicArn, String region,
+                                              List<Subscription> owned,
+                                              Map<String, String> topicAttributes) {
+    }
+
+    private void restoreInlineSubscriptions(StackResource r) {
+        String raw = r.getAttributes().get(CfnRollback.SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return;
+        }
+        InlineSubscriptionSnapshot snapshot;
+        try {
+            snapshot = MAPPER.readValue(raw, InlineSubscriptionSnapshot.class);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read inline SNS subscription snapshot", e);
+        }
+        if (snapshot.topicAttributes() != null) {
+            snsService.restoreTopicAttributes(snapshot.topicArn(), snapshot.topicAttributes(),
+                    MUTABLE_TOPIC_ATTRIBUTES, snapshot.region());
+        }
+        Set<String> priorArns = snapshot.owned().stream()
+                .map(Subscription::getSubscriptionArn).collect(Collectors.toSet());
+        for (Subscription current : snsService.listSubscriptionsByTopic(snapshot.topicArn(), snapshot.region())) {
+            String key = INLINE_SUBSCRIPTION_PREFIX + current.getSubscriptionArn();
+            if (r.getAttributes().containsKey(key) && !priorArns.contains(current.getSubscriptionArn())) {
+                snsService.unsubscribe(current.getSubscriptionArn(), snapshot.region());
+            }
+        }
+        r.getAttributes().keySet().removeIf(key -> key.startsWith(INLINE_SUBSCRIPTION_PREFIX));
+        for (Subscription prior : snapshot.owned()) {
+            Subscription restored = snsService.subscribe(snapshot.topicArn(), prior.getProtocol(),
+                    prior.getEndpoint(), snapshot.region(), prior.getAttributes());
+            r.getAttributes().put(INLINE_SUBSCRIPTION_PREFIX + restored.getSubscriptionArn(), "true");
+        }
+        r.getAttributes().remove(CfnRollback.SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (!resource.getAttributes().containsKey(CfnRollback.SNS_INLINE_SUBSCRIPTIONS_SNAPSHOT_ATTR)) {
+            return false;
+        }
+        restoreInlineSubscriptions(resource);
+        return true;
+    }
+
+    @Override
+    public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        previous.getAttributes().keySet().removeIf(key -> key.startsWith(INLINE_SUBSCRIPTION_PREFIX));
+        attempted.getAttributes().forEach((key, value) -> {
+            if (key.startsWith(INLINE_SUBSCRIPTION_PREFIX)) {
+                previous.getAttributes().put(key, value);
+            }
+        });
+    }
+
+    private void reconcileInlineSubscriptions(StackResource r, String topicArn, String region,
+                                              List<SubscriptionTarget> desired, List<Subscription> existing,
+                                              Set<String> added) {
+        for (SubscriptionTarget target : desired) {
+            boolean present = existing.stream().anyMatch(sub -> target.matches(sub));
+            Subscription sub = snsService.subscribe(topicArn, target.protocol(), target.endpoint(),
+                    region, Map.of());
+            if (!present) {
+                added.add(sub.getSubscriptionArn());
+                r.getAttributes().put(INLINE_SUBSCRIPTION_PREFIX + sub.getSubscriptionArn(), "true");
+            }
+        }
+        for (Subscription sub : existing) {
+            String key = INLINE_SUBSCRIPTION_PREFIX + sub.getSubscriptionArn();
+            if (r.getAttributes().containsKey(key)
+                    && desired.stream().noneMatch(target -> target.matches(sub))) {
+                snsService.unsubscribe(sub.getSubscriptionArn(), region);
+                r.getAttributes().remove(key);
+            }
+        }
+        r.getAttributes().keySet().removeIf(key -> key.startsWith(INLINE_SUBSCRIPTION_PREFIX)
+                && existing.stream().noneMatch(sub -> key.equals(INLINE_SUBSCRIPTION_PREFIX
+                + sub.getSubscriptionArn())) && !added.contains(key.substring(INLINE_SUBSCRIPTION_PREFIX.length())));
+    }
+
+    private record SubscriptionTarget(String protocol, String endpoint) {
+        private boolean matches(Subscription subscription) {
+            return Objects.equals(protocol, subscription.getProtocol())
+                    && Objects.equals(endpoint, subscription.getEndpoint());
+        }
     }
 
     private void provisionSubscription(StackResource r, JsonNode props, ProvisionContext ctx) {
