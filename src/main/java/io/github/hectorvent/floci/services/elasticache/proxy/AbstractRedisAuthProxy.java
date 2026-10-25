@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elasticache.proxy;
 import io.github.hectorvent.floci.core.common.ListenBacklog;
 import org.jboss.logging.Logger;
 
+import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -11,6 +12,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -386,7 +388,8 @@ public abstract class AbstractRedisAuthProxy {
         Thread t1 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-c2b-" + resourceId)
                 .start(() -> {
                     try {
-                        relay(clientInput, backend);
+                        // Bug #4502: Frame client RESP commands to intercept re-authentication on live connections
+                        relayClientToBackend(client, clientInput, backend);
                     } finally {
                         firstRelayDone.countDown();
                     }
@@ -409,6 +412,155 @@ public abstract class AbstractRedisAuthProxy {
             closeQuietly(client);
             closeQuietly(backend);
         }
+    }
+
+    private void relayClientToBackend(Socket client, InputStream clientInput, Socket backend) {
+        byte[] transferBuf = new byte[8192];
+        try {
+            BufferedInputStream in = (clientInput instanceof BufferedInputStream bis)
+                    ? bis : new BufferedInputStream(clientInput, 8192);
+            OutputStream out = backend.getOutputStream();
+            while (running) {
+                int first = in.read();
+                if (first == -1) {
+                    break;
+                }
+                if (first == '*') {
+                    String countLine = readAsciiLine(in);
+                    if (countLine == null || countLine.isEmpty()) {
+                        break;
+                    }
+                    int argCount = Integer.parseInt(countLine);
+                    if (argCount <= 0) {
+                        continue;
+                    }
+                    String bulkHdr0 = readAsciiLine(in);
+                    if (bulkHdr0 == null || !bulkHdr0.startsWith("$")) {
+                        break;
+                    }
+                    int len0 = Integer.parseInt(bulkHdr0.substring(1));
+                    byte[] arg0Bytes = in.readNBytes(len0);
+                    in.readNBytes(2); // consume \r\n
+                    String cmd0 = new String(arg0Bytes, StandardCharsets.US_ASCII);
+
+                    if ("AUTH".equalsIgnoreCase(cmd0)) {
+                        String[] authArgs = new String[argCount - 1];
+                        for (int i = 0; i < argCount - 1; i++) {
+                            String bulkHdr = readAsciiLine(in);
+                            int len = Integer.parseInt(bulkHdr.substring(1));
+                            byte[] data = in.readNBytes(len);
+                            in.readNBytes(2);
+                            authArgs[i] = new String(data, StandardCharsets.UTF_8);
+                        }
+                        String username = (authArgs.length == 2) ? authArgs[0] : null;
+                        String password = (authArgs.length == 2) ? authArgs[1] : (authArgs.length == 1 ? authArgs[0] : null);
+                        boolean ok = (password != null) && authenticate(username, password);
+                        writeResponse(client, ok ? OK_RESPONSE : WRONGPASS_RESPONSE);
+                        continue;
+                    }
+                    if ("HELLO".equalsIgnoreCase(cmd0)) {
+                        String[] helloArgs = new String[argCount - 1];
+                        for (int i = 0; i < argCount - 1; i++) {
+                            String bulkHdr = readAsciiLine(in);
+                            int len = Integer.parseInt(bulkHdr.substring(1));
+                            byte[] data = in.readNBytes(len);
+                            in.readNBytes(2);
+                            helloArgs[i] = new String(data, StandardCharsets.UTF_8);
+                        }
+                        int authIdx = -1;
+                        for (int i = 0; i < helloArgs.length; i++) {
+                            if ("AUTH".equalsIgnoreCase(helloArgs[i])) {
+                                authIdx = i;
+                                break;
+                            }
+                        }
+                        if (authIdx != -1 && authIdx + 2 < helloArgs.length) {
+                            String username = helloArgs[authIdx + 1];
+                            String password = helloArgs[authIdx + 2];
+                            if (!authenticate(username, password)) {
+                                writeResponse(client, WRONGPASS_RESPONSE);
+                                continue;
+                            }
+                            List<String> forwarded = new ArrayList<>();
+                            forwarded.add(cmd0);
+                            for (int i = 0; i < helloArgs.length; i++) {
+                                if (i == authIdx) {
+                                    i += 2; // skip AUTH user pass
+                                } else {
+                                    forwarded.add(helloArgs[i]);
+                                }
+                            }
+                            resendCommand(forwarded.toArray(String[]::new), out);
+                            continue;
+                        }
+                        List<String> forwarded = new ArrayList<>();
+                        forwarded.add(cmd0);
+                        forwarded.addAll(List.of(helloArgs));
+                        resendCommand(forwarded.toArray(String[]::new), out);
+                        continue;
+                    }
+
+                    // Stream all other commands directly to preserve binary payloads
+                    out.write(('*' + String.valueOf(argCount) + "\r\n").getBytes(StandardCharsets.US_ASCII));
+                    out.write(('$' + String.valueOf(len0) + "\r\n").getBytes(StandardCharsets.US_ASCII));
+                    out.write(arg0Bytes);
+                    out.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+                    for (int i = 1; i < argCount; i++) {
+                        String bulkHdr = readAsciiLine(in);
+                        int len = Integer.parseInt(bulkHdr.substring(1));
+                        out.write(('$' + String.valueOf(len) + "\r\n").getBytes(StandardCharsets.US_ASCII));
+                        int remaining = len;
+                        while (remaining > 0) {
+                            int toRead = Math.min(transferBuf.length, remaining);
+                            int r = in.read(transferBuf, 0, toRead);
+                            if (r == -1) {
+                                throw new IOException("Unexpected EOF in RESP bulk string");
+                            }
+                            out.write(transferBuf, 0, r);
+                            remaining -= r;
+                        }
+                        in.readNBytes(2); // trailing \r\n
+                        out.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+                    }
+                    out.flush();
+                } else {
+                    // Inline command fallback
+                    String line = (char) first + readAsciiLine(in);
+                    if (line.toUpperCase(Locale.ROOT).startsWith("AUTH ")) {
+                        String[] parts = line.trim().split("\s+");
+                        String username = parts.length == 3 ? parts[1] : null;
+                        String password = parts.length == 3 ? parts[2] : (parts.length == 2 ? parts[1] : null);
+                        boolean ok = (password != null) && authenticate(username, password);
+                        writeResponse(client, ok ? OK_RESPONSE : WRONGPASS_RESPONSE);
+                        continue;
+                    }
+                    out.write((line + "\r\n").getBytes(StandardCharsets.US_ASCII));
+                    out.flush();
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            shutdownOutput(backend);
+        }
+    }
+
+    private static String readAsciiLine(InputStream in) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        int c;
+        while ((c = in.read()) != -1) {
+            if (c == '\r') {
+                int next = in.read();
+                if (next != '\n') {
+                    throw new IOException("Expected \n after \r in RESP");
+                }
+                break;
+            }
+            sb.append((char) c);
+        }
+        if (c == -1 && sb.length() == 0) {
+            return null;
+        }
+        return sb.toString();
     }
 
     private static void relay(InputStream in, Socket to) {
