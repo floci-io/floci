@@ -381,6 +381,71 @@ class Ec2KeyPairCfnProvisionerTest {
         verify(ec2, times(1)).createKeyPair(REGION, "first", null, null);
     }
 
+    /** The cleanup goes by name, yet a displaced key deleted outside the stack still takes its parameter. */
+    @Test
+    void theCommittedRenameRemovesTheParameterOfADisplacedKeyDeletedOutsideTheStack() throws Exception {
+        StackResource r = renamed();
+        when(ec2.describeKeyPairs(REGION, List.of("first"), List.of()))
+                .thenThrow(new AwsException("InvalidKeyPair.NotFound", "The key pair 'first' does not exist", 400));
+
+        assertTrue(provisioner.completeUpdate(r).complete());
+        provisioner.clearUpdate(r);
+
+        verify(ssm).deleteParameter("/ec2/keypair/key-1", REGION);
+        verify(ssm, never()).deleteParameter("/ec2/keypair/key-2", REGION);
+        verify(ec2, never()).deleteKeyPair(anyString(), any(), any());
+        assertFalse(r.getAttributes().containsKey("__FlociKeyPairCreatedKeys"));
+    }
+
+    @Test
+    void aRolledBackRenameRemovesTheParameterOfAReplacementDeletedOutsideTheStack() throws Exception {
+        StackResource r = renamed();
+        when(ec2.describeKeyPairs(REGION, List.of("next"), List.of()))
+                .thenThrow(new AwsException("InvalidKeyPair.NotFound", "The key pair 'next' does not exist", 400));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals("first", r.getPhysicalId());
+        verify(ssm).deleteParameter("/ec2/keypair/key-2", REGION);
+        verify(ssm, never()).deleteParameter("/ec2/keypair/key-1", REGION);
+        verify(ec2, never()).deleteKeyPair(anyString(), any(), any());
+        assertFalse(r.getAttributes().containsKey("__FlociKeyPairCreatedKeys"));
+    }
+
+    /** The retry runs after the revert, when the resource records the original key, not the replacement. */
+    @Test
+    void theRollbackRetryStillRemovesTheParameterOfAReplacementGoneSinceTheFirstAttempt() throws Exception {
+        StackResource r = renamed();
+        when(ec2.describeKeyPairs(REGION, List.of("next"), List.of()))
+                .thenReturn(List.of(created("next", "key-2")))
+                .thenThrow(new AwsException("InvalidKeyPair.NotFound", "The key pair 'next' does not exist", 400));
+        when(ec2.deleteKeyPair(REGION, null, "key-2"))
+                .thenThrow(new AwsException("InternalServerError", "simulated delete failure", 500));
+
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(ssm, times(2)).deleteParameter("/ec2/keypair/key-2", REGION);
+        verify(ssm, never()).deleteParameter("/ec2/keypair/key-1", REGION);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        assertFalse(r.getAttributes().containsKey("__FlociKeyPairCreatedKeys"));
+    }
+
+    @Test
+    void aDisplacedImportedKeyDeletedOutsideTheStackLeavesParameterStoreAlone() throws Exception {
+        when(ec2.importKeyPair(REGION, "first", "ssh-ed25519 AAAA")).thenReturn(imported("first", "key-1"));
+        when(ec2.createKeyPair(REGION, "next", null, null)).thenReturn(created("next", "key-2"));
+        StackResource r = resource();
+        provisioner.provision(r, props("{\"KeyName\": \"first\", \"PublicKeyMaterial\": \"ssh-ed25519 AAAA\"}"), ctx(null));
+        provisioner.provision(r, props("{\"KeyName\": \"next\"}"), ctx("first"));
+        when(ec2.describeKeyPairs(REGION, List.of("first"), List.of()))
+                .thenThrow(new AwsException("InvalidKeyPair.NotFound", "The key pair 'first' does not exist", 400));
+
+        assertTrue(provisioner.completeUpdate(r).complete());
+
+        verify(ssm, never()).deleteParameter(anyString(), anyString());
+    }
+
     /** A key deleted outside the stack still has its parameter removed when the stack is deleted. */
     @Test
     void stackDeleteRemovesTheParameterOfAKeyDeletedOutsideTheStack() throws Exception {
