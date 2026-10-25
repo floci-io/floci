@@ -184,8 +184,10 @@ class CloudFrontCfnProvisionerTest {
                 {"DistributionConfig": {
                    "Origins": [{"Id": "o1", "DomainName": "origin.example.com",
                                 "ConnectionAttempts": 2, "ConnectionTimeout": 5,
+                                "ResponseCompletionTimeout": 90,
                                 "CustomOriginConfig": {"OriginProtocolPolicy": "https-only",
-                                                       "OriginReadTimeout": 45}}],
+                                                       "OriginReadTimeout": 45,
+                                                       "OriginKeepaliveTimeout": 120}}],
                    "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "redirect-to-https"}
                 }}
                 """), distributionCtx(null));
@@ -195,8 +197,11 @@ class CloudFrontCfnProvisionerTest {
         Origin origin = sent.getValue().getConfig().getOrigins().getFirst();
         assertEquals(2, origin.getConnectionAttempts());
         assertEquals(5, origin.getConnectionTimeout());
+        // ResponseCompletionTimeout lives on the origin, where the serving layer reads it.
+        assertEquals(Integer.valueOf(90), origin.getResponseCompletionTimeout());
         // OriginReadTimeout lives on CustomOriginConfig, where the serving layer reads it.
         assertEquals(Integer.valueOf(45), origin.getCustomOriginConfig().get("OriginReadTimeout"));
+        assertEquals(Integer.valueOf(120), origin.getCustomOriginConfig().get("OriginKeepaliveTimeout"));
     }
 
     @Test

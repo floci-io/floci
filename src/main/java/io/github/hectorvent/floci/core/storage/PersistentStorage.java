@@ -7,11 +7,10 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -30,7 +29,7 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
 
     private static final Logger LOG = Logger.getLogger(PersistentStorage.class);
 
-    private final ConcurrentHashMap<K, V> store = new ConcurrentHashMap<>();
+    private volatile ConcurrentHashMap<K, V> store = new ConcurrentHashMap<>();
     private final Path filePath;
     private final ObjectMapper objectMapper;
     private final TypeReference<Map<K, V>> typeReference;
@@ -45,13 +44,13 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void put(K key, V value) {
+    public synchronized void put(K key, V value) {
         store.put(key, value);
         persistToDisk();
     }
 
     @Override
-    public void putAll(Map<K, V> entries) {
+    public synchronized void putAll(Map<K, V> entries) {
         if (entries.isEmpty()) {
             return;
         }
@@ -60,14 +59,45 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
+    public synchronized void putAllAtomically(Map<K, V> entries) {
+        Map<K, V> replacements = Map.copyOf(entries);
+        if (replacements.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
+        candidate.putAll(replacements);
+        try {
+            StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), candidate));
+        } catch (IOException exception) {
+            throw new UncheckedIOException("Failed to commit atomic batch to " + filePath, exception);
+        }
+        store = candidate;
+    }
+
+    @Override
     public Optional<V> get(K key) {
         return Optional.ofNullable(store.get(key));
     }
 
     @Override
-    public void delete(K key) {
+    public synchronized void delete(K key) {
         store.remove(key);
         persistToDisk();
+    }
+
+    @Override
+    public synchronized void deleteAllAtomically(Set<K> keys) {
+        if (keys.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
+        candidate.keySet().removeAll(Set.copyOf(keys));
+        try {
+            StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), candidate));
+        } catch (IOException exception) {
+            throw new UncheckedIOException("Failed to commit atomic deletions to " + filePath, exception);
+        }
+        store = candidate;
     }
 
     @Override
@@ -80,7 +110,7 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
 
     @Override
     public Set<K> keys() {
-        return Collections.unmodifiableSet(store.keySet());
+        return Set.copyOf(store.keySet());
     }
 
     @Override
@@ -89,7 +119,7 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void load() {
+    public synchronized void load() {
         if (!Files.exists(filePath)) {
             LOG.debugv("No persistent file found at {0}, starting with empty store", filePath);
             return;
@@ -109,17 +139,14 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void clear() {
+    public synchronized void clear() {
         store.clear();
         persistToDisk();
     }
 
     private synchronized void persistToDisk() {
         try {
-            Files.createDirectories(filePath.getParent());
-            Path tempFile = filePath.resolveSibling(filePath.getFileName() + ".tmp");
-            objectMapper.writeValue(tempFile.toFile(), store);
-            Files.move(tempFile, filePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), store));
         } catch (IOException e) {
             LOG.errorv(e, "Failed to persist data to {0}", filePath);
         }

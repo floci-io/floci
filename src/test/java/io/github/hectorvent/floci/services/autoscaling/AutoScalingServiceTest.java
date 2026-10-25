@@ -22,10 +22,13 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -35,12 +38,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.anyList;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -133,6 +143,110 @@ class AutoScalingServiceTest {
         assertEquals("lt-updated", group.getLaunchTemplateId());
         assertEquals("2", group.getLaunchTemplateVersion());
         assertNull(group.getLaunchConfigurationName());
+    }
+
+    @Test
+    void attachedInstancesReceiveThePropagatingTagsAndTheirGroupName() {
+        service.ec2Service = mock(Ec2Service.class);
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        group.getTags().put("env", "group");
+        group.getTags().put("hidden", "group");
+        group.getTags().put("aws:autoscaling:groupName", "spoofed");
+        group.getTagPropagateAtLaunch().putAll(Map.of("env", true, "hidden", false,
+                "aws:autoscaling:groupName", true));
+        ec2HoldsInstances("i-attached");
+
+        service.attachInstances(REGION, "test-asg", List.of("i-attached"));
+
+        ArgumentCaptor<List<Tag>> appliedTags = ArgumentCaptor.captor();
+        verify(service.ec2Service).createSystemTags(eq(REGION), eq(List.of("i-attached")), appliedTags.capture());
+        assertEquals(Map.of("env", "group", "aws:autoscaling:groupName", "test-asg"),
+                appliedTags.getValue().stream().collect(Collectors.toMap(Tag::getKey, Tag::getValue)));
+        assertEquals(List.of("i-attached"), group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+    }
+
+    @Test
+    void attachTagsOnlyTheInstancesEc2Holds() {
+        service.ec2Service = mock(Ec2Service.class);
+        ec2HoldsInstances("i-held");
+
+        service.attachInstances(REGION, "test-asg", List.of("i-held", "i-unknown"));
+
+        verify(service.ec2Service).createSystemTags(eq(REGION), eq(List.of("i-held")), anyList());
+        verify(service.ec2Service, times(1)).createSystemTags(anyString(), anyList(), anyList());
+    }
+
+    @Test
+    void attachCountsARepeatedInstanceOnce() {
+        service.ec2Service = mock(Ec2Service.class);
+        ec2HoldsInstances("i-repeated");
+
+        service.attachInstances(REGION, "test-asg", List.of("i-repeated", "i-repeated"));
+
+        verify(service.ec2Service).createSystemTags(eq(REGION), eq(List.of("i-repeated")), anyList());
+        assertEquals(List.of("i-repeated"), service.describeAutoScalingGroups(REGION, List.of("test-asg"))
+                .getFirst().getInstances().stream().map(AsgInstance::getInstanceId).toList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void attachRejectsAnInstanceThatAlreadyBelongsToAGroupBeforeTaggingAnyOfTheBatch(boolean sameGroup) {
+        service.createAutoScalingGroup(REGION, "other-asg", null, "lt-original", null, "1", null,
+                0, 3, 0, 300, List.of(REGION + "a"), List.of(), List.of(), List.of(),
+                "EC2", 0, List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
+        service.ec2Service = mock(Ec2Service.class);
+        service.attachInstances(REGION, "test-asg", List.of("i-owned"));
+        clearInvocations(service.ec2Service);
+        String target = sameGroup ? "test-asg" : "other-asg";
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of(target)).getFirst();
+        int desired = group.getDesiredCapacity();
+        List<String> members = group.getInstances().stream().map(AsgInstance::getInstanceId).toList();
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> service.attachInstances(REGION, target, List.of("i-free", "i-owned")));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals(400, failure.getHttpStatus());
+        assertEquals("[The Instance: i-owned is already part of AutoScalingGroup:test-asg]", failure.getMessage());
+        assertEquals(members, group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+        assertEquals(desired, group.getDesiredCapacity());
+        verifyNoInteractions(service.ec2Service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void detachRemovesOnlyTheDetachedInstancesGroupNameTag(boolean decrementDesiredCapacity) {
+        service.ec2Service = mock(Ec2Service.class);
+        service.attachInstances(REGION, "test-asg", List.of("i-detached", "i-retained"));
+
+        service.detachInstances(REGION, "test-asg", List.of("i-detached"), decrementDesiredCapacity);
+
+        verify(service.ec2Service).deleteSystemTag(
+                REGION, List.of("i-detached"), "aws:autoscaling:groupName", "test-asg");
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals(List.of("i-retained"), group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+        assertEquals(decrementDesiredCapacity ? 1 : 2, group.getDesiredCapacity());
+    }
+
+    @Test
+    void detachingAnInstanceTheGroupDoesNotHoldChangesNoTags() {
+        service.ec2Service = mock(Ec2Service.class);
+        service.attachInstances(REGION, "test-asg", List.of("i-member"));
+        clearInvocations(service.ec2Service);
+
+        service.detachInstances(REGION, "test-asg", List.of("i-stranger"), false);
+
+        verify(service.ec2Service, never()).deleteSystemTag(anyString(), anyList(), anyString(), anyString());
+        assertEquals(List.of("i-member"), service.describeAutoScalingGroups(REGION, List.of("test-asg"))
+                .getFirst().getInstances().stream().map(AsgInstance::getInstanceId).toList());
+    }
+
+    private void ec2HoldsInstances(String... instanceIds) {
+        for (String id : instanceIds) {
+            Instance instance = new Instance();
+            instance.setInstanceId(id);
+            when(service.ec2Service.findInstanceForAccount("000000000000", REGION, id)).thenReturn(Optional.of(instance));
+        }
     }
 
     @Test
@@ -970,6 +1084,7 @@ class AutoScalingServiceTest {
         StorageBackedMap<AutoScalingGroup> groups = new StorageBackedMap<>(storage);
         groups.putAll(service.groups);
         service.groups = groups;
+        service.ec2Service = mock(Ec2Service.class);
         service.attachInstances(REGION, "test-asg", List.of("i-live"));
         service.createOrUpdateTags(REGION, "test-asg", "auto-scaling-group", Map.of("k", "v"), Map.of());
 
@@ -1447,6 +1562,33 @@ class AutoScalingServiceTest {
                 new AsgOptionalFields(null, null, null, null, null, null, null, specification)));
 
         assertEquals(AutoScalingService.CAPACITY_RESERVATION_TARGET_WITH_NONE_MESSAGE, error.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ids", "groups", "mixed"})
+    void capacityReservationRejectsMultipleTargetsBeforeCreateOrUpdate(String kind) {
+        CapacityReservationSpecification specification = new CapacityReservationSpecification();
+        specification.setCapacityReservationPreference("capacity-reservations-only");
+        if ("ids".equals(kind)) {
+            specification.setCapacityReservationIds(List.of("cr-one", "cr-two"));
+        } else if ("groups".equals(kind)) {
+            specification.setCapacityReservationResourceGroupArns(List.of("group-one", "group-two"));
+        } else {
+            specification.setCapacityReservationIds(List.of("cr-one"));
+            specification.setCapacityReservationResourceGroupArns(List.of("group-one"));
+        }
+        AsgOptionalFields options = new AsgOptionalFields(null, null, null, null, null, null, null, specification);
+        AwsException create = assertThrows(AwsException.class, () -> createWithStructures("multi-target", options));
+        assertEquals("ValidationError", create.getErrorCode());
+        assertTrue(service.describeAutoScalingGroups(REGION, List.of("multi-target")).isEmpty());
+        AutoScalingGroup before = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        int desired = before.getDesiredCapacity();
+        AwsException update = assertThrows(AwsException.class, () -> service.updateAutoScalingGroup(REGION,
+                "test-asg", null, null, null, null, null, null, null, 2, null, null, null, null, null, null, options));
+        assertEquals("ValidationError", update.getErrorCode());
+        AutoScalingGroup after = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals(desired, after.getDesiredCapacity());
+        assertNull(after.getCapacityReservationSpecification());
     }
 
     @Test

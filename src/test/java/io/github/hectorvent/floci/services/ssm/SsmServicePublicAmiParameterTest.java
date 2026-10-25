@@ -126,6 +126,12 @@ class SsmServicePublicAmiParameterTest {
     }
 
     @Test
+    void excludesPublicParametersFromLabelFilteredPaths() {
+        assertTrue(ssmService.getParametersByPath("/aws/service", true,
+                List.of(new ParameterStringFilter("Label", null, List.of("release"))), REGION).isEmpty());
+    }
+
+    @Test
     void resolvesEksOptimizedAmiParametersAcrossArchitecturesAndVersions() {
         String x86Param = "/aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id";
         Parameter x86 = ssmService.getParameter(x86Param, REGION);

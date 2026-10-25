@@ -66,7 +66,7 @@ class SesBooleanCoercionV2IntegrationTest {
             String readField = suffix.equals("/dkim") ? "DkimAttributes.SigningEnabled" : "FeedbackForwardingStatus";
             String path = "/v2/email/identities/" + DOMAIN + suffix;
             send("PUT", path, "{\"" + member + "\":true}").statusCode(200);
-            send("PUT", path, "[]").statusCode(400).body("__type", equalTo("BadRequestException"));
+            send("PUT", path, "[]").statusCode(400).body("__type", equalTo("SerializationException"));
             get("/v2/email/identities/" + DOMAIN).body(readField, equalTo(true));
         }
     }

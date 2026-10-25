@@ -43,6 +43,24 @@ class RedshiftDataExecutionTest {
     }
 
     @Test
+    void cancellationSignalHoldsExecutionMonitor() throws Exception {
+        RedshiftDataExecution execution = new RedshiftDataExecution(0);
+        Statement statement = mock(Statement.class);
+        execution.track(statement);
+        assertTrue(execution.requestCancellation());
+        doAnswer(invocation -> {
+            assertTrue(Thread.holdsLock(execution));
+            return null;
+        }).when(statement).cancel();
+
+        execution.signalCancellation();
+        execution.terminal();
+        execution.signalCancellation();
+        verify(statement).cancel();
+        execution.completed();
+    }
+
+    @Test
     void successfulCommitWinsOverCancellation() throws Exception {
         try (RedshiftDataExecutor executor = new RedshiftDataExecutor(1, 1, 1)) {
             AtomicReference<Throwable> workerFailure = new AtomicReference<>();

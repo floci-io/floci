@@ -98,4 +98,12 @@ class SesExportFiltersTest {
 
         assertEquals(List.of("two@example.com"), destinations(kept));
     }
+
+    @Test
+    void fractionalMaxResultsIsReadAsTheIntTheRequestWasValidatedWith() {
+        List<SesExportPayloads.InsightsRow> kept = SesExportFilters.apply(ROWS,
+                source("{\"Exclude\": {\"TenantName\": [\"blue\"]}, \"MaxResults\": 1.5}"));
+
+        assertEquals(List.of("two@example.com"), destinations(kept));
+    }
 }

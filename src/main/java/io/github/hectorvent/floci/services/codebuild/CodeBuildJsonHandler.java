@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService.ProjectPage;
+import io.github.hectorvent.floci.services.codebuild.CodeBuildService.ReportGroupPage;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
 import io.github.hectorvent.floci.services.codebuild.model.Project;
 import io.github.hectorvent.floci.services.codebuild.model.ProjectArtifacts;
@@ -44,7 +45,7 @@ public class CodeBuildJsonHandler {
             case "UpdateReportGroup" -> updateReportGroup(request, region);
             case "DeleteReportGroup" -> deleteReportGroup(request, region);
             case "BatchGetReportGroups" -> batchGetReportGroups(request, region);
-            case "ListReportGroups" -> listReportGroups(region);
+            case "ListReportGroups" -> listReportGroups(request, region);
             case "ImportSourceCredentials" -> importSourceCredentials(request, region, account);
             case "ListSourceCredentials" -> listSourceCredentials(region);
             case "DeleteSourceCredentials" -> deleteSourceCredentials(request, region);
@@ -179,8 +180,24 @@ public class CodeBuildJsonHandler {
         return Response.ok(Map.of("reportGroups", found, "reportGroupsNotFound", notFound)).build();
     }
 
-    private Response listReportGroups(String region) {
-        return Response.ok(Map.of("reportGroups", service.listReportGroups(region))).build();
+    private Response listReportGroups(JsonNode req, String region) {
+        JsonNode sizeNode = req.get("maxResults");
+        if (sizeNode != null && (!sizeNode.isIntegralNumber() || !sizeNode.canConvertToInt())) {
+            throw new AwsException("InvalidInputException", "Invalid maxResults", 400);
+        }
+        JsonNode tokenNode = req.get("nextToken");
+        if (tokenNode != null && !tokenNode.isTextual()) {
+            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+        }
+        ReportGroupPage page = service.listReportGroupsPage(region,
+                req.path("sortBy").asText(null), req.path("sortOrder").asText(null),
+                sizeNode == null ? 100 : sizeNode.intValue(), tokenNode == null ? null : tokenNode.asText());
+        Map<String, Object> result = new HashMap<>();
+        result.put("reportGroups", page.reportGroups());
+        if (page.nextToken() != null) {
+            result.put("nextToken", page.nextToken());
+        }
+        return Response.ok(result).build();
     }
 
     private Response importSourceCredentials(JsonNode req, String region, String account) {

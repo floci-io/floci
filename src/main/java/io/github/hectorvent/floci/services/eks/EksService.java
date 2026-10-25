@@ -156,6 +156,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 oidcService, accessEntries, null, null);
     }
 
+    /** Called at boot so this lazily created bean runs {@link #init()}, which restarts persisted clusters. */
+    public void restorePersistedRuntime() {
+        int persistedClusters = allClusterEntries().size();
+        if (persistedClusters > 0) {
+            LOG.infov("Found {0} persisted EKS cluster record(s)", persistedClusters);
+        }
+    }
+
     @PostConstruct
     public void init() {
         backfillOidcIdentities();
@@ -732,6 +740,37 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     public Optional<Cluster> findAuthenticationCluster(String accountId, String name) {
         return storage instanceof AccountAwareStorageBackend<Cluster> aware
                 ? aware.getForAccount(accountId, name) : storage.get(name);
+    }
+
+    /**
+     * The ARN of what an EKS route names in the caller's account, looked up as its handler looks it up: the
+     * cluster {@code clusterName} when {@code collection} is null, or else the node group, Fargate profile,
+     * add-on, access entry or Pod Identity association {@code name} in that cluster, by the route's
+     * collection segment, or for the update {@code name} the add-on it was made to. Empty when there is none,
+     * or the handler would refuse the lookup.
+     */
+    public Optional<String> findResourceArn(String clusterName, String collection, String name) {
+        Optional<Cluster> cluster = storage.get(clusterName);
+        if (cluster.isEmpty() || collection == null) {
+            return cluster.map(Cluster::getArn);
+        }
+        try {
+            return Optional.ofNullable(switch (collection) {
+                case "node-groups" -> describeNodeGroup(clusterName, name).getNodegroupArn();
+                case "fargate-profiles" -> describeFargateProfile(clusterName, name).getFargateProfileArn();
+                case "addons" -> addons.describe(cluster.get(), name).addonArn();
+                case "access-entries" -> accessEntries.describe(cluster.get(), name).accessEntryArn();
+                case "pod-identity-associations" -> podIdentityAssociations.describe(cluster.get(), name).associationArn();
+                case "updates" -> {
+                    String addon = addons.updateAddonName(cluster.get(), name);
+                    yield addon == null ? null : addons.describe(cluster.get(), addon).addonArn();
+                }
+                default -> null;
+            });
+        } catch (AwsException expected) {
+            // The handler answers this lookup with the same error, so the route names no resource to act on.
+            return Optional.empty();
+        }
     }
 
     public Cluster describeCluster(String name) {

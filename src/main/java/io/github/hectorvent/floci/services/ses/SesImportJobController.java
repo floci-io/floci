@@ -1,10 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -26,9 +23,9 @@ import org.jboss.logging.Logger;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readRequiredStringField;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
@@ -46,9 +43,6 @@ public class SesImportJobController {
     private final SesImportJobService importJobService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
-    // FAIL_ON_TRAILING_TOKENS so "{...} garbage" is rejected instead of creating a job from the
-    // leading object, as the JSON protocol controllers do.
-    private final ObjectReader strictReader;
 
     @Inject
     public SesImportJobController(SesImportJobService importJobService, RegionResolver regionResolver,
@@ -56,7 +50,6 @@ public class SesImportJobController {
         this.importJobService = importJobService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
-        this.strictReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     }
 
     @POST
@@ -64,11 +57,10 @@ public class SesImportJobController {
     public Response createImportJob(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            if (body == null || body.isBlank()) {
+            if (body == null || body.isEmpty()) {
                 throw new AwsException("BadRequestException", "Request body is required.", 400);
             }
-            JsonNode request = strictReader.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("CreateImportJob", request);
             JsonNode source = request.path("ImportDataSource");
             if (source.isMissingNode() || source.isNull()) {
@@ -104,8 +96,6 @@ public class SesImportJobController {
             return Response.ok(result).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -131,10 +121,7 @@ public class SesImportJobController {
     public Response listImportJobs(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : strictReader.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
             String destinationType = stringMemberOrAbsent(request, "ImportDestinationType");
             Integer pageSize = intMemberOrAbsent(request, "PageSize");
             String nextToken = stringMemberOrAbsent(request, "NextToken");
@@ -149,8 +136,6 @@ public class SesImportJobController {
             return Response.ok(result).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 

@@ -6,24 +6,19 @@ import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
-import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.CreateDbInstanceRequest;
 import software.amazon.awssdk.services.rds.model.DBCluster;
 import software.amazon.awssdk.services.rds.model.DBInstance;
 import software.amazon.awssdk.services.rds.model.RdsException;
 
-import java.net.URI;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.testing.RdsRequests.rdsClient;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -48,7 +43,7 @@ class RdsManagedSecretIntegrationTest {
     void sdkRejectsMemberCredentialParametersAndAllowsOmittedRetry(String engine, String field, boolean matching) {
         String id = "member-input-" + UUID.randomUUID().toString().substring(0, 8);
         String memberId = id + "-member";
-        try (RdsClient rds = client("us-east-1", "000000000000")) {
+        try (RdsClient rds = rdsClient("us-east-1", "000000000000")) {
             rds.createDBCluster(request -> request.dbClusterIdentifier(id).engine(engine)
                     .masterUsername("clusteradmin").masterUserPassword("ClusterPassword!"));
             try {
@@ -90,19 +85,12 @@ class RdsManagedSecretIntegrationTest {
         }
     }
 
-    private static RdsClient client(String region, String account) {
-        return RdsClient.builder().endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).region(Region.of(region))
-                .credentialsProvider(StaticCredentialsProvider.create(
-                        AwsBasicCredentials.create(account, "test-secret-key"))).build();
-    }
-
     @ParameterizedTest
     @CsvSource({"us-east-1,000000000000", "cn-north-1,000000000000",
             "us-east-1,222222222222", "cn-north-1,222222222222"})
     void sdkReportsTheActualDefaultManagedKeyForInstancesAndClusters(String region, String account) {
         String id = "managed-key-" + UUID.randomUUID().toString().substring(0, 8);
-        try (RdsClient rds = client(region, account)) {
+        try (RdsClient rds = rdsClient(region, account)) {
             DBInstance instance = rds.createDBInstance(request -> request
                     .dbInstanceIdentifier(id)
                     .dbInstanceClass("db.t4g.small")
@@ -150,7 +138,7 @@ class RdsManagedSecretIntegrationTest {
     void sdkClusterMemberLeavesTheManagedSecretOnTheCluster(String engine, String region, String account)
             throws Exception {
         String id = "cluster-managed-" + UUID.randomUUID().toString().substring(0, 8);
-        try (RdsClient rds = client(region, account)) {
+        try (RdsClient rds = rdsClient(region, account)) {
             DBCluster cluster = rds.createDBCluster(request -> request.dbClusterIdentifier(id).engine(engine)
                     .masterUsername("clusteradmin").manageMasterUserPassword(true)).dbCluster();
             try {

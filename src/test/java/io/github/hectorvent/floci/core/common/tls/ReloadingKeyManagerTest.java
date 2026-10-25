@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.iot;
+package io.github.hectorvent.floci.core.common.tls;
 
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;

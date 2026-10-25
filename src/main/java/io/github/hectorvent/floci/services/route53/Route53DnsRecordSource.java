@@ -195,10 +195,7 @@ public class Route53DnsRecordSource implements DnsRecordSource {
                 }
                 AliasTarget alias = rrs.getAliasTarget();
                 if (alias != null && alias.getDnsName() != null && !alias.getDnsName().isBlank()) {
-                    String cleanAlias = alias.getDnsName().trim();
-                    if (cleanAlias.endsWith(".")) {
-                        cleanAlias = cleanAlias.substring(0, cleanAlias.length() - 1);
-                    }
+                    String cleanAlias = DnsLookupHelper.normalizeTarget(alias.getDnsName());
                     // An alias record has no TTL of its own; Route 53 answers with the target's.
                     if (route53Service.isCoveredByPrivateZone(cleanAlias)) {
                         DnsAnswer target = resolveAddresses(cleanAlias, visited, depth + 1);
@@ -226,10 +223,7 @@ public class Route53DnsRecordSource implements DnsRecordSource {
                 if (rrs.getRecords() != null && !rrs.getRecords().isEmpty()) {
                     String target = rrs.getRecords().get(0).getValue();
                     if (target != null && !target.isBlank()) {
-                        String cleanTarget = target.trim();
-                        if (cleanTarget.endsWith(".")) {
-                            cleanTarget = cleanTarget.substring(0, cleanTarget.length() - 1);
-                        }
+                        String cleanTarget = DnsLookupHelper.normalizeTarget(target);
                         // The answer is flattened to A records, so it can be cached only as long
                         // as the shortest-lived record in the chain.
                         int cnameTtl = ttlOf(rrs);

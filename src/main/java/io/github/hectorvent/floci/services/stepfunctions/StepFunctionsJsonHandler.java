@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.stepfunctions.model.Activity;
 import io.github.hectorvent.floci.services.stepfunctions.model.ActivityTask;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
@@ -432,10 +433,23 @@ public class StepFunctionsJsonHandler {
     }
 
     private Response handleListExecutions(JsonNode request) {
+        String statusFilter = optionalText(request, "statusFilter");
+        if (statusFilter != null && !EXECUTION_STATUSES.contains(statusFilter)) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notInEnum(statusFilter, "statusFilter", EXECUTION_STATUSES));
+        }
+        if ("PENDING_REDRIVE".equals(statusFilter)) {
+            throw new AwsException("ValidationException",
+                    "PENDING_REDRIVE execution listing is not supported.", 400);
+        }
         List<Execution> list = service.listExecutions(request.path("stateMachineArn").asText());
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("executions");
         for (Execution e : list) {
+            String status = e.getStatus();
+            if (statusFilter != null && !statusFilter.equals(status)) {
+                continue;
+            }
             ObjectNode item = array.addObject();
             item.put("executionArn", e.getExecutionArn());
             item.put("stateMachineArn", e.getStateMachineArn());
@@ -446,7 +460,7 @@ public class StepFunctionsJsonHandler {
                 item.put("stateMachineAliasArn", e.getStateMachineAliasArn());
             }
             item.put("name", e.getName());
-            item.put("status", e.getStatus());
+            item.put("status", status);
             item.put("startDate", e.getStartDate());
             if (e.getStopDate() != null) item.put("stopDate", e.getStopDate());
         }
@@ -497,6 +511,8 @@ public class StepFunctionsJsonHandler {
 
     private static final Set<String> EXECUTION_DATA_FIELDS =
             Set.of("input", "inputDetails", "output", "outputDetails");
+    private static final List<String> EXECUTION_STATUSES =
+            List.of("SUCCEEDED", "TIMED_OUT", "PENDING_REDRIVE", "ABORTED", "FAILED", "RUNNING");
 
     static String historyEventDetailsField(String type) {
         if (type.endsWith("StateEntered")) {

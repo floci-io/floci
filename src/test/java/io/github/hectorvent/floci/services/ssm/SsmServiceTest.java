@@ -50,6 +50,25 @@ class SsmServiceTest {
     private final List<Map<String, Object>> events = new ArrayList<>();
     private SsmService ssmService;
 
+    @Test
+    void labeledCurrentVersionUsesKeyIdFromLegacyHistory() {
+        InMemoryStorage<String, Parameter> parameters = new InMemoryStorage<>();
+        InMemoryStorage<String, List<ParameterHistory>> history = new InMemoryStorage<>();
+        SsmService service = new SsmService(parameters, history, 5);
+        Parameter current = new Parameter("/legacy/key", "secret", "SecureString");
+        current.setVersion(1);
+        current.setKeyId("alias/legacy-key");
+        parameters.put("us-east-1::/legacy/key", current);
+        ParameterHistory oldRecord = new ParameterHistory(current);
+        oldRecord.setKeyId(null);
+        oldRecord.setLabels(List.of("release"));
+        history.put("us-east-1::/legacy/key", List.of(oldRecord));
+
+        assertEquals(1, service.getParametersByPath("/legacy", false, List.of(
+                new ParameterStringFilter("Label", null, List.of("release")),
+                new ParameterStringFilter("KeyId", null, List.of("alias/legacy-key"))), "us-east-1").size());
+    }
+
     @BeforeEach
     void setUp() {
         ssmService = new SsmService(

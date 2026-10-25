@@ -256,6 +256,25 @@ public class IamActionRegistry {
         rule("scheduler", "POST",   "^/tags(/.+)?$",            "scheduler:TagResource"),
         rule("scheduler", "DELETE", "^/tags(/.+)?$",            "scheduler:UntagResource"),
 
+        // ── Aurora DSQL ────────────────────────────────────────────────────────
+        rule("dsql", "POST",   "^/cluster$",                                  "dsql:CreateCluster"),
+        rule("dsql", "GET",    "^/cluster$",                                  "dsql:ListClusters"),
+        rule("dsql", "GET",    "^/cluster/[^/]+$",                            "dsql:GetCluster"),
+        rule("dsql", "POST",   "^/cluster/[^/]+$",                            "dsql:UpdateCluster"),
+        rule("dsql", "DELETE", "^/cluster/[^/]+$",                            "dsql:DeleteCluster"),
+        rule("dsql", "POST",   "^/cluster/[^/]+/policy$",                     "dsql:PutClusterPolicy"),
+        rule("dsql", "GET",    "^/cluster/[^/]+/policy$",                     "dsql:GetClusterPolicy"),
+        rule("dsql", "DELETE", "^/cluster/[^/]+/policy$",                     "dsql:DeleteClusterPolicy"),
+        rule("dsql", "GET",    "^/clusters/[^/]+/vpc-endpoint-service-name$", "dsql:GetVpcEndpointServiceName"),
+        rule("dsql", "POST",   "^/stream/[^/]+$",                             "dsql:CreateStream"),
+        rule("dsql", "GET",    "^/stream/[^/]+$",                             "dsql:ListStreams"),
+        rule("dsql", "GET",    "^/stream/[^/]+/[^/]+$",                       "dsql:GetStream"),
+        rule("dsql", "DELETE", "^/stream/[^/]+/[^/]+$",                       "dsql:DeleteStream"),
+        // Tagging is served at /tags/<arn> and at /tags, naming the ARN in the query or the body.
+        rule("dsql", "GET",    "^/tags(/.+)?$",                               "dsql:ListTagsForResource"),
+        rule("dsql", "POST",   "^/tags(/.+)?$",                               "dsql:TagResource"),
+        rule("dsql", "DELETE", "^/tags(/.+)?$",                               "dsql:UntagResource"),
+
         // ── EventBridge Pipes ──────────────────────────────────────────────────
         rule("pipes", "POST",   "^/v1/pipes/[^/]+/start$", "pipes:StartPipe"),
         rule("pipes", "POST",   "^/v1/pipes/[^/]+/stop$",  "pipes:StopPipe"),
@@ -267,6 +286,88 @@ public class IamActionRegistry {
         rule("pipes", "GET",    "^/tags(/.+)?$",           "pipes:ListTagsForResource"),
         rule("pipes", "POST",   "^/tags(/.+)?$",           "pipes:TagResource"),
         rule("pipes", "DELETE", "^/tags(/.+)?$",           "pipes:UntagResource"),
+
+        // ── EKS ────────────────────────────────────────────────────────────────
+        // Floci takes an access entry's principal ARN whole, slashes included, so a GET or DELETE under an
+        // entry is DescribeAccessEntry or DeleteAccessEntry: the entry's access policy routes, which Floci
+        // does not serve, run as those and are checked as those.
+        rule("eks", "GET",    "^/clusters/[^/]+/access-entries/.+$",                     "eks:DescribeAccessEntry"),
+        rule("eks", "DELETE", "^/clusters/[^/]+/access-entries/.+$",                     "eks:DeleteAccessEntry"),
+        rule("eks", "POST",   "^/clusters/[^/]+/access-entries/.+/access-policies$",     "eks:AssociateAccessPolicy"),
+        rule("eks", "POST",   "^/clusters/[^/]+/access-entries/.+$",                     "eks:UpdateAccessEntry"),
+        rule("eks", "GET",    "^/clusters/[^/]+/access-entries$",                        "eks:ListAccessEntries"),
+        rule("eks", "POST",   "^/clusters/[^/]+/access-entries$",                        "eks:CreateAccessEntry"),
+        rule("eks", "GET",    "^/clusters$",                                             "eks:ListClusters"),
+        rule("eks", "POST",   "^/clusters$",                                             "eks:CreateCluster"),
+        rule("eks", "GET",    "^/clusters/[^/]+$",                                       "eks:DescribeCluster"),
+        rule("eks", "DELETE", "^/clusters/[^/]+$",                                       "eks:DeleteCluster"),
+        rule("eks", "POST",   "^/clusters/[^/]+/update-config$",                         "eks:UpdateClusterConfig"),
+        rule("eks", "POST",   "^/clusters/[^/]+/encryption-config/associate$", "eks:AssociateEncryptionConfig"),
+        rule("eks", "GET",    "^/clusters/[^/]+/updates$",                               "eks:ListUpdates"),
+        rule("eks", "POST",   "^/clusters/[^/]+/updates$",                               "eks:UpdateClusterVersion"),
+        rule("eks", "GET",    "^/clusters/[^/]+/updates/[^/]+$",                         "eks:DescribeUpdate"),
+        rule("eks", "POST",   "^/clusters/[^/]+/updates/[^/]+/cancel-update$",           "eks:CancelUpdate"),
+        rule("eks", "GET",    "^/clusters/[^/]+/node-groups$",                           "eks:ListNodegroups"),
+        rule("eks", "POST",   "^/clusters/[^/]+/node-groups$",                           "eks:CreateNodegroup"),
+        rule("eks", "GET",    "^/clusters/[^/]+/node-groups/[^/]+$",                     "eks:DescribeNodegroup"),
+        rule("eks", "DELETE", "^/clusters/[^/]+/node-groups/[^/]+$",                     "eks:DeleteNodegroup"),
+        rule("eks", "POST",   "^/clusters/[^/]+/node-groups/[^/]+/update-config$",       "eks:UpdateNodegroupConfig"),
+        rule("eks", "POST",   "^/clusters/[^/]+/node-groups/[^/]+/update-version$",      "eks:UpdateNodegroupVersion"),
+        rule("eks", "GET",    "^/clusters/[^/]+/fargate-profiles$",                      "eks:ListFargateProfiles"),
+        rule("eks", "POST",   "^/clusters/[^/]+/fargate-profiles$",                      "eks:CreateFargateProfile"),
+        rule("eks", "GET",    "^/clusters/[^/]+/fargate-profiles/[^/]+$",                "eks:DescribeFargateProfile"),
+        rule("eks", "DELETE", "^/clusters/[^/]+/fargate-profiles/[^/]+$",                "eks:DeleteFargateProfile"),
+        rule("eks", "GET",    "^/clusters/[^/]+/addons$",                                "eks:ListAddons"),
+        rule("eks", "POST",   "^/clusters/[^/]+/addons$",                                "eks:CreateAddon"),
+        rule("eks", "GET",    "^/clusters/[^/]+/addons/[^/]+$",                          "eks:DescribeAddon"),
+        rule("eks", "DELETE", "^/clusters/[^/]+/addons/[^/]+$",                          "eks:DeleteAddon"),
+        rule("eks", "POST",   "^/clusters/[^/]+/addons/[^/]+/update$",                   "eks:UpdateAddon"),
+        rule("eks", "GET",    "^/addons/supported-versions$",                            "eks:DescribeAddonVersions"),
+        rule("eks", "GET",    "^/addons/configuration-schemas$", "eks:DescribeAddonConfiguration"),
+        rule("eks", "GET",    "^/clusters/[^/]+/pod-identity-associations$", "eks:ListPodIdentityAssociations"),
+        rule("eks", "POST",   "^/clusters/[^/]+/pod-identity-associations$", "eks:CreatePodIdentityAssociation"),
+        rule("eks", "GET",    "^/clusters/[^/]+/pod-identity-associations/[^/]+$",
+                "eks:DescribePodIdentityAssociation"),
+        rule("eks", "POST",   "^/clusters/[^/]+/pod-identity-associations/[^/]+$",
+                "eks:UpdatePodIdentityAssociation"),
+        rule("eks", "DELETE", "^/clusters/[^/]+/pod-identity-associations/[^/]+$",
+                "eks:DeletePodIdentityAssociation"),
+        rule("eks", "GET",    "^/clusters/[^/]+/identity-provider-configs$", "eks:ListIdentityProviderConfigs"),
+        rule("eks", "POST",   "^/clusters/[^/]+/identity-provider-configs/associate$",
+                "eks:AssociateIdentityProviderConfig"),
+        rule("eks", "POST",   "^/clusters/[^/]+/identity-provider-configs/describe$",
+                "eks:DescribeIdentityProviderConfig"),
+        rule("eks", "POST",   "^/clusters/[^/]+/identity-provider-configs/disassociate$",
+                "eks:DisassociateIdentityProviderConfig"),
+        rule("eks", "POST",   "^/clusters/[^/]+/insights$",                              "eks:ListInsights"),
+        rule("eks", "GET",    "^/clusters/[^/]+/insights/[^/]+$",                        "eks:DescribeInsight"),
+        rule("eks", "GET",    "^/clusters/[^/]+/insights-refresh$",                      "eks:DescribeInsightsRefresh"),
+        rule("eks", "POST",   "^/clusters/[^/]+/insights-refresh$",                      "eks:StartInsightsRefresh"),
+        rule("eks", "GET",    "^/clusters/[^/]+/capabilities$",                          "eks:ListCapabilities"),
+        rule("eks", "POST",   "^/clusters/[^/]+/capabilities$",                          "eks:CreateCapability"),
+        rule("eks", "GET",    "^/clusters/[^/]+/capabilities/[^/]+$",                    "eks:DescribeCapability"),
+        rule("eks", "POST",   "^/clusters/[^/]+/capabilities/[^/]+$",                    "eks:UpdateCapability"),
+        rule("eks", "DELETE", "^/clusters/[^/]+/capabilities/[^/]+$",                    "eks:DeleteCapability"),
+        rule("eks", "GET",    "^/clusters/[^/]+/certificate-authorities$", "eks:ListCertificateAuthorities"),
+        rule("eks", "POST",   "^/clusters/[^/]+/certificate-authorities$", "eks:CreateCertificateAuthority"),
+        rule("eks", "GET",    "^/clusters/[^/]+/certificate-authorities/[^/]+$",
+                "eks:DescribeCertificateAuthority"),
+        rule("eks", "DELETE", "^/clusters/[^/]+/certificate-authorities/[^/]+$",
+                "eks:DeleteCertificateAuthority"),
+        rule("eks", "POST",   "^/clusters/[^/]+/certificate-authorities/[^/]+/activate$",
+                "eks:ActivateCertificateAuthority"),
+        rule("eks", "GET",    "^/access-policies$",                                      "eks:ListAccessPolicies"),
+        rule("eks", "GET",    "^/cluster-versions$",                                     "eks:DescribeClusterVersions"),
+        rule("eks", "POST",   "^/cluster-registrations$",                                "eks:RegisterCluster"),
+        rule("eks", "DELETE", "^/cluster-registrations/[^/]+$",                          "eks:DeregisterCluster"),
+        rule("eks", "GET",    "^/eks-anywhere-subscriptions$", "eks:ListEksAnywhereSubscriptions"),
+        rule("eks", "POST",   "^/eks-anywhere-subscriptions$", "eks:CreateEksAnywhereSubscription"),
+        rule("eks", "GET",    "^/eks-anywhere-subscriptions/[^/]+$", "eks:DescribeEksAnywhereSubscription"),
+        rule("eks", "POST",   "^/eks-anywhere-subscriptions/[^/]+$", "eks:UpdateEksAnywhereSubscription"),
+        rule("eks", "DELETE", "^/eks-anywhere-subscriptions/[^/]+$", "eks:DeleteEksAnywhereSubscription"),
+        rule("eks", "GET",    "^/tags(/.+)?$",                                           "eks:ListTagsForResource"),
+        rule("eks", "POST",   "^/tags(/.+)?$",                                           "eks:TagResource"),
+        rule("eks", "DELETE", "^/tags(/.+)?$",                                           "eks:UntagResource"),
 
         // ── SES v2 ─────────────────────────────────────────────────────────────
         // SES v1 is a Query API and resolves from its Action like any other; v2 is REST-JSON under
@@ -441,13 +542,18 @@ public class IamActionRegistry {
         }
 
         // JSON 1.1: X-Amz-Target → the action AWS checks for the operation it names
-        String target = ctx.getHeaderString("X-Amz-Target");
-        if (target != null && target.contains(".")) {
-            String operationName = target.substring(target.lastIndexOf('.') + 1);
+        String operationName = targetOperation(ctx);
+        if (operationName != null) {
             return resolveOperation(credentialScope, operationName, ctx);
         }
 
         return resolveRoute(credentialScope, ctx);
+    }
+
+    /** The operation a JSON request's {@code X-Amz-Target} names, the part after its last dot; null without one. */
+    public static String targetOperation(ContainerRequestContext ctx) {
+        String target = ctx.getHeaderString("X-Amz-Target");
+        return target != null && target.contains(".") ? target.substring(target.lastIndexOf('.') + 1) : null;
     }
 
     /** The action for a dispatched operation, including statement-dependent JSON and CBOR calls. */
@@ -475,7 +581,9 @@ public class IamActionRegistry {
      */
     public String resolveRoute(String credentialScope, ContainerRequestContext ctx) {
         String method = ctx.getMethod().toUpperCase();
-        String path = rawPath(ctx.getUriInfo());
+        // An S3 key may end in a slash, PUT /bucket// writes the key "/", and S3's rules already take a
+        // bucket's one trailing slash, so an S3 path is matched as sent.
+        String path = "s3".equals(credentialScope) ? rawPath(ctx.getUriInfo()) : routedPath(ctx.getUriInfo());
 
         // S3 sub-resource override: the URL path alone doesn't distinguish
         // s3:GetObjectAcl / s3:PutObjectAcl from s3:GetObject / s3:PutObject
@@ -510,6 +618,19 @@ public class IamActionRegistry {
             path = path.substring(base.length() - 1);
         }
         return path.startsWith("/") ? path : "/" + path;
+    }
+
+    /**
+     * {@link #rawPath} without a trailing slash: the router matches {@code /clusters/} as {@code /clusters},
+     * so a rule ending at the route's last segment has to match it too, or the request would pass as an
+     * unknown action.
+     */
+    static String routedPath(UriInfo uriInfo) {
+        String path = rawPath(uriInfo);
+        while (path.length() > 1 && path.endsWith("/")) {
+            path = path.substring(0, path.length() - 1);
+        }
+        return path;
     }
 
     /**
@@ -572,6 +693,7 @@ public class IamActionRegistry {
             sub("website",           "s3:GetBucketWebsite"),
             sub("logging",           "s3:GetBucketLogging"),
             sub("policy",            "s3:GetBucketPolicy"),
+            sub("policyStatus",      "s3:GetBucketPolicyStatus"),
             sub("cors",              "s3:GetBucketCORS"),
             sub("lifecycle",         "s3:GetLifecycleConfiguration"),
             sub("acl",               "s3:GetBucketAcl"),

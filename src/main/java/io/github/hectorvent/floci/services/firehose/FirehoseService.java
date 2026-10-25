@@ -406,8 +406,11 @@ public class FirehoseService implements ResourceProvider {
                     "Delivery stream " + name + " already exists.", 409);
         }
 
+        validateLogging(null, s3Config);
         validateBufferingHints(s3Config);
         if (redshift != null) {
+            validateLogging(null, redshift.getS3());
+            validateLogging(null, redshift.getS3Backup());
             validateBufferingHints(redshift.getS3());
             validateBufferingHints(redshift.getS3Backup());
         }
@@ -486,6 +489,7 @@ public class FirehoseService implements ResourceProvider {
             throw new AwsException("InvalidArgumentException",
                     "The delivery stream " + name + " has a Redshift destination; use RedshiftDestinationUpdate.", 400);
         }
+        validateLogging(destination.getExtendedS3DestinationDescription(), update);
         validateBufferingHints(update);
         S3Destination current = destination.getExtendedS3DestinationDescription();
         if (current == null) {
@@ -533,6 +537,8 @@ public class FirehoseService implements ResourceProvider {
                 throw new AwsException("InvalidArgumentException",
                         "S3BackupMode is Enabled but no S3 backup configuration is set.", 400);
             }
+            validateLogging(current.getS3(), update.getS3());
+            validateLogging(current.getS3Backup(), update.getS3Backup());
             validateBufferingHints(update.getS3());
             validateBufferingHints(update.getS3Backup());
             if (update.getS3Backup() != null && current.getS3Backup() == null) {
@@ -665,6 +671,29 @@ public class FirehoseService implements ResourceProvider {
         }
     }
 
+    /**
+     * Once logging is on, both names are required, checked on the merged result for an update
+     * (probed 2026-10-23). An update without a logging block leaves the stored one as it was.
+     */
+    private static void validateLogging(S3Destination stored, S3Destination update) {
+        if (update == null || update.getCloudWatchLoggingOptions() == null) {
+            return;
+        }
+        DeliveryStreamDescription.CloudWatchLoggingOptions effective = mergeLogging(
+                stored == null ? null : stored.getCloudWatchLoggingOptions(), update.getCloudWatchLoggingOptions());
+        if (!Boolean.TRUE.equals(effective.getEnabled())) {
+            return;
+        }
+        if (effective.getLogGroupName() == null || effective.getLogGroupName().isEmpty()) {
+            throw new AwsException("InvalidArgumentException",
+                    "CloudWatch Log Group Name is required if CloudWatch Logging is enabled", 400);
+        }
+        if (effective.getLogStreamName() == null || effective.getLogStreamName().isEmpty()) {
+            throw new AwsException("InvalidArgumentException",
+                    "CloudWatch Log Stream Name is required if CloudWatch Logging is enabled", 400);
+        }
+    }
+
     private static void mergeDestination(S3Destination current, S3Destination update) {
         if (update.getRoleArn() != null) current.setRoleArn(update.getRoleArn());
         if (update.getBucketArn() != null) current.setBucketArn(update.getBucketArn());
@@ -676,6 +705,10 @@ public class FirehoseService implements ResourceProvider {
         if (update.getBufferingHints() != null) current.setBufferingHints(update.getBufferingHints());
         if (update.getEncryptionConfiguration() != null) current.setEncryptionConfiguration(update.getEncryptionConfiguration());
         if (update.getS3BackupMode() != null) current.setS3BackupMode(update.getS3BackupMode());
+        if (update.getCloudWatchLoggingOptions() != null) {
+            current.setCloudWatchLoggingOptions(mergeLogging(
+                    current.getCloudWatchLoggingOptions(), update.getCloudWatchLoggingOptions()));
+        }
         // Replaced whole, not merged member-wise: an update carrying only
         // {"Enabled": false} leaves Processors empty on real AWS, where the same shape
         // preserves the conversion block's members (probed 2026-09-10).
@@ -711,6 +744,23 @@ public class FirehoseService implements ResourceProvider {
                 ? update.getInputFormatConfiguration() : current.getInputFormatConfiguration());
         merged.setOutputFormatConfiguration(update.getOutputFormatConfiguration() != null
                 ? update.getOutputFormatConfiguration() : current.getOutputFormatConfiguration());
+        return merged;
+    }
+
+    /**
+     * Member-wise, like the conversion block: an update carrying only {"Enabled": false} keeps the
+     * stored group and stream, and one naming only a group keeps Enabled (probed 2026-10-22).
+     */
+    private static DeliveryStreamDescription.CloudWatchLoggingOptions mergeLogging(
+            DeliveryStreamDescription.CloudWatchLoggingOptions current,
+            DeliveryStreamDescription.CloudWatchLoggingOptions update) {
+        if (current == null) {
+            return update;
+        }
+        DeliveryStreamDescription.CloudWatchLoggingOptions merged = new DeliveryStreamDescription.CloudWatchLoggingOptions();
+        merged.setEnabled(update.getEnabled() != null ? update.getEnabled() : current.getEnabled());
+        merged.setLogGroupName(update.getLogGroupName() != null ? update.getLogGroupName() : current.getLogGroupName());
+        merged.setLogStreamName(update.getLogStreamName() != null ? update.getLogStreamName() : current.getLogStreamName());
         return merged;
     }
 
@@ -827,9 +877,7 @@ public class FirehoseService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Delivery stream not found: " + streamName, 400));
         // Normalizes streams persisted before required output members existed.
-        if (stream.s3Destination() != null) {
-            stream.s3Destination().applyDefaults();
-        }
+        stream.applyDefaults();
         return stream;
     }
 

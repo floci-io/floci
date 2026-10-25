@@ -1,6 +1,10 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChanges;
 import io.github.hectorvent.floci.services.redshift.spectrum.PostgresExtendedBackendSession;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumColumn;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
@@ -18,6 +22,7 @@ import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -26,6 +31,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiConsumer;
 
 /**
  * Replaces the transparent {@code bridge()} for Redshift connections so SQL in Simple and Extended
@@ -61,9 +67,13 @@ public class RedshiftInterceptingBridge {
     private final IamService iamService;
     private final String clusterAccountId;
     private final List<String> iamRoleArns;
+    private final String defaultIamRoleArn;
     private final SpectrumInterceptor spectrumInterceptor;
     private final String clusterKey;
     private final String databaseName;
+    private final RedshiftAuditLogPublisher auditLogPublisher;
+    private final String databaseUser;
+    private final UserChanges auditUserChanges = new UserChanges();
     private final PostgresExtendedBackendSession relationalBackend;
     private final Map<String, PostgresWireDecoder.ParseMessage> relationalStatements = new HashMap<>();
     private final ExtendedQuerySession session = new ExtendedQuerySession();
@@ -77,6 +87,7 @@ public class RedshiftInterceptingBridge {
     private volatile boolean pumpFinished = false;
     private boolean extendedSpectrumError;
     private boolean rolledBackInCycle;
+    private boolean auditCycleFailed;
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService) {
         this(client, backend, s3Service, iamService, null);
@@ -96,15 +107,43 @@ public class RedshiftInterceptingBridge {
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
                                       String clusterAccountId, List<String> iamRoleArns,
                                       SpectrumInterceptor spectrumInterceptor, String clusterKey, String databaseName) {
+        this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, spectrumInterceptor,
+                clusterKey, databaseName, null);
+    }
+
+    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
+                                      String clusterAccountId, List<String> iamRoleArns,
+                                      SpectrumInterceptor spectrumInterceptor, String clusterKey, String databaseName,
+                                      String defaultIamRoleArn) {
+        this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, spectrumInterceptor,
+                clusterKey, databaseName, defaultIamRoleArn, null, null);
+    }
+
+    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
+                                      String clusterAccountId, List<String> iamRoleArns,
+                                      SpectrumInterceptor spectrumInterceptor, String clusterKey, String databaseName,
+                                      String defaultIamRoleArn, RedshiftAuditLogPublisher auditLogPublisher) {
+        this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, spectrumInterceptor,
+                clusterKey, databaseName, defaultIamRoleArn, auditLogPublisher, null);
+    }
+
+    public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
+                                      String clusterAccountId, List<String> iamRoleArns,
+                                      SpectrumInterceptor spectrumInterceptor, String clusterKey, String databaseName,
+                                      String defaultIamRoleArn, RedshiftAuditLogPublisher auditLogPublisher,
+                                      String databaseUser) {
         this.client = client;
         this.backend = backend;
         this.s3Service = s3Service;
         this.iamService = iamService;
         this.clusterAccountId = clusterAccountId;
         this.iamRoleArns = iamRoleArns == null ? List.of() : List.copyOf(iamRoleArns);
+        this.defaultIamRoleArn = defaultIamRoleArn;
         this.spectrumInterceptor = spectrumInterceptor;
         this.clusterKey = clusterKey;
         this.databaseName = databaseName;
+        this.auditLogPublisher = auditLogPublisher;
+        this.databaseUser = databaseUser;
         this.relationalBackend = new PostgresExtendedBackendSession(backend);
     }
 
@@ -199,6 +238,7 @@ public class RedshiftInterceptingBridge {
     private void handleSimpleQuery(PostgresWireDecoder.FrontendMessage message, OutputStream backendOut)
             throws IOException {
         String sql = message.getSql();
+        publishActivity(sql);
         if (spectrumInterceptor != null) {
             SpectrumInterceptor.Decision[] decision = new SpectrumInterceptor.Decision[1];
             boolean intercepted;
@@ -258,7 +298,7 @@ public class RedshiftInterceptingBridge {
         } catch (RuntimeException e) {
             LOG.warnv("RedshiftSqlInterceptor failed, forwarding original query: {0}", e.getMessage());
         }
-        coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
+        coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null, auditResponses(sql));
         write(backendOut, packet);
     }
 
@@ -278,6 +318,7 @@ public class RedshiftInterceptingBridge {
                         || plan instanceof SpectrumInterceptor.Plan.ExternalDdl) {
                     awaitPriorBackendResponses();
                     spectrumStatements.put(parse.statementName(), plan);
+                    session.confirm(session.stageParse(parse.statementName(), null, parse.sql()));
                     write(client.getOutputStream(), backendFrame('1', EMPTY_BODY));
                     return;
                 }
@@ -309,7 +350,7 @@ public class RedshiftInterceptingBridge {
         }
         CopyStatementParser.S3Statement statement = parse.parameterTypeOids().isEmpty()
                 ? parseS3Statement(parse.sql()) : null;
-        ExtendedQuerySession.Mutation mutation = session.stageParse(parse.statementName(), statement);
+        ExtendedQuerySession.Mutation mutation = session.stageParse(parse.statementName(), statement, parse.sql());
         coordinator.register(BackendResponseCoordinator.Operation.PARSE, mutation);
 
         String rewritten = parse.sql();
@@ -354,6 +395,7 @@ public class RedshiftInterceptingBridge {
         if (spectrumPlan != null) {
             awaitPriorBackendResponses();
             spectrumPortals.put(bind.portalName(), spectrumPlan);
+            session.confirm(session.stageBind(bind.portalName(), bind.statementName()));
             write(client.getOutputStream(), backendFrame('2', EMPTY_BODY));
             return;
         }
@@ -432,6 +474,10 @@ public class RedshiftInterceptingBridge {
     private void handleExecute(PostgresWireDecoder decoder, PostgresWireDecoder.FrontendMessage message,
             OutputStream backendOut) throws IOException {
         PostgresWireDecoder.ExecuteMessage execute = decoder.decodeExecute(message);
+        String auditSql = session.portalSql(execute.portalName()).orElse(null);
+        if (auditSql != null) {
+            publishActivity(auditSql);
+        }
         SpectrumInterceptor.Plan spectrumPlan = spectrumPortals.get(execute.portalName());
         if (spectrumPlan != null) {
             BackendResponseCoordinator.Ticket ticket = coordinator.register(
@@ -440,7 +486,8 @@ public class RedshiftInterceptingBridge {
             return;
         }
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
-                BackendResponseCoordinator.Operation.EXECUTE, null);
+                BackendResponseCoordinator.Operation.EXECUTE, null,
+                auditSql == null ? null : auditResponses(auditSql));
         CopyStatementParser.S3Statement statement = session.portal(execute.portalName()).orElse(null);
         if (statement == null) {
             write(backendOut, message.toPacketBytes());
@@ -533,6 +580,7 @@ public class RedshiftInterceptingBridge {
             // (they are synthesized locally, see handleParse/handleBind), so the backend has never
             // heard of this name either: forwarding Close would draw a spurious "does not exist" error.
             awaitPriorBackendResponses();
+            session.confirm(session.stageClose(close.targetType(), close.name()));
             write(client.getOutputStream(), backendFrame('3', EMPTY_BODY));
             return;
         }
@@ -565,7 +613,7 @@ public class RedshiftInterceptingBridge {
 
     private CopyStatementParser.S3Statement parseS3Statement(String sql) {
         try {
-            return CopyStatementParser.parse(sql);
+            return CopyStatementParser.parse(sql, defaultIamRoleArn);
         } catch (RuntimeException e) {
             LOG.warnv("CopyStatementParser failed, forwarding original statement: {0}", e.getMessage());
             return null;
@@ -815,9 +863,13 @@ public class RedshiftInterceptingBridge {
             if (type == 'E') {
                 relationalBackend.onBackendError();
             }
+            if (type == 'E') {
+                auditCycleFailed = true;
+            }
             coordinator.onBackendFrame(type, body);
             if (type == 'Z') {
                 relationalBackend.onSync();
+                completeUserChanges(body);
             }
         });
         try {
@@ -853,6 +905,54 @@ public class RedshiftInterceptingBridge {
             closeQuietly(client, "client");
             closeQuietly(backend, "backend");
         }
+    }
+
+    private void publishActivity(String sql) {
+        if (auditLogPublisher == null) {
+            return;
+        }
+        auditLogPublisher.publishRegisteredActivity(clusterAccountId, clusterIdentifier(), databaseName,
+                databaseUser, sql);
+    }
+
+    private BiConsumer<Character, byte[]> auditResponses(String sql) {
+        ArrayDeque<String> commands = new ArrayDeque<>(RedshiftAuditSql.statements(sql));
+        return (type, body) -> {
+            if (type != 'C' || auditLogPublisher == null) {
+                return;
+            }
+            String command = commands.pollFirst();
+            if (command == null) {
+                return;
+            }
+            String tag = new String(body, StandardCharsets.UTF_8).replace("\0", "");
+            auditUserChanges.complete(command, tag);
+            publishCompletedUserChanges();
+        };
+    }
+
+    private void completeUserChanges(byte[] readyStatus) {
+        if (readyStatus.length > 0 && readyStatus[0] == 'I') {
+            if (auditCycleFailed) {
+                auditUserChanges.rollback();
+            } else {
+                auditUserChanges.commit();
+            }
+            publishCompletedUserChanges();
+        }
+        auditCycleFailed = false;
+    }
+
+    private void publishCompletedUserChanges() {
+        for (UserChange change : auditUserChanges.drainCommitted()) {
+            auditLogPublisher.publishRegisteredUserChange(clusterAccountId, clusterIdentifier(), databaseName,
+                    change.username(), change.action(), change.oldUsername());
+        }
+    }
+
+    private String clusterIdentifier() {
+        int separator = clusterKey.indexOf(':');
+        return separator < 0 ? clusterKey : clusterKey.substring(separator + 1);
     }
 
     private void closeQuietly(Socket socket, String which) {

@@ -117,12 +117,12 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
         List<UsagePlan.ApiStage> desired = apiStages(props, ctx);
         List<UsagePlan.ApiStage> current = List.copyOf(existing.getApiStages());
         for (UsagePlan.ApiStage stage : current) {
-            if (!desired.contains(stage)) {
+            if (!listsStage(desired, stage)) {
                 patches.add(patch("remove", "/apiStages", stage.apiId() + KEY_ID_SEPARATOR + stage.stage()));
             }
         }
         for (UsagePlan.ApiStage stage : desired) {
-            if (!current.contains(stage)) {
+            if (!listsStage(current, stage)) {
                 patches.add(patch("add", "/apiStages", stage.apiId() + KEY_ID_SEPARATOR + stage.stage()));
             }
         }
@@ -137,6 +137,15 @@ public class ApiGatewayUsagePlanCfnProvisioner implements CfnResourceProvisioner
             plan = apiGatewayService.replaceUsagePlanTags(ctx.region(), plan.getId(), desiredTags);
         }
         recordPlan(r, plan);
+    }
+
+    /**
+     * Whether {@code stages} lists {@code stage}'s API and stage. A stage's method throttle is not part of
+     * its identity, so a stage throttled through UpdateUsagePlan still matches the template's.
+     */
+    private static boolean listsStage(List<UsagePlan.ApiStage> stages, UsagePlan.ApiStage stage) {
+        return stages.stream().anyMatch(listed -> Objects.equals(listed.apiId(), stage.apiId())
+                && Objects.equals(listed.stage(), stage.stage()));
     }
 
     /** The template's ApiStages as (apiId, stage) pairs, in template order. */

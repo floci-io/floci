@@ -11,6 +11,7 @@ import java.util.Map;
 public class LogGroup {
 
     private String logGroupName;
+    private String logGroupClass = "STANDARD";
     private long createdTime;
     private Integer retentionInDays;
     private boolean deletionProtectionEnabled;
@@ -21,6 +22,9 @@ public class LogGroup {
 
     public String getLogGroupName() { return logGroupName; }
     public void setLogGroupName(String logGroupName) { this.logGroupName = logGroupName; }
+
+    public String getLogGroupClass() { return logGroupClass; }
+    public void setLogGroupClass(String logGroupClass) { this.logGroupClass = logGroupClass; }
 
     public long getCreatedTime() { return createdTime; }
     public void setCreatedTime(long createdTime) { this.createdTime = createdTime; }

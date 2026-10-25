@@ -27,7 +27,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and the NAT gateway inside it and removes the displaced ones, and that {@code DeleteStack} removes
  * every one of the seven networking resources, which the legacy switch left behind. A second case
  * changes a route table's tag and a subnet's MapPublicIpOnLaunch in place next to a resource that
- * fails, and asserts the rollback puts both back. The VPC is
+ * fails, and asserts the rollback puts both back. A third provisions a prefix list that a route
+ * targets, updates it in place and rolls a change back. The VPC is
  * created through the EC2 API and passed in as a literal: {@code Ec2VpcCfnProvisioner} still
  * re-creates a VPC on every update (the #3033 fix), which would rightly replace everything in it.
  */
@@ -111,6 +112,213 @@ class CloudFormationEc2NetworkingIntegrationTest {
 
     private static String subnetXml(String subnetId) {
         return ec2("DescribeSubnets", Map.of("SubnetId.1", subnetId));
+    }
+
+    private static final String PREFIX_LIST_STACK = "ec2-prefix-list-it";
+
+    /**
+     * A prefix list and a route to it through an internet gateway, the way a template sends a set of
+     * CIDRs out of a VPC. {@code tags} is the Tags list, or empty for none; {@code failing} adds a
+     * resource that cannot be created once the prefix list is done.
+     */
+    private static String prefixListTemplate(String vpcId, String family, int maxEntries, String entries,
+                                             String tags, boolean failing) {
+        String boom = failing
+                ? ",\n            \"Boom\": {\"Type\": \"AWS::SecretsManager::Secret\", \"DependsOn\": \"Firewall\","
+                  + " \"Properties\": {\"SecretString\": \"x\", \"GenerateSecretString\": {\"SecretStringTemplate\": \"{}\", \"GenerateStringKey\": \"p\"}}}"
+                : "";
+        return """
+        {
+          "Resources": {
+            "Firewall": {"Type": "AWS::EC2::PrefixList",
+                         "Properties": {"PrefixListName": "office-egress", "AddressFamily": "%2$s",
+                                        "MaxEntries": %3$d, "Entries": %4$s%5$s}},
+            "Igw": {"Type": "AWS::EC2::InternetGateway"},
+            "Attach": {"Type": "AWS::EC2::VPCGatewayAttachment",
+                       "Properties": {"VpcId": "%1$s", "InternetGatewayId": {"Ref": "Igw"}}},
+            "Rt": {"Type": "AWS::EC2::RouteTable", "Properties": {"VpcId": "%1$s"}},
+            "OfficeRoute": {"Type": "AWS::EC2::Route", "DependsOn": "Attach",
+                            "Properties": {"RouteTableId": {"Ref": "Rt"}, "DestinationPrefixListId": {"Ref": "Firewall"},
+                                           "GatewayId": {"Ref": "Igw"}}}%6$s
+          },
+          "Outputs": {
+            "Ref": {"Value": {"Ref": "Firewall"}},
+            "PrefixListId": {"Value": {"Fn::GetAtt": ["Firewall", "PrefixListId"]}},
+            "Arn": {"Value": {"Fn::GetAtt": ["Firewall", "Arn"]}},
+            "OwnerId": {"Value": {"Fn::GetAtt": ["Firewall", "OwnerId"]}},
+            "RtId": {"Value": {"Ref": "Rt"}},
+            "RouteRef": {"Value": {"Ref": "OfficeRoute"}}
+          }
+        }
+        """.formatted(vpcId, family, maxEntries, entries, tags.isEmpty() ? "" : ", \"Tags\": " + tags, boom);
+    }
+
+    @Test
+    void aPrefixListIsARealListThatARouteCanTargetAndUpdatesInPlace() {
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.43.0.0/16")), "<vpcId>", "</vpcId>");
+        String office = "[{\"Cidr\": \"192.0.2.0/24\", \"Description\": \"office\"}]";
+        String offices = "[{\"Cidr\": \"192.0.2.0/24\", \"Description\": \"head office\"},"
+                + " {\"Cidr\": \"198.51.100.0/24\", \"Description\": \"branch\"}]";
+        String team = "[{\"Key\": \"team\", \"Value\": \"network\"}]";
+        cloudFormation(PREFIX_LIST_STACK, "CreateStack", prefixListTemplate(vpcId, "IPv4", 2, office, team, false));
+
+        Map<String, String> out = XmlParser.extractPairs(describeStacks(PREFIX_LIST_STACK, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue");
+        String id = out.get("Ref");
+        assertTrue(id.startsWith("pl-"), "Ref of a prefix list is its EC2 id: " + id);
+        assertEquals(id, out.get("PrefixListId"));
+        assertEquals("arn:aws:ec2:us-east-1:" + out.get("OwnerId") + ":prefix-list/" + id, out.get("Arn"));
+        String list = prefixListXml(id);
+        assertTrue(list.contains("<prefixListName>office-egress</prefixListName>") && list.contains("<version>1</version>")
+                && list.contains("<maxEntries>2</maxEntries>"), list);
+        assertTrue(list.contains("<key>team</key>") && list.contains("<value>network</value>"), "tags must reach EC2: " + list);
+        assertTrue(entriesXml(id).contains("<cidr>192.0.2.0/24</cidr>"));
+        assertEquals(out.get("RtId") + "|" + id, out.get("RouteRef"), "the route is keyed by the list it targets");
+        String routes = ec2("DescribeRouteTables", Map.of("RouteTableId.1", out.get("RtId")));
+        assertTrue(routes.contains("<destinationPrefixListId>" + id + "</destinationPrefixListId>"), routes);
+
+        // Entries change in place. A changed description is a removal and then an addition, two
+        // EC2 calls because EC2 refuses one that removes and adds the same CIDR, so version 3.
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 2, offices, team, false));
+        assertEquals(id, XmlParser.extractPairs(describeStacks(PREFIX_LIST_STACK, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("Ref"));
+        assertTrue(prefixListXml(id).contains("<version>3</version>"));
+        String entries = entriesXml(id);
+        assertTrue(entries.contains("<description>head office</description>") && entries.contains("198.51.100.0/24"), entries);
+
+        // Capacity alone changes in place and makes no new version.
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 3, offices, team, false));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_COMPLETE");
+        list = prefixListXml(id);
+        assertTrue(list.contains("<maxEntries>3</maxEntries>") && list.contains("<version>3</version>"), list);
+
+        // Capacity and entries together, and another address family, fail the update and change nothing.
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 4, office, team, false));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        String reason = CfnStackWaits.failedResourceReason(PREFIX_LIST_STACK, CFN_AUTH);
+        assertTrue(reason.contains("cannot change MaxEntries (from 3 to 4) and Entries"), reason);
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv6", 3, offices, team, false));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        reason = CfnStackWaits.failedResourceReason(PREFIX_LIST_STACK, CFN_AUTH);
+        assertTrue(reason.contains("cannot change the AddressFamily of prefix list " + id + " from IPv4 to IPv6"), reason);
+        list = prefixListXml(id);
+        assertTrue(list.contains("<maxEntries>3</maxEntries>") && list.contains("<version>3</version>")
+                && list.contains("<addressFamily>IPv4</addressFamily>"), list);
+
+        // An entry and tag change next to a resource that fails is put back.
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 3, office,
+                "[{\"Key\": \"team\", \"Value\": \"platform\"}]", true));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        entries = entriesXml(id);
+        assertTrue(entries.contains("<description>head office</description>") && entries.contains("198.51.100.0/24"),
+                "the prior entries must be back: " + entries);
+        list = prefixListXml(id);
+        assertTrue(list.contains("<value>network</value>") && !list.contains("<value>platform</value>"),
+                "the prior tags must be back: " + list);
+
+        // A rename is no replacement: the change set modifies the list alone, and the route that
+        // targets it is left as it is.
+        String renamed = prefixListTemplate(vpcId, "IPv4", 3, offices, team, false)
+                .replace("\"office-egress\"", "\"office-egress-renamed\"");
+        changeSet("CreateChangeSet", "rename", renamed);
+        String preview = changeSet("DescribeChangeSet", "rename", null);
+        assertTrue(preview.contains("<LogicalResourceId>Firewall</LogicalResourceId>")
+                && preview.contains("<Replacement>False</Replacement>") && !preview.contains("<Replacement>True</Replacement>")
+                && !preview.contains("<LogicalResourceId>OfficeRoute</LogicalResourceId>"), preview);
+        changeSet("ExecuteChangeSet", "rename", null);
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(PREFIX_LIST_STACK, CFN_AUTH).status());
+        assertEquals(id, XmlParser.extractPairs(describeStacks(PREFIX_LIST_STACK, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("Ref"));
+        assertTrue(prefixListXml(id).contains("<prefixListName>office-egress-renamed</prefixListName>"));
+
+        // A template that drops Tags removes them.
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 3, offices, "", false)
+                .replace("\"office-egress\"", "\"office-egress-renamed\""));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_COMPLETE");
+        assertFalse(prefixListXml(id).contains("<key>team</key>"), "the dropped tags must be removed");
+
+        cloudFormation(PREFIX_LIST_STACK, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(PREFIX_LIST_STACK);
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", EC2_AUTH)
+                .formParam("Action", "GetManagedPrefixListEntries").formParam("Version", "2016-11-15")
+                .formParam("PrefixListId", id)
+        .when().post("/").then().statusCode(400).body(containsString("InvalidPrefixListID.NotFound"));
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /**
+     * {@code Fn::GetAtt Version} is the list's version, and a resource whose integer property reads
+     * it follows the list: here a second list sized by the first one's version.
+     */
+    @Test
+    void aPrefixListVersionCanSizeAnotherList() {
+        String stack = "ec2-prefix-list-version-it";
+        String template = """
+        {
+          "Resources": {
+            "First": {"Type": "AWS::EC2::PrefixList",
+                      "Properties": {"PrefixListName": "version-source", "AddressFamily": "IPv4", "MaxEntries": 2,
+                                     "Entries": %s}},
+            "Second": {"Type": "AWS::EC2::PrefixList",
+                       "Properties": {"PrefixListName": "version-sized", "AddressFamily": "IPv4",
+                                      "MaxEntries": {"Fn::GetAtt": ["First", "Version"]}}}
+          },
+          "Outputs": {"SecondId": {"Value": {"Ref": "Second"}}}
+        }
+        """;
+        cloudFormation(stack, "CreateStack", template.formatted("[{\"Cidr\": \"192.0.2.0/24\"}]"));
+        String second = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("SecondId");
+        assertTrue(prefixListXml(second).contains("<maxEntries>1</maxEntries>"), prefixListXml(second));
+
+        cloudFormation(stack, "UpdateStack",
+                template.formatted("[{\"Cidr\": \"192.0.2.0/24\"}, {\"Cidr\": \"198.51.100.0/24\"}]"));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        assertTrue(prefixListXml(second).contains("<maxEntries>2</maxEntries>"),
+                "the first list's new version resizes the second: " + prefixListXml(second));
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    /** EC2 checks a prefix list's tags; one it refuses fails the create and leaves no list behind. */
+    @Test
+    void aTagEc2RefusesFailsThePrefixListAndLeavesNoList() {
+        String stack = "ec2-prefix-list-bad-tag-it";
+        cloudFormation(stack, "CreateStack", """
+        {"Resources": {"Firewall": {"Type": "AWS::EC2::PrefixList",
+          "Properties": {"PrefixListName": "bad-tag-list", "AddressFamily": "IPv4", "MaxEntries": 1,
+                         "Tags": [{"Key": "%s", "Value": "x"}]}}}}
+        """.formatted("k".repeat(129)));
+
+        describeStacks(stack, "ROLLBACK_COMPLETE");
+        String reason = CfnStackWaits.failedResourceReason(stack, CFN_AUTH);
+        assertTrue(reason.contains("Tag key exceeds the maximum length of 128 characters"), reason);
+        assertFalse(ec2("DescribeManagedPrefixLists").contains("bad-tag-list"), "the new list is removed again");
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    /** A change set action on the prefix list stack; {@code templateBody} only for CreateChangeSet. */
+    private static String changeSet(String action, String changeSetName, String templateBody) {
+        RequestSpecification request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", action)
+            .formParam("StackName", PREFIX_LIST_STACK)
+            .formParam("ChangeSetName", changeSetName);
+        if (templateBody != null) {
+            request.formParam("ChangeSetType", "UPDATE").formParam("TemplateBody", templateBody);
+        }
+        return request.when().post("/").then().statusCode(200).extract().asString();
+    }
+
+    private static String prefixListXml(String prefixListId) {
+        return ec2("DescribeManagedPrefixLists", Map.of("PrefixListId.1", prefixListId));
+    }
+
+    private static String entriesXml(String prefixListId) {
+        return ec2("GetManagedPrefixListEntries", Map.of("PrefixListId", prefixListId));
     }
 
     private static String template(String vpcId, String publicSubnetCidr, String extraSubnetTag) {

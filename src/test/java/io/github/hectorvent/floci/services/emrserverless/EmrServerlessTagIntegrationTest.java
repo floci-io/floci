@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.emrserverless;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.testing.EmrServerlessRequests;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
@@ -21,7 +22,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.EmrServerlessRequests.tagsPath;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -41,16 +42,28 @@ class EmrServerlessTagIntegrationTest {
     }
 
     private static RequestSpecification emr() {
-        return given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=TEST/20260929/us-east-1/emr-serverless/aws4_request, "
-                        + "SignedHeaders=host;x-amz-date, Signature=test")
-                .contentType("application/json")
-                .urlEncodingEnabled(false);
+        return EmrServerlessRequests.emrServerless("us-east-1").urlEncodingEnabled(false);
     }
 
-    /** The SDK sends the ARN as one path segment with ':' and '/' percent-encoded. */
-    private static String tagsPath(String arn) {
-        return "/tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
+    /** A tags map of {@code count} distinct keys, as JSON. */
+    private static String tagMap(int count) {
+        StringBuilder tags = new StringBuilder("{");
+        for (int i = 0; i < count; i++) {
+            tags.append(i == 0 ? "" : ",").append("\"k").append(i).append("\": \"v\"");
+        }
+        return tags.append("}").toString();
+    }
+
+    private static String[] startJobRun(String applicationId, String tagsJson) {
+        JsonPath started = emr()
+                .body("""
+                        { "clientToken": "%s", "executionRoleArn": "arn:aws:iam::000000000000:role/emr-serverless-job",
+                          "jobDriver": { "sparkSubmit": { "entryPoint": "s3://bucket/jobs/app.jar" } }, "tags": %s }
+                        """.formatted(UUID.randomUUID(), tagsJson))
+        .when().post("/applications/" + applicationId + "/jobruns")
+        .then().statusCode(200)
+                .extract().jsonPath();
+        return new String[] {started.getString("jobRunId"), started.getString("arn")};
     }
 
     private static String[] createApplication(String tagsJson) {
@@ -138,12 +151,7 @@ class EmrServerlessTagIntegrationTest {
         .then().statusCode(400)
                 .body("__type", equalTo("ValidationException"));
 
-        StringBuilder tooMany = new StringBuilder("{ \"tags\": {");
-        for (int i = 0; i < 51; i++) {
-            tooMany.append(i == 0 ? "" : ",").append("\"k").append(i).append("\": \"v\"");
-        }
-        tooMany.append("} }");
-        emr().body(tooMany.toString())
+        emr().body("{ \"tags\": " + tagMap(51) + " }")
         .when().post(tagsPath(arn))
         .then().statusCode(400)
                 .body("__type", equalTo("ValidationException"));
@@ -170,12 +178,7 @@ class EmrServerlessTagIntegrationTest {
 
     @Test
     void createApplicationAppliesTheSameTagRules() {
-        StringBuilder tooMany = new StringBuilder("{");
-        for (int i = 0; i < 51; i++) {
-            tooMany.append(i == 0 ? "" : ",").append("\"k").append(i).append("\": \"v\"");
-        }
-        tooMany.append("}");
-        for (String tags : List.of(tooMany.toString(), "{ \"bad#key\": \"v\" }")) {
+        for (String tags : List.of(tagMap(51), "{ \"bad#key\": \"v\" }")) {
             emr().body("""
                             { "name": "limits", "releaseLabel": "emr-7.5.0", "type": "SPARK",
                               "clientToken": "%s", "tags": %s }
@@ -193,13 +196,8 @@ class EmrServerlessTagIntegrationTest {
     @Test
     void theUserGuideLimitsApplyAndAnEmptyMapIsANoOp() {
         String arn = createApplication("{ \"team\": \"data\" }")[1];
-        StringBuilder fortyNine = new StringBuilder("{ \"tags\": {");
-        for (int i = 0; i < 49; i++) {
-            fortyNine.append(i == 0 ? "" : ",").append("\"k").append(i).append("\": \"v\"");
-        }
-        fortyNine.append("} }");
 
-        emr().body(fortyNine.toString()).when().post(tagsPath(arn)).then().statusCode(200);
+        emr().body("{ \"tags\": " + tagMap(49) + " }").when().post(tagsPath(arn)).then().statusCode(200);
         emr().when().get(tagsPath(arn)).then().statusCode(200).body("tags", aMapWithSize(50));
         emr().body("{ \"tags\": { \"one-more\": \"v\" } }")
         .when().post(tagsPath(arn))
@@ -221,7 +219,7 @@ class EmrServerlessTagIntegrationTest {
     /** Tag writes read, change and store the whole application; concurrent ones must not lose each other. */
     @Test
     void concurrentTagWritesAreAllKept() throws Exception {
-        String arn = createApplication("{}")[1];
+        EmrServerlessService.ResourceArn resource = service.resourceArn(createApplication("{}")[1]);
         int threads = 16;
         CountDownLatch go = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(threads);
@@ -231,7 +229,7 @@ class EmrServerlessTagIntegrationTest {
                 String key = "k" + i;
                 futures.add(pool.submit(() -> {
                     go.await();
-                    service.tagResource(arn, Map.of(key, "v"));
+                    service.tagResource(resource, Map.of(key, "v"));
                     return null;
                 }));
             }
@@ -243,20 +241,125 @@ class EmrServerlessTagIntegrationTest {
             pool.shutdownNow();
         }
 
-        assertEquals(threads, service.listTags(arn).size());
+        assertEquals(threads, service.listTags(resource).size());
     }
 
     @Test
     void anEmptyTagMapChangesNothingButMissingTagsOrKeysAreRefused() {
-        String arn = createApplication("{ \"team\": \"data\" }")[1];
+        EmrServerlessService.ResourceArn resource = service.resourceArn(createApplication("{ \"team\": \"data\" }")[1]);
 
-        service.tagResource(arn, Map.of());
-        assertEquals(Map.of("team", "data"), service.listTags(arn));
+        service.tagResource(resource, Map.of());
+        assertEquals(Map.of("team", "data"), service.listTags(resource));
         assertEquals("ValidationException",
                 assertThrows(AwsException.class,
-                        () -> service.tagResource(arn, null)).getErrorCode());
+                        () -> service.tagResource(resource, null)).getErrorCode());
         assertEquals("ValidationException",
                 assertThrows(AwsException.class,
-                        () -> service.untagResource(arn, List.of())).getErrorCode());
+                        () -> service.untagResource(resource, List.of())).getErrorCode());
+    }
+
+    @Test
+    void tagsRoundTripOnAJobRunArnAndShowInGetJobRun() {
+        String[] app = createApplication("{ \"team\": \"app\" }");
+        String[] run = startJobRun(app[0], "{ \"team\": \"data\" }");
+        String arn = run[1];
+
+        emr().when().get(tagsPath(arn))
+        .then().statusCode(200)
+                .body("tags", aMapWithSize(1))
+                .body("tags.team", equalTo("data"));
+
+        emr().body("{ \"tags\": { \"env\": \"dev\", \"team\": \"platform\" } }")
+        .when().post(tagsPath(arn))
+        .then().statusCode(200);
+        emr().when().get("/applications/" + app[0] + "/jobruns/" + run[0])
+        .then().statusCode(200)
+                .body("jobRun.state", equalTo("SUCCESS"))
+                .body("jobRun.tags.team", equalTo("platform"))
+                .body("jobRun.tags.env", equalTo("dev"));
+
+        emr().when().delete(tagsPath(arn) + "?tagKeys=env")
+        .then().statusCode(200);
+        emr().when().get(tagsPath(arn))
+        .then().statusCode(200)
+                .body("tags", not(hasKey("env")))
+                .body("tags.team", equalTo("platform"));
+        emr().when().get(tagsPath(app[1]))
+        .then().statusCode(200)
+                .body("tags", aMapWithSize(1))
+                .body("tags.team", equalTo("app"));
+    }
+
+    @Test
+    void aDeletedApplicationsRunsCannotBeTagged() {
+        String applicationId = createApplication("{}")[0];
+        String[] run = startJobRun(applicationId, "{ \"team\": \"data\" }");
+        String path = tagsPath(run[1]);
+
+        emr().when().post("/applications/" + applicationId + "/stop")
+        .then().statusCode(200);
+        emr().when().delete("/applications/" + applicationId)
+        .then().statusCode(200);
+
+        emr().when().get(path)
+        .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"))
+                .body("message", equalTo("Resource " + run[1] + " not found"));
+        emr().body("{ \"tags\": { \"env\": \"dev\" } }")
+        .when().post(path)
+        .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        emr().when().delete(path + "?tagKeys=team")
+        .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+
+        emr().when().get("/applications/" + applicationId + "/jobruns/" + run[0])
+        .then().statusCode(200)
+                .body("jobRun.tags.team", equalTo("data"))
+                .body("jobRun.tags", not(hasKey("env")));
+    }
+
+    @Test
+    void aJobRunArnMustBeTheRunsOwnAndSessionArnsNameNothing() {
+        String[] owner = createApplication("{}");
+        String[] other = createApplication("{}");
+        String[] run = startJobRun(owner[0], "{ \"team\": \"data\" }");
+
+        for (String arn : List.of(other[1] + "/jobruns/" + run[0],
+                run[1].replace(":000000000000:", ":111111111111:"),
+                owner[1] + "/sessions/00abc0000000000")) {
+            emr().when().get(tagsPath(arn))
+            .then().statusCode(404)
+                    .body("__type", equalTo("ResourceNotFoundException"));
+            emr().body("{ \"tags\": { \"env\": \"dev\" } }")
+            .when().post(tagsPath(arn))
+            .then().statusCode(404)
+                    .body("__type", equalTo("ResourceNotFoundException"));
+        }
+        emr().when().get(tagsPath(run[1]))
+        .then().statusCode(200)
+                .body("tags", aMapWithSize(1));
+    }
+
+    @Test
+    void jobRunsKeepTheSameTagRules() {
+        String applicationId = createApplication("{}")[0];
+        String arn = startJobRun(applicationId, tagMap(50))[1];
+
+        emr().body("{ \"tags\": { \"one-more\": \"v\" } }")
+        .when().post(tagsPath(arn))
+        .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("A resource can have at most 50 tags."));
+        emr().body("{ \"tags\": { \"aws:owner\": \"x\" } }")
+        .when().post(tagsPath(arn))
+        .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        emr().when().delete(tagsPath(arn) + "?tagKeys=")
+        .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        emr().when().get(tagsPath(arn))
+        .then().statusCode(200)
+                .body("tags", aMapWithSize(50));
     }
 }

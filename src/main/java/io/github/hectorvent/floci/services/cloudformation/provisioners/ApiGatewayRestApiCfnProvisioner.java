@@ -311,26 +311,35 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
             api = apiGatewayService.createRestApi(region, req);
         }
         r.setPhysicalId(api.getId());
-        r.getAttributes().put("RestApiId", api.getId());
-        // Not the first of getResources, which is the root only on a freshly created API.
-        r.getAttributes().put("RootResourceId",
-                apiGatewayService.findRootResourceId(region, api.getId()).orElseThrow());
-
+        boolean created = existing == null;
         // putRestApi overwrites Name and Description from the document's info, so the declared Name
         // and Description (null clearing an undeclared Description) are re-applied immediately after.
-        if (openApiDocument != null) {
-            try {
-                apiGatewayService.putRestApi(region, api.getId(), "overwrite", openApiDocument.toString());
-            } catch (RuntimeException failure) {
-                if (existing != null) {
-                    unwind(r, failure);
-                } else if (ctx.isUpdate()) {
-                    discard(r, api.getId(), region, failure);
-                }
-                throw failure;
-            }
-            apiGatewayService.updateRestApi(region, api.getId(),
-                    List.of(replacePatchOp("/name", name), replacePatchOp("/description", description)));
+        List<Map<String, String>> declaredNameAndDescription = List.of(
+                replacePatchOp("/name", name), replacePatchOp("/description", description));
+        // A step that fails once the API exists undoes this provision: an API it created is deleted
+        // again (or left marked for the stack's rollback when that delete fails too), and a kept API
+        // gets back what the update patched. putRestApi leaves the API as it was when it rejects the
+        // document.
+        CfnRollback.guarded(r, ctx, created,
+                () -> delete(REST_API, api.getId(), region),
+                () -> restore(api.getId(), readSnapshot(r)),
+                () -> {
+                    r.getAttributes().put("RestApiId", api.getId());
+                    // Not the first of getResources, which is the root only on a freshly created API.
+                    r.getAttributes().put("RootResourceId",
+                            apiGatewayService.findRootResourceId(region, api.getId()).orElseThrow());
+                    if (openApiDocument != null) {
+                        apiGatewayService.putRestApi(region, api.getId(), "overwrite", openApiDocument.toString());
+                        if (created) {
+                            apiGatewayService.updateRestApi(region, api.getId(), declaredNameAndDescription);
+                        }
+                    }
+                });
+        // On a kept API the re-apply follows the guard: the document putRestApi accepted replaced the
+        // API's definition, which the snapshot does not hold, so putting back only the patch would
+        // not restore the API.
+        if (!created && openApiDocument != null) {
+            apiGatewayService.updateRestApi(region, api.getId(), declaredNameAndDescription);
         }
         // An API created in place of one removed out of band is a replacement: a rollback deletes it.
         ReplacementCleanup.record(r, ctx, attributesBefore);
@@ -409,45 +418,6 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         operations.addAll(endpointPatchOps(apiGatewayService.getRestApi(region, apiId).getEndpointConfiguration(),
                 snapshot.path("endpointType").asText(), vpcEndpointIds));
         apiGatewayService.updateRestApi(region, apiId, operations);
-    }
-
-    /**
-     * An in-place update whose OpenAPI document putRestApi rejected puts back the name, description
-     * and endpoint configuration it had already patched; putRestApi left the definition as it was.
-     * CloudFormationService restores the resource the stack held before the attempt, which never
-     * carried the snapshot, so the rollback walker would leave the patch in place. A restore that
-     * fails is recorded as a rollback failure, so the stack ends in UPDATE_ROLLBACK_FAILED instead
-     * of reporting the API intact.
-     */
-    private void unwind(StackResource r, RuntimeException failure) {
-        try {
-            restore(r.getPhysicalId(), readSnapshot(r));
-        } catch (RuntimeException unwindFailure) {
-            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
-                    "Could not roll back the update of REST API " + r.getPhysicalId() + ": "
-                            + unwindFailure.getMessage());
-            failure.addSuppressed(unwindFailure);
-        }
-    }
-
-    /**
-     * Deletes the API an update created in place of one removed out of band, when putRestApi
-     * rejected its OpenAPI document. CloudFormationService restores the resource the stack held
-     * before the attempt, so nothing else tracks the new API. An API that cannot be deleted is
-     * listed for the next cleanup, which the restored resource inherits, and the update reports a
-     * rollback failure. {@code failure} stays the reported error.
-     */
-    private void discard(StackResource r, String apiId, String region, RuntimeException failure) {
-        try {
-            delete(REST_API, apiId, region);
-        } catch (RuntimeException deleteFailure) {
-            failure.addSuppressed(deleteFailure);
-            LOG.warnv("Could not remove REST API {0}, created for {1} by a failed update: {2}",
-                    apiId, r.getLogicalId(), deleteFailure.getMessage());
-            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, "Could not remove REST API " + apiId
-                    + ", created for " + r.getLogicalId() + " by a failed update: " + deleteFailure.getMessage());
-            ReplacementCleanup.recordOrphan(r, apiId, REST_API, region);
-        }
     }
 
     /**

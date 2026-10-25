@@ -59,6 +59,15 @@ public class ServiceCallAuthorizer {
      */
     public Decision authorize(String service, String action, String resourceArn,
                               String sourceArn, String sourceAccount) {
+        return authorize(service, action, resourceArn, sourceArn, sourceAccount, Map.of());
+    }
+
+    /**
+     * As {@link #authorize(String, String, String, String, String)}, with the keys the target
+     * service adds for the request, such as {@code s3:versionid} for an object version.
+     */
+    public Decision authorize(String service, String action, String resourceArn, String sourceArn,
+                              String sourceAccount, Map<String, List<String>> requestKeys) {
         if (!config.services().iam().enforcementEnabled()) {
             return Decision.ALLOW;
         }
@@ -73,6 +82,7 @@ public class ServiceCallAuthorizer {
                 .toList();
         Map<String, List<String>> context = IamConditionContextResolver.serviceCallContext(
                 servicePrincipal, resourceArn, ownerAccountId, sourceArn, sourceAccount);
+        context.putAll(requestKeys);
         Decision decision = evaluator.evaluateServicePrincipal(
                 documents.isEmpty() ? null : documents, servicePrincipal, action, resourceArn, context);
         if (decision == Decision.DENY) {

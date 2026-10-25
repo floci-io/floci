@@ -1462,8 +1462,8 @@ public class EcsJsonHandler {
         }
         if (!node.hasNonNull("type")) {
             throw SmithyValidationErrors.exception("ClientException",
-                    "Value null at 'containerDefinitions." + containerIndex
-                            + ".member.firelensConfiguration.type' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("containerDefinitions." + containerIndex
+                            + ".member.firelensConfiguration.type"));
         }
         String type = node.path("type").asText();
         if (!"fluentd".equals(type) && !"fluentbit".equals(type)) {

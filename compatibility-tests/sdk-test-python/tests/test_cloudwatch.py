@@ -203,6 +203,8 @@ class TestCloudWatchAlarms:
 
             alarm = next(a for a in alarms if a["AlarmName"] == alarm_name)
             assert alarm["StateValue"] == "INSUFFICIENT_DATA"
+            assert response["CompositeAlarms"] == []
+            assert response["LogAlarms"] == []
         finally:
             cloudwatch_client.delete_alarms(AlarmNames=[alarm_name])
 

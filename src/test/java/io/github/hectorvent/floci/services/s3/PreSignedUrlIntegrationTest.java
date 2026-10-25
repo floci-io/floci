@@ -15,6 +15,10 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -72,7 +76,11 @@ class PreSignedUrlIntegrationTest {
     @Test
     @Order(3)
     void presignedUrlGeneratesValidStructure() {
-        String url = presignGenerator.generatePresignedUrl(
+        Clock clock = Clock.fixed(Instant.now(), ZoneOffset.UTC);
+        PreSignedUrlGenerator generator = new PreSignedUrlGenerator(
+                "secret", 300, true, "us-east-1", "000000000000",
+                iamService, null, new SecureRandom(), clock);
+        String url = generator.generatePresignedUrl(
                 "http://localhost:4566", BUCKET, "file.txt", "GET", 300);
 
         assertTrue(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
@@ -98,14 +106,14 @@ class PreSignedUrlIntegrationTest {
         assertTrue(iamService.findSecretKey(accessKeyId, sessionToken).isPresent(),
                 "The temporary credential must be registered for SigV4 validation");
 
-        URI secondUri = URI.create(presignGenerator.generatePresignedUrl(
+        URI secondUri = URI.create(generator.generatePresignedUrl(
                 "http://localhost:8080", BUCKET, "file.txt", "GET", 300));
         String secondCredential = queryParam(secondUri, "X-Amz-Credential");
         assertEquals(accessKeyId, secondCredential.substring(0, secondCredential.indexOf('/')),
-                "Only URLs for the same object and method should reuse the scoped credential");
+                "URLs for the same object, method and signing time should reuse the scoped credential");
         assertEquals(sessionToken, queryParam(secondUri, "X-Amz-Security-Token"));
 
-        URI otherUri = URI.create(presignGenerator.generatePresignedUrl(
+        URI otherUri = URI.create(generator.generatePresignedUrl(
                 "http://localhost:8080", BUCKET, "second-file.txt", "GET", 300));
         assertNotEquals(accessKeyId, queryParam(otherUri, "X-Amz-Credential").split("/", 2)[0]);
     }

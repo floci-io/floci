@@ -104,7 +104,7 @@ class IamEnforcementFilterTest {
         when(services.iam()).thenReturn(iamConfig);
         when(iamConfig.enforcementEnabled()).thenReturn(true);
         when(config.defaultRegion()).thenReturn("us-east-1");
-        when(arnBuilder.buildResources(any(), any(), any(), any())).thenReturn(List.of("*"));
+        when(arnBuilder.buildResources(any(), any(), any(), any(), any(), any())).thenReturn(List.of("*"));
         when(arnBuilder.build(any(), any(), any(), any())).thenReturn("*");
         // Default: scopes are already canonical. Alias handling is asserted explicitly below.
         when(catalog.canonicalCredentialScope(anyString())).thenAnswer(inv -> inv.getArgument(0));
@@ -168,7 +168,7 @@ class IamEnforcementFilterTest {
                           {"Effect":"Allow","Action":"lambda:InvokeFunction",
                            "Resource":"arn:aws:lambda:us-east-1:222233334444:function:fn"}
                         ]}""")));
-        when(arnBuilder.buildResources("lambda", containerRequest, "us-east-1", "222233334444"))
+        when(arnBuilder.buildResources(eq("lambda"), any(), eq(containerRequest), eq("us-east-1"), eq("222233334444"), eq("aws")))
                 .thenReturn(List.of("arn:aws:lambda:us-east-1:222233334444:function:fn"));
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
@@ -185,7 +185,7 @@ class IamEnforcementFilterTest {
 
         filter.filter(containerRequest);
 
-        verify(arnBuilder).buildResources("lambda", containerRequest, "us-east-1", "222233334444");
+        verify(arnBuilder).buildResources(eq("lambda"), any(), eq(containerRequest), eq("us-east-1"), eq("222233334444"), eq("aws"));
     }
 
     @Test
@@ -207,7 +207,7 @@ class IamEnforcementFilterTest {
                           {"Effect":"Allow","Action":"s3:GetObject",
                            "Resource":"arn:aws:s3:::mybucket/obj"}
                         ]}""")));
-        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), eq("us-east-1"), eq("222233334444"), eq("aws")))
                 .thenReturn(List.of("arn:aws:s3:::mybucket/obj"));
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
@@ -252,7 +252,7 @@ class IamEnforcementFilterTest {
                           {"Effect":"Allow","Action":"s3:GetObject",
                            "Resource":"arn:aws:s3:::mybucket/obj"}
                         ]}""")));
-        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), eq("us-east-1"), eq("222233334444"), eq("aws")))
                 .thenReturn(List.of("arn:aws:s3:::mybucket/obj"));
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
@@ -287,7 +287,7 @@ class IamEnforcementFilterTest {
         // Resolve for the serving service only. Left unstubbed the filter would leave through its
         // permissive unknown-action branch and the deny below would never be reached.
         when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:PutItem");
-        when(arnBuilder.buildResources("dynamodb", containerRequest, "us-east-1", "000000000000"))
+        when(arnBuilder.buildResources(eq("dynamodb"), any(), eq(containerRequest), eq("us-east-1"), eq("000000000000"), eq("aws")))
                 .thenReturn(List.of("*"));
         when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), eq("dynamodb:PutItem"), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
@@ -417,8 +417,7 @@ class IamEnforcementFilterTest {
 
         verify(actionRegistry).resolveRoute("apigateway", containerRequest);
         verify(actionRegistry, never()).resolveRoute("iam", containerRequest);
-        verify(arnBuilder).buildResources("apigateway", containerRequest,
-                "us-east-1", "000000000000");
+        verify(arnBuilder).buildResources(eq("apigateway"), any(), eq(containerRequest), eq("us-east-1"), eq("000000000000"), eq("aws"));
         verify(conditionContextResolver).resolve("apigateway", "apigateway:POST", containerRequest);
     }
 
@@ -494,8 +493,7 @@ class IamEnforcementFilterTest {
 
         verify(actionRegistry).queryAction(containerRequest);
         verify(actionRegistry, never()).resolve("lambda", containerRequest);
-        verify(arnBuilder).buildResources("iam", containerRequest,
-                "us-east-1", "000000000000");
+        verify(arnBuilder).buildResources(eq("iam"), any(), eq(containerRequest), eq("us-east-1"), eq("000000000000"), eq("aws"));
         verify(conditionContextResolver).resolve("iam", "iam:CreateUser", containerRequest);
     }
 
@@ -520,8 +518,7 @@ class IamEnforcementFilterTest {
 
         verify(actionRegistry).queryAction(containerRequest);
         verify(actionRegistry, never()).resolve("lambda", containerRequest);
-        verify(arnBuilder).buildResources("iam", containerRequest,
-                "us-east-1", "000000000000");
+        verify(arnBuilder).buildResources(eq("iam"), any(), eq(containerRequest), eq("us-east-1"), eq("000000000000"), eq("aws"));
         verify(conditionContextResolver).resolve("iam", "iam:CreateUser", containerRequest);
     }
 
@@ -1159,7 +1156,7 @@ class IamEnforcementFilterTest {
                           {"Effect":"Allow","Action":"dynamodb:GetItem",
                            "Resource":"arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable"}
                         ]}""")));
-        when(arnBuilder.buildResources("dynamodb", containerRequest, "us-east-1", "000000000000"))
+        when(arnBuilder.buildResources(eq("dynamodb"), any(), eq(containerRequest), eq("us-east-1"), eq("000000000000"), eq("aws")))
                 .thenReturn(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable"));
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
@@ -1176,7 +1173,7 @@ class IamEnforcementFilterTest {
 
         filter.filter(containerRequest);
 
-        verify(arnBuilder).buildResources("dynamodb", containerRequest, "us-east-1", "000000000000");
+        verify(arnBuilder).buildResources(eq("dynamodb"), any(), eq(containerRequest), eq("us-east-1"), eq("000000000000"), eq("aws"));
         verify(containerRequest, never()).abortWith(any());
     }
 
@@ -1194,7 +1191,7 @@ class IamEnforcementFilterTest {
         when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:BatchGetItem");
         when(iamService.resolveCallerContext(eq("ASIASESSION"), any()))
                 .thenReturn(CallerContext.of(List.of("{}")));
-        when(arnBuilder.buildResources("dynamodb", containerRequest, "us-east-1", "000000000000"))
+        when(arnBuilder.buildResources(eq("dynamodb"), any(), eq(containerRequest), eq("us-east-1"), eq("000000000000"), eq("aws")))
                 .thenReturn(List.of(
                         "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
                         "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
@@ -1252,7 +1249,7 @@ class IamEnforcementFilterTest {
         when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:BatchGetItem");
         when(iamService.resolveCallerContext(eq("ASIASESSION"), any()))
                 .thenReturn(CallerContext.of(List.of("{}")));
-        when(arnBuilder.buildResources("dynamodb", containerRequest, "us-east-1", "000000000000"))
+        when(arnBuilder.buildResources(eq("dynamodb"), any(), eq(containerRequest), eq("us-east-1"), eq("000000000000"), eq("aws")))
                 .thenReturn(List.of(
                         "arn:aws:dynamodb:us-east-1:000000000000:table/TableA",
                         "arn:aws:dynamodb:us-east-1:000000000000:table/TableB"
@@ -1481,7 +1478,7 @@ class IamEnforcementFilterTest {
                         {"Version":"2012-10-17","Statement":[
                           {"Effect":"Allow","Action":"s3:ListBucket","Resource":"*"}
                         ]}""")));
-        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), eq("us-east-1"), eq("222233334444"), eq("aws")))
                 .thenReturn(List.of("arn:aws:s3:::bucket"));
         when(conditionContextResolver.resolve("s3", "s3:ListBucket", containerRequest))
                 .thenReturn(conditions);
@@ -1528,7 +1525,7 @@ class IamEnforcementFilterTest {
                         {"Version":"2012-10-17","Statement":[
                           {"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}
                         ]}""")));
-        when(arnBuilder.buildResources(eq("s3"), eq(containerRequest), anyString(), anyString()))
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), anyString(), anyString(), anyString()))
                 .thenReturn(List.of("arn:aws:s3:::bucket/key"));
         when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), any(), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
@@ -1537,7 +1534,7 @@ class IamEnforcementFilterTest {
 
         // Everything keyed by scope must see the canonical name, not the alias.
         verify(actionRegistry).resolve("s3", containerRequest);
-        verify(arnBuilder).buildResources(eq("s3"), eq(containerRequest), anyString(), anyString());
+        verify(arnBuilder).buildResources(eq("s3"), any(), eq(containerRequest), anyString(), anyString(), anyString());
         verify(conditionContextResolver).resolve("s3", "s3:GetObject", containerRequest);
         // The policy above grants only s3:PutObject, so a GetObject signed as s3express is denied.
         verify(containerRequest).abortWith(any(Response.class));
@@ -1624,7 +1621,7 @@ class IamEnforcementFilterTest {
         when(actionRegistry.resolve("organizations", containerRequest))
                 .thenReturn("organizations:DescribeOrganization");
         when(iamService.resolveCallerContext(eq(account), any())).thenReturn(null);
-        when(arnBuilder.buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
+        when(arnBuilder.buildResources(eq("organizations"), any(), eq(containerRequest), eq("us-east-1"), eq(account), eq("aws")))
                 .thenReturn(List.of("*"));
         when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(containerRequest)))
                 .thenReturn(null);
@@ -1642,7 +1639,7 @@ class IamEnforcementFilterTest {
         // arnBuilder.buildResources sits after the caller-resolution branch, so it only fires for a request
         // that was actually evaluated. Without this, the never()-abort assertion would also pass on
         // a bypass, making it no stronger than the pre-fix behavior.
-        verify(arnBuilder).buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account));
+        verify(arnBuilder).buildResources(eq("organizations"), any(), eq(containerRequest), eq("us-east-1"), eq(account), eq("aws"));
     }
 
     // The realistic baseline guardrail from .temp/org-functional-test.sh: DenyLeaveOrg plus a
@@ -1825,7 +1822,7 @@ class IamEnforcementFilterTest {
                 .thenReturn(CallerContext.of(List.of(ALLOW_IF_IAM_USER_PRINCIPAL)));
         String userArn = "arn:aws:iam::" + account + ":user/bob";
         when(iamService.resolveCallerArns(akid)).thenReturn(Optional.of(new CallerArns(userArn, userArn)));
-        when(arnBuilder.buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
+        when(arnBuilder.buildResources(eq("organizations"), any(), eq(containerRequest), eq("us-east-1"), eq(account), eq("aws")))
                 .thenReturn(List.of("*"));
         when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(containerRequest)))
                 .thenReturn(null);
@@ -1838,7 +1835,7 @@ class IamEnforcementFilterTest {
 
         // aws:PrincipalArn matches arn:aws:iam::*:user/* → the conditional Allow grants access.
         verify(containerRequest, never()).abortWith(any());
-        verify(arnBuilder).buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account));
+        verify(arnBuilder).buildResources(eq("organizations"), any(), eq(containerRequest), eq("us-east-1"), eq(account), eq("aws"));
     }
 
     @Test
@@ -1889,7 +1886,7 @@ class IamEnforcementFilterTest {
                         {"Version":"2012-10-17","Statement":[
                           {"Effect":"Deny","Action":"s3:PutObject","Resource":"*"}
                         ]}""")));
-        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), eq("us-east-1"), eq("222233334444"), eq("aws")))
                 .thenReturn(List.of("arn:aws:s3:::some-bucket/test.txt"));
         when(conditionContextResolver.resolve("s3", "s3:PutObject", containerRequest))
                 .thenReturn(null);
@@ -1925,7 +1922,7 @@ class IamEnforcementFilterTest {
                         {"Version":"2012-10-17","Statement":[
                           {"Effect":"Deny","Action":"s3:PutObject","Resource":"*"}
                         ]}""")));
-        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), eq("us-east-1"), eq("222233334444"), eq("aws")))
                 .thenReturn(List.of("arn:aws:s3:::some-bucket/test.txt"));
         when(conditionContextResolver.resolve("s3", "s3:PutObject", containerRequest))
                 .thenReturn(null);
@@ -1960,7 +1957,7 @@ class IamEnforcementFilterTest {
                         {"Version":"2012-10-17","Statement":[
                           {"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}
                         ]}""")));
-        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), eq("us-east-1"), eq("222233334444"), eq("aws")))
                 .thenReturn(List.of("arn:aws:s3:::some-bucket/test.txt"));
         when(conditionContextResolver.resolve("s3", "s3:PutObject", containerRequest))
                 .thenReturn(null);
@@ -2183,7 +2180,7 @@ class IamEnforcementFilterTest {
         when(containerRequest.getHeaderString("x-amz-bypass-governance-retention")).thenReturn("true");
         when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:DeleteObjectVersion");
         when(iamService.resolveCallerContext(eq("AKIABYPASS"), any())).thenReturn(CallerContext.of(List.of()));
-        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), eq("us-east-1"), eq("222233334444"), eq("aws")))
                 .thenReturn(List.of("arn:aws:s3:::bucket/object"));
         when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), any(), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
@@ -2216,7 +2213,7 @@ class IamEnforcementFilterTest {
         when(containerRequest.getHeaderString(header)).thenReturn(headerValue);
         when(actionRegistry.resolve("s3", containerRequest)).thenReturn(allowedAction);
         when(iamService.resolveCallerContext(eq("AKIAEXTRA"), any())).thenReturn(CallerContext.of(List.of()));
-        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), eq("us-east-1"), eq("222233334444"), eq("aws")))
                 .thenReturn(List.of("arn:aws:s3:::bucket/object"));
         when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), eq(allowedAction), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
@@ -2258,7 +2255,7 @@ class IamEnforcementFilterTest {
                         {"Version":"2012-10-17","Statement":[
                           {"Effect":"Allow","Action":"s3:ListBucket","Resource":"*"}
                         ]}""")));
-        when(arnBuilder.buildResources("s3", containerRequest, "us-east-1", "222233334444"))
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), eq("us-east-1"), eq("222233334444"), eq("aws")))
                 .thenReturn(List.of("arn:aws:s3:::partner-bucket"));
         when(conditionContextResolver.resolve("s3", "s3:ListBucket", containerRequest))
                 .thenReturn(conditions);

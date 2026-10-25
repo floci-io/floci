@@ -9,9 +9,11 @@ import software.amazon.awssdk.services.emrserverless.model.Application;
 import software.amazon.awssdk.services.emrserverless.model.ApplicationState;
 import software.amazon.awssdk.services.emrserverless.model.ConflictException;
 import software.amazon.awssdk.services.emrserverless.model.JobRun;
+import software.amazon.awssdk.services.emrserverless.model.JobRunAttemptSummary;
 import software.amazon.awssdk.services.emrserverless.model.JobRunMode;
 import software.amazon.awssdk.services.emrserverless.model.JobRunState;
 import software.amazon.awssdk.services.emrserverless.model.JobRunSummary;
+import software.amazon.awssdk.services.emrserverless.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.emrserverless.model.StartJobRunResponse;
 import software.amazon.awssdk.services.emrserverless.model.ValidationException;
 
@@ -27,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DisplayName("EMR Serverless job runs")
 class EmrServerlessJobRunTest {
 
-    private static final String ROLE = "arn:aws:iam::000000000000:role/emr-serverless-job";
+    private static final String ROLE = TestFixtures.globalArn("iam", "000000000000", "role/emr-serverless-job");
 
     private static EmrServerlessClient emr;
     private static String applicationId;
@@ -89,7 +91,7 @@ class EmrServerlessJobRunTest {
         assertThat(run.state()).isEqualTo(JobRunState.SUCCESS);
         assertThat(run.executionRole()).isEqualTo(ROLE);
         assertThat(run.releaseLabel()).isEqualTo("emr-7.5.0");
-        assertThat(run.createdBy()).startsWith("arn:aws:");
+        assertThat(run.createdBy()).startsWith("arn:" + TestFixtures.partition() + ":");
         assertThat(run.createdAt()).isBetween(before, after);
         assertThat(run.jobDriver().sparkSubmit().entryPoint()).isEqualTo("s3://bucket/jobs/app.jar");
         assertThat(run.tags()).containsEntry("team", "data");
@@ -145,5 +147,44 @@ class EmrServerlessJobRunTest {
         finally {
             emr.cancelJobRun(r -> r.applicationId(applicationId).jobRunId(streaming));
         }
+    }
+
+    @Test
+    @DisplayName("A run is its one attempt: GetJobRun and ListJobRunAttempts report attempt 1")
+    void attempts() {
+        String jobRunId = startSparkRun(JobRunMode.BATCH).jobRunId();
+
+        JobRun run = emr.getJobRun(r -> r.applicationId(applicationId).jobRunId(jobRunId).attempt(1)).jobRun();
+        assertThat(run.attempt()).isEqualTo(1);
+        assertThat(run.attemptCreatedAt()).isEqualTo(run.createdAt());
+        assertThat(run.attemptUpdatedAt()).isEqualTo(run.updatedAt());
+
+        List<JobRunAttemptSummary> attempts = emr.listJobRunAttempts(r -> r
+                .applicationId(applicationId).jobRunId(jobRunId)).jobRunAttempts();
+        assertThat(attempts).singleElement().satisfies(attempt -> {
+            assertThat(attempt.id()).isEqualTo(jobRunId);
+            assertThat(attempt.attempt()).isEqualTo(1);
+            assertThat(attempt.jobCreatedAt()).isEqualTo(run.createdAt());
+            assertThat(attempt.state()).isEqualTo(JobRunState.SUCCESS);
+            assertThat(attempt.mode()).isEqualTo(JobRunMode.BATCH);
+        });
+
+        assertThatThrownBy(() -> emr.getJobRun(r -> r.applicationId(applicationId).jobRunId(jobRunId).attempt(2)))
+                .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    @DisplayName("A run's ARN takes tags, which GetJobRun reports")
+    void jobRunTags() {
+        StartJobRunResponse started = startSparkRun(JobRunMode.BATCH);
+
+        emr.tagResource(r -> r.resourceArn(started.arn()).tags(Map.of("env", "dev")));
+        assertThat(emr.listTagsForResource(r -> r.resourceArn(started.arn())).tags())
+                .containsEntry("team", "data")
+                .containsEntry("env", "dev");
+
+        emr.untagResource(r -> r.resourceArn(started.arn()).tagKeys("env"));
+        assertThat(emr.getJobRun(r -> r.applicationId(applicationId).jobRunId(started.jobRunId())).jobRun().tags())
+                .containsOnlyKeys("team");
     }
 }

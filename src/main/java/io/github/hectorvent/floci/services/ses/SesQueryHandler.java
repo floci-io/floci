@@ -38,9 +38,11 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Query-protocol handler for SES actions.
@@ -764,12 +766,33 @@ public class SesQueryHandler {
             throw new AwsException("AccountSendingPausedException",
                     "Account sending is disabled.", 400);
         }
+        String templateName = getParam(params, "Template");
+        String templateArn = getParam(params, "TemplateArn");
+        BulkDestinationIndexes destinations = bulkDestinationIndexes(params);
+        // The model validation answers ahead of every other check of the request, listing its
+        // violations in the model's member order (probe-confirmed).
+        List<String> violations = new ArrayList<>();
+        if (templateName == null && templateArn == null) {
+            violations.add(SmithyValidationErrors.notNullWithoutValue("template"));
+        }
+        if (!params.containsKey("Destinations") && !hasParamWithPrefix(params, "Destinations.")) {
+            violations.add(SmithyValidationErrors.notNullWithoutValue("destinations"));
+        }
+        // A skipped index, like an entry without a Destination, is a null destination
+        // (probe-confirmed). An empty address list still sends its bare key.
+        for (int i = 1; i <= Math.min(destinations.last(), MAX_VALIDATED_DESTINATION_INDEX); i++) {
+            if (!destinations.withDestination().contains(i)) {
+                violations.add(SmithyValidationErrors.notNullWithoutValue("destinations." + i + ".member.destination"));
+            }
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
+
         String source = getParam(params, "Source");
         SesAddressSyntax.requireBulkAddress(source);
         SesAddressSyntax.requireBulkAddress(getParam(params, "ReturnPath"));
         List<String> replyToAddresses = extractMembers(params, "ReplyToAddresses");
-        String templateName = getParam(params, "Template");
-        String templateArn = getParam(params, "TemplateArn");
         String defaultDataRaw = getParam(params, "DefaultTemplateData");
 
         boolean hasName = templateName != null && !templateName.isBlank();
@@ -779,41 +802,41 @@ public class SesQueryHandler {
                     "Template or TemplateArn is required.", 400);
         }
         String resolvedName = hasName ? templateName : SesTemplateService.templateNameFromArn(templateArn);
-        EmailTemplate template = templateService.getTemplate(resolvedName, region);
-        JsonNode defaultTemplateData = parseTemplateData(defaultDataRaw);
 
+        int lastIndex = destinations.last();
+        if (lastIndex == 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "At least one destination is required.", 400);
+        }
+        // AWS counts the destinations before it looks the template up (probe-confirmed). The list
+        // runs to its highest index, so counting that index first also bounds the scan below.
+        SesService.requireBulkDestinationCount(lastIndex);
         List<BulkEmailEntry> entries = new ArrayList<>();
-        for (int i = 1; ; i++) {
+        for (int i = 1; i <= lastIndex; i++) {
             String destPrefix = "Destinations.member." + i;
             List<String> to = extractMembers(params, destPrefix + ".Destination.ToAddresses");
             List<String> cc = extractMembers(params, destPrefix + ".Destination.CcAddresses");
             List<String> bcc = extractMembers(params, destPrefix + ".Destination.BccAddresses");
             String replacementRaw = getParam(params, destPrefix + ".ReplacementTemplateData");
             List<MessageTag> replacementTags = extractMessageTags(params, destPrefix + ".ReplacementTags");
-            if (to.isEmpty() && cc.isEmpty() && bcc.isEmpty()
-                    && replacementRaw == null && replacementTags.isEmpty()) {
-                break;
-            }
             entries.add(new BulkEmailEntry(to, cc, bcc,
                     parseTemplateData(replacementRaw), replacementTags, List.of()));
         }
-        if (entries.isEmpty()) {
-            throw new AwsException("InvalidParameterValue",
-                    "At least one destination is required.", 400);
-        }
+        JsonNode defaultTemplateData = parseTemplateData(defaultDataRaw);
 
         String configurationSetName = getParam(params, "ConfigurationSetName");
         String returnPath = getParam(params, "ReturnPath");
         List<MessageTag> defaultEmailTags = extractMessageTags(params, "DefaultTags");
         List<BulkEmailEntryResult> results = sesService.sendBulkEmail(SendBulkEmailRequest.builder()
                 .source(source)
+                .sourceArn(getParam(params, "SourceArn"))
                 .replyToAddresses(replyToAddresses)
                 .returnPath(returnPath)
+                .returnPathArn(getParam(params, "ReturnPathArn"))
                 .configurationSetName(configurationSetName)
                 .defaultEmailTags(defaultEmailTags)
                 .region(region)
-                .defaultContent(new EmailContent.InlineTemplate(template.getSubject(), template.getTextPart(),
-                        template.getHtmlPart(), defaultTemplateData, List.of()))
+                .defaultContent(new EmailContent.Template(resolvedName, defaultTemplateData, List.of()))
                 .entries(entries)
                 .build());
 
@@ -1555,6 +1578,46 @@ public class SesQueryHandler {
     }
 
     // --- Helpers ---
+
+    private static boolean hasParamWithPrefix(MultivaluedMap<String, String> params, String prefix) {
+        return params.keySet().stream().anyMatch(key -> key.startsWith(prefix));
+    }
+
+    // Bounds the violation list a hostile index could inflate; an index above it still fails the
+    // destination count. Where AWS stops listing null destinations has not been probed.
+    private static final int MAX_VALIDATED_DESTINATION_INDEX = 1000;
+
+    /** The highest {@code Destinations.member.N}, and the Ns that carry a {@code Destination}. */
+    private record BulkDestinationIndexes(int last, Set<Integer> withDestination) {}
+
+    private static BulkDestinationIndexes bulkDestinationIndexes(MultivaluedMap<String, String> params) {
+        String prefix = "Destinations.member.";
+        int last = 0;
+        Set<Integer> withDestination = new HashSet<>();
+        for (String key : params.keySet()) {
+            if (!key.startsWith(prefix)) {
+                continue;
+            }
+            int dot = key.indexOf('.', prefix.length());
+            int index = memberIndex(dot < 0 ? key.substring(prefix.length()) : key.substring(prefix.length(), dot));
+            if (index == 0) {
+                continue;
+            }
+            last = Math.max(last, index);
+            if (dot >= 0 && key.startsWith(".Destination.", dot)) {
+                withDestination.add(index);
+            }
+        }
+        return new BulkDestinationIndexes(last, withDestination);
+    }
+
+    // 0 for a token that is not a member index; one too long for an int is past any limit.
+    private static int memberIndex(String token) {
+        if (token.isEmpty() || token.charAt(0) == '0' || !token.chars().allMatch(c -> c >= '0' && c <= '9')) {
+            return 0;
+        }
+        return token.length() > 9 ? Integer.MAX_VALUE : Integer.parseInt(token);
+    }
 
     private List<String> extractMembers(MultivaluedMap<String, String> params, String prefix) {
         List<String> members = new ArrayList<>();

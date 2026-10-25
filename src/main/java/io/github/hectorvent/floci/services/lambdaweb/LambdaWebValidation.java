@@ -18,7 +18,7 @@ final class LambdaWebValidation {
     /** A member read by {@link LambdaWebJson}, so an absent JSON member arrives as null. */
     LambdaWebValidation required(String path, Object value) {
         if (value == null) {
-            errors.add("Value null at '" + path + "' failed to satisfy constraint: Member must not be null");
+            errors.add(SmithyValidationErrors.notNull(path));
         }
         return this;
     }

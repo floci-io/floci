@@ -42,6 +42,7 @@ import software.amazon.awssdk.services.ssm.model.UnlabelParameterVersionResponse
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -396,6 +397,34 @@ class SsmTest {
                     });
         } finally {
             ssm.deleteParameter(DeleteParameterRequest.builder().name(name).build());
+        }
+    }
+
+    @Test
+    void paginatorsFollowNextTokenForPathAndHistory() {
+        String path = "/sdk-test/paging-" + UUID.randomUUID();
+        List<String> names = List.of(path + "/p1", path + "/p2", path + "/p3", path + "/p4", path + "/p5");
+        try {
+            names.forEach(name -> ssm.putParameter(PutParameterRequest.builder()
+                    .name(name).value("v1").type(ParameterType.STRING).overwrite(true).build()));
+            for (int version = 2; version <= 3; version++) {
+                ssm.putParameter(PutParameterRequest.builder()
+                        .name(names.get(0)).value("v" + version).type(ParameterType.STRING).overwrite(true).build());
+            }
+
+            List<GetParametersByPathResponse> pathPages = ssm.getParametersByPathPaginator(
+                    GetParametersByPathRequest.builder().path(path).maxResults(2).build()).stream().toList();
+            assertThat(pathPages).hasSize(3).allSatisfy(page -> assertThat(page.parameters()).hasSizeLessThanOrEqualTo(2));
+            assertThat(pathPages.stream().flatMap(page -> page.parameters().stream()).map(p -> p.name()).toList())
+                    .containsExactlyInAnyOrderElementsOf(names);
+
+            List<GetParameterHistoryResponse> historyPages = ssm.getParameterHistoryPaginator(
+                    GetParameterHistoryRequest.builder().name(names.get(0)).maxResults(1).build()).stream().toList();
+            assertThat(historyPages).hasSize(3).allSatisfy(page -> assertThat(page.parameters()).hasSize(1));
+            assertThat(historyPages.stream().flatMap(page -> page.parameters().stream()).map(p -> p.version())
+                    .toList()).containsExactly(1L, 2L, 3L);
+        } finally {
+            ssm.deleteParameters(DeleteParametersRequest.builder().names(names).build());
         }
     }
 }

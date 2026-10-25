@@ -18,8 +18,10 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -729,6 +731,47 @@ class CodeArtifactPypiDockerIntegrationTest {
     }
 
     /**
+     * The real-world gap this guards against: {@code PypiserverSidecarClient#listPackageVersions}
+     * used to send one {@code HEAD} per version, one at a time, so a package with many versions
+     * answered no faster than its slowest version's own round trip, times the version count. This
+     * uploads enough versions that a broken fan-out (dropped, duplicated, or silently empty results
+     * from the bounded executor) would show up as something other than exactly this set of
+     * versions, against the real pypiserver sidecar, not a mock.
+     */
+    @Test
+    @Order(21)
+    void listPackageVersionsFetchesManyVersionsPublishTimesCorrectly() {
+        String packageName = "many-versions-pypi-pkg";
+        int versionCount = 12;
+        Set<String> expectedVersions = new HashSet<>();
+        for (int i = 1; i <= versionCount; i++) {
+            String version = "1.0." + i;
+            expectedVersions.add(version);
+            String filename = "many_versions_pypi_pkg-" + version + ".tar.gz";
+            byte[] content = ("many-versions-sdist-bytes-" + i).getBytes(StandardCharsets.UTF_8);
+            given().header("Authorization", "Bearer " + bearerToken)
+                    .contentType("multipart/form-data; boundary=boundary123")
+                    .body(twineUploadBody("boundary123", packageName, version, filename, content, null))
+                    .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                    .then().statusCode(200);
+        }
+
+        JsonPath body = given().header("Authorization", AUTH)
+                .post("/v1/package/versions?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + packageName)
+                .then().statusCode(200)
+                .body("package", equalTo(packageName))
+                .body("versions.size()", equalTo(versionCount))
+                .extract().jsonPath();
+        List<String> actualVersions = body.getList("versions.version", String.class);
+        assertEquals(expectedVersions, new HashSet<>(actualVersions));
+        String defaultDisplayVersion = body.getString("defaultDisplayVersion");
+        assertTrue(expectedVersions.contains(defaultDisplayVersion),
+                "expected defaultDisplayVersion to be one of the uploaded versions, got "
+                        + defaultDisplayVersion);
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code PypiserverSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container.
@@ -808,7 +851,7 @@ class CodeArtifactPypiDockerIntegrationTest {
      * {@code name} and the {@code content} file part, so the rest are included for realism only.
      */
     private static byte[] twineUploadBody(String boundary, String packageName, String filename, byte[] content) {
-        return twineUploadBody(boundary, packageName, filename, content, null);
+        return twineUploadBody(boundary, packageName, "1.0.0", filename, content, null);
     }
 
     /**
@@ -818,6 +861,19 @@ class CodeArtifactPypiDockerIntegrationTest {
      */
     private static byte[] twineUploadBody(String boundary, String packageName, String filename, byte[] content,
             String description) {
+        return twineUploadBody(boundary, packageName, "1.0.0", filename, content, description);
+    }
+
+    /**
+     * Full shape, with an explicit {@code version} field: every other overload above hardcodes
+     * {@code 1.0.0}, which happens to match every other test's own fixed filename in this class,
+     * but {@code CodeArtifactPypiController#upload} now checks the version field against the
+     * real filename (Greptile's review of this PR), so a caller whose filename embeds a different
+     * version (see {@link #listPackageVersionsFetchesManyVersionsPublishTimesCorrectly}'s own
+     * loop) must pass the matching one here instead.
+     */
+    private static byte[] twineUploadBody(String boundary, String packageName, String version, String filename,
+            byte[] content, String description) {
         String preamble = "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\":action\"\r\n\r\n"
                 + "file_upload\r\n"
@@ -829,7 +885,7 @@ class CodeArtifactPypiDockerIntegrationTest {
                 + packageName + "\r\n"
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"version\"\r\n\r\n"
-                + "1.0.0\r\n"
+                + version + "\r\n"
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"filetype\"\r\n\r\n"
                 + "sdist\r\n"

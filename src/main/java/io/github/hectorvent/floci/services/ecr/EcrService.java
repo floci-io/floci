@@ -132,6 +132,10 @@ public class EcrService implements ResourceProvider {
         this.registryManager.setReconcileHook(this::reconcileFromCatalog);
     }
 
+    public boolean isDisabled() {
+        return !config.services().ecr().enabled();
+    }
+
     // ============================================================
     // Pull through cache rules
     // ============================================================

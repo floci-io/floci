@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
@@ -84,8 +85,8 @@ class FirehoseRedshiftServiceTest {
                 mock(FirehoseLambdaTransformer.class), delivery, Runnable::run);
     }
 
-    private void createStream(String extraMembers) throws Exception {
-        RedshiftDestination destination = mapper.readValue("""
+    private RedshiftDestination destination(String extraMembers) throws Exception {
+        return mapper.readValue("""
                 {"RoleARN": "arn:aws:iam::000000000000:role/firehose",
                  "ClusterJDBCURL": "jdbc:redshift://c1.abc.us-east-1.redshift.amazonaws.com:5439/dev",
                  "Username": "admin", "Password": "Secret123",
@@ -93,8 +94,16 @@ class FirehoseRedshiftServiceTest {
                  "S3Configuration": {"RoleARN": "arn:aws:iam::000000000000:role/firehose", "BucketARN": "arn:aws:s3:::stage"}
                  %s}
                 """.formatted(extraMembers), RedshiftDestination.class);
-        service.createDeliveryStream("us-east-1", STREAM, null, destination, List.of(), null, null);
+    }
+
+    private void createStream(String extraMembers) throws Exception {
+        service.createDeliveryStream("us-east-1", STREAM, null, destination(extraMembers), List.of(), null, null);
         service.putRecord(STREAM, new Record("{\"id\":1}".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private S3Destination describedBackup(String streamName) {
+        return service.describeDeliveryStream(streamName).getDestinations().get(0)
+                .getRedshiftDestinationDescription().getS3Backup();
     }
 
     private void copyFails() {
@@ -167,6 +176,25 @@ class FirehoseRedshiftServiceTest {
         verifyStagedTimes(1);
         verify(s3Service, times(1)).putObject(eq("bk"), anyString(), any(byte[].class), anyString(), anyMap(), any());
         verify(delivery, times(1)).copy(anyString(), anyString(), any(), eq("stage"), anyString());
+    }
+
+    @Test
+    void aRedshiftBackupGetsTheLoggingDefaultsOnCreate() throws Exception {
+        createStream(BACKUP_ENABLED);
+        service.createDeliveryStream("us-east-1", "rs-logging", null, destination(
+                ", \"S3BackupMode\": \"Enabled\", \"S3BackupConfiguration\": "
+                        + "{\"RoleARN\": \"arn:aws:iam::000000000000:role/firehose\", \"BucketARN\": \"arn:aws:s3:::bk\","
+                        + " \"CloudWatchLoggingOptions\": {\"LogGroupName\": \"g\"}}"),
+                List.of(), null, null);
+
+        S3Destination omitted = describedBackup(STREAM);
+        assertEquals(false, omitted.getCloudWatchLoggingOptions().getEnabled());
+        assertEquals("UNCOMPRESSED", omitted.getCompressionFormat());
+
+        S3Destination withoutEnabled = describedBackup("rs-logging");
+        assertEquals(false, withoutEnabled.getCloudWatchLoggingOptions().getEnabled());
+        assertEquals("g", withoutEnabled.getCloudWatchLoggingOptions().getLogGroupName());
+        assertEquals("UNCOMPRESSED", withoutEnabled.getCompressionFormat());
     }
 
     @Test

@@ -1668,6 +1668,10 @@ public class KmsService implements ResourceProvider {
 
     public record GenerateMacResult(byte[] mac, String keyArn) {}
 
+    /** A data key pair: PKCS#8 private key, its ciphertext under the KMS key, and the X.509 public key. */
+    public record DataKeyPair(byte[] privateKeyPlaintext, byte[] privateKeyCiphertextBlob, byte[] publicKey,
+                              String keyArn, String keyPairSpec) {}
+
     public record VerifyMacResult(String keyArn) {}
 
     /**
@@ -2002,8 +2006,7 @@ public class KmsService implements ResourceProvider {
     private static void validateEnumMember(String member, String value, List<String> allowed) {
         if (value == null) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at '" + member + "' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(member));
         }
         if (!allowed.contains(value)) {
             throw SmithyValidationErrors.validationException(
@@ -2130,6 +2133,40 @@ public class KmsService implements ResourceProvider {
         result.put("CiphertextBlob", encrypted.ciphertext());
         result.put("KeyId", encrypted.keyArn());
         return result;
+    }
+
+    public DataKeyPair generateDataKeyPair(String keyId, String keyPairSpec, Map<String, String> encryptionContext,
+                                           String region) {
+        return generateDataKeyPair(keyId, keyPairSpec, encryptionContext, region, "GenerateDataKeyPair");
+    }
+
+    DataKeyPair generateDataKeyPairWithoutPlaintext(String keyId, String keyPairSpec,
+                                                    Map<String, String> encryptionContext, String region) {
+        DataKeyPair pair = generateDataKeyPair(keyId, keyPairSpec, encryptionContext, region,
+                "GenerateDataKeyPairWithoutPlaintext");
+        return new DataKeyPair(null, pair.privateKeyCiphertextBlob(), pair.publicKey(), pair.keyArn(),
+                pair.keyPairSpec());
+    }
+
+    // The pair is generated with the same code that creates asymmetric KMS keys of that spec, but is
+    // never stored: only its private key, encrypted under the symmetric KMS key, leaves this method.
+    private DataKeyPair generateDataKeyPair(String keyId, String keyPairSpec, Map<String, String> encryptionContext,
+                                            String region, String operation) {
+        KmsKey key = resolveKey(keyId, region);
+        validateKeyUsage(key, KmsKeyUsage.ENCRYPT_DECRYPT, operation);
+        validateKeyIsUsableForCryptoOperations(key);
+        if (KmsKeySpec.SYMMETRIC_DEFAULT != key.getKeySpec()) {
+            throw new AwsException("InvalidKeyUsageException", "You cannot generate a data key pair with an asymmetric CMK", 400);
+        }
+
+        KmsKey pair = new KmsKey();
+        pair.setKeySpec(KmsKeySpec.valueOf(keyPairSpec));
+        generateKeyMaterial(pair, region);
+        byte[] privateKey = Base64.getDecoder().decode(pair.getPrivateKeyEncoded());
+        byte[] publicKey = Base64.getDecoder().decode(pair.getPublicKeyEncoded());
+
+        EncryptResult encrypted = encrypt(keyId, privateKey, encryptionContext, null, region, operation);
+        return new DataKeyPair(privateKey, encrypted.ciphertext(), publicKey, encrypted.keyArn(), keyPairSpec);
     }
 
     // ──────────────────────────── Tags ────────────────────────────

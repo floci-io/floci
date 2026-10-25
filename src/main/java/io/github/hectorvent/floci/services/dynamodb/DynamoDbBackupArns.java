@@ -63,8 +63,12 @@ final class DynamoDbBackupArns {
     }
 
     static String mint(String tableArn, Instant creationDateTime) {
-        return tableArn + "/backup/" + String.format("%014d", creationDateTime.toEpochMilli())
-                + "-" + UUID.randomUUID().toString().substring(0, 8);
+        return tableArn + "/backup/" + timedId(creationDateTime);
+    }
+
+    /** AWS ids a backup and an export by their time in milliseconds and 8 random hex digits. */
+    static String timedId(Instant time) {
+        return String.format("%014d", time.toEpochMilli()) + "-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
     /** AWS ends the id of a system backup with zeros instead of random hex digits. */

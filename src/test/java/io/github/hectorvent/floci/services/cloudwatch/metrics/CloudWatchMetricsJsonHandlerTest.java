@@ -347,6 +347,22 @@ class CloudWatchMetricsJsonHandlerTest {
         assertEquals("Count", alarm.get("Unit").asText());
     }
 
+    // AWS sends every alarm collection even when it is empty. The CLI's text output writes a
+    // None line for each paginator result key missing from the page (floci-io/floci#6362).
+    @Test
+    void describeAlarms_returnsEmptyCompositeAndLogAlarmCollections() {
+        handler.handle("PutMetricAlarm", alarmRequest("MetricOnly"), REGION);
+
+        ObjectNode response = (ObjectNode) handler.handle("DescribeAlarms", MAPPER.createObjectNode(), REGION)
+                .getEntity();
+
+        assertEquals(1, response.get("MetricAlarms").size());
+        assertTrue(response.get("CompositeAlarms").isArray());
+        assertTrue(response.get("CompositeAlarms").isEmpty());
+        assertTrue(response.get("LogAlarms").isArray());
+        assertTrue(response.get("LogAlarms").isEmpty());
+    }
+
     // An alarm the caller never gave an M for reports no DatapointsToAlarm at all. AWS omits the
     // member in that case, and echoing EvaluationPeriods instead reads as a change to any client
     // that re-plans against its own configuration, which is what floci-io/floci#3660 hit.

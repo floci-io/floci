@@ -26,8 +26,8 @@ import java.util.stream.Stream;
 
 /**
  * The CloudWatch metrics of Web Functions: one datapoint per request when it is answered, and one
- * per environment when it starts, each minute and when it ends. Floci serves an endpoint in its
- * home region only, so both namespaces go there.
+ * per environment when it starts, each minute and when it ends. Both namespaces go to the region
+ * that served, and {@code AWS/Lambda/Web} also to the home region, where AWS centralizes it.
  */
 @ApplicationScoped
 public class LambdaWebMetrics {
@@ -84,14 +84,14 @@ public class LambdaWebMetrics {
         datapoints.add(new Datapoint(USAGE_NAMESPACE,
                 MetricDatum.of("EndpointActiveEnvironments", "Count", activeEnvironments, usage, now)));
         statusClass(datapoints, status, request, now);
-        publish(target.accountId(), target.region(), datapoints);
+        publish(target.accountId(), target.servingRegion(), target.region(), datapoints);
     }
 
     /** A request the platform answered without an environment. */
     void answered(WebFunctionTarget target, int status) {
         List<Datapoint> datapoints = new ArrayList<>();
         statusClass(datapoints, status, requestDimensions(target), Instant.now().getEpochSecond());
-        publish(target.accountId(), target.region(), datapoints);
+        publish(target.accountId(), target.servingRegion(), target.region(), datapoints);
     }
 
     /** A request refused with 429. {@code metric} names the limit it hit. */
@@ -101,14 +101,14 @@ public class LambdaWebMetrics {
         datapoints.add(new Datapoint(USAGE_NAMESPACE,
                 MetricDatum.of(metric, "Count", 1, usageDimensions(target), now)));
         statusClass(datapoints, 429, requestDimensions(target), now);
-        publish(target.accountId(), target.region(), datapoints);
+        publish(target.accountId(), target.servingRegion(), target.region(), datapoints);
     }
 
-    EnvironmentMetrics environment(String accountId, String region, String functionName) {
+    EnvironmentMetrics environment(String accountId, String region, String homeRegion, String functionName) {
         List<Dimension> dimensions = List.of(new Dimension("FunctionName", functionName));
         return (activeMillis, cpuMillis, maxMemoryMb, concurrentRequests, responseBytes) -> {
             long now = Instant.now().getEpochSecond();
-            publish(accountId, region, Stream.of(
+            publish(accountId, region, homeRegion, Stream.of(
                     MetricDatum.of("EnvironmentActiveTime", "Milliseconds", activeMillis, dimensions, now),
                     MetricDatum.of("EnvironmentCPUTime", "Milliseconds", cpuMillis, dimensions, now),
                     MetricDatum.of("EnvironmentMaxMemoryUsage", "Megabytes", maxMemoryMb, dimensions, now),
@@ -157,10 +157,10 @@ public class LambdaWebMetrics {
     private static List<Dimension> usageDimensions(WebFunctionTarget target) {
         return List.of(new Dimension("FunctionName", target.function().functionName),
                 new Dimension("EndpointName", target.endpoint().endpointName),
-                new Dimension("ExecutionRegion", target.region()));
+                new Dimension("ExecutionRegion", target.servingRegion()));
     }
 
-    private synchronized void publish(String accountId, String region, List<Datapoint> datapoints) {
+    private synchronized void publish(String accountId, String region, String homeRegion, List<Datapoint> datapoints) {
         if (datapoints.isEmpty()) {
             return;
         }
@@ -168,6 +168,9 @@ public class LambdaWebMetrics {
             lastWrite = publisher.submit(() -> {
                 for (Datapoint datapoint : datapoints) {
                     store(accountId, region, datapoint);
+                    if (!region.equals(homeRegion) && NAMESPACE.equals(datapoint.namespace())) {
+                        store(accountId, homeRegion, datapoint);
+                    }
                 }
             });
             dropping = false;

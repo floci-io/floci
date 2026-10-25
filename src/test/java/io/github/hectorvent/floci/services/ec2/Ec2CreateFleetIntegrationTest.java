@@ -5,6 +5,10 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -27,6 +31,62 @@ class Ec2CreateFleetIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
     private static final String CONTRACT_IMAGE_ID = "ami-create-fleet-contract";
     private static String launchTemplateId;
+
+    @ParameterizedTest
+    @ValueSource(strings = {"none", "targeted"})
+    void fleetRetainsCapacityReservationEligibility(String preference) {
+        String capacityId = given().header("Authorization", AUTH_HEADER)
+                .formParam("Action", "CreateCapacityReservation")
+                .formParam("InstanceType", "t3.small").formParam("InstancePlatform", "Linux/UNIX")
+                .formParam("AvailabilityZone", "us-east-1a").formParam("InstanceCount", "1")
+                .formParam("InstanceMatchCriteria", "targeted".equals(preference) ? "targeted" : "open")
+                .post("/").then().statusCode(200).extract()
+                .xmlPath().getString("CreateCapacityReservationResponse.capacityReservation.capacityReservationId");
+        String templateId = null;
+        String instanceId = null;
+        try {
+            String selector = "none".equals(preference)
+                    ? "CapacityReservationPreference" : "CapacityReservationTarget.CapacityReservationId";
+            templateId = given().header("Authorization", AUTH_HEADER)
+                    .formParam("Action", "CreateLaunchTemplate")
+                    .formParam("LaunchTemplateName", "fleet-capacity-" + UUID.randomUUID())
+                    .formParam("LaunchTemplateData.ImageId", "ami-test")
+                    .formParam("LaunchTemplateData.InstanceType", "t3.small")
+                    .formParam("LaunchTemplateData.Placement.AvailabilityZone", "us-east-1a")
+                    .formParam("LaunchTemplateData.CapacityReservationSpecification." + selector,
+                            "none".equals(preference) ? "none" : capacityId)
+                    .post("/").then().statusCode(200).extract()
+                    .xmlPath().getString("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+            instanceId = given().header("Authorization", AUTH_HEADER)
+                    .formParam("Action", "CreateFleet").formParam("Type", "instant")
+                    .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.LaunchTemplateId", templateId)
+                    .formParam("TargetCapacitySpecification.TotalTargetCapacity", "1")
+                    .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
+                    .post("/").then().statusCode(200).extract()
+                    .xmlPath().getString("CreateFleetResponse.fleetInstanceSet.item.instanceIds.item");
+            given().header("Authorization", AUTH_HEADER)
+                    .formParam("Action", "DescribeCapacityReservations").formParam("CapacityReservationId.1", capacityId)
+                    .post("/").then().statusCode(200)
+                    .body("DescribeCapacityReservationsResponse.capacityReservationSet.item.availableInstanceCount",
+                            equalTo("none".equals(preference) ? "1" : "0"));
+            given().header("Authorization", AUTH_HEADER)
+                    .formParam("Action", "DescribeInstances").formParam("InstanceId.1", instanceId)
+                    .post("/").then().statusCode(200)
+                    .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.capacityReservationId.text()",
+                            equalTo("none".equals(preference) ? "" : capacityId));
+        } finally {
+            if (instanceId != null) {
+                given().header("Authorization", AUTH_HEADER).formParam("Action", "TerminateInstances")
+                        .formParam("InstanceId.1", instanceId).post("/").then().statusCode(200);
+            }
+            if (templateId != null) {
+                given().header("Authorization", AUTH_HEADER).formParam("Action", "DeleteLaunchTemplate")
+                        .formParam("LaunchTemplateId", templateId).post("/").then().statusCode(200);
+            }
+            given().header("Authorization", AUTH_HEADER).formParam("Action", "CancelCapacityReservation")
+                    .formParam("CapacityReservationId", capacityId).post("/").then().statusCode(200);
+        }
+    }
 
     @Test
     @Order(1)

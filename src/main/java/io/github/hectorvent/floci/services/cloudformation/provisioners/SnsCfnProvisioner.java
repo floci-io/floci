@@ -8,9 +8,12 @@ import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
@@ -23,6 +26,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     private static final String TOPIC_POLICY = "AWS::SNS::TopicPolicy";
     private static final int TOPIC_NAME_MAX_LENGTH = 256;
     private static final String FIFO_SUFFIX = ".fifo";
+    private static final String INLINE_SUBSCRIPTION_PREFIX = "__FlociInlineSubscription:";
 
     private final SnsService snsService;
 
@@ -90,7 +94,24 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
             attributes.put("MaximumMessageSize", maximumMessageSize);
         }
 
-        Topic topic = snsService.createTopic(topicName, attributes, Map.of(), ctx.region());
+        JsonNode subscriptions = props == null ? null
+                : ctx.engine().resolveNodeOmittingNoValue(props.path("Subscription"));
+        if (subscriptions != null && !subscriptions.isMissingNode() && !subscriptions.isNull()
+                && !subscriptions.isArray()) {
+            throw new AwsException("ValidationError", "Subscription must be a list.", 400);
+        }
+        List<SubscriptionTarget> desiredSubscriptions = new ArrayList<>();
+        if (subscriptions != null && subscriptions.isArray()) {
+            for (JsonNode subscription : subscriptions) {
+                desiredSubscriptions.add(new SubscriptionTarget(ctx.resolveOptional(subscription, "Protocol"),
+                        ctx.resolveOptional(subscription, "Endpoint")));
+            }
+        }
+
+        SnsService.TopicCreation creation = snsService.createTopicWithStatus(
+                topicName, attributes, Map.of(), ctx.region());
+        Topic topic = creation.topic();
+        boolean created = creation.created();
         // createTopic leaves an existing topic untouched, so an update writes the mutable
         // attributes itself. A property the template dropped is reset, not left standing.
         if (ctx.isUpdate()) {
@@ -117,6 +138,46 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("TopicArn", topic.getTopicArn());
         r.getAttributes().put("Arn", topic.getTopicArn());
         r.getAttributes().put("TopicName", topicName);
+
+        List<Subscription> existing = snsService.listSubscriptionsByTopic(topic.getTopicArn(), ctx.region());
+        Set<String> added = new HashSet<>();
+        CfnRollback.guarded(r, ctx, created,
+                () -> snsService.deleteTopic(topic.getTopicArn(), ctx.region()),
+                () -> added.forEach(arn -> snsService.unsubscribe(arn, ctx.region())),
+                () -> reconcileInlineSubscriptions(r, topic.getTopicArn(), ctx.region(),
+                        desiredSubscriptions, existing, added));
+    }
+
+    private void reconcileInlineSubscriptions(StackResource r, String topicArn, String region,
+                                              List<SubscriptionTarget> desired, List<Subscription> existing,
+                                              Set<String> added) {
+        for (SubscriptionTarget target : desired) {
+            SnsService.SubscriptionCreation creation = snsService.subscribeWithStatus(
+                    topicArn, target.protocol(), target.endpoint(), region, Map.of());
+            Subscription sub = creation.subscription();
+            if (creation.created()) {
+                added.add(sub.getSubscriptionArn());
+                r.getAttributes().put(INLINE_SUBSCRIPTION_PREFIX + sub.getSubscriptionArn(), "true");
+            }
+        }
+        for (Subscription sub : existing) {
+            String key = INLINE_SUBSCRIPTION_PREFIX + sub.getSubscriptionArn();
+            if (r.getAttributes().containsKey(key)
+                    && desired.stream().noneMatch(target -> target.matches(sub))) {
+                snsService.unsubscribe(sub.getSubscriptionArn(), region);
+                r.getAttributes().remove(key);
+            }
+        }
+        r.getAttributes().keySet().removeIf(key -> key.startsWith(INLINE_SUBSCRIPTION_PREFIX)
+                && existing.stream().noneMatch(sub -> key.equals(INLINE_SUBSCRIPTION_PREFIX
+                + sub.getSubscriptionArn())) && !added.contains(key.substring(INLINE_SUBSCRIPTION_PREFIX.length())));
+    }
+
+    private record SubscriptionTarget(String protocol, String endpoint) {
+        private boolean matches(Subscription subscription) {
+            return Objects.equals(protocol, subscription.getProtocol())
+                    && Objects.equals(endpoint, subscription.getEndpoint());
+        }
     }
 
     private void provisionSubscription(StackResource r, JsonNode props, ProvisionContext ctx) {

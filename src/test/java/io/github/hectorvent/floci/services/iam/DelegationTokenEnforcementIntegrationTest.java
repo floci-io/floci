@@ -7,6 +7,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -147,6 +148,58 @@ class DelegationTokenEnforcementIntegrationTest {
                 .then().statusCode(200)
                 .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn",
                         equalTo("arn:aws:iam::" + CUSTOMER + ":user/" + approverName));
+    }
+
+    /**
+     * The summary is authorized against the request the ARN names, which is the whole point of
+     * resolving {@code EntityArn} as the resource: an action left unresolved is evaluated against
+     * {@code *}, so a policy naming one request would silently cover every other one.
+     */
+    @Test
+    void theSummaryIsAuthorizedAgainstTheRequestItsArnNames() {
+        String allowed = partnerCreate();
+        String refused = partnerCreate();
+        String arn = "arn:aws:iam::" + CUSTOMER + ":delegation-request/";
+        S3RequestSigner reader = userWithPolicy("summary-reader-"
+                + UUID.randomUUID().toString().substring(0, 8), """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Action":"iam:GetHumanReadableSummary","Resource":"%s"}]}"""
+                .formatted(arn + allowed));
+
+        summarize(reader, arn + allowed).statusCode(200)
+                .body("GetHumanReadableSummaryResponse.GetHumanReadableSummaryResult.SummaryState",
+                        equalTo("AVAILABLE"));
+        summarize(reader, arn + refused).statusCode(403)
+                .body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
+    }
+
+    /**
+     * A deny names the request, so it has to hold whichever ARN the caller spells it with. The
+     * lookup reads only the id out of {@code EntityArn}, deliberately, which is why the request
+     * is authorized against the ARN Floci mints around that id rather than against the string as
+     * it arrived: otherwise a wildcard allow plus a respelled ARN would read a denied summary.
+     */
+    @Test
+    void aDenyOnARequestHoldsWhateverArnTheCallerSpellsItWith() {
+        String id = partnerCreate();
+        String canonical = "arn:aws:iam::" + CUSTOMER + ":delegation-request/" + id;
+        S3RequestSigner reader = userWithPolicy("summary-deny-"
+                + UUID.randomUUID().toString().substring(0, 8), """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"iam:GetHumanReadableSummary","Resource":"*"},
+                  {"Effect":"Deny","Action":"iam:GetHumanReadableSummary","Resource":"%s"}]}"""
+                .formatted(canonical));
+
+        summarize(reader, canonical).statusCode(403)
+                .body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
+        summarize(reader, "arn:aws:iam::000000000009:delegation-request/" + id).statusCode(403)
+                .body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
+    }
+
+    private static ValidatableResponse summarize(S3RequestSigner caller, String entityArn) {
+        return given().filter(caller).formParam("Action", "GetHumanReadableSummary")
+                .formParam("Version", "2010-05-08").formParam("EntityArn", entityArn)
+            .when().post("/").then();
     }
 
     /** A request this identity claimed, accepted and released itself, ready to exchange. */

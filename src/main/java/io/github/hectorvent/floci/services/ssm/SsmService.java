@@ -532,15 +532,23 @@ public class SsmService implements ResourceProvider {
                         : h.getLabels() != null && h.getLabels().contains(selector))
                 .max(Comparator.comparingLong(ParameterHistory::getVersion))
                 .map(h -> {
-                    Parameter parameter = new Parameter(baseName, h.getValue(), h.getType());
-                    parameter.setVersion(h.getVersion());
-                    parameter.setDescription(h.getDescription());
-                    parameter.setLastModifiedDate(h.getLastModifiedDate());
-                    parameter.setArn(current.get().getArn());
-                    parameter.setDataType(current.get().getDataType());
+                    Parameter parameter = historicalParameter(current.get(), h);
                     parameter.setSelector(":" + selector);
                     return parameter;
                 });
+    }
+
+    private static Parameter historicalParameter(Parameter current, ParameterHistory history) {
+        Parameter parameter = new Parameter(current.getName(), history.getValue(), history.getType());
+        parameter.setVersion(history.getVersion());
+        parameter.setDescription(history.getDescription());
+        parameter.setLastModifiedDate(history.getLastModifiedDate());
+        // Older stored history has no KeyId; only the current version can recover it reliably.
+        parameter.setKeyId(history.getKeyId() != null ? history.getKeyId()
+                : history.getVersion() == current.getVersion() ? current.getKeyId() : null);
+        parameter.setArn(current.getArn());
+        parameter.setDataType(current.getDataType());
+        return parameter;
     }
 
     /**
@@ -566,8 +574,19 @@ public class SsmService implements ResourceProvider {
                                               List<ParameterStringFilter> filters, String region) {
         filters.forEach(SsmService::validateGetParametersByPathFilter);
         List<ParameterStringFilter> matchingFilters = filters.stream().filter(filter -> !"Label".equals(filter.key())).toList();
+        List<ParameterStringFilter> labelFilters = filters.stream().filter(filter -> "Label".equals(filter.key())).toList();
+        if (labelFilters.isEmpty()) {
+            return getParametersByPath(path, recursive, region).stream()
+                    .filter(parameter -> matchingFilters.stream().allMatch(filter -> matchesParameterFilter(parameter, filter)))
+                    .toList();
+        }
+        // Labels belong to versions, so matching only the latest parameter would lose older releases.
         return getParametersByPath(path, recursive, region).stream()
-                .filter(parameter -> matchingFilters.stream().allMatch(filter -> matchesParameterFilter(parameter, filter)))
+                .flatMap(parameter -> historyStore.get(regionKey(region, parameter.getName())).orElse(List.of()).stream()
+                        .filter(history -> history.getLabels() != null && labelFilters.stream().allMatch(filter ->
+                                filter.values().stream().anyMatch(history.getLabels()::contains)))
+                        .map(history -> historicalParameter(parameter, history))
+                        .filter(history -> matchingFilters.stream().allMatch(filter -> matchesParameterFilter(history, filter))))
                 .toList();
     }
 
@@ -731,6 +750,11 @@ public class SsmService implements ResourceProvider {
             default -> null;
         };
         return actual != null && matchesAny(actual, filter);
+    }
+
+    /** The account the current request acts in; parameter storage is partitioned by it. */
+    String accountId() {
+        return regionResolver.getAccountId();
     }
 
     /** Parameters stored before Floci kept a tier are Standard, as AWS defaults them. */
@@ -950,7 +974,7 @@ public class SsmService implements ResourceProvider {
      */
     static String labelListViolation(List<String> labels) {
         if (labels == null) {
-            return "Value null at 'labels' failed to satisfy constraint: Member must not be null";
+            return SmithyValidationErrors.notNull("labels");
         }
         String prefix = "Value '" + labels + "' at 'labels' failed to satisfy constraint: ";
         if (labels.isEmpty()) {

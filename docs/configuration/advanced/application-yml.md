@@ -59,8 +59,8 @@ floci:
       # mount-user: "1001:1001"    # PosixUser: run mounting containers as uid[:gid]
       # mount-group-add: 2000      # supplementary gid added to mounting containers
     wal:
-      # Also the cadence at which journaled stores under persistent mode (CloudWatch Logs events,
-      # the S3 object index) fold their .wal file into the store's JSON file.
+      # Also the cadence at which journaled stores under persistent mode (CloudWatch Logs events and
+      # metric datapoints, the S3 object index) fold their .wal file into the store's JSON file.
       compaction-interval-ms: 30000
     services:
       ssm:
@@ -136,6 +136,7 @@ floci:
       max-message-size: 1048576              # Bytes (1 MiB, the AWS maximum)
       clear-fifo-deduplication-cache-on-purge: false  # When true, PurgeQueue clears SQS FIFO dedup and SNS FIFO topic dedup for topics subscribed to that queue
       receipt-handle-secret: local-emulator-secret  # HMAC secret that signs receipt handles
+      cloudwatch-metrics-enabled: true       # Publish AWS/SQS queue metrics to CloudWatch once a minute
       endpoint-strategy: floci               # QueueUrl shape: floci is <base-url>/<account>/<name>, aws is https://sqs.<region>.<dns-suffix>/<account>/<name>
 
     s3:
@@ -171,6 +172,7 @@ floci:
       poll-interval-ms: 1000
       async-retry-delay-seconds: 60           # Wait before the first retry of a failed Event invocation; the second waits twice this
       container-idle-timeout-seconds: 300     # Remove idle containers after this
+      init-timeout-seconds: 10                # Time a cold runtime has to request its first invocation; the function's Timeout wins when longer
       # warm-pool-max-per-function:           # Idle containers kept per function (default max(4, cpus))
       warm-pool-max-total: 0                  # Idle containers kept across all functions; 0 = unbounded
       region-concurrency-limit: 1000          # Concurrent executions ceiling per region
@@ -349,6 +351,7 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | When `true`, `PurgeQueue` clears the FIFO 5-minute deduplication cache for the target queue and matching SNS FIFO topic dedup entries |
 | `FLOCI_SERVICES_SQS_RECEIPT_HANDLE_SECRET` | `local-emulator-secret` | HMAC secret that signs receipt handles, so a handle that was edited or built by hand is rejected |
 | `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY` | `floci` | Shape of the returned `QueueUrl`. `floci` gives `<FLOCI_BASE_URL>/<account>/<name>` and `aws` gives `https://sqs.<region>.<dns-suffix>/<account>/<name>`. Both forms are accepted as input |
+| `FLOCI_SERVICES_SQS_CLOUDWATCH_METRICS_ENABLED` | `true` | Publish the `AWS/SQS` metrics of active queues to CloudWatch once a minute |
 | `FLOCI_SERVICES_S3_DEFAULT_PRESIGN_EXPIRY_SECONDS` | `3600`           | Pre-signed URL expiry                                         |
 | `FLOCI_SERVICES_DOCKER_NETWORK`                    | *(unset)*        | Shared Docker network for Lambda, RDS, ElastiCache containers |
 | `FLOCI_SERVICES_RDS_DATA_ENABLED`                  | `true`           | Enable the RDS Data API service                               |

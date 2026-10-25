@@ -23,6 +23,19 @@ public interface CfnResourceProvisioner {
 
     void provision(StackResource resource, JsonNode properties, ProvisionContext ctx);
 
+    /**
+     * True when the service this provisioner wraps is turned off. {@link CloudFormationResourceRegistry}
+     * then serves none of its types, so the dispatcher stubs them instead of provisioning them.
+     */
+    default boolean serviceDisabled() {
+        return false;
+    }
+
+    /** The config property that turns this provisioner's service on, named in messages about it being off. */
+    default String serviceEnabledFlag() {
+        return null;
+    }
+
     /** Most implementations delegate to {@code service.deleteX(physicalId, region)}. */
     default void delete(String resourceType, String physicalId, String region) {
         // no-op by default: some resource types have no backing delete

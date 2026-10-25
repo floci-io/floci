@@ -173,6 +173,25 @@ class ApiGatewayUsagePlanCfnProvisionerTest {
         assertEquals("plan-1", r.getAttributes().get("Id"));
     }
 
+    // A stage's method throttle is not part of its identity, so a stage the template still lists stays on the
+    // plan with its throttle rather than being removed and added again.
+    @Test
+    void aThrottledStageTheTemplateStillListsIsLeftInPlace() {
+        UsagePlan existing = plan("plan-1", "gold", "old", Map.of(), new UsagePlan.ApiStage("api1", "dev",
+                Map.of("/pets/GET", new UsagePlan.Throttle(10, 5.0))));
+        when(apiGateway.getUsagePlan(REGION, "plan-1")).thenReturn(existing);
+        when(apiGateway.updateUsagePlan(eq(REGION), eq("plan-1"), anyList())).thenReturn(existing);
+
+        provisioner.provision(resource(PLAN, "Plan", "plan-1"), planProps("gold", "new", null, "api1:dev"),
+                ctx("plan-1"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, String>>> patches = ArgumentCaptor.forClass(List.class);
+        verify(apiGateway).updateUsagePlan(eq(REGION), eq("plan-1"), patches.capture());
+        assertEquals(List.of(Map.of("op", "replace", "path", "/description", "value", "new")),
+                patches.getValue());
+    }
+
     @Test
     void anUnchangedUsagePlanUpdateTouchesNothing() {
         UsagePlan existing = plan("plan-1", "gold", "same", Map.of("stack", "v1"), new UsagePlan.ApiStage("api1", "dev"));

@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -38,7 +39,7 @@ class ServiceConfigYamlCoverageTest {
                     continue;
                 }
                 String key = StringUtil.skewer(accessor.getName());
-                if (!services.path(key).path("enabled").isBoolean()) {
+                if (!declaresEnabled(services.path(key))) {
                     missing.add(config + " -> floci.services." + key + ".enabled");
                 }
             }
@@ -48,6 +49,32 @@ class ServiceConfigYamlCoverageTest {
                 "Every service config with an enabled() toggle must declare it explicitly in both "
                         + "application.yml files. Note a bare 'service-name:' key with no child does "
                         + "not count, since it binds to nothing. Missing: " + missing);
+    }
+
+    @Test
+    void explicitBooleanAndEnvironmentExpressionDeclareTheToggle() throws IOException {
+        for (String value : List.of("true", "false", "${FLOCI_SERVICES_RESOURCE_GROUPS_ENABLED:true}")) {
+            JsonNode service = new YAMLMapper().readTree("enabled: " + value);
+            assertTrue(declaresEnabled(service), value);
+        }
+    }
+
+    @Test
+    void missingBareNullAndEmptyDeclarationsRemainMissing() throws IOException {
+        for (String yaml : List.of("{}", "service:", "service: {}", "service: {enabled: null}",
+                "service: {enabled: ''}", "service: {enabled: '   '}",
+                "service: {enabled: {}}", "service: {enabled: []}")) {
+            JsonNode service = new YAMLMapper().readTree(yaml).path("service");
+            assertFalse(declaresEnabled(service), yaml);
+        }
+    }
+
+    private static boolean declaresEnabled(JsonNode service) {
+        JsonNode enabled = service.path("enabled");
+        // Config binding validates Boolean values after resolving expressions. This guard only
+        // checks that the YAML declares a value instead of relying on the interface fallback.
+        return enabled.isValueNode() && !enabled.isNull()
+                && (!enabled.isTextual() || !enabled.textValue().isBlank());
     }
 
     /**

@@ -58,6 +58,9 @@ python3.9 -m venv .venv-legacy
 FLOCI_ENDPOINT=http://localhost:4566 .venv-legacy/bin/python -m pytest legacy/
 ```
 
+`tests/test_ec2_subnet_ipv6.py` checks that expanded IPv6 subnet CIDRs are
+stored and returned in canonical form through Boto 3.
+
 ## Legacy Query GET
 
 `legacy/test_elb_query_get.py` checks that public Boto 2 Query GET reads and

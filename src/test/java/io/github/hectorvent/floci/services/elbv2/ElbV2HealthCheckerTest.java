@@ -4,13 +4,18 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
+import io.vertx.core.Future;
+import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -18,7 +23,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -98,11 +106,11 @@ class ElbV2HealthCheckerTest {
     }
 
     @Test
-    void successfulProbeBelowThresholdReturnsInitialHealthCheckingReason() throws Exception {
+    void firstSuccessfulProbeMakesNewTargetHealthyRegardlessOfRecoveryThreshold() throws Exception {
         HttpServer server = startServer(200);
         try {
             ElbV2HealthChecker checker = healthChecker();
-            TargetGroup targetGroup = targetGroup(server.actualPort(), "200", 2, 1);
+            TargetGroup targetGroup = targetGroup(server.actualPort(), "200", 10, 2);
             TargetDescription target = target("127.0.0.1", server.actualPort());
 
             checker.addTargets(targetGroup.getTargetGroupArn(), List.of(target), targetGroup);
@@ -110,9 +118,9 @@ class ElbV2HealthCheckerTest {
             await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
                 ElbV2HealthChecker.TargetHealthStatus health = checker.getHealth(
                         targetGroup.getTargetGroupArn(), target.getId(), target.getPort());
-                assertEquals("initial", health.state());
-                assertEquals("Elb.InitialHealthChecking", health.reason());
-                assertEquals("Initial health checks in progress", health.description());
+                assertEquals("healthy", health.state());
+                assertNull(health.reason());
+                assertNull(health.description());
             });
         } finally {
             close(server);
@@ -151,6 +159,15 @@ class ElbV2HealthCheckerTest {
                         targetGroup.getTargetGroupArn(), target.getId(), target.getPort());
                 assertEquals("unhealthy", health.state());
                 assertEquals("Target.ResponseCodeMismatch", health.reason());
+            });
+
+            checker.addTargets(targetGroup.getTargetGroupArn(), List.of(target), targetGroup);
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+                ElbV2HealthChecker.TargetHealthStatus health = checker.getHealth(
+                        targetGroup.getTargetGroupArn(), target.getId(), target.getPort());
+                assertEquals("healthy", health.state());
+                assertNull(health.reason());
+                assertNull(health.description());
             });
         } finally {
             close(server);
@@ -207,6 +224,41 @@ class ElbV2HealthCheckerTest {
         assertEquals("Target registration is in progress", health.description());
     }
 
+    @ParameterizedTest
+    @CsvSource({"HTTP,1", "HTTPS,1", "LAMBDA,1", "TCP,2", "TLS,2", "UDP,2", "TCP_UDP,2", "GENEVE,2"})
+    @SuppressWarnings("unchecked")
+    void initialAdmissionRespectsTargetGroupKind(String protocol, int requiredSuccesses) {
+        Vertx immediate = mock(Vertx.class);
+        when(immediate.executeBlocking(any(Callable.class))).thenReturn(Future.succeededFuture(200));
+        doAnswer(invocation -> {
+            Handler<Long> callback = invocation.getArgument(1);
+            callback.handle(1L);
+            return 1L;
+        }).when(immediate).setTimer(anyLong(), any());
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().elbv2().mock()).thenReturn(false);
+        ElbV2HealthChecker checker = new ElbV2HealthChecker(immediate, config, mock(Ec2Service.class));
+        TargetGroup group = targetGroup(8080, "200", 2, 1);
+        group.setProtocol("LAMBDA".equals(protocol) ? null : protocol);
+        group.setTargetType("LAMBDA".equals(protocol) ? "lambda" : "ip");
+        group.setHealthCheckProtocol("HTTP");
+        TargetDescription target = target("127.0.0.1", 8080);
+
+        checker.addTargets(group.getTargetGroupArn(), List.of(target), group);
+
+        ElbV2HealthChecker.TargetHealthStatus first = checker.getHealth(
+                group.getTargetGroupArn(), target.getId(), target.getPort());
+        assertEquals(requiredSuccesses == 1 ? "healthy" : "initial", first.state());
+        assertEquals(requiredSuccesses == 1 ? null : "Elb.InitialHealthChecking", first.reason());
+        assertEquals(requiredSuccesses == 1 ? null : "Initial health checks in progress", first.description());
+        checker.addTargets(group.getTargetGroupArn(), List.of(target), group);
+        ElbV2HealthChecker.TargetHealthStatus healthy = checker.getHealth(
+                group.getTargetGroupArn(), target.getId(), target.getPort());
+        assertEquals("healthy", healthy.state());
+        assertNull(healthy.reason());
+        assertNull(healthy.description());
+    }
+
     private ElbV2HealthChecker healthChecker() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().elbv2().mock()).thenReturn(false);
@@ -237,6 +289,7 @@ class ElbV2HealthCheckerTest {
         targetGroup.setTargetGroupArn(
                 "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/app/1234");
         targetGroup.setTargetType("ip");
+        targetGroup.setProtocol("HTTP");
         targetGroup.setPort(port);
         targetGroup.setHealthCheckEnabled(true);
         targetGroup.setHealthCheckPath("/");

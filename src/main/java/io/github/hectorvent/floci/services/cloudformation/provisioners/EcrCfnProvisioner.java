@@ -40,6 +40,16 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
+    public boolean serviceDisabled() {
+        return ecrService.isDisabled();
+    }
+
+    @Override
+    public String serviceEnabledFlag() {
+        return "floci.services.ecr.enabled";
+    }
+
+    @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         // CDK bootstrap requires lower-case repository names; CFN-generated suffixes can include
         // upper-case characters. Normalize to satisfy the AWS ECR repository name pattern.

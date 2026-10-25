@@ -351,7 +351,7 @@ public class SchedulerService {
     private void validateScheduleRequest(ScheduleRequest req) {
         if (req.getScheduleExpression() == null || req.getScheduleExpression().isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'scheduleExpression' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("scheduleExpression"));
         }
         if (req.getScheduleExpression().length() > 256) {
             throw SmithyValidationErrors.validationException(
@@ -366,12 +366,12 @@ public class SchedulerService {
         }
         if (req.getFlexibleTimeWindow() == null) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'flexibleTimeWindow' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("flexibleTimeWindow"));
         }
         String flexibleTimeWindowMode = req.getFlexibleTimeWindow().getMode();
         if (flexibleTimeWindowMode == null || flexibleTimeWindowMode.isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'flexibleTimeWindow.mode' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("flexibleTimeWindow.mode"));
         }
         flexibleTimeWindowMode = flexibleTimeWindowMode.trim();
         if (!"OFF".equals(flexibleTimeWindowMode) && !"FLEXIBLE".equals(flexibleTimeWindowMode)) {
@@ -381,7 +381,7 @@ public class SchedulerService {
         if ("FLEXIBLE".equals(flexibleTimeWindowMode)
                 && req.getFlexibleTimeWindow().getMaximumWindowInMinutes() == null) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'flexibleTimeWindow.maximumWindowInMinutes' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("flexibleTimeWindow.maximumWindowInMinutes"));
         }
         if ("OFF".equals(flexibleTimeWindowMode)
                 && req.getFlexibleTimeWindow().getMaximumWindowInMinutes() != null) {
@@ -390,15 +390,15 @@ public class SchedulerService {
         }
         if (req.getTarget() == null) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'target' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("target"));
         }
         if (req.getTarget().getArn() == null || req.getTarget().getArn().isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'target.arn' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("target.arn"));
         }
         if (req.getTarget().getRoleArn() == null || req.getTarget().getRoleArn().isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'target.roleArn' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("target.roleArn"));
         }
         if (req.getTarget().getRoleArn().length() > 1600) {
             throw SmithyValidationErrors.validationException(
@@ -415,7 +415,7 @@ public class SchedulerService {
                 && (req.getTarget().getDeadLetterConfig().getArn() == null
                 || req.getTarget().getDeadLetterConfig().getArn().isBlank())) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'target.deadLetterConfig.arn' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("target.deadLetterConfig.arn"));
         }
         String input = req.getTarget().getInput();
         if (input != null && requiresJsonInput(req.getTarget().getArn()) && !isWellFormedJson(input)) {

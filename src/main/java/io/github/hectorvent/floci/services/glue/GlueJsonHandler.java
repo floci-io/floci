@@ -455,12 +455,15 @@ public class GlueJsonHandler {
                 glueService.deleteSecurityConfiguration(request.path("Name").asText(null), region);
                 yield Response.ok(Map.of()).build();
             }
+            case "GetSecurityConfigurations" -> {
+                GlueService.Page<SecurityConfiguration> page = glueService.getSecurityConfigurations(
+                        region, readMaxResults(request), readNextToken(request));
+                yield Response.ok(pageResponse("SecurityConfigurations", page.items(), page.nextToken())).build();
+            }
             // Read-only Glue actions for resources the emulator does not model. The AWS SDK
             // expects each to return a 200 with its result key present (empty), so we emit the
             // documented empty shape rather than an InvalidAction 400 that callers can't read.
             case "ListDataQualityRulesets" -> Response.ok(Map.of("Rulesets", List.of())).build();
-            case "GetSecurityConfigurations" -> Response.ok(Map.of(
-                    "SecurityConfigurations", glueService.getSecurityConfigurations(region))).build();
             case "CreateTrigger" -> {
                 Trigger trigger = toTrigger(request);
                 trigger.setName(request.path("Name").asText(null));

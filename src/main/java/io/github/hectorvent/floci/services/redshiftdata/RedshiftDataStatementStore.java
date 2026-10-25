@@ -42,22 +42,25 @@ class RedshiftDataStatementStore {
     private final AccountAwareStorageBackend<StoredStatement> statements;
     private final Duration ttl;
     private final Clock clock;
+    private final RedshiftDataIdempotencyStore idempotency;
     // Created by the CDI lifecycle in start(); the test constructor never starts it, so unit
     // tests that build the store directly drive sweep() by hand and spawn no background thread.
     private ScheduledExecutorService sweeper;
 
     @Inject
-    RedshiftDataStatementStore(StorageFactory storageFactory, EmulatorConfig config) {
+    RedshiftDataStatementStore(StorageFactory storageFactory, EmulatorConfig config, RedshiftDataIdempotencyStore idempotency) {
         this.statements = storageFactory.create("redshift-data", "statements.json",
                 new TypeReference<Map<String, StoredStatement>>() {});
         this.ttl = Duration.ofHours(Math.max(1, config.services().redshiftData().resultTtlHours()));
         this.clock = Clock.systemUTC();
+        this.idempotency = idempotency;
     }
 
     RedshiftDataStatementStore(int resultTtlHours, Clock clock) {
         this.statements = AccountAwareStorageBackend.inMemory("000000000000");
         this.ttl = Duration.ofHours(Math.max(1, resultTtlHours));
         this.clock = clock;
+        this.idempotency = null;
     }
 
     @PostConstruct
@@ -95,8 +98,16 @@ class RedshiftDataStatementStore {
         statements.putForAccount(accountId, statement.id, statement.snapshot());
     }
 
+    void admitForAccount(String accountId, StoredStatement statement) {
+        statements.putAllAtomicallyForAccount(accountId, Map.of(statement.id, statement.snapshot()));
+    }
+
     void deleteForAccount(String accountId, String id) {
         statements.deleteForAccount(accountId, id);
+    }
+
+    void flush() {
+        statements.flush();
     }
 
     Instant expiresAt(Instant createdAt) {
@@ -119,7 +130,18 @@ class RedshiftDataStatementStore {
         statements.clear();
     }
 
+    String accountId() {
+        return statements.accountId();
+    }
+
     void sweep() {
+        if (idempotency != null) {
+            try {
+                idempotency.sweep();
+            } catch (RuntimeException failure) {
+                LOG.warnv(failure, "Failed to sweep expired Redshift Data API client-token receipts");
+            }
+        }
         Instant cutoff = Instant.now(clock).minus(ttl);
         // The sweep thread has no request context, so it iterates every account's partition
         // and deletes per account rather than through the current-account view.
@@ -142,6 +164,11 @@ class RedshiftDataStatementStore {
 
     @RegisterForReflection
     @JsonAutoDetect(fieldVisibility = JsonAutoDetect.Visibility.ANY)
+    record StoredParameter(String name, String value) {
+    }
+
+    @RegisterForReflection
+    @JsonAutoDetect(fieldVisibility = JsonAutoDetect.Visibility.ANY)
     static final class StoredStatement {
         String id;
         String sql;
@@ -153,6 +180,7 @@ class RedshiftDataStatementStore {
         String workgroupName;
         String database;
         String dbUser;
+        String sessionId;
         String resultFormat = "JSON";
         Status status;
         String error;
@@ -165,6 +193,7 @@ class RedshiftDataStatementStore {
         ArrayNode columnMetadata;
         List<ArrayNode> rows;
         List<StoredStatement> subStatements;
+        List<StoredParameter> queryParameters;
         String accountId;
         String region;
         String resourceArn;
@@ -196,6 +225,7 @@ class RedshiftDataStatementStore {
             copy.workgroupName = workgroupName;
             copy.database = database;
             copy.dbUser = dbUser;
+            copy.sessionId = sessionId;
             copy.resultFormat = resultFormat;
             copy.status = status;
             copy.error = error;
@@ -205,6 +235,7 @@ class RedshiftDataStatementStore {
             copy.hasResultSet = hasResultSet;
             copy.resultRows = resultRows;
             copy.resultSize = resultSize;
+            copy.queryParameters = queryParameters == null ? null : List.copyOf(queryParameters);
             if (withResults) {
                 copy.columnMetadata = columnMetadata;
                 copy.rows = rows == null ? null : List.copyOf(rows);

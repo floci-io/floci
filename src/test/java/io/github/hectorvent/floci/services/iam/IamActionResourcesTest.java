@@ -145,7 +145,8 @@ class IamActionResourcesTest {
                         "access-report",
                         // Derived from an id the request carries.
                         "delegation-request",
-                        // Only on actions the handler does not dispatch.
+                        // Named by an ARN the request carries, in the aws account rather than the
+                        // caller's.
                         "role-template"),
                 inUse,
                 "AWS has changed which resource types IAM actions are authorized against; "

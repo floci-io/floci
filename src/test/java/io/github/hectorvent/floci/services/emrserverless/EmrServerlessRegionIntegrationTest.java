@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.emrserverless;
 
+import io.github.hectorvent.floci.testing.EmrServerlessRequests;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -7,11 +8,9 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.EmrServerlessRequests.tagsPath;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
@@ -26,15 +25,7 @@ class EmrServerlessRegionIntegrationTest {
     }
 
     private static RequestSpecification emr(String region) {
-        return given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=TEST/20261020/" + region
-                        + "/emr-serverless/aws4_request, SignedHeaders=host;x-amz-date, Signature=test")
-                .contentType("application/json")
-                .urlEncodingEnabled(false);
-    }
-
-    private static String tagsPath(String arn) {
-        return "/tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
+        return EmrServerlessRequests.emrServerless(region).urlEncodingEnabled(false);
     }
 
     @Test
@@ -87,6 +78,31 @@ class EmrServerlessRegionIntegrationTest {
                 .when().post(tagsPath(eastArn))
                 .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
         emr("us-east-1").when().get(tagsPath(eastArn))
+                .then().statusCode(200).body("tags.team", equalTo("data"));
+    }
+
+    @Test
+    void jobRunTagsStayInTheRunsRegion() {
+        String applicationId = emr("us-east-1").body("""
+                        {"name":"regional-runs","releaseLabel":"emr-7.5.0","type":"SPARK","clientToken":"%s"}
+                        """.formatted(UUID.randomUUID()))
+                .when().post("/applications")
+                .then().statusCode(200).extract().path("applicationId");
+        String runArn = emr("us-east-1").body("""
+                        {"clientToken":"%s","executionRoleArn":"arn:aws:iam::000000000000:role/emr-serverless-job",
+                         "jobDriver":{"sparkSubmit":{"entryPoint":"s3://bucket/jobs/app.jar"}},"tags":{"team":"data"}}
+                        """.formatted(UUID.randomUUID()))
+                .when().post("/applications/" + applicationId + "/jobruns")
+                .then().statusCode(200).extract().path("arn");
+
+        emr("eu-west-1").when().get(tagsPath(runArn))
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+        emr("eu-west-1").body("{\"tags\":{\"team\":\"wrong-region\"}}")
+                .when().post(tagsPath(runArn))
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+        emr("eu-west-1").when().delete(tagsPath(runArn) + "?tagKeys=team")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+        emr("us-east-1").when().get(tagsPath(runArn))
                 .then().statusCode(200).body("tags.team", equalTo("data"));
     }
 }

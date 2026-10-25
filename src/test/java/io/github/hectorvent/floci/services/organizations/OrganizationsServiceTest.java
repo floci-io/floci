@@ -12,9 +12,12 @@ import io.github.hectorvent.floci.services.organizations.model.OrganizationPolic
 import io.github.hectorvent.floci.services.organizations.model.OrganizationalUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -59,7 +62,7 @@ class OrganizationsServiceTest {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
 
         assertTrue(organization.getId().matches("o-[a-z0-9]{10}"), organization.getId());
-        assertTrue(organization.getRoot().getId().matches("r-[a-z0-9]{4}"), organization.getRoot().getId());
+        assertTrue(organization.getRoot().getId().matches("r-[0-9a-z]{4}"), organization.getRoot().getId());
 
         String rootSuffix = organization.getRoot().getId().substring(2);
         OrganizationalUnit unit =
@@ -75,6 +78,128 @@ class OrganizationsServiceTest {
                 service.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, false);
         assertTrue(status.getId().matches("car-[a-z0-9]{8}"), status.getId());
         assertTrue(status.getAccountId().matches("\\d{12}"), status.getAccountId());
+    }
+
+    /** The (member account, role name, management account) triples a provisioner received. */
+    private static final class RecordedProvisions implements AccountAccessRoleProvisioner {
+        final List<String> calls = new ArrayList<>();
+
+        @Override
+        public void provision(String memberAccountId, String roleName, String managementAccountId) {
+            calls.add(memberAccountId + "|" + roleName + "|" + managementAccountId);
+        }
+    }
+
+    private OrganizationsService serviceWithProvisioner(RecordedProvisions provisioner) {
+        return new OrganizationsService(
+                new ObjectMapper(),
+                REGION_RESOLVER,
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT),
+                true,
+                null,
+                provisioner);
+    }
+
+    @Test
+    void createAccountProvisionsTheDefaultAccountAccessRole() {
+        RecordedProvisions provisioner = new RecordedProvisions();
+        OrganizationsService provisioning = serviceWithProvisioner(provisioner);
+        provisioning.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        CreateAccountStatus status = provisioning.createAccount(
+                MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, null, false);
+
+        assertEquals("SUCCEEDED", status.getState());
+        assertEquals(List.of(status.getAccountId() + "|OrganizationAccountAccessRole|" + MANAGEMENT_ACCOUNT),
+                provisioner.calls);
+    }
+
+    @Test
+    void createAccountWithARoleNameProvisionsThatName() {
+        RecordedProvisions provisioner = new RecordedProvisions();
+        OrganizationsService provisioning = serviceWithProvisioner(provisioner);
+        provisioning.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        CreateAccountStatus status = provisioning.createAccount(
+                MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, "CustomAccessRole", false);
+
+        assertEquals(status.getAccountId() + "|CustomAccessRole|" + MANAGEMENT_ACCOUNT,
+                provisioner.calls.get(0));
+    }
+
+    @Test
+    void createAccountWithAnInvalidRoleNameIsRejected() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        for (String roleName : List.of("bad name", "", "x".repeat(65))) {
+            AwsException error = assertThrows(AwsException.class, () -> service.createAccount(
+                    MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, roleName, false));
+            assertEquals("InvalidInputException", error.getErrorCode());
+            assertEquals("INVALID_PATTERN", error.getExtendedData().get("Reason"));
+        }
+
+        AwsException reserved = assertThrows(AwsException.class, () -> service.createAccount(
+                MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, "AWSServiceRoleForOrganizations", false));
+        assertEquals("InvalidInputException", reserved.getErrorCode());
+        assertEquals("INVALID_ROLE_NAME", reserved.getExtendedData().get("Reason"));
+    }
+
+    @Test
+    void createAccountWithADuplicateEmailProvisionsNoRole() {
+        RecordedProvisions provisioner = new RecordedProvisions();
+        OrganizationsService provisioning = serviceWithProvisioner(provisioner);
+        provisioning.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        provisioning.createAccount(MANAGEMENT_ACCOUNT, "dev@example.com", "Dev", null, null, false);
+        int provisionedSoFar = provisioner.calls.size();
+
+        CreateAccountStatus failed = provisioning.createAccount(
+                MANAGEMENT_ACCOUNT, "dev@example.com", "Dev2", null, null, false);
+
+        assertEquals("FAILED", failed.getState());
+        assertEquals(provisionedSoFar, provisioner.calls.size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"INSPECTOR_POLICY", "UPGRADE_ROLLOUT_POLICY", "BEDROCK_POLICY",
+            "S3_POLICY", "NETWORK_SECURITY_DIRECTOR_POLICY", "GUARDDUTY_POLICY"})
+    void managementPolicyTypesSupportTheExistingLifecycle(String type) {
+        Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String rootId = organization.getRoot().getId();
+        AwsException disabled = assertThrows(AwsException.class, () -> service.createPolicy(
+                MANAGEMENT_ACCOUNT, "{}", "description", "Policy", type, null));
+        assertEquals("PolicyTypeNotEnabledException", disabled.getErrorCode());
+
+        service.enablePolicyType(MANAGEMENT_ACCOUNT, rootId, type);
+        OrganizationPolicy policy = service.createPolicy(MANAGEMENT_ACCOUNT, "{}", "description", "Policy", type, null);
+        assertEquals(type, policy.getType());
+        assertEquals(List.of(policy), service.listPolicies(MANAGEMENT_ACCOUNT, type));
+        service.attachPolicy(MANAGEMENT_ACCOUNT, policy.getId(), rootId);
+        assertEquals(List.of(policy), service.listPoliciesForTarget(MANAGEMENT_ACCOUNT, rootId, type));
+        OrganizationsService.EffectivePolicy effective = service.describeEffectivePolicy(
+                MANAGEMENT_ACCOUNT, type, MANAGEMENT_ACCOUNT);
+        assertEquals(type, effective.policyType());
+        assertEquals("{}", effective.policyContent());
+        assertEquals(MANAGEMENT_ACCOUNT, effective.targetId());
+        assertTrue(service.listAccountsWithInvalidEffectivePolicy(MANAGEMENT_ACCOUNT, type).isEmpty());
+        service.detachPolicy(MANAGEMENT_ACCOUNT, policy.getId(), rootId);
+        assertTrue(service.listPoliciesForTarget(MANAGEMENT_ACCOUNT, rootId, type).isEmpty());
+        service.deletePolicy(MANAGEMENT_ACCOUNT, policy.getId());
+        assertTrue(service.listPolicies(MANAGEMENT_ACCOUNT, type).isEmpty());
+        service.disablePolicyType(MANAGEMENT_ACCOUNT, rootId, type);
+        assertTrue(organization.getRoot().getPolicyTypes().stream().noneMatch(entry -> type.equals(entry.getType())));
+    }
+
+    @Test
+    void guardDutyWithNoAttachedPolicyReportsTheMissingEffectivePolicy() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        AwsException missing = assertThrows(AwsException.class, () -> service.describeEffectivePolicy(
+                MANAGEMENT_ACCOUNT, "GUARDDUTY_POLICY", MANAGEMENT_ACCOUNT));
+        assertEquals("EffectivePolicyNotFoundException", missing.getErrorCode());
     }
 
     @Test

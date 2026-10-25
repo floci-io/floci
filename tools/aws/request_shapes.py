@@ -1,10 +1,12 @@
 """Shared generator for the vendored request shapes a service's request check reads.
 
-`regen_dynamodb_shapes.py`, `regen_sesv2_shapes.py` and `regen_ecs_shapes.py` each name a botocore
-model and an output file and hand the rest to `main()`. `regen_resource_groups_shapes.py` and
+`regen_dynamodb_shapes.py`, `regen_sesv2_shapes.py`, `regen_apigateway_shapes.py` and
+`regen_ecs_shapes.py` each name a botocore model and an output file and hand the rest to
+`main()`. `regen_resource_groups_shapes.py` and
 `regen_ecr_shapes.py` vendor constraints as well, through `build_constraints()`. The output keeps only what `RequestShapeModel` reads: the input
 shape of every operation, reduced to the members carried in the JSON body, and for every shape
 reachable from one, its type and the shapes of its members, list elements or map values.
+`regen_emr_serverless_shapes.py` keeps every operation's output shape too, with `outputs=True`.
 
 Members bound to the URI, the query string or a header are left out: they never reach the body.
 A model without such members, as DynamoDB's, comes out whole.
@@ -30,7 +32,7 @@ def load_model(data: Path, model: Path) -> dict:
     return load_json_model(source)
 
 
-def build(model: dict, provenance: str, generator: str) -> dict:
+def build(model: dict, provenance: str, generator: str, outputs: bool = False) -> dict:
     shapes = model["shapes"]
     kept: dict[str, dict] = {}
 
@@ -59,6 +61,8 @@ def build(model: dict, provenance: str, generator: str) -> dict:
         if "input" in operation:
             operations[name] = operation["input"]["shape"]
             keep(operation["input"]["shape"], body_only=True)
+        if outputs and "output" in operation:
+            keep(operation["output"]["shape"], body_only=True)
 
     return {
         "_source": {
@@ -114,7 +118,8 @@ def generator_name(script: str) -> str:
     return path.relative_to(REPO_ROOT).as_posix() if path.is_relative_to(REPO_ROOT) else path.name
 
 
-def main(argv: list[str] | None, *, script: str, model: Path, output: Path, description: str) -> int:
+def main(argv: list[str] | None, *, script: str, model: Path, output: Path, description: str,
+         outputs: bool = False) -> int:
     parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="exit 1 when the vendored file differs from a fresh generation")
     parser.add_argument("--botocore-data", type=Path, help="botocore data directory")
@@ -122,7 +127,7 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path, desc
     args = parser.parse_args(argv)
 
     data, provenance = resolve_botocore_data(args.botocore_data)
-    fresh = render(build(load_model(data, model), provenance, generator_name(script)))
+    fresh = render(build(load_model(data, model), provenance, generator_name(script), outputs))
 
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""

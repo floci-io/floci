@@ -1,7 +1,11 @@
 package io.github.hectorvent.floci.services.msk;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -18,14 +22,21 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.Closeable;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
@@ -40,6 +51,8 @@ public class RedpandaManager {
 
     // Redpanda's Admin API exposes readiness at /v1/status/ready. /ready always returns 404
     private static final String ADMIN_READY_PATH = "/v1/status/ready";
+    private static final String ADMIN_SCRAM_USERS_PATH = "/v1/security/users";
+    private static final String ADMIN_SCRAM_USER_PATH_TEMPLATE = "/v1/security/users/%s";
 
     private record StartedBroker(int hostPort, ContainerInfo info) {
     }
@@ -51,6 +64,7 @@ public class RedpandaManager {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final PortAllocator portAllocator;
+    private final ObjectMapper objectMapper;
     private final Map<String, Closeable> logStreams = new ConcurrentHashMap<>();
     // Container mode only, keyed like logStreams: the host port the host listener is published
     // on (not recoverable from the bootstrap string, which may be the Docker-network address).
@@ -64,7 +78,8 @@ public class RedpandaManager {
                            ContainerDetector containerDetector,
                            EmulatorConfig config,
                            RegionResolver regionResolver,
-                           PortAllocator portAllocator) {
+                           PortAllocator portAllocator,
+                           ObjectMapper objectMapper) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -72,6 +87,7 @@ public class RedpandaManager {
         this.config = config;
         this.regionResolver = regionResolver;
         this.portAllocator = portAllocator;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -262,7 +278,7 @@ public class RedpandaManager {
         }
 
         try {
-            String adminUrl = adminReadyUrl(cluster);
+            String adminUrl = adminBaseUrl(cluster) + ADMIN_READY_PATH;
             HttpURLConnection conn = (HttpURLConnection) URI.create(adminUrl).toURL().openConnection();
             conn.setRequestMethod("GET");
             conn.setConnectTimeout(1000);
@@ -288,7 +304,7 @@ public class RedpandaManager {
     }
 
     /**
-     * The broker's admin readiness URL, resolved from the persisted container id the same way
+     * The broker's admin base URL, resolved from the persisted container id the same way
      * container start resolves endpoints: the bound host port in native mode, the container's
      * reachable address in container mode. Nothing is kept in memory, so it still works for a
      * cluster left in CREATING by a Floci process that was killed and restarted, and an IP is
@@ -298,10 +314,10 @@ public class RedpandaManager {
      * resolved the Kafka endpoint: in container mode the broker publishes the host listener, so
      * it is on the default bridge as well, and the bridge address is not one Floci can reach.
      */
-    String adminReadyUrl(MskCluster cluster) {
+    String adminBaseUrl(MskCluster cluster) {
         String network = containerBuilder.resolveDockerNetwork(config.services().dockerNetwork()).orElse(null);
         EndpointInfo admin = lifecycleManager.resolveEndpoint(cluster.getContainerId(), ADMIN_PORT, network);
-        return "http://" + admin.host() + ":" + admin.port() + ADMIN_READY_PATH;
+        return "http://" + admin.host() + ":" + admin.port();
     }
 
     private void releaseKafkaHostPort(MskCluster cluster) {
@@ -377,4 +393,105 @@ public class RedpandaManager {
         return cluster.getDockerVolumeName();
     }
 
+    public void createUser(MskCluster cluster, String username, String password) {
+        byte[] payload;
+        try {
+            // Amazon MSK supports only SCRAM-SHA-512 for SCRAM authentication
+            payload = objectMapper.writeValueAsBytes(Map.of(
+                "username", username, "password", password, "algorithm", "SCRAM-SHA-512"));
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InternalServerErrorException", "Failed to serialize SCRAM credentials.", 500);
+        }
+        String encodedUsername = URLEncoder.encode(username, StandardCharsets.UTF_8).replace("+", "%20");
+        AdminResponse response = listUsers(cluster).contains(username)
+            ? sendAdminRequest(cluster, ADMIN_SCRAM_USER_PATH_TEMPLATE.formatted(encodedUsername), "PUT", payload)
+            : sendAdminRequest(cluster, ADMIN_SCRAM_USERS_PATH, "POST", payload);
+        
+        int status = response.status();
+        if (status < 200 || status >= 300) {
+            throw new AwsException("InternalServerErrorException",
+                "Kafka user creation failed with HTTP status " + status + ".", 500);
+        }
+    }
+
+    public void deleteUser(MskCluster cluster, String username) {
+        String encodedUsername = URLEncoder.encode(username, StandardCharsets.UTF_8).replace("+", "%20");
+        AdminResponse response = sendAdminRequest(cluster, ADMIN_SCRAM_USER_PATH_TEMPLATE.formatted(encodedUsername), "DELETE", null);
+        int status = response.status();
+        if (status != 404 && (status < 200 || status >= 300)) {
+            throw new AwsException("InternalServerErrorException",
+                "Kafka user deletion failed with HTTP status " + status + ".", 500);
+        }
+    }
+
+    public Set<String> listUsers(MskCluster cluster) {
+        AdminResponse response = sendAdminRequest(cluster, ADMIN_SCRAM_USERS_PATH, "GET", null);
+        if (response.status() != 200) {
+            throw new AwsException("InternalServerErrorException", "Unable to list Kafka SCRAM users.", 500);
+        }
+        JsonNode users;
+        try {
+            users = objectMapper.readTree(response.body());
+        } catch (IOException e) {
+            throw new AwsException("InternalServerErrorException", "Invalid Kafka user list response.", 500);
+        }
+        if (users == null || !users.isArray()) {
+            throw new AwsException("InternalServerErrorException", "Invalid Kafka user list response.", 500);
+        }
+        Set<String> result = new LinkedHashSet<>();
+        for (JsonNode user : users) {
+            if (user.isTextual()) {
+                result.add(user.textValue());
+            }
+        }
+        return result;
+    }
+
+    private record AdminResponse(int status, byte[] body) {
+    }
+
+    AdminResponse sendAdminRequest(MskCluster cluster, String path, String method, byte[] payload) {
+        if (cluster.getContainerId() == null || cluster.getBootstrapBrokers() == null) {
+            throw new AwsException("ServiceUnavailableException", "Cluster has no backing Kafka broker.", 503);
+        }
+        String adminUrl;
+        try {
+            adminUrl = adminBaseUrl(cluster);
+        } catch (RuntimeException e) {
+            LOG.warnv("Failed to resolve the admin endpoint of container {0} for MSK cluster {1}: {2}",
+                    cluster.getContainerId(), cluster.getClusterName(), e.getMessage());
+            throw new AwsException("ServiceUnavailableException", "Cluster has no backing Kafka broker.", 503);
+        }
+        String url = path.startsWith("/") ? adminUrl + path : adminUrl + "/" + path;
+        try {
+            HttpURLConnection connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
+            try {
+                connection.setRequestMethod(method);
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                if (payload != null) {
+                    connection.setRequestProperty("Content-Type", "application/json");
+                    connection.setDoOutput(true);
+                    connection.setFixedLengthStreamingMode(payload.length);
+                    try (OutputStream output = connection.getOutputStream()) {
+                        output.write(payload);
+                    }
+                }
+                int status = connection.getResponseCode();
+                byte[] body = new byte[0];
+                InputStream responseStream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+                if (responseStream != null) {
+                    try (InputStream input = responseStream) {
+                        body = input.readAllBytes();
+                    }
+                }
+                return new AdminResponse(status, body);
+            } finally {
+                connection.disconnect();
+            }
+        } catch (IOException e) {
+            // Do not include the broker response or exception text: either can contain credentials.
+            throw new AwsException("ServiceUnavailableException", "Unable to contact the Kafka management API.", 503);
+        }
+    }
 }

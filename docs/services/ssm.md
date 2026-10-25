@@ -33,7 +33,13 @@
 filters combine with AND. Filtering also applies to public AMI parameters and
 respects `Path`, `Recursive`, and region selection. Unknown or missing keys and keys
 not allowed for this action are rejected with `InvalidFilterKey`.
-`Label` filters accept only `Equals`, but label matching and pagination are not currently modeled.
+`Label` filters accept only `Equals` and return the stored versions carrying the requested
+labels, including older versions. Moving or removing a label changes subsequent results.
+The same OR/AND rules apply to label filters, and a version matching several requested
+labels appears only once. Type and KeyId filters match the labeled version's metadata.
+Public AMI parameters have no stored labels and are excluded from label queries.
+`MaxResults` and `NextToken` paginate the matching versions in name/version order; queries
+without a label filter continue to return the latest version of each parameter.
 
 ### Run Command
 

@@ -9,10 +9,12 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionRevision;
@@ -27,9 +29,11 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -40,6 +44,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -53,6 +59,7 @@ class LambdaWebServiceTest {
     private static final byte[] NOT_A_ZIP = "this is not a zip\n".getBytes(StandardCharsets.UTF_8);
 
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+    private final ServiceCallAuthorizer serviceCalls = mock(ServiceCallAuthorizer.class);
 
     @TempDir
     Path storageDir;
@@ -70,10 +77,15 @@ class LambdaWebServiceTest {
     }
 
     private LambdaWebService service(StorageFactory storage, String baseUrl, S3Service s3Service) {
+        return service(storage, baseUrl, s3Service, mock(LambdaWebExecutionRole.class));
+    }
+
+    private LambdaWebService service(StorageFactory storage, String baseUrl, S3Service s3Service,
+                                     LambdaWebExecutionRole executionRole) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn(baseUrl);
         LambdaWebService service = new LambdaWebService(new RegionResolver(REGION, ACCOUNT_ID), storage, config,
-                s3Service, new LambdaWebCode(storageDir.resolve("code")), mapper, null);
+                s3Service, new LambdaWebCode(storageDir.resolve("code")), mapper, null, executionRole, serviceCalls);
         service.initializeStorage();
         return service;
     }
@@ -84,6 +96,12 @@ class LambdaWebServiceTest {
         build.putObject("codeConfig").putObject("s3Object").put("bucket", "code").put("key", "app.zip");
         build.putObject("runtimeConfig").put("runtime", "nodejs24.x");
         config.putObject("serviceConfig").put("executionRoleArn", ROLE).put("timeoutSeconds", timeoutSeconds);
+        return config;
+    }
+
+    private ObjectNode revisionConfig(String executionRoleArn) {
+        ObjectNode config = revisionConfig(30);
+        ((ObjectNode) config.get("serviceConfig")).put("executionRoleArn", executionRoleArn);
         return config;
     }
 
@@ -274,6 +292,43 @@ class LambdaWebServiceTest {
         update.putObject("throttleConfig").put("rateLimit", 150);
         assertEquals("ResourceNotFoundException",
                 error(() -> service.updateEndpoint(REGION, "missing", "dev", update)).getErrorCode());
+    }
+
+    @Test
+    void executionRoleIsCheckedInTheOrderAwsChecksIt() {
+        String missingRole = "arn:aws:iam::000000000000:role/missing";
+        LambdaWebExecutionRole executionRole = mock(LambdaWebExecutionRole.class);
+        doThrow(new AwsException("ValidationException", "cannot be assumed", 400))
+                .when(executionRole).requireAssumable(REGION, missingRole);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", null, executionRole);
+        service.createFunction(REGION, createRequest("app"));
+
+        ObjectNode otherAccount = revisionConfig("arn:aws:iam::111122223333:role/web");
+        ((ObjectNode) otherAccount.get("serviceConfig")).putObject("environmentVariables").put("AWS_REGION", "x");
+        assertEquals("Invalid function name or ARN 'bad.name'",
+                message(() -> service.createRevision(REGION, "bad.name", otherAccount)));
+        AwsException denied = error(() -> service.createRevision(REGION, "missing", otherAccount));
+        assertEquals("AccessDeniedException", denied.getErrorCode());
+        assertEquals(403, denied.getHttpStatus());
+        assertEquals("Cross-account pass role is not allowed.", denied.getMessage());
+
+        ObjectNode reserved = revisionConfig(missingRole);
+        ((ObjectNode) reserved.get("serviceConfig")).putObject("environmentVariables").put("AWS_REGION", "x");
+        assertEquals("The environmentVariables cannot contain reserved keys. The request specified the reserved keys"
+                + " [AWS_REGION].", message(() -> service.createRevision(REGION, "app", reserved)));
+
+        ObjectNode runtime = revisionConfig(missingRole);
+        ((ObjectNode) runtime.path("buildConfig").path("runtimeConfig")).put("runtime", "nodejs22.x");
+        assertEquals("cannot be assumed", message(() -> service.createRevision(REGION, "missing", runtime)));
+        assertEquals("cannot be assumed", message(() -> service.createRevision(REGION, "app", runtime)));
+
+        ObjectNode existing = createRequest("app");
+        existing.set("revisionConfig", revisionConfig(missingRole));
+        assertEquals("cannot be assumed", message(() -> service.createFunction(REGION, existing)));
+        ObjectNode multiRegion = createRequest("other");
+        multiRegion.set("revisionConfig", revisionConfig(missingRole));
+        ((ObjectNode) multiRegion.get("endpointConfig")).put("endpointType", "MultiRegion");
+        assertEquals("cannot be assumed", message(() -> service.createFunction(REGION, multiRegion)));
     }
 
     @Test
@@ -604,6 +659,28 @@ class LambdaWebServiceTest {
     }
 
     @Test
+    void theGlobalDomainIsServedInTheDefaultRegionWhenTheEndpointHasIt() {
+        LambdaWebService service = service();
+        service.createFunction("us-west-2", createRequest("app"));
+        String revisionId = service.getEndpoint("us-west-2", "app", "dev").revisionWeights.get(0).revisionId;
+        String near = service.createEndpoint("us-west-2", "app", multiRegion("near", revisionId, REGION)).domainName;
+        String far = service.createEndpoint("us-west-2", "app", multiRegion("far", revisionId, "eu-west-1")).domainName;
+
+        LambdaWebService.WebFunctionTarget target = service.locate(near).orElseThrow();
+        assertEquals("us-west-2", target.region());
+        assertEquals(REGION, target.servingRegion());
+        assertEquals("us-west-2", service.locate(far).orElseThrow().servingRegion());
+    }
+
+    private ObjectNode multiRegion(String name, String revisionId, String region) {
+        ObjectNode request = mapper.createObjectNode().put("endpointName", name).put("endpointType", "MultiRegion")
+                .put("authType", "ApplicationManaged");
+        request.putArray("regions").add(region);
+        request.putArray("revisionWeights").addObject().put("revisionId", revisionId).put("weight", 100);
+        return request;
+    }
+
+    @Test
     void eachRevisionKeepsTheCodeTheObjectHadWhenItWasCreated() throws IOException {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
@@ -845,6 +922,97 @@ class LambdaWebServiceTest {
         }
     }
 
+    @Test
+    void theNullVersionAsTheLatestIsRefusedBeforeTheSize() {
+        S3Service s3 = mock(S3Service.class);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        byte[] zip = LambdaWebZips.indexJs("");
+        when(s3.openObject("code", "app.zip", null)).thenReturn(nullVersion(object(zip, LambdaWebCode.MAX_BYTES + 1)));
+
+        AwsException create = error(() -> service.createFunction(REGION, createRequest("app")));
+        assertEquals("ValidationException", create.getErrorCode());
+        assertEquals(400, create.getHttpStatus());
+        assertEquals("You must enable S3 versioning for your S3 bucket when S3ObjectStorageMode is set to REFERENCE.",
+                create.getMessage());
+        assertEquals("The function arn:aws:lambda:us-east-1:000000000000:web-function/app does not exist.",
+                message(() -> service.getFunction(REGION, "app")));
+
+        ObjectNode pinned = createRequest("app");
+        ((ObjectNode) pinned.path("revisionConfig").path("buildConfig").path("codeConfig").path("s3Object"))
+                .put("versionId", "null");
+        when(s3.openObject("code", "app.zip", "null")).thenReturn(nullVersion(object(zip)));
+        assertNull(service.createFunction(REGION, pinned).revisions.values().iterator().next().failureReason);
+    }
+
+    @Test
+    void lambdaMustBeAllowedToReadTheObjectVersionAfterTheSizeCheck() throws IOException {
+        S3Service s3 = mock(S3Service.class);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        when(serviceCalls.authorize(eq("lambda"), eq("s3:GetObjectVersion"), eq("arn:aws:s3:::code/app.zip"),
+                startsWith(ARN + "/revision/rev-"), eq(ACCOUNT_ID), eq(Map.of("s3:versionid", List.of("v1")))))
+                .thenReturn(Decision.DENY);
+        when(s3.openObject("code", "app.zip", null)).thenReturn(object(new byte[0]));
+
+        AwsException create = error(() -> service.createFunction(REGION, createRequest("app")));
+        assertEquals("ValidationException", create.getErrorCode());
+        assertEquals(400, create.getHttpStatus());
+        assertEquals("Lambda service principal lambda.amazonaws.com does not have s3:GetObject and s3:GetObjectVersion"
+                + " permission on s3://code/app.zip. Update the bucket policy to grant the Lambda service principal"
+                + " access and retry.", create.getMessage());
+        assertEquals("The function arn:aws:lambda:us-east-1:000000000000:web-function/app does not exist.",
+                message(() -> service.getFunction(REGION, "app")));
+        Files.createDirectories(storageDir.resolve("code"));
+        try (Stream<Path> copies = Files.walk(storageDir.resolve("code"))) {
+            assertEquals(0, copies.filter(Files::isRegularFile).count());
+        }
+
+        when(s3.openObject("code", "app.zip", null))
+                .thenReturn(object(LambdaWebZips.indexJs(""), LambdaWebCode.MAX_BYTES + 1));
+        assertEquals("Zipped size must be smaller than 536870912 bytes",
+                message(() -> service.createFunction(REGION, createRequest("app"))));
+    }
+
+    @Test
+    void anActiveRevisionPastFiftyDeletesTheOldestUnusedOnes() {
+        S3Service s3 = mock(S3Service.class);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        byte[] zip = LambdaWebZips.indexJs("");
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(zip));
+        String pinned = service.createFunction(REGION, createRequest("app")).revisions.keySet().iterator().next();
+        ObjectNode pin = endpointConfig("pin").put("autoDeploymentMode", "Disabled");
+        pin.putArray("revisionWeights").addObject().put("revisionId", pinned).put("weight", 100);
+        service.createEndpoint(REGION, "app", pin);
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(NOT_A_ZIP));
+        String failed = service.createRevision(REGION, "app", revisionConfig(30)).revisionId;
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(zip));
+        List<String> active = new ArrayList<>();
+        for (int i = 0; i < 48; i++) {
+            active.add(service.createRevision(REGION, "app", revisionConfig(30)).revisionId);
+        }
+        assertEquals(50, service.getFunction(REGION, "app").revisions.size());
+
+        service.createRevision(REGION, "app", revisionConfig(30));
+        Set<String> kept = service.getFunction(REGION, "app").revisions.keySet();
+        assertEquals(50, kept.size());
+        assertFalse(kept.contains(failed));
+        assertTrue(kept.contains(pinned));
+
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(NOT_A_ZIP));
+        service.createRevision(REGION, "app", revisionConfig(30));
+        assertEquals(51, service.getFunction(REGION, "app").revisions.size(), "a Failed revision cleans up nothing");
+
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(zip));
+        service.createRevision(REGION, "app", revisionConfig(30));
+        kept = service.getFunction(REGION, "app").revisions.keySet();
+        assertEquals(50, kept.size());
+        assertFalse(kept.contains(active.get(0)));
+        assertFalse(kept.contains(active.get(1)));
+        assertTrue(kept.contains(active.get(2)));
+        LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
+        assertFalse(Files.exists(code.file(ACCOUNT_ID, REGION, "app", active.get(0))));
+        assertTrue(Files.exists(code.file(ACCOUNT_ID, REGION, "app", active.get(2))));
+    }
+
     private ObjectNode stateFilter(String state) {
         ObjectNode request = mapper.createObjectNode();
         request.putArray("filters").addObject().put("name", "state").putArray("values").add(state);
@@ -852,14 +1020,22 @@ class LambdaWebServiceTest {
     }
 
     private static S3Service.ObjectRead object(byte[] bytes) {
-        return new S3Service.ObjectRead(new S3Object("code", "app.zip", bytes, "application/zip"),
-                new ByteArrayInputStream(bytes));
+        return versioned(new S3Object("code", "app.zip", bytes, "application/zip"), bytes);
     }
 
     /** An object S3 reports as {@code size} bytes, whatever its body. */
     private static S3Service.ObjectRead object(byte[] bytes, long size) {
-        return new S3Service.ObjectRead(new S3Object("code", "app.zip", size, "application/zip", "etag"),
-                new ByteArrayInputStream(bytes));
+        return versioned(new S3Object("code", "app.zip", size, "application/zip", "etag"), bytes);
+    }
+
+    private static S3Service.ObjectRead versioned(S3Object object, byte[] bytes) {
+        object.setVersionId("v1");
+        return new S3Service.ObjectRead(object, new ByteArrayInputStream(bytes));
+    }
+
+    private static S3Service.ObjectRead nullVersion(S3Service.ObjectRead read) {
+        read.object().setVersionId(null);
+        return read;
     }
 
     private static final class MemoryStorageFactory extends StorageFactory {

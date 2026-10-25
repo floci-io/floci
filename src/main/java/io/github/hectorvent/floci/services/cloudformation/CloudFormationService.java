@@ -1414,7 +1414,7 @@ public class CloudFormationService implements ResourceProvider {
     private static void validateContinueUpdateRollback(String stackNameOrArn, List<String> resourcesToSkip) {
         List<String> violations = new ArrayList<>();
         if (stackNameOrArn == null) {
-            violations.add("Value null at 'stackName' failed to satisfy constraint: Member must not be null");
+            violations.add(SmithyValidationErrors.notNull("stackName"));
         } else {
             if (stackNameOrArn.isEmpty()) {
                 violations.add("Value '' at 'stackName' failed to satisfy constraint:"

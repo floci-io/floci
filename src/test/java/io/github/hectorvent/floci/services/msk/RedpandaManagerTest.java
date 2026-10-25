@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.msk;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -26,11 +28,14 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -101,7 +106,7 @@ class RedpandaManagerTest {
 
         ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
         manager = new RedpandaManager(containerBuilder, lifecycleManager, logStreamer, containerDetector,
-                config, regionResolver, portAllocator);
+                config, regionResolver, portAllocator, new ObjectMapper());
 
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
         lenient().when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
@@ -181,6 +186,183 @@ class RedpandaManagerTest {
         return adminServer.getAddress().getPort();
     }
 
+    private MskCluster clusterWithAdminPort(int adminHostPort) {
+        when(lifecycleManager.resolveEndpoint("container-id", RedpandaManager.ADMIN_PORT, null))
+                .thenReturn(new EndpointInfo("localhost", adminHostPort));
+        MskCluster cluster = newCluster();
+        cluster.setContainerId("container-id");
+        cluster.setBootstrapBrokers("localhost:19092");
+        return cluster;
+    }
+
+    @Test
+    void createScramUser() throws Exception {
+        int port = startFakeAdminServer();
+        AtomicReference<String> body = new AtomicReference<>();
+        AtomicReference<String> method = new AtomicReference<>();
+        adminServer.createContext("/v1/security/users", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                byte[] users = "[]".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, users.length);
+                exchange.getResponseBody().write(users);
+                exchange.close();
+                return;
+            }
+            method.set(exchange.getRequestMethod());
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+
+        manager.createUser(clusterWithAdminPort(port), "alice", "password");
+
+        assertEquals("POST", method.get());
+        assertEquals(Map.of("username", "alice", "password", "password", "algorithm", "SCRAM-SHA-512"),
+                new ObjectMapper().readValue(body.get(), Map.class));
+    }
+
+    @Test
+    void createScramUserUpdatesExistingUser() throws Exception {
+        int port = startFakeAdminServer();
+        AtomicReference<String> updatePath = new AtomicReference<>();
+        AtomicReference<String> updateBody = new AtomicReference<>();
+        AtomicReference<String> updateMethod = new AtomicReference<>();
+        adminServer.createContext("/v1/security/users", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                byte[] users = "[\"alice /+\"]".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, users.length);
+                exchange.getResponseBody().write(users);
+            } else {
+                updateMethod.set(exchange.getRequestMethod());
+                updatePath.set(exchange.getRequestURI().getRawPath());
+                updateBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+                exchange.sendResponseHeaders(200, -1);
+            }
+            exchange.close();
+        });
+
+        manager.createUser(clusterWithAdminPort(port), "alice /+", "new-password");
+
+        assertEquals("/v1/security/users/alice%20%2F%2B", updatePath.get());
+        assertEquals("PUT", updateMethod.get());
+        assertEquals("new-password", new ObjectMapper().readTree(updateBody.get()).get("password").textValue());
+    }
+
+    @Test
+    void createScramUserSurfacesBrokerErrorsWithoutLeakingResponse() throws Exception {
+        int port = startFakeAdminServer();
+        adminServer.createContext("/v1/security/users", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                byte[] users = "[]".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, users.length);
+                exchange.getResponseBody().write(users);
+                exchange.close();
+                return;
+            }
+            byte[] body = "sensitive-password".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(500, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> manager.createUser(clusterWithAdminPort(port), "alice", "sensitive-password"));
+
+        assertEquals("InternalServerErrorException", error.getErrorCode());
+        assertFalse(error.getMessage().contains("sensitive-password"));
+    }
+
+    @Test
+    void deleteScramUser() throws Exception {
+        int port = startFakeAdminServer();
+        AtomicReference<String> path = new AtomicReference<>();
+        AtomicReference<String> method = new AtomicReference<>();
+        adminServer.createContext("/v1/security/users", exchange -> {
+            path.set(exchange.getRequestURI().getRawPath());
+            method.set(exchange.getRequestMethod());
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+
+        manager.deleteUser(clusterWithAdminPort(port), "alice /+");
+
+        assertEquals("DELETE", method.get());
+        assertEquals("/v1/security/users/alice%20%2F%2B", path.get());
+    }
+
+    @Test
+    void deleteScramUserToleratesAlreadyDeletedUser() throws Exception {
+        int port = startFakeAdminServer();
+        adminServer.createContext("/v1/security/users", exchange -> {
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        });
+
+        assertDoesNotThrow(() -> manager.deleteUser(clusterWithAdminPort(port), "alice"));
+    }
+
+    @Test
+    void checkScramUserExistsReturnsTrueWhenPresent() throws Exception {
+        int port = startFakeAdminServer();
+        adminServer.createContext("/v1/security/users", exchange -> {
+            byte[] users = "[\"alice\", \"bob\"]".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, users.length);
+            exchange.getResponseBody().write(users);
+            exchange.close();
+        });
+
+        MskCluster cluster = clusterWithAdminPort(port);
+        assertTrue(manager.listUsers(cluster).contains("alice"));
+    }
+
+    @Test
+    void checkScramUserExistsReturnsFalseWhenUserNotFound() throws Exception {
+        int port = startFakeAdminServer();
+        adminServer.createContext("/v1/security/users", exchange -> {
+            byte[] users = "[\"bob\"]".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, users.length);
+            exchange.getResponseBody().write(users);
+            exchange.close();
+        });
+
+        MskCluster cluster = clusterWithAdminPort(port);
+        assertFalse(manager.listUsers(cluster).contains("alice"));
+    }
+
+    @Test
+    void deleteScramUserReportsBrokerFailure() throws Exception {
+        int port = startFakeAdminServer();
+        adminServer.createContext("/v1/security/users", exchange -> {
+            exchange.sendResponseHeaders(503, -1);
+            exchange.close();
+        });
+        MskCluster cluster = clusterWithAdminPort(port);
+        AwsException error = assertThrows(AwsException.class, () -> manager.deleteUser(cluster, "alice"));
+        assertEquals("InternalServerErrorException", error.getErrorCode());
+    }
+
+    @Test
+    void sendAdminRequestRejectsClusterWithoutBroker() {
+        AwsException error = assertThrows(AwsException.class, 
+            () -> manager.sendAdminRequest(newCluster(), "/v1/security/users", "GET", null));
+        assertEquals("ServiceUnavailableException", error.getErrorCode());
+    }
+    
+    @Test
+    void adminRequestsReportMissingBrokerWhenEndpointResolutionFails() {
+        when(lifecycleManager.resolveEndpoint("container-fail", RedpandaManager.ADMIN_PORT, null))
+                .thenThrow(new NotFoundException("container not found"));
+
+        MskCluster cluster = newCluster();
+        cluster.setContainerId("container-fail");
+        cluster.setBootstrapBrokers("localhost:19092");
+
+        assertFalse(manager.isReady(cluster));
+        AwsException error = assertThrows(AwsException.class, () -> manager.deleteUser(cluster, "alice"));
+        assertEquals("ServiceUnavailableException", error.getErrorCode());
+        assertEquals("Cluster has no backing Kafka broker.", error.getMessage());
+    }
+
     @Test
     void isReadyPollsTheCorrectAdminReadinessPathInNativeMode() throws Exception {
         int adminHostPort = startFakeAdminServer();
@@ -198,7 +380,7 @@ class RedpandaManagerTest {
     }
 
     @Test
-    void adminReadyUrlResolvesFromThePersistedContainerIdOnTheBrokersNetworkAfterRestart() {
+    void adminBaseUrlResolvesFromThePersistedContainerIdOnTheBrokersNetworkAfterRestart() {
         when(config.services().dockerNetwork()).thenReturn(Optional.of("floci-net"));
         when(lifecycleManager.resolveEndpoint("container-460", RedpandaManager.ADMIN_PORT, "floci-net"))
                 .thenReturn(new EndpointInfo("172.18.0.9", RedpandaManager.ADMIN_PORT));
@@ -209,7 +391,7 @@ class RedpandaManagerTest {
         cluster.setContainerId("container-460");
         cluster.setBootstrapBrokers("localhost:9300");
 
-        assertEquals("http://172.18.0.9:9644/v1/status/ready", manager.adminReadyUrl(cluster),
+        assertEquals("http://172.18.0.9:9644", manager.adminBaseUrl(cluster),
                 "readiness must not depend on in-memory state or on the bootstrap string's format");
     }
 

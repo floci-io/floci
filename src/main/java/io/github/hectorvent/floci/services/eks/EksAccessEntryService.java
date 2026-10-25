@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.eks;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -17,9 +18,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -63,21 +62,21 @@ public class EksAccessEntryService {
             throw invalid("EC2_LINUX entries cannot specify username or kubernetesGroups");
         }
         String principal = request.principalArn();
-        String[] arn = principal.split(":", 6);
-        String[] clusterArn = cluster.getArn().split(":", 6);
-        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].equals(clusterArn[1])
-                || !"iam".equals(arn[2]) || !arn[3].isEmpty() || !arn[4].matches("[0-9]{12}")
-                || !(arn[5].startsWith("role/") || (!node && arn[5].startsWith("user/")))
-                || arn[5].startsWith("role/aws-service-role/")
-                || principal.endsWith("/") || (node && !arn[4].equals(clusterArn[4]))) {
+        AwsArnUtils.Arn arn = AwsArnUtils.isArn(principal) ? AwsArnUtils.parse(principal) : null;
+        AwsArnUtils.Arn clusterArn = AwsArnUtils.parse(cluster.getArn());
+        if (arn == null || !arn.partition().equals(clusterArn.partition())
+                || !"iam".equals(arn.service()) || !arn.region().isEmpty() || !arn.accountId().matches("[0-9]{12}")
+                || !(arn.resource().startsWith("role/") || (!node && arn.resource().startsWith("user/")))
+                || arn.resource().startsWith("role/aws-service-role/")
+                || principal.endsWith("/") || (node && !arn.accountId().equals(clusterArn.accountId()))) {
             throw invalid("principalArn must identify an IAM principal; EC2_LINUX requires a role in the cluster account");
         }
         String name = principal.substring(principal.lastIndexOf('/') + 1);
-        boolean role = arn[5].startsWith("role/");
+        boolean role = arn.resource().startsWith("role/");
         String principalId = role
-                ? iam.findRole(arn[4], name).filter(value -> principal.equals(value.getArn()))
+                ? iam.findRole(arn.accountId(), name).filter(value -> principal.equals(value.getArn()))
                         .map(IamRole::getRoleId).orElseThrow(() -> invalid("IAM role does not exist"))
-                : iam.findUser(arn[4], name).filter(value -> principal.equals(value.getArn()))
+                : iam.findUser(arn.accountId(), name).filter(value -> principal.equals(value.getArn()))
                         .map(IamUser::getUserId).orElseThrow(() -> invalid("IAM user does not exist"));
         String username = node ? "system:node:{{EC2PrivateDNSName}}" : request.username();
         if (username != null && !node && (username.isBlank()
@@ -93,8 +92,8 @@ public class EksAccessEntryService {
             }
         }
         if (username == null) {
-            username = role ? "arn:" + arn[1] + ":sts::" + arn[4] + ":assumed-role/" + name + "/{{SessionName}}"
-                    : principal;
+            username = role ? AwsArnUtils.Arn.global(arn.partition(), "sts", arn.accountId(),
+                    "assumed-role/" + name + "/{{SessionName}}").toString() : principal;
         }
         List<String> groups = node ? List.of("system:nodes")
                 : request.kubernetesGroups() == null ? List.of() : request.kubernetesGroups();
@@ -127,9 +126,10 @@ public class EksAccessEntryService {
             throw new AwsException("ResourceInUseException", "Access entry already exists", 409);
         }
         double now = Instant.now().toEpochMilli() / 1000.0;
-        AccessEntry entry = new AccessEntry("arn:" + clusterArn[1] + ":eks:" + clusterArn[3] + ":"
-                + clusterArn[4] + ":access-entry/" + cluster.getName() + "/" + (role ? "role" : "user")
-                + "/" + arn[4] + "/" + name + "/" + UUID.randomUUID(), cluster.getName(), principal,
+        String entryArn = new AwsArnUtils.Arn(clusterArn.partition(), "eks", clusterArn.region(), clusterArn.accountId(),
+                "access-entry/" + cluster.getName() + "/" + (role ? "role" : "user") + "/" + arn.accountId() + "/" + name
+                        + "/" + UUID.randomUUID()).toString();
+        AccessEntry entry = new AccessEntry(entryArn, cluster.getName(), principal,
                 type, username, List.copyOf(groups), Map.copyOf(tags), now, now);
         entries.put(key, new StoredEntry(entry, principalId, token));
         return entry;
@@ -165,7 +165,7 @@ public class EksAccessEntryService {
         String after = "";
         if (nextToken != null) {
             try {
-                String decoded = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+                String decoded = Base64Url.decode(nextToken);
                 if (!decoded.startsWith(prefix + "\n")) {
                     throw invalid("nextToken does not belong to this cluster");
                 }

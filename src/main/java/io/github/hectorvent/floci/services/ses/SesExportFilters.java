@@ -10,6 +10,7 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.function.Function;
 
+import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringArrayOrAbsent;
 
 /**
@@ -46,9 +47,9 @@ final class SesExportFilters {
         }
         // The service validated the range at create time; this stays defensive so a stored job
         // written by an older build cannot slice with a negative bound.
-        JsonNode maxResults = insights.path("MaxResults");
-        if (maxResults.isInt() && maxResults.intValue() > 0 && kept.size() > maxResults.intValue()) {
-            return kept.subList(0, maxResults.intValue());
+        Integer maxResults = intMemberOrAbsent(insights, "MaxResults");
+        if (maxResults != null && maxResults > 0 && kept.size() > maxResults) {
+            return kept.subList(0, maxResults);
         }
         return kept;
     }

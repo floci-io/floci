@@ -6,9 +6,11 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.RequestResources;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
+import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
@@ -46,6 +48,8 @@ public class ResourceArnBuilder {
     /** The only scheme IAM accepts on an OIDC provider URL, and the part its ARN drops. */
     private static final String OIDC_URL_SCHEME = "https://";
 
+    private static final String DELEGATION_REQUEST_RESOURCE = "delegation-request/";
+
     /** What a service-linked role deletion task identifier starts with; see its resolver. */
     private static final String DELETION_TASK_PREFIX = "task" + ServiceLinkedRoles.PATH;
 
@@ -65,15 +69,25 @@ public class ResourceArnBuilder {
     private final Instance<SecretsManagerService> secretsManagerService;
     /** Looked up lazily for the same reason, to read the image a MicroVM runs. */
     private final Instance<LambdaMicrovmsService> microvmsService;
+    /** Looked up lazily for the same reason, to read the ARN an EKS cluster or what it holds is stored under. */
+    private final Instance<EksService> eksService;
 
     @Inject
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
                               Instance<SecretsManagerService> secretsManagerService,
-                              Instance<LambdaMicrovmsService> microvmsService) {
+                              Instance<LambdaMicrovmsService> microvmsService,
+                              Instance<EksService> eksService) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
         this.secretsManagerService = secretsManagerService;
         this.microvmsService = microvmsService;
+        this.eksService = eksService;
+    }
+
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
+                              Instance<SecretsManagerService> secretsManagerService,
+                              Instance<LambdaMicrovmsService> microvmsService) {
+        this(objectMapper, iamService, secretsManagerService, microvmsService, null);
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
@@ -105,11 +119,21 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The resources a request is checked against. Scheduler and Pipes ARNs are minted in {@code partition},
-     * the request's, as those services mint theirs, so a Region no partition publishes gets the deployment's
-     * partition rather than {@code aws}.
+     * The resources a request is checked against. Scheduler, Pipes and DSQL ARNs are minted in
+     * {@code partition}, the request's, as those services mint theirs, so a Region no partition publishes gets
+     * the deployment's partition rather than {@code aws}.
      */
     public List<String> buildResources(String credentialScope, ContainerRequestContext ctx,
+                                       String region, String accountId, String partition) {
+        return buildResources(credentialScope, null, ctx, region, accountId, partition);
+    }
+
+    /**
+     * The resources a request is checked against, {@code operation} the one it is dispatched as, as
+     * {@code <namespace>:<Operation>}: a namespace with no branch here is checked on the resources its request
+     * names for that operation (see {@link RequestResources}), and on {@code *} without one.
+     */
+    public List<String> buildResources(String credentialScope, String operation, ContainerRequestContext ctx,
                                        String region, String accountId, String partition) {
         if (credentialScope == null) {
             return List.of("*");
@@ -128,8 +152,22 @@ public class ResourceArnBuilder {
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
             case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
             case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
-            default               -> List.of("*");
+            case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
+            case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
+            default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
+    }
+
+    /**
+     * The resources a request of a namespace this builder has no branch for names, from the vendored table of
+     * request resources (see {@link RequestResources}); {@code *} when it names none, or the operation is not one
+     * of the namespace.
+     */
+    private static List<String> namedResources(String credentialScope, String operation, ContainerRequestContext ctx,
+                                               String region, String accountId, String partition) {
+        List<String> named = operation == null || !operation.startsWith(credentialScope + ":") ? List.of()
+                : RequestResources.of(operation, ctx, partition, region, accountId);
+        return named.isEmpty() ? List.of("*") : named;
     }
 
     private String buildResourceGroupArn(ContainerRequestContext ctx, String region, String accountId) {
@@ -234,6 +272,11 @@ public class ResourceArnBuilder {
      * belongs to an action the handler does not dispatch, so there is no request to name a
      * resource for.
      *
+     * <p>Empty since {@code GetRoleTemplateVersion} was dispatched: {@code role-template} was the
+     * last entry and the action carries its ARN, so the type is resolved through
+     * {@link #IAM_ARN_PARAMETERS} like any other the request names. The map stays because the next
+     * action AWS publishes a type for arrives before Floci dispatches it.
+     *
      * <p>Declared rather than implied so that a type which is neither resolved nor listed here
      * fails a test naming it, instead of quietly putting that action back on {@code *}. The
      * resolver's fallback for a type it does not know is the permissive answer, so a regeneration
@@ -245,8 +288,7 @@ public class ResourceArnBuilder {
      * its type would leave it evaluated against {@code *}, which is the fail-open this class
      * exists to close.
      */
-    static final Map<String, String> UNRESOLVED_TYPES = Map.of(
-            "role-template", "GetRoleTemplateVersion is not dispatched");
+    static final Map<String, String> UNRESOLVED_TYPES = Map.of();
 
     /**
      * The IAM actions whose target the request carries as an ARN, and the parameter holding it.
@@ -285,7 +327,8 @@ public class ResourceArnBuilder {
             "AcceptDelegationRequest", ResourceArnBuilder::delegationRequestArn,
             "RejectDelegationRequest", ResourceArnBuilder::delegationRequestArn,
             "GetDelegationRequest", ResourceArnBuilder::delegationRequestArn,
-            "SendDelegationToken", ResourceArnBuilder::delegationRequestArn);
+            "SendDelegationToken", ResourceArnBuilder::delegationRequestArn,
+            "GetHumanReadableSummary", ResourceArnBuilder::summarizedRequestArn);
 
     /** How one of {@link #DERIVED_RESOLVERS} reads its resource out of the request. */
     interface DerivedResolver {
@@ -326,6 +369,9 @@ public class ResourceArnBuilder {
                 "GenerateServiceLastAccessedDetails", "ListPoliciesGrantingServiceAccess");
         arnParameter(parameters, "PolicySourceArn",
                 "GetContextKeysForPrincipalPolicy", "SimulatePrincipalPolicy");
+        // AWS owns role templates, so the ARN names one in the aws account rather than the
+        // caller's, and it is still the resource the action is authorized against.
+        arnParameter(parameters, "TemplateArn", "GetRoleTemplateVersion");
         return Map.copyOf(parameters);
     }
 
@@ -484,8 +530,40 @@ public class ResourceArnBuilder {
         if (id == null || id.isBlank()) {
             return List.of("*");
         }
-        return List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
-                "delegation-request/" + id).toString());
+        return List.of(delegationRequestArn(region, accountId, id));
+    }
+
+    /**
+     * The delegation request a summary is asked for, named by the ARN Floci mints rather than
+     * the one the caller spelled.
+     *
+     * <p>{@code GetHumanReadableSummary} is the one action of this family that takes an ARN, and
+     * the lookup reads only the request id out of it, deliberately: the id is what resolves a
+     * request across accounts. So the string as it arrived cannot be what the request is
+     * authorized against. A caller allowed by a wildcard and denied on one request could
+     * otherwise respell that request's ARN, under another account or another service, and miss
+     * the deny while still reading the summary. The id is lifted out and the canonical ARN is
+     * minted around it instead, which is the same ARN the five by-id actions resolve to.
+     *
+     * <p>A value that is no ARN, or an ARN naming anything but an IAM delegation request, leaves
+     * the wildcard standing: the service answers {@code NOT_SUPPORTED} or {@code InvalidInput}
+     * for those without reading a request at all.
+     */
+    private List<String> summarizedRequestArn(ContainerRequestContext ctx, String region,
+                                              String accountId) {
+        return AwsArnUtils
+                .resourceIfArnFor(RequestBodyReader.formField(ctx, "EntityArn"), "iam")
+                .filter(resource -> resource.startsWith(DELEGATION_REQUEST_RESOURCE))
+                .map(resource -> resource.substring(DELEGATION_REQUEST_RESOURCE.length()))
+                .filter(id -> !id.isBlank())
+                .map(id -> List.of(delegationRequestArn(region, accountId, id)))
+                .orElseGet(() -> List.of("*"));
+    }
+
+    /** The ARN a delegation request carries, which is its id under the calling account. */
+    private static String delegationRequestArn(String region, String accountId, String id) {
+        return AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
+                DELEGATION_REQUEST_RESOURCE + id).toString();
     }
 
     /** An OIDC provider URL as its ARN carries it, which is the URL without its scheme. */
@@ -718,11 +796,14 @@ public class ResourceArnBuilder {
         }
         // path: /2015-03-31/functions/name or similar
         String name = extractSegmentAfter(path, "functions");
-        if (name == null) return "*";
-        boolean invoke = path.endsWith("/functions/" + name + "/invocations")
-                || path.endsWith("/functions/" + name + "/response-streaming-invocations");
+        if (name == null) {
+            return createdFunctionArn(path, ctx, region, accountId);
+        }
+        boolean qualifiedTarget = path.endsWith("/functions/" + name + "/invocations")
+                || path.endsWith("/functions/" + name + "/response-streaming-invocations")
+                || path.endsWith("/functions/" + name + "/provisioned-concurrency");
         try {
-            if (!invoke) {
+            if (!qualifiedTarget) {
                 LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(name);
                 boolean namedAccount = readsInTheAccountItNames(path, name, ref, ctx);
                 return AwsArnUtils.Arn.of("lambda",
@@ -742,6 +823,30 @@ public class ResourceArnBuilder {
         } catch (AwsException e) {
             // A reference Lambda refuses, which its handler answers with a 400 before acting on anything.
             return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name).toString();
+        }
+    }
+
+    /**
+     * The function {@code CreateFunction} makes, which its body names, in the caller's account and Region, as
+     * every route but an invoke acts there: the Service Reference gives it the {@code function} resource, so
+     * its own action, and the tagging action its tags need, are checked on that function. {@code *} for any
+     * other route that names no function.
+     */
+    private String createdFunctionArn(String path, ContainerRequestContext ctx, String region, String accountId) {
+        if (!"POST".equalsIgnoreCase(ctx.getMethod()) || !"/2015-03-31/functions".equals(path)) {
+            return "*";
+        }
+        JsonNode body = readJsonBody(ctx);
+        JsonNode name = body == null ? null : body.get("FunctionName");
+        if (name == null || !name.isTextual() || name.asText().isEmpty()) {
+            return "*";
+        }
+        try {
+            return AwsArnUtils.Arn.of("lambda", region, accountId,
+                    "function:" + LambdaArnUtils.resolve(name.asText()).name()).toString();
+        } catch (AwsException e) {
+            // A name Lambda refuses, which its handler answers with a 400 before creating anything.
+            return AwsArnUtils.Arn.of("lambda", region, accountId, "function:" + name.asText()).toString();
         }
     }
 
@@ -948,6 +1053,29 @@ public class ResourceArnBuilder {
         return taggedResource(ctx);
     }
 
+    /**
+     * The resource of an Aurora DSQL route, as the Service Authorization Reference names it: the cluster
+     * a cluster route names, the stream a stream route names (its cluster, to create or list streams), or
+     * the ARN a tagging route names. CreateCluster and ListClusters are checked against
+     * {@code cluster/*}, as DSQL checks them (measured).
+     */
+    private String buildDsqlArn(String path, ContainerRequestContext ctx, String region, String accountId,
+                                String partition) {
+        String cluster = "/cluster".equals(path) ? "*" : segmentAfterPrefix(path, "/cluster/");
+        if (cluster == null) {
+            cluster = segmentAfterPrefix(path, "/clusters/");
+        }
+        String streamCluster = segmentAfterPrefix(path, "/stream/");
+        if (streamCluster != null) {
+            String stream = segmentAfterPrefix(path, "/stream/" + streamCluster + "/");
+            cluster = stream == null ? streamCluster : streamCluster + "/stream/" + stream;
+        }
+        if (cluster != null) {
+            return new AwsArnUtils.Arn(partition, "dsql", region, accountId, "cluster/" + cluster).toString();
+        }
+        return taggedResource(ctx);
+    }
+
     /** The resource of an EventBridge Pipes route: {@code pipe/<name>}, or the ARN a tagging route names. */
     private String buildPipesArn(String path, ContainerRequestContext ctx, String region, String accountId,
                                  String partition) {
@@ -956,6 +1084,88 @@ public class ResourceArnBuilder {
             return new AwsArnUtils.Arn(partition, "pipes", region, accountId, "pipe/" + pipe).toString();
         }
         return taggedResource(ctx);
+    }
+
+    /**
+     * The resource of an EKS route, as the Service Reference gives it, in the caller's account, where EKS
+     * looks everything up. A cluster is the ARN EKS holds it under, or for one it holds none of, the ARN a
+     * create mints in the request's Region; {@code CreateCluster} is checked against the cluster its body
+     * names, as the EKS user guide's example policy for creating a cluster grants it. A node group, Fargate
+     * profile, add-on, access entry or Pod Identity association is the ARN EKS holds it under, which ends
+     * in an id the request does not carry, or {@code *} when EKS holds none to act on; listing or creating
+     * them, and every other route under a cluster, act on the cluster. The path is split as the router
+     * splits it, before decoding, so an encoded {@code /} stays inside a name, and an access entry's
+     * principal is the rest of the path, as EKS takes it. {@code DescribeUpdate} acts on the add-on its
+     * {@code addonName} names, since the updates EKS keeps are its add-ons', and otherwise on the cluster. A
+     * tagging route acts on the caller's cluster named by what follows the ARN's last {@code /}, as EKS tags
+     * it, whatever the ARN names before that. Deregistering a cluster acts on that cluster, and an EKS
+     * Anywhere subscription route on the subscription its id names. Listing clusters, registering one, the
+     * account-wide reads, and an identity provider config or capability, which end in an id Floci does not
+     * keep, name no resource, so they are {@code *}.
+     */
+    private String buildEksArn(String path, ContainerRequestContext ctx, String region, String accountId) {
+        if (path.equals("/tags") || path.startsWith("/tags/")) {
+            String tagged = taggedArn(ctx);
+            int slash = tagged == null ? -1 : tagged.lastIndexOf('/');
+            return slash < 0 || slash == tagged.length() - 1 ? "*"
+                    : eksClusterArn(tagged.substring(slash + 1), region, accountId);
+        }
+        String[] segments = IamActionRegistry.routedPath(ctx.getUriInfo()).substring(1).split("/", -1);
+        if (segments.length == 1) {
+            JsonNode body = "clusters".equals(segments[0]) && "POST".equalsIgnoreCase(ctx.getMethod())
+                    ? readJsonBody(ctx) : null;
+            String cluster = body == null ? null : body.path("name").asText(null);
+            return cluster == null || cluster.isBlank() ? "*" : eksClusterArn(cluster, region, accountId);
+        }
+        String name = pathSegment(segments[1]);
+        if (name.isEmpty()) {
+            return "*";
+        }
+        return switch (segments[0]) {
+            case "clusters" -> eksClusterRouteArn(name, segments, region, accountId);
+            case "cluster-registrations" -> eksClusterArn(name, region, accountId);
+            case "eks-anywhere-subscriptions" ->
+                    AwsArnUtils.Arn.of("eks", region, accountId, "eks-anywhere-subscription/" + name).toString();
+            default -> "*";
+        };
+    }
+
+    /** The resource of a route under the cluster {@code cluster}, its path split into {@code segments}. */
+    private String eksClusterRouteArn(String cluster, String[] segments, String region, String accountId) {
+        if (segments.length < 4 || segments[3].isEmpty()) {
+            return eksClusterArn(cluster, region, accountId);
+        }
+        String collection = segments[2];
+        return switch (collection) {
+            case "node-groups", "fargate-profiles", "addons", "pod-identity-associations" ->
+                    eksHeldArn(cluster, collection, pathSegment(segments[3]));
+            case "access-entries" -> eksHeldArn(cluster, collection,
+                    pathSegment(String.join("/", List.of(segments).subList(3, segments.length))));
+            case "updates" -> {
+                // The updates Floci keeps are its add-ons', and EKS returns one whether or not the request names
+                // its add-on, so the update is checked against the add-on it was made to.
+                Optional<String> addon = segments.length == 4 && eksService != null
+                        ? eksService.get().findResourceArn(cluster, collection, pathSegment(segments[3]))
+                        : Optional.empty();
+                yield addon.orElseGet(() -> eksClusterArn(cluster, region, accountId));
+            }
+            case "identity-provider-configs" ->
+                    "associate".equals(segments[3]) ? eksClusterArn(cluster, region, accountId) : "*";
+            case "capabilities" -> "*";
+            default -> eksClusterArn(cluster, region, accountId);
+        };
+    }
+
+    /** The ARN EKS holds the cluster {@code name} under, or else the one a create mints in {@code region}. */
+    private String eksClusterArn(String name, String region, String accountId) {
+        Optional<String> held = eksService == null ? Optional.empty()
+                : eksService.get().findResourceArn(name, null, null);
+        return held.orElseGet(() -> AwsArnUtils.Arn.of("eks", region, accountId, "cluster/" + name).toString());
+    }
+
+    /** The ARN EKS holds {@code name} of {@code collection} in the cluster under, or {@code *} when it holds none. */
+    private String eksHeldArn(String cluster, String collection, String name) {
+        return eksService == null ? "*" : eksService.get().findResourceArn(cluster, collection, name).orElse("*");
     }
 
     /** The ARN a shared tagging route names, or {@code *} for any other route. */
@@ -1089,11 +1299,7 @@ public class ResourceArnBuilder {
 
     // ── SQS ─────────────────────────────────────────────────────────────────────
     private String buildSqsArn(ContainerRequestContext ctx, String region, String accountId) {
-        String queueUrl = ctx.getUriInfo().getQueryParameters().getFirst("QueueUrl");
-        if (queueUrl == null) {
-            // Try form param for Query-protocol
-            queueUrl = firstFormParam(ctx, "QueueUrl");
-        }
+        String queueUrl = firstFormParam(ctx, "QueueUrl");
         if (queueUrl == null) {
             JsonNode json = readJsonBody(ctx);
             if (json != null && json.isObject()) {
@@ -1432,9 +1638,37 @@ public class ResourceArnBuilder {
         return slash > 0 ? after.substring(0, slash) : after;
     }
 
+    // ── STS ─────────────────────────────────────────────────────────────────────
+    /**
+     * Uses the serving operation, as {@link #buildLogResources} does: {@code AssumeRole} is
+     * authorized against the role it names, so a policy can allow assuming one role and not another.
+     * Every other operation keeps {@code *}, so a {@code RoleArn} it never reads cannot choose its resource.
+     */
+    public List<String> buildStsResources(String action, ContainerRequestContext ctx) {
+        return List.of("sts:AssumeRole".equals(action) ? buildAssumeRoleArn(ctx) : "*");
+    }
+
+    private String buildAssumeRoleArn(ContainerRequestContext ctx) {
+        String roleArn = firstFormParam(ctx, "RoleArn");
+        // Untrimmed: the handler assumes the role named by this exact string.
+        return roleArn == null || roleArn.isBlank() ? "*" : roleArn;
+    }
+
+    /**
+     * A Query-protocol parameter, read from the same place the handler reads it. For a form POST
+     * that is the body alone: {@code AwsQueryController} dispatches on the form parameters and never
+     * sees the URL query, so authorizing a URL value would check one resource and act on another.
+     * A value with an invalid percent escape is read as absent, so the resource stays the default
+     * and the request goes on to be answered as it is without enforcement.
+     */
     private String firstFormParam(ContainerRequestContext ctx, String name) {
-        // Form params are typically available as query params in REST-Assured / JAX-RS
-        String v = ctx.getUriInfo().getQueryParameters().getFirst(name);
-        return v;
+        if (RequestBodyReader.isForm(ctx)) {
+            try {
+                return RequestBodyReader.formField(ctx, name);
+            } catch (IllegalArgumentException malformed) {
+                return null;
+            }
+        }
+        return ctx.getUriInfo().getQueryParameters().getFirst(name);
     }
 }

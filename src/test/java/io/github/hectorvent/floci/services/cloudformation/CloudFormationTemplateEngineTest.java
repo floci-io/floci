@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -17,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -28,6 +30,31 @@ class CloudFormationTemplateEngineTest {
         return new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
                 "stack/id", Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), mapper,
                 (Function<String, String>) name -> null);
+    }
+
+    private CloudFormationTemplateEngine engineWithAttributes(Map<String, Map<String, String>> attributes) {
+        return new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
+                "stack/id", Map.of(), Map.of(), attributes, Map.of(), Map.of(), mapper,
+                (Function<String, String>) name -> null);
+    }
+
+    @Test
+    void getAttOnAMissingAttributeOfAStubbedDisabledServiceIsRefused() {
+        CloudFormationTemplateEngine e = engineWithAttributes(Map.of("Repo", Map.of(
+                "Arn", "arn:aws:stub:::Repo", CloudFormationTemplateEngine.SERVICE_DISABLED_ATTR, "true")));
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> e.resolve(json("{\"Fn::GetAtt\": [\"Repo\", \"RepositoryUri\"]}")));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertEquals("arn:aws:stub:::Repo", e.resolve(json("{\"Fn::GetAtt\": [\"Repo\", \"Arn\"]}")));
+    }
+
+    @Test
+    void getAttOnAMissingAttributeOfAnOrdinaryStubStillResolvesToThePlaceholder() {
+        CloudFormationTemplateEngine e = engineWithAttributes(Map.of("Thing", Map.of("Arn", "arn:aws:stub:::Thing")));
+
+        assertEquals("Thing.Missing", e.resolve(json("{\"Fn::GetAtt\": [\"Thing\", \"Missing\"]}")));
     }
 
     private JsonNode json(String s) {

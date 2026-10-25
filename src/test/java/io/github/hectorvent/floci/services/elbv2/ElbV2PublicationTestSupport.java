@@ -1,9 +1,16 @@
 package io.github.hectorvent.floci.services.elbv2;
 
+import io.github.hectorvent.floci.core.common.tls.ReloadingKeyManager;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
 import io.github.hectorvent.floci.services.elbv2.model.Rule;
+import io.vertx.core.http.HttpServerOptions;
 import org.mockito.invocation.InvocationOnMock;
 
+import javax.net.ssl.ExtendedSSLSession;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.X509ExtendedKeyManager;
+import java.security.cert.X509Certificate;
 import java.util.List;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
@@ -12,9 +19,22 @@ import java.util.function.Supplier;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 final class ElbV2PublicationTestSupport {
     private ElbV2PublicationTestSupport() { }
+
+    static X509Certificate servedCertificate(HttpServerOptions options, String host) {
+        X509ExtendedKeyManager manager = (X509ExtendedKeyManager)
+                ReloadingKeyManager.keyManagerOf(null, options.getKeyCertOptions());
+        SSLEngine engine = mock(SSLEngine.class);
+        ExtendedSSLSession session = mock(ExtendedSSLSession.class);
+        when(engine.getHandshakeSession()).thenReturn(session);
+        when(session.getRequestedServerNames()).thenReturn(List.of(new SNIHostName(host)));
+        String alias = manager.chooseEngineServerAlias("RSA", null, engine);
+        return manager.getCertificateChain(alias)[0];
+    }
 
     static void publishRuntime(ElbV2DataPlane plane, Listener listener, String region,
                                Integer previousPort, List<Rule> rules) {

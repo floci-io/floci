@@ -114,7 +114,7 @@ public class SesTenantService implements SesTaggable {
         String tenantId = generateTenantId();
         String tenantArn = AwsArnUtils.Arn.of("ses", region, accountId, "tenant/" + tenantName + "/" + tenantId).toString();
         Tenant tenant = new Tenant(tenantName, tenantId, tenantArn, Instant.now(clock), tags,
-                "ENABLED", attrs);
+                "ENABLED", attrs, null, null);
         // Only the check-then-put needs to be atomic, so two concurrent creates for the same name can't
         // both observe the key as absent; the id/ARN/record are built outside the lock.
         synchronized (tenantMutationLock) {
@@ -239,6 +239,33 @@ public class SesTenantService implements SesTaggable {
         return tenantStore.scan(k -> k.startsWith(prefix)).stream()
                 .filter(t -> tenantId != null && tenantId.equals(t.tenantId()))
                 .findFirst();
+    }
+
+    /**
+     * Resolves a tenant by its full ARN, for the reputation entity operations: unlike the tag
+     * operations, SES matches the whole ARN there, name and id both (probe-confirmed).
+     */
+    public Optional<Tenant> findByArn(String tenantArn, String region) {
+        String resource = AwsArnUtils.resourceIfArnFor(tenantArn, "ses").orElse("");
+        String[] segments = resource.split("/", -1);
+        if (segments.length != 3 || !"tenant".equals(segments[0])) {
+            return Optional.empty();
+        }
+        return tenantStore.get(tenantKey(region, segments[1]))
+                .filter(t -> t.tenantArn().equals(tenantArn));
+    }
+
+    /**
+     * Applies {@code mutation} to the tenant with this ARN under the shared lock, so a concurrent
+     * tag, suppression-attribute or reputation update is not overwritten by a stale copy. Returns
+     * the updated tenant, empty when no tenant has the ARN.
+     */
+    public Optional<Tenant> updateByArn(String tenantArn, String region, UnaryOperator<Tenant> mutation) {
+        synchronized (tenantMutationLock) {
+            Optional<Tenant> updated = findByArn(tenantArn, region).map(mutation);
+            updated.ifPresent(t -> tenantStore.put(tenantKey(region, t.tenantName()), t));
+            return updated;
+        }
     }
 
     /**

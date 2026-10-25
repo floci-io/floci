@@ -22,11 +22,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.math.BigInteger;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -1312,7 +1310,7 @@ public class FisService implements TagHandler {
             throw validation("Invalid nextToken.");
         }
         try {
-            String raw = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+            String raw = Base64Url.decode(token);
             int separator = raw.indexOf('\n');
             if (separator < 0 || !expectedScope.equals(raw.substring(0, separator))
                     || separator == raw.length() - 1) {

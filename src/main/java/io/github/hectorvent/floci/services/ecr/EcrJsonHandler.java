@@ -232,10 +232,10 @@ public class EcrJsonHandler {
         // MANUAL), with empty appliedScanFilters. Note: real AWS reports unknown repos
         // in the `failures` array; here describeRepositories throws
         // RepositoryNotFoundException, failing the whole batch instead.
+        // AWS's request has no registryId, so the repositories are the caller's.
         List<String> names = parseStringList(request.path("repositoryNames"));
-        String registryId = request.path("registryId").asText(null);
 
-        List<Repository> repos = service.describeRepositories(names, registryId, region);
+        List<Repository> repos = service.describeRepositories(names, null, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode configs = objectMapper.createArrayNode();

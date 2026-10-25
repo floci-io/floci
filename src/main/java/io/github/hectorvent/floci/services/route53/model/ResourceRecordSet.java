@@ -20,6 +20,19 @@ public class ResourceRecordSet {
 
     public ResourceRecordSet() {}
 
+    public ResourceRecordSet(ResourceRecordSet source) {
+        name = source.name;
+        type = source.type;
+        ttl = source.ttl;
+        records = source.records;
+        aliasTarget = source.aliasTarget;
+        weight = source.weight;
+        region = source.region;
+        setIdentifier = source.setIdentifier;
+        failover = source.failover;
+        healthCheckId = source.healthCheckId;
+    }
+
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
 

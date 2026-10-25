@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.lambdaweb;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import org.junit.jupiter.api.AfterEach;
@@ -10,6 +12,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -58,7 +61,7 @@ class LambdaWebLogsTest {
         doThrow(notFound()).doReturn("token").when(cloudWatchLogs)
                 .putLogEventsForAccount(eq(ACCOUNT), eq(GROUP), eq(CENTRAL_STREAM), anyList(), eq(REGION));
 
-        logs.open(ACCOUNT, REGION, GROUP, STREAM, "INFO").accept("first\n");
+        logs.open(ACCOUNT, REGION, REGION, GROUP, STREAM, "INFO").accept("first\n");
 
         ArgumentCaptor<List<Map<String, Object>>> local = ArgumentCaptor.forClass(List.class);
         verify(cloudWatchLogs, timeout(5_000).times(2)).putLogEventsForAccount(eq(ACCOUNT), eq(GROUP + ".local"),
@@ -73,13 +76,31 @@ class LambdaWebLogsTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void anEnvironmentInAnotherRegionWritesTheLocalGroupThereAndTheCentralizedOneInTheHomeRegion() {
+        String replica = "eu-central-1";
+        ObjectNode record = new ObjectMapper().createObjectNode().put("functionName", "web");
+
+        logs.open(ACCOUNT, replica, REGION, GROUP, STREAM, "INFO").platform(Instant.now(), "INFO",
+                "platform.initStart", record);
+
+        ArgumentCaptor<List<Map<String, Object>>> local = ArgumentCaptor.forClass(List.class);
+        verify(cloudWatchLogs, timeout(5_000)).putLogEventsForAccount(eq(ACCOUNT), eq(GROUP + ".local"), eq(STREAM),
+                local.capture(), eq(replica));
+        verify(cloudWatchLogs, timeout(5_000)).putLogEventsForAccount(eq(ACCOUNT), eq(GROUP),
+                eq(STREAM + "-" + ACCOUNT + "-" + replica), anyList(), eq(REGION));
+        String message = (String) local.getValue().getFirst().get("message");
+        assertTrue(message.contains("\"region\":\"eu-central-1\""), message);
+    }
+
+    @Test
     void aGroupThatCannotBeCreatedTakesNoEventsAndTheOtherStillDoes() {
         doThrow(notFound()).when(cloudWatchLogs)
                 .putLogEventsForAccount(eq(ACCOUNT), eq(GROUP + ".local"), eq(STREAM), anyList(), eq(REGION));
         doThrow(new AwsException("InvalidParameterException", "Invalid log group name.", 400)).when(cloudWatchLogs)
                 .createLogGroupForAccount(ACCOUNT, GROUP + ".local", null, null, REGION);
 
-        logs.open(ACCOUNT, REGION, GROUP, STREAM, "INFO").accept("first\n");
+        logs.open(ACCOUNT, REGION, REGION, GROUP, STREAM, "INFO").accept("first\n");
 
         verify(cloudWatchLogs, timeout(5_000)).putLogEventsForAccount(eq(ACCOUNT), eq(GROUP), eq(CENTRAL_STREAM),
                 anyList(), eq(REGION));
@@ -96,7 +117,7 @@ class LambdaWebLogsTest {
             throw new IllegalStateException("the store failed");
         }).doReturn("token").when(cloudWatchLogs)
                 .putLogEventsForAccount(eq(ACCOUNT), eq(GROUP + ".local"), eq(STREAM), anyList(), eq(REGION));
-        LambdaWebLogs.Sink sink = logs.open(ACCOUNT, REGION, GROUP, STREAM, "INFO");
+        LambdaWebLogs.Sink sink = logs.open(ACCOUNT, REGION, REGION, GROUP, STREAM, "INFO");
 
         sink.accept("first\n");
         writing.await(5, TimeUnit.SECONDS);
@@ -118,7 +139,7 @@ class LambdaWebLogsTest {
             return "token";
         }).doReturn("token").when(cloudWatchLogs)
                 .putLogEventsForAccount(eq(ACCOUNT), eq(GROUP + ".local"), eq(STREAM), anyList(), eq(REGION));
-        LambdaWebLogs.Sink sink = logs.open(ACCOUNT, REGION, GROUP, STREAM, "INFO");
+        LambdaWebLogs.Sink sink = logs.open(ACCOUNT, REGION, REGION, GROUP, STREAM, "INFO");
         sink.accept("first\n");
         writing.await(5, TimeUnit.SECONDS);
 

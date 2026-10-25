@@ -18,6 +18,8 @@ import io.vertx.mutiny.core.Vertx;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,6 +33,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -286,6 +289,43 @@ class AslExecutorLambdaArnTargetTest {
                 """.formatted(functionArn(OTHER_ACCOUNT, REGION)), "{\"roleArn\": \"" + TASK_ROLE_ARN + "\"}");
 
         verify(authorizer).assumeRefusal(ROLE_ARN, TASK_ROLE_ARN, STATE_MACHINE_ARN);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"worker", "111111111111:function:worker",
+            "arn:aws:lambda:us-east-2:111111111111:function:worker"})
+    void anExplicitQualifierIsAuthorizedBeforeResolvingOrInvoking(String reference) {
+        LambdaTaskAuthorizer authorizer = enforcing();
+        when(authorizer.refusal(anyString(), anyString())).thenReturn(Optional.of("refused"));
+
+        Execution execution = run("""
+                {"StartAt":"Call","States":{"Call":{"Type":"Task",
+                  "Resource":"arn:aws:states:::lambda:invoke",
+                  "Parameters":{"FunctionName":"%s","Qualifier":"live"},"End":true}}}
+                """.formatted(reference));
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Lambda.AccessDeniedException", execution.getError());
+        String account = reference.equals(FUNCTION_NAME) ? ACCOUNT : OTHER_ACCOUNT;
+        verify(authorizer).refusal(ROLE_ARN, functionArn(account, REGION) + ":live");
+        verifyNoInteractions(functionStore, lambdaExecutor);
+    }
+
+    @Test
+    void anExplicitQualifierDoesNotChangeFunctionNameValidation() {
+        LambdaTaskAuthorizer authorizer = enforcing();
+        when(authorizer.refusal(anyString(), anyString())).thenReturn(Optional.of("refused"));
+        String qualifier = "q".repeat(128);
+
+        Execution execution = run("""
+                {"StartAt":"Call","States":{"Call":{"Type":"Task",
+                  "Resource":"arn:aws:states:::lambda:invoke",
+                  "Parameters":{"FunctionName":"%s","Qualifier":"%s"},"End":true}}}
+                """.formatted(functionArn(ACCOUNT, REGION), qualifier));
+
+        assertEquals("Lambda.AccessDeniedException", execution.getError());
+        verify(authorizer).refusal(ROLE_ARN, functionArn(ACCOUNT, REGION) + ":" + qualifier);
+        verifyNoInteractions(functionStore, lambdaExecutor);
     }
 
     private LambdaTaskAuthorizer enforcing() {

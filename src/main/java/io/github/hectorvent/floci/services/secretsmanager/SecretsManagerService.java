@@ -62,6 +62,9 @@ public class SecretsManagerService implements ResourceProvider {
     private static final String PENDING_DELETION_STATE = "PendingDeletion";
     private static final Pattern SECRET_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9/_+=.@-]+");
 
+    public static final String SCHEDULED_DELETION_ERROR_MESSAGE =
+        "You can't perform this operation on the secret because it was marked for deletion.";
+
     private final StorageBackend<String, Secret> store;
     private final int defaultRecoveryWindowDays;
     private final RegionResolver regionResolver;
@@ -1566,7 +1569,7 @@ public class SecretsManagerService implements ResourceProvider {
                 Secret secret = resolveSecret(secretId, region);
                 if (secret.getDeletedDate() != null) {
                     errors.add(new BatchGetSecretValueError(secretId, "InvalidRequestException",
-                            "You can't perform this operation on the secret because it was marked for deletion."));
+                            SCHEDULED_DELETION_ERROR_MESSAGE));
                     continue;
                 }
 
@@ -1792,7 +1795,7 @@ public class SecretsManagerService implements ResourceProvider {
     private void throwIfPendingDeletion(Secret secret) {
         if (secret.getDeletedDate() != null) {
             throw new AwsException("InvalidRequestException",
-                    "You can't perform this operation on the secret because it was marked for deletion.", 400);
+                    SCHEDULED_DELETION_ERROR_MESSAGE, 400);
         }
     }
 

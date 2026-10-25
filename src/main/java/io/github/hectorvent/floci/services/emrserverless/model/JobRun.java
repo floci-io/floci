@@ -33,6 +33,11 @@ public class JobRun {
     private Long executionTimeoutMinutes;
     private String mode;
     private Map<String, Object> retryPolicy;
+    private Integer attempt;
+    @JsonFormat(shape = JsonFormat.Shape.NUMBER)
+    private Instant attemptCreatedAt;
+    @JsonFormat(shape = JsonFormat.Shape.NUMBER)
+    private Instant attemptUpdatedAt;
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant startedAt;
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
@@ -78,6 +83,12 @@ public class JobRun {
     public void setMode(String mode) { this.mode = mode; }
     public Map<String, Object> getRetryPolicy() { return retryPolicy; }
     public void setRetryPolicy(Map<String, Object> retryPolicy) { this.retryPolicy = retryPolicy; }
+    public Integer getAttempt() { return attempt; }
+    public void setAttempt(Integer attempt) { this.attempt = attempt; }
+    public Instant getAttemptCreatedAt() { return attemptCreatedAt; }
+    public void setAttemptCreatedAt(Instant attemptCreatedAt) { this.attemptCreatedAt = attemptCreatedAt; }
+    public Instant getAttemptUpdatedAt() { return attemptUpdatedAt; }
+    public void setAttemptUpdatedAt(Instant attemptUpdatedAt) { this.attemptUpdatedAt = attemptUpdatedAt; }
     public Instant getStartedAt() { return startedAt; }
     public void setStartedAt(Instant startedAt) { this.startedAt = startedAt; }
     public Instant getEndedAt() { return endedAt; }

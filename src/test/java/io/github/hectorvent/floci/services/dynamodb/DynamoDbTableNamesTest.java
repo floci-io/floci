@@ -97,6 +97,48 @@ class DynamoDbTableNamesTest {
         assertEquals(400, ex.getHttpStatus());
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {2, 256})
+    void shortNameLengthErrorsMatchAcrossOperations(int length) {
+        String input = "a".repeat(length);
+        String bound = length < 3 ? "greater than or equal to 3" : "less than or equal to 255";
+        String expected = "1 validation error detected: Value '" + input
+                + "' at 'tableName' failed to satisfy constraint: Member must have length " + bound;
+        assertEquals(expected, assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.requireShortName(input)).getMessage());
+        assertEquals(expected, assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.resolve(input)).getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {3, 255})
+    void shortNameLengthBoundariesRemainValid(int length) {
+        String input = "a".repeat(length);
+        assertEquals(input, DynamoDbTableNames.requireShortName(input));
+        assertEquals(input, DynamoDbTableNames.resolve(input));
+    }
+
+    @Test
+    void emptyNameKeepsOperationSpecificMinimum() {
+        String prefix = "1 validation error detected: Value '' at 'tableName' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to ";
+        assertEquals(prefix + "3", assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.requireShortName("")).getMessage());
+        assertEquals(prefix + "1", assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.resolve("")).getMessage());
+    }
+
+    @Test
+    void whitespaceIsNotTrimmedBeforeLengthAndPatternValidation() {
+        String input = " a ";
+        String expected = "1 validation error detected: Value ' a ' at 'tableName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+";
+        assertEquals(expected, assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.requireShortName(input)).getMessage());
+        assertEquals(expected, assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.resolve(input)).getMessage());
+    }
+
     private static String emptyToNull(String s) {
         return (s == null || s.isEmpty()) ? null : s;
     }

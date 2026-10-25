@@ -19,12 +19,16 @@ public class ExportSummary {
     @JsonProperty("ExportType")
     private String exportType;
 
+    @JsonProperty("DestinationType")
+    private String destinationType;
+
     public ExportSummary() {}
 
     public ExportSummary(ExportDescription desc) {
         this.exportArn = desc.getExportArn();
         this.exportStatus = desc.getExportStatus();
-        this.exportType = desc.getExportType();
+        this.exportType = desc.getExportType() != null ? desc.getExportType() : "FULL_EXPORT";
+        this.destinationType = desc.getDestinationType();
     }
 
     public String getExportArn() { return exportArn; }
@@ -35,4 +39,7 @@ public class ExportSummary {
 
     public String getExportType() { return exportType; }
     public void setExportType(String exportType) { this.exportType = exportType; }
+
+    public String getDestinationType() { return destinationType; }
+    public void setDestinationType(String destinationType) { this.destinationType = destinationType; }
 }

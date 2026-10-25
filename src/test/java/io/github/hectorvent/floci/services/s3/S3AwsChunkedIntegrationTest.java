@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -20,6 +22,11 @@ class S3AwsChunkedIntegrationTest {
     // S3 names the size proposed and the most allowed, in this order, between the message and the request id.
     private static final String ENTITY_TOO_LARGE_SIZES =
             "</Message><ProposedSize>5368709121</ProposedSize><MaxSizeAllowed>5368709120</MaxSizeAllowed><RequestId>";
+    private static final String INVALID_CHUNK_SIZE_MESSAGE =
+            "Only the last chunk is allowed to have a size less than 8192 bytes";
+    // Two 100-byte chunks and the CRC32 of the 200 bytes: the first chunk is not the last, so it is under 8 KiB.
+    private static final String SMALL_CHUNKS = "64\r\n" + "a".repeat(100) + "\r\n64\r\n" + "b".repeat(100)
+            + "\r\n0\r\nx-amz-checksum-crc32:0+vo5w==\r\n\r\n";
 
     @Test
     void putObject_chunkShorterThanItsDeclaredSize_isIncompleteBodyAndNotStored() {
@@ -303,6 +310,73 @@ class S3AwsChunkedIntegrationTest {
             .when().get("/" + bucket + "/object.txt?uploadId=" + uploadId)
             .then().statusCode(200)
             .body(not(containsString("<Part>")));
+    }
+
+    @Test
+    void putObject_chunkBeforeTheLastUnder8KiB_isInvalidChunkSizeErrorAndNotStored() {
+        String bucket = createBucket("chunked-small");
+
+        given()
+            .header("x-amz-content-sha256", STREAMING_UNSIGNED)
+            .header("Content-Encoding", "aws-chunked")
+            .header("x-amz-decoded-content-length", "200")
+            .header("x-amz-trailer", "x-amz-checksum-crc32")
+            .body(SMALL_CHUNKS)
+        .when()
+            .put("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(403)
+            .body(containsString("<Code>InvalidChunkSizeError</Code>"))
+            .body(containsString("<Message>" + INVALID_CHUNK_SIZE_MESSAGE + "</Message>"));
+
+        assertObjectAbsent(bucket, "object.txt");
+    }
+
+    @Test
+    void uploadPart_chunkBeforeTheLastUnder8KiB_isInvalidChunkSizeErrorAndNoPartIsStored() {
+        String bucket = createBucket("chunked-part-small");
+        String uploadId = given()
+            .when().post("/" + bucket + "/object.txt?uploads")
+            .then().statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .header("x-amz-content-sha256", STREAMING_UNSIGNED)
+            .header("Content-Encoding", "aws-chunked")
+            .header("x-amz-decoded-content-length", "200")
+            .header("x-amz-trailer", "x-amz-checksum-crc32")
+            .body(SMALL_CHUNKS)
+        .when()
+            .put("/" + bucket + "/object.txt?partNumber=1&uploadId=" + uploadId)
+        .then()
+            .statusCode(403)
+            .body(containsString("<Code>InvalidChunkSizeError</Code>"))
+            .body(containsString("<Message>" + INVALID_CHUNK_SIZE_MESSAGE + "</Message>"));
+
+        given()
+            .when().get("/" + bucket + "/object.txt?uploadId=" + uploadId)
+            .then().statusCode(200)
+            .body(not(containsString("<Part>")));
+    }
+
+    @Test
+    void putObject_lastChunkUnder8KiB_storesTheDecodedPayload() {
+        String bucket = createBucket("chunked-small-last");
+        String payload = "a".repeat(8192) + "b".repeat(100);
+
+        given()
+            .header("x-amz-content-sha256", STREAMING_UNSIGNED)
+            .header("Content-Encoding", "aws-chunked")
+            .header("x-amz-decoded-content-length", String.valueOf(payload.length()))
+            .header("x-amz-trailer", "x-amz-checksum-crc32")
+            .body("2000\r\n" + "a".repeat(8192) + "\r\n64\r\n" + "b".repeat(100) + "\r\n0\r\nx-amz-checksum-crc32:"
+                    + S3Checksum.crc32Base64(payload.getBytes(StandardCharsets.US_ASCII)) + "\r\n\r\n")
+        .when()
+            .put("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(200);
+
+        given().when().get("/" + bucket + "/object.txt").then().statusCode(200).body(equalTo(payload));
     }
 
     @Test

@@ -10,7 +10,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
-import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Alarm;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.BeforeEach;
@@ -43,7 +43,7 @@ class CloudWatchMetricMathAlarmTest {
         initialize(new InMemoryStorage<>());
     }
 
-    private void initialize(StorageBackend<String, MetricAlarm> alarmStore) {
+    private void initialize(StorageBackend<String, Alarm> alarmStore) {
         RegionResolver resolver = new RegionResolver(REGION, "000000000000");
         CloudWatchMetricsService service = new CloudWatchMetricsService(new InMemoryStorage<>(), alarmStore, resolver);
         CloudWatchDashboardsService dashboards = new CloudWatchDashboardsService(new InMemoryStorage<>(), resolver);
@@ -64,12 +64,12 @@ class CloudWatchMetricMathAlarmTest {
     void metricMathQueriesSurvivePersistentStorageReload(boolean queryProtocol, @TempDir Path directory)
             throws Exception {
         Path storageFile = directory.resolve("alarms.json");
-        TypeReference<Map<String, MetricAlarm>> type = new TypeReference<>() { };
+        TypeReference<Map<String, Alarm>> type = new TypeReference<>() { };
         initialize(new PersistentStorage<>(storageFile, type));
         ObjectNode request = metricMathRequest();
         put(request, queryProtocol);
 
-        PersistentStorage<String, MetricAlarm> reloaded = new PersistentStorage<>(storageFile, type);
+        PersistentStorage<String, Alarm> reloaded = new PersistentStorage<>(storageFile, type);
         reloaded.load();
         assertEquals(1, reloaded.keys().size(), "the stored alarm must deserialize after a restart");
         initialize(reloaded);

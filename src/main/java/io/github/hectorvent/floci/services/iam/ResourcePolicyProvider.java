@@ -24,6 +24,14 @@ public interface ResourcePolicyProvider {
     List<ResourcePolicy> getResourcePolicies(String credentialScope, String resourceArn);
 
     /**
+     * Policies applying to an action. A service may exclude operations that do not act on
+     * an existing resource.
+     */
+    default List<ResourcePolicy> getResourcePolicies(String credentialScope, String action, String resourceArn) {
+        return getResourcePolicies(credentialScope, resourceArn);
+    }
+
+    /**
      * The ARN the resource is actually named by, which policies are matched against. A request's
      * resource ARN is built in the request's partition; a provider whose resources outlive that
      * (an S3 bucket reachable from any partition) returns it in the partition the resource lives

@@ -190,20 +190,6 @@ public class LambdaService implements ResourceProvider {
     private final ObjectMapper objectMapper;
     private Map<String, Integer> versionCounters = new ConcurrentHashMap<>();
     private Map<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
-    /**
-     * Per-function locks covering PutFunctionConcurrency,
-     * DeleteFunctionConcurrency, and deleteFunction itself. Serializing the
-     * limiter update + persistence pair against itself for a given function
-     * prevents the limiter and store from diverging on interleaved concurrent
-     * requests.
-     *
-     * <p>Entries are intentionally never removed — see {@code deleteFunction}
-     * for the race this avoids. The map therefore grows by one {@code Object}
-     * per distinct function ARN the emulator has ever seen (create/delete
-     * cycles with fresh names included). Acceptable footprint for a local
-     * emulator workload.
-     */
-    private final ConcurrentHashMap<String, Object> concurrencyOpLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> policyMutationLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
 
@@ -1088,6 +1074,7 @@ public class LambdaService implements ResourceProvider {
             return;
         }
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            warmPool.deleteProvisionedQualifier(fn, qualifier);
             warmPool.drainEnvironment(version.get());
             functionStore.deleteVersion(region, name, qualifier);
             reclaimVersionCodeDirectory(region, fn, qualifier, version.get());
@@ -1116,6 +1103,7 @@ public class LambdaService implements ResourceProvider {
         // object, letting a follow-up request allocate a fresh lock and run
         // in parallel — the very serialization this map exists to prevent.
         synchronized (lockForConcurrencyOp(arn)) {
+            warmPool.deleteProvisionedFunction(fn);
             if (concurrencyLimiter != null) {
                 concurrencyLimiter.reset(arn);
             }
@@ -2243,6 +2231,8 @@ public class LambdaService implements ResourceProvider {
         esmStore.delete(uuid);
         if (esm.getEventSourceArn() != null && esm.getEventSourceArn().contains(":dynamodb:")) {
             dynamodbStreamsPoller.mappingDeleted(uuid);
+        } else if (esm.getEventSourceArn() != null && esm.getEventSourceArn().contains(":kinesis:")) {
+            kinesisPoller.mappingDeleted(uuid);
         }
         LOG.infov("Deleted ESM {0}", uuid);
     }
@@ -2253,7 +2243,7 @@ public class LambdaService implements ResourceProvider {
      * Locked get-increment-put: StorageBackedMap has no atomic merge, so the
      * sequence must not interleave or concurrent PublishVersion calls could issue
      * duplicate version numbers. The lock is per counter key (same pattern as
-     * {@code concurrencyOpLocks}) so publishes of unrelated functions do not
+     * the per-function concurrency lock) so publishes of unrelated functions do not
      * serialize on the instance monitor for the storage round-trip.
      */
     /**
@@ -2993,7 +2983,10 @@ public class LambdaService implements ResourceProvider {
                     "Version must be a published version number, got: " + version, 400);
         }
         LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
-        functionStore.deleteVersion(region, fn.getFunctionName(), version);
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            warmPool.deleteProvisionedQualifier(fn, version);
+            functionStore.deleteVersion(region, fn.getFunctionName(), version);
+        }
         LOG.infov("Deleted version {0} of function {1}", version, fn.getFunctionName());
     }
 
@@ -3046,14 +3039,18 @@ public class LambdaService implements ResourceProvider {
                                    java.util.Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
         validateAliasMembers(functionVersion, description);
-        LambdaAlias alias = getAlias(region, functionName, aliasName);
-        if (functionVersion != null) alias.setFunctionVersion(functionVersion);
-        if (description != null) alias.setDescription(description);
-        if (routingConfig != null) alias.setRoutingConfig(routingConfig.isEmpty() ? null : routingConfig);
-        alias.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-        alias.setRevisionId(UUID.randomUUID().toString());
-        if (aliasStore != null) aliasStore.save(region, alias);
-        return alias;
+        LambdaFunction fn = getFunction(region, functionName);
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            LambdaAlias alias = getAlias(region, functionName, aliasName);
+            warmPool.validateProvisionedAliasUpdate(fn, aliasName, functionVersion);
+            if (functionVersion != null) alias.setFunctionVersion(functionVersion);
+            if (description != null) alias.setDescription(description);
+            if (routingConfig != null) alias.setRoutingConfig(routingConfig.isEmpty() ? null : routingConfig);
+            alias.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            alias.setRevisionId(UUID.randomUUID().toString());
+            if (aliasStore != null) aliasStore.save(region, alias);
+            return alias;
+        }
     }
 
     /** FunctionUrlQualifier in botocore: 1-128 characters, not all digits. */
@@ -3079,8 +3076,12 @@ public class LambdaService implements ResourceProvider {
     public void deleteAlias(String region, String functionName, String aliasName) {
         validatePattern(aliasName, "name", ALIAS_NAME_PATTERN);
         String canonical = canonicalFunctionName(region, functionName);
-        getAlias(region, canonical, aliasName); // verify it exists
-        if (aliasStore != null) aliasStore.delete(region, canonical, aliasName);
+        LambdaFunction fn = getFunction(region, canonical);
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            getAlias(region, canonical, aliasName); // verify it exists
+            warmPool.deleteProvisionedQualifier(fn, aliasName);
+            if (aliasStore != null) aliasStore.delete(region, canonical, aliasName);
+        }
         LOG.infov("Deleted alias {0} for function {1}", aliasName, canonical);
     }
 
@@ -3283,6 +3284,7 @@ public class LambdaService implements ResourceProvider {
         // concurrent Puts cannot leave the limiter and persisted state out of
         // sync, regardless of which call acquires the reservedLock first.
         synchronized (lockForConcurrencyOp(arn)) {
+            warmPool.validateProvisionedReservation(fn, reservedConcurrentExecutions);
             Integer previousReserved = null;
             boolean limiterUpdated = false;
             if (concurrencyLimiter != null) {
@@ -3359,7 +3361,7 @@ public class LambdaService implements ResourceProvider {
 
     /** Package-private (not private) so tests can hold this lock to prove a critical section waits for it. */
     Object lockForConcurrencyOp(String functionArn) {
-        return concurrencyOpLocks.computeIfAbsent(functionArn, k -> new Object());
+        return functionStore.lockForConcurrencyOp(functionArn);
     }
 
     public LambdaFunction getFunctionByUrlId(String urlId) {

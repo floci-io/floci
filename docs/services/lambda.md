@@ -49,6 +49,9 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `PutFunctionConcurrency` | Set reserved concurrent executions |
 | `GetFunctionConcurrency` | Get reserved concurrent executions |
 | `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
+| `PutProvisionedConcurrencyConfig` | Initialize Docker environments for a published version or simple alias |
+| `GetProvisionedConcurrencyConfig` | Read the allocation's actual initialization status and capacity |
+| `DeleteProvisionedConcurrencyConfig` | Remove an allocation and stop its environments |
 | `GetAccountSettings` | Account limits plus usage derived from the caller's stored functions |
 | `PutFunctionEventInvokeConfig` | Set the asynchronous invocation settings of a function, version or alias (retries, event age, destinations) |
 | `UpdateFunctionEventInvokeConfig` | Change some of those settings, leaving the rest as they are |
@@ -90,16 +93,18 @@ part in authorizing calls to the function:
 - `GetFunction`, `GetFunctionConfiguration` and `ListDurableExecutionsByFunction`, given a full ARN
   with a version or alias, read the function in the account in the ARN, and need its function
   policy to allow the caller in the same way.
+- Provisioned-concurrency configuration operations also act in the account named by the function
+  reference. Cross-account access requires that function's policy to allow the caller.
 - Other operations act on the caller's own function of the name the ARN gives, whatever account
   the ARN names, and are authorized against that function. Floci does not serve them on another
   account's function, which AWS allows through a function policy.
 - Within one account, a statement naming the caller grants on its own. One naming only the
   account, as `AddPermission --principal <account-id>` writes it, delegates to the account, so the
   caller's identity policy has to allow the call too.
-- An invoke is authorized against the version or alias it names, in the function name or in
-  `Qualifier`. A grant added with `Qualifier` covers that version or alias only, and a grant on the
-  function does not cover a qualified invoke. Other operations are authorized against the
-  unqualified function.
+- An invoke or provisioned-concurrency configuration operation is authorized against the version or
+  alias it names, in the function name or in `Qualifier`. A grant added with `Qualifier` covers that
+  version or alias only, and a grant on the function does not cover a qualified operation.
+  Other operations are authorized against the unqualified function.
 - A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
 - `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
   admits no caller.
@@ -370,8 +375,7 @@ disabled fails with Lambda's error as the resource status reason.
     applies independently to each region. `PutFunctionConcurrency` validates
     that the requested value leaves at least
     `floci.services.lambda.unreserved-concurrency-min` (default 100) available
-    for unreserved functions in that region. `PutProvisionedConcurrencyConfig`
-    and related provisioned-concurrency operations remain unimplemented.
+    for unreserved functions in that region.
 
     Reducing or clearing a function's reserved value does not kill
     invocations that are already in flight. This matches AWS, which
@@ -448,12 +452,92 @@ A layer ARN outside the caller's partition is refused whatever that setting says
 isolated, so no resource policy can ever make such a layer readable, and `GetLayerVersionByArn`
 rejects one outright with `InvalidParameterValueException: Invalid layer version ...`.
 
+## Provisioned concurrency
+
+Published versions with `SnapStart.ApplyOn=PublishedVersions` reject provisioned concurrency
+with `ResourceConflictException`, including through an alias. A configured alias cannot
+retarget to such a version. Eligibility uses the published snapshot, so changing `$LATEST`
+does not change older versions. Get and Delete retain their normal configuration lookup
+behavior, and unconfigured aliases can still point to SnapStart versions.
+
+Put, Get and Delete use `/2019-09-30/functions/{FunctionName}/provisioned-concurrency`
+with a required `Qualifier` query parameter. Put accepts a positive integer
+`ProvisionedConcurrentExecutions` and returns HTTP 202 with `IN_PROGRESS`. An existing
+function without a configuration returns `ProvisionedConcurrencyConfigNotFoundException`
+from Get.
+
+An alias and its resolved published version cannot both have configurations. Different
+aliases of the same provisioned version also conflict; other versions remain independent.
+`LastModified` uses Lambda's UTC `+0000` form.
+
+Each environment runs the real function initialization. `READY` requires the runtime and
+every discovered extension to send their first Runtime API `Next` request. Provisioning
+does not enqueue a handler event. Initialization failures become `FAILED`; the initialization
+deadline is the greater of 130 seconds and the configured function timeout. A later ordinary
+Invoke for that exact alias or version uses an available initialized environment, with
+on-demand spillover when all its environments are busy. Other aliases, versions, accounts
+and regions do not borrow that allocation.
+
+Layer initialization uses the stored function's account and partition, including background
+workers without a request context. An unresolved configured layer or missing layer directory
+fails provisioned initialization; it is never silently omitted from a `READY` environment.
+Cross-account layer sharing remains unsupported.
+
+With IAM enforcement enabled, these operations authorize the function owner and qualifier
+against the caller's identity policy and the owner's function policy. A cross-account grant
+for Get does not authorize Put, Delete, or another qualifier.
+
+Provisioned environments are separate from ordinary idle eviction. Desired configurations
+are persisted; restarting Floci initializes new processes before reporting `READY`.
+Deleting the configuration, alias or function removes the owned environments. Changing an
+alias's version reinitializes its existing allocation for the new published version and
+releases the old version's configuration conflict. The alias retains its requested quota;
+retired environments retain their local container capacity until cleanup succeeds. An identical
+Put preserves the existing healthy allocation. Failed background alias refreshes retain their
+previous allocation and retry on later reconciliation without blocking other configurations.
+An alias with a configuration cannot move to
+`$LATEST`; remove the configuration first. Get and Delete remain available if the alias gains
+unsupported weighted routing.
+
+This implementation supports the non-ephemeral Docker executor with immutable published
+versions and simple aliases. It refuses `$LATEST`, weighted aliases, hot reload, durable
+functions and other executors. Allocations share the configured `warm-pool-max-per-function`
+ceiling across a function's qualifiers, and the optional `warm-pool-max-total` ceiling across
+provisioned allocations. A function's reserved concurrency is also a ceiling. These local
+resource bounds do not implement AWS's complete regional provisioned-concurrency quota
+accounting, automatic scaling, or weighted-alias allocation. Provisioned runtimes receive
+their numeric `AWS_LAMBDA_FUNCTION_VERSION` and
+`AWS_LAMBDA_INITIALIZATION_TYPE=provisioned-concurrency`.
+
+Configuration replacement and deletion remain committed if environment removal fails.
+Failed removals retain ownership and are retried while Floci is running; they continue
+to count against local container limits until cleanup succeeds.
+
+Shutdown drains provisioned and on-demand containers concurrently within one
+`floci.services.lambda.container-drain-timeout-seconds` budget. The default is 15 seconds;
+set `FLOCI_SERVICES_LAMBDA_CONTAINER_DRAIN_TIMEOUT_SECONDS` when a larger fleet needs more
+time for Docker to finish removing stopped containers. Supported values are 1 through 300;
+invalid values fail initialization. The parent process's stop grace must exceed this
+budget. The destruction hook does not start another drain budget. Failed removals remain
+owned for a later retirement or reset retry; a completed removal is not repeated.
+A launch that outlasts the deadline is reported as incomplete cleanup. Its invocation is
+refused, and any returned container remains owned for a later cleanup retry; the deadline
+does not guarantee cancellation of an unresponsive container launcher.
+
+If an invocation finishes after the shutdown deadline, releasing its still-owned
+container starts a separate bounded cleanup attempt. This does not extend the
+initial shutdown wait.
+
+When using `floci-cli`, set `floci stop --timeout <seconds>` above the configured
+drain budget. The CLI currently defaults to 10 seconds, including for `floci restart`.
+For a longer drain, explicitly stop with the larger timeout and then start Floci.
+
 ## Not Implemented
 
 These AWS Lambda operations have no handler in Floci. Calls will return `404` or an error:
 
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
-- Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
+- Listing provisioned concurrency (`ListProvisionedConcurrencyConfigs`)
 - `InvokeWithResponseStream`
 - Code signing enforcement. A configuration is created, read, updated, deleted and listed, and
   nothing verifies a signature against it, so it never gates a deployment. Attaching one to a
@@ -488,6 +572,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS` | `1000` | Event-source mapping poll interval (milliseconds) |
 | `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` | `60` | Wait before the first retry of a failed asynchronous invocation (seconds); the second waits twice this, `0` retries back to back |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` | `300` | Idle container shutdown timeout (seconds) |
+| `FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS` | `10` | Time a newly started runtime has to finish its init and request its first invocation (seconds). A function whose `Timeout` plus 2 seconds is longer waits that long instead. See [Slow cold starts](#slow-cold-starts) |
 | `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION` | `max(4, cpus)` | Maximum idle (warm) containers kept per function |
 | `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL` | `0` | Maximum idle (warm) containers kept across all functions, LRU-evicted beyond it. `0` = unbounded. See the note below |
 | `FLOCI_SERVICES_LAMBDA_REGION_CONCURRENCY_LIMIT` | `1000` | Maximum concurrent executions per region |
@@ -565,6 +650,34 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
     active region. A cap that is smaller than the number of functions invoked in a tight loop
     trades some warm hits for the memory bound. A negative value is ignored with a warning and
     leaves the total unbounded, like `0`.
+
+### Slow cold starts
+
+A cold start has two budgets. The Init phase runs from the moment the container has started
+until its runtime requests the first invocation, which covers runtime startup and the
+function's static initialization. The function's `Timeout` starts only when the invocation is
+handed to the runtime, so in Floci a slow init never shortens the handler's time and
+`getRemainingTimeInMillis()` reports the full `Timeout`. AWS differs here: an init that runs
+past its 10-second limit is retried with the first invocation, inside the function's
+`Timeout`, so there a slow init does eat into the handler's time.
+
+The Init phase may last `init-timeout-seconds` (default 10, the limit AWS applies), counted
+from the container's start, so launching extensions and attaching logs use part of it. A
+function whose `Timeout` plus 2 seconds is longer than what is left of the budget waits that
+long instead. A runtime that has not asked for its invocation by then is stopped, the
+invocation fails with `Function.TimedOut`, and Floci logs a warning naming the setting. Java
+and other JVM runtimes on a busy CI host can need more than 10 seconds; raise the budget there:
+
+```bash
+FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS=120
+```
+
+Image pulls and container creation happen before the Init phase and are not counted
+against it. The budget applies only until the runtime first requests an invocation: a warm
+or provisioned container whose runtime stops asking is given its `Timeout` plus 2 seconds.
+SQS event source mappings add the budget to the visibility timeout they receive messages
+with, so a message is not delivered to another consumer while its cold start is still within
+the budget.
 
 ### Runtime API host override
 
@@ -1030,7 +1143,9 @@ Connect Lambda to SQS, Kinesis, or DynamoDB Streams. Self-managed Apache Kafka e
 
 For DynamoDB Streams mappings, Floci retries failed batches with exponential backoff, honors `MaximumRetryAttempts` and `MaximumRecordAgeInSeconds`, and sends discarded batches to configured SQS, SNS, or S3 `DestinationConfig.OnFailure` destinations. With `BisectBatchOnFunctionError`, a batch that fails with a function error is split in half and retried, narrowing it down to the failing record, which then follows the normal retry and record age rules. Splits do not count as retry attempts, and only function errors split: throttles do not, and a partial batch response retries from the reported record. If the OnFailure destination refuses a discarded batch, Floci logs the failure, drops the batch and advances past it.
 
-For Kinesis mappings, a function error or throttle leaves the shard checkpoint in place and the same batch is read again on the next poll; there is no retry limit, backoff, or OnFailure destination. With `FunctionResponseTypes: ["ReportBatchItemFailures"]`, a partial batch response moves the checkpoint up to the lowest reported record, and a malformed response retries the whole batch. `FunctionResponseTypes` can be set or cleared on an existing mapping with `UpdateEventSourceMapping`.
+For Kinesis mappings, a function error leaves the shard checkpoint in place and the same batch is retried with exponential backoff. With `FunctionResponseTypes: ["ReportBatchItemFailures"]`, a partial batch response moves the checkpoint up to the lowest reported record and retries from there, and a malformed response retries the whole batch. Each of these retries counts toward `MaximumRetryAttempts`; when a partial batch response moves the checkpoint forward, the attempts count again from the new checkpoint, as they do for DynamoDB Streams. When the attempts run out, or a failed batch is older than `MaximumRecordAgeInSeconds`, Floci discards the batch: it sends one invocation record with a `KinesisBatchInfo` block to the SQS, SNS, or S3 `DestinationConfig.OnFailure` destination, if one is set, moves the checkpoint past the batch and goes on with the next records of the shard. If the destination refuses the record, Floci logs the failure and discards the batch all the same. With the defaults (`-1` or unset) a failing batch is retried until it succeeds. A throttle leaves the checkpoint in place, without a backoff and without using an attempt, until the batch is older than `MaximumRecordAgeInSeconds`: then it is discarded the same way, with an `approximateInvokeCount` of the invocations that ran. The record age is checked only when an invoke fails or is throttled, so records are not dropped before their first invoke. With `BisectBatchOnFunctionError`, a batch that fails with a function error is split in half and retried, as for DynamoDB Streams, narrowing it down to the failing record, which then follows the normal retry and record age rules. Splits do not count as retry attempts, and a batch already older than `MaximumRecordAgeInSeconds` is discarded rather than split. `FunctionResponseTypes` can be set or cleared on an existing mapping with `UpdateEventSourceMapping`.
+
+For both stream sources, the first retry waits twice `FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS` (2 seconds by default), and each later retry waits twice as long as the one before, up to 60 seconds.
 
 For SQS mappings, a function error returns every delivered message to the queue with the queue's `VisibilityTimeout`, so it is received again after that timeout and the queue's `RedrivePolicy` applies as usual. With `FunctionResponseTypes: ["ReportBatchItemFailures"]`, only the messages the function reports are returned and the rest are deleted; a malformed response returns the whole batch.
 

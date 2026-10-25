@@ -111,7 +111,7 @@ public final class Totp {
                 actual.getBytes(StandardCharsets.US_ASCII));
     }
 
-    static String base32Encode(byte[] data) {
+    public static String base32Encode(byte[] data) {
         StringBuilder encoded = new StringBuilder();
         int buffer = 0;
         int bitsLeft = 0;

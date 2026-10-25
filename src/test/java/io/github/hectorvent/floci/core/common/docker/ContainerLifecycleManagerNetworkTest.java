@@ -118,14 +118,21 @@ class ContainerLifecycleManagerNetworkTest {
         verify(connectCmd).exec();
     }
 
-    @Test
-    void createRemovesContainerWhenNetworkAttachFails() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void createRemovesContainerWhenNetworkAttachFails(boolean ephemeral) {
         RemoveContainerCmd removeCmd = mock(RemoveContainerCmd.class, RETURNS_SELF);
         lenient().when(dockerClient.removeContainerCmd("container-id")).thenReturn(removeCmd);
         doThrow(new IllegalStateException("network gone")).when(connectCmd).exec();
 
-        assertThrows(IllegalStateException.class, () -> manager().create(specWithLinkLocalIp(Map.of())));
-
+        assertThrows(IllegalStateException.class, () -> {
+            if (ephemeral) {
+                manager().createAndStartEphemeral(specWithLinkLocalIp(Map.of()));
+            } else {
+                manager().create(specWithLinkLocalIp(Map.of()));
+            }
+        });
+        verify(removeCmd, ephemeral ? times(1) : never()).withRemoveVolumes(true);
         verify(dockerClient).removeContainerCmd("container-id");
     }
 

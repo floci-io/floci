@@ -23,8 +23,16 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Comparator;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -181,14 +189,6 @@ public class KinesisService implements ResourceProvider {
             store.put(key, stream);
             LOG.infov("Updated stream mode for {0} to {1}", streamName, streamMode);
         }
-    }
-
-    public List<String> listStreams(String region) {
-        String prefix = region + "::";
-        return store.scan(key -> key.startsWith(prefix)).stream()
-                .map(KinesisStream::getStreamName)
-                .sorted()
-                .toList();
     }
 
     public List<KinesisStream> listStreamDetails(String region) {
@@ -1208,21 +1208,42 @@ public class KinesisService implements ResourceProvider {
             return selectShardByExplicitHashKey(stream, explicitHashKey);
         }
 
-        // Simple hash-based shard selection among ALL shards, then resolve to open one
-        int index = (int) (Math.abs((long) partitionKey.hashCode()) % stream.getShards().size());
-        KinesisShard shard = stream.getShards().get(index);
-
-        // If closed, find the first open child (simplified)
-        while (shard.isClosed()) {
-            KinesisShard finalShard = shard;
-            shard = stream.getShards().stream()
-                    .filter(s -> finalShard.getShardId().equals(s.getParentShardId()) || finalShard.getShardId().equals(s.getAdjacentParentShardId()))
-                    .filter(s -> !s.isClosed())
-                    .findFirst()
-                    .orElse(shard); // Fallback to itself if no open child found
-            if (shard == finalShard) break; // prevent infinite loop
+        // Preserve ordinary-key placement, then resolve historical parents to an open descendant.
+        // The producer holds the stream lock, shared with splitShard and mergeShards.
+        List<KinesisShard> shards = stream.getShards();
+        int index = (int) (Math.abs((long) partitionKey.hashCode()) % shards.size());
+        KinesisShard selected = shards.get(index);
+        if (!selected.isClosed()) {
+            return selected;
         }
-        return shard;
+
+        List<KinesisShard> snapshot = List.copyOf(shards);
+        Map<String, List<KinesisShard>> children = new HashMap<>();
+        for (KinesisShard shard : snapshot) {
+            if (shard.getParentShardId() != null) {
+                children.computeIfAbsent(shard.getParentShardId(), ignored -> new ArrayList<>()).add(shard);
+            }
+            if (shard.getAdjacentParentShardId() != null) {
+                children.computeIfAbsent(shard.getAdjacentParentShardId(), ignored -> new ArrayList<>()).add(shard);
+            }
+        }
+        Deque<KinesisShard> pending = new ArrayDeque<>();
+        Set<String> visited = new HashSet<>();
+        pending.add(selected);
+        visited.add(selected.getShardId());
+        while (!pending.isEmpty()) {
+            KinesisShard shard = pending.removeFirst();
+            if (!shard.isClosed()) {
+                return shard;
+            }
+            for (KinesisShard child : children.getOrDefault(shard.getShardId(), List.of())) {
+                if (visited.add(child.getShardId())) {
+                    pending.addLast(child);
+                }
+            }
+        }
+        throw new AwsException("InvalidArgumentException",
+                "Selected shard " + selected.getShardId() + " has no open descendant.", 400);
     }
 
     private KinesisShard selectShardByExplicitHashKey(KinesisStream stream, String explicitHashKey) {

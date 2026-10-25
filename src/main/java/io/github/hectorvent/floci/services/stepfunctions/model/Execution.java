@@ -1,10 +1,13 @@
 package io.github.hectorvent.floci.services.stepfunctions.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -22,6 +25,8 @@ public class Execution {
     private String error;
     private String cause;
     private List<HistoryEvent> history = new ArrayList<>();
+    @JsonIgnore
+    private transient Set<ExecutionStatusSubscription> statusSubscriptions;
 
     public Execution() {
         this.startDate = System.currentTimeMillis() / 1000.0;
@@ -47,7 +52,36 @@ public class Execution {
     public void setName(String name) { this.name = name; }
 
     public String getStatus() { return status; }
-    public void setStatus(String status) { this.status = status; }
+    public synchronized void setStatus(String status) {
+        this.status = status;
+        if (!"RUNNING".equals(status) && statusSubscriptions != null) {
+            Set<ExecutionStatusSubscription> subscriptions = statusSubscriptions;
+            statusSubscriptions = null;
+            for (ExecutionStatusSubscription subscription : subscriptions) {
+                subscription.signal();
+            }
+        }
+    }
+
+    synchronized void registerStatusSubscription(ExecutionStatusSubscription subscription) {
+        if (!"RUNNING".equals(status)) {
+            subscription.signal();
+            return;
+        }
+        if (statusSubscriptions == null) {
+            statusSubscriptions = new HashSet<>();
+        }
+        statusSubscriptions.add(subscription);
+    }
+
+    synchronized void unregisterStatusSubscription(ExecutionStatusSubscription subscription) {
+        if (statusSubscriptions != null) {
+            statusSubscriptions.remove(subscription);
+            if (statusSubscriptions.isEmpty()) {
+                statusSubscriptions = null;
+            }
+        }
+    }
 
     public String getInput() { return input; }
     public void setInput(String input) { this.input = input; }

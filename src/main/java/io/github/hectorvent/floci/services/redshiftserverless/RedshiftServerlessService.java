@@ -32,6 +32,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -108,11 +109,18 @@ public class RedshiftServerlessService implements Resettable {
     private final RedshiftServerlessEndpoints endpoints;
     private final RedshiftServerlessRuntime runtime;
     private final EmulatorConfig config;
+    private final RedshiftServerlessAdminSecrets adminSecrets;
+
+    public RedshiftServerlessService(StorageFactory storageFactory, RegionResolver regionResolver,
+                                     RedshiftServerlessEndpoints endpoints, RedshiftServerlessRuntime runtime,
+                                     EmulatorConfig config) {
+        this(storageFactory, regionResolver, endpoints, runtime, config, null);
+    }
 
     @Inject
     public RedshiftServerlessService(StorageFactory storageFactory, RegionResolver regionResolver,
                                      RedshiftServerlessEndpoints endpoints, RedshiftServerlessRuntime runtime,
-                                     EmulatorConfig config) {
+                                     EmulatorConfig config, RedshiftServerlessAdminSecrets adminSecrets) {
         this.namespaces = storageFactory.create("redshiftserverless", "redshiftserverless-namespaces.json",
                 new TypeReference<Map<String, Namespace>>() {});
         this.workgroups = storageFactory.create("redshiftserverless", "redshiftserverless-workgroups.json",
@@ -123,6 +131,7 @@ public class RedshiftServerlessService implements Resettable {
         this.endpoints = endpoints;
         this.runtime = runtime;
         this.config = config;
+        this.adminSecrets = adminSecrets;
     }
 
     /**
@@ -213,6 +222,17 @@ public class RedshiftServerlessService implements Resettable {
                                                   String adminUserPassword, String dbName, String kmsKeyId,
                                                   String defaultIamRoleArn, List<String> iamRoles,
                                                   List<String> logExports, Map<String, String> tags, String region) {
+        return createNamespace(namespaceName, adminUsername, adminUserPassword, dbName, kmsKeyId,
+                defaultIamRoleArn, iamRoles, logExports, tags, null, null, region);
+    }
+
+    public synchronized Namespace createNamespace(String namespaceName, String adminUsername,
+                                                  String adminUserPassword, String dbName, String kmsKeyId,
+                                                  String defaultIamRoleArn, List<String> iamRoles,
+                                                  List<String> logExports, Map<String, String> tags,
+                                                  Boolean manageAdminPassword, String adminPasswordSecretKmsKeyId,
+                                                  String region) {
+        validateManagedPassword(manageAdminPassword, adminUserPassword, adminPasswordSecretKmsKeyId);
         validateNamespaceName(namespaceName);
         String key = storageKey(region, namespaceName);
         if (namespaces.get(key).isPresent()) {
@@ -234,7 +254,20 @@ public class RedshiftServerlessService implements Resettable {
         namespace.setStatus("AVAILABLE");
         namespace.setCreationDate(Instant.now());
         namespace.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
-        namespaces.put(key, namespace);
+        if (Boolean.TRUE.equals(manageAdminPassword)) {
+            namespace.setAdminUsername(adminUserOf(namespace));
+            namespace.setAdminUserPassword(runtime.generatePassword());
+            requireAdminSecrets().create(namespace, adminPasswordSecretKmsKeyId, region);
+        }
+        try {
+            namespaces.put(key, namespace);
+        } catch (RuntimeException failure) {
+            if (namespace.getAdminPasswordSecretArn() != null) {
+                compensate(() -> namespaces.delete(key), failure, "remove namespace after failed create");
+                compensate(() -> requireAdminSecrets().delete(namespace, region), failure, "delete orphaned admin secret");
+            }
+            throw failure;
+        }
         return namespace;
     }
 
@@ -267,7 +300,16 @@ public class RedshiftServerlessService implements Resettable {
                                                   String defaultIamRoleArn, List<String> iamRoles,
                                                   List<String> logExports, String region) {
         return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
-                defaultIamRoleArn, iamRoles, logExports, region, false);
+                defaultIamRoleArn, iamRoles, logExports, null, null, region, false);
+    }
+
+    public synchronized Namespace updateNamespace(String namespaceName, String adminUsername,
+                                                  String adminUserPassword, String kmsKeyId,
+                                                  String defaultIamRoleArn, List<String> iamRoles,
+                                                  List<String> logExports, Boolean manageAdminPassword,
+                                                  String adminPasswordSecretKmsKeyId, String region) {
+        return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
+                defaultIamRoleArn, iamRoles, logExports, manageAdminPassword, adminPasswordSecretKmsKeyId, region, false);
     }
 
     /**
@@ -280,7 +322,7 @@ public class RedshiftServerlessService implements Resettable {
                                                      String defaultIamRoleArn, List<String> iamRoles,
                                                      List<String> logExports, String region) {
         return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
-                defaultIamRoleArn, iamRoles, logExports, region, true);
+                defaultIamRoleArn, iamRoles, logExports, null, null, region, true);
     }
 
     /**
@@ -291,7 +333,9 @@ public class RedshiftServerlessService implements Resettable {
     private Namespace applyNamespaceUpdate(String namespaceName, String adminUsername,
                                            String adminUserPassword, String kmsKeyId,
                                            String defaultIamRoleArn, List<String> iamRoles,
-                                           List<String> logExports, String region, boolean resetOmitted) {
+                                           List<String> logExports, Boolean manageAdminPassword,
+                                           String adminPasswordSecretKmsKeyId, String region, boolean resetOmitted) {
+        validateManagedPassword(manageAdminPassword, adminUserPassword, adminPasswordSecretKmsKeyId);
         String key = storageKey(region, namespaceName);
         Namespace current = getNamespace(namespaceName, region);
         Namespace updated = new Namespace(current);
@@ -312,36 +356,85 @@ public class RedshiftServerlessService implements Resettable {
         if (logExports != null) {
             updated.setLogExports(validateLogExports(logExports));
         }
-        boolean rotated = adminUserPassword != null && !adminUserPassword.isBlank();
-        if (rotated) {
-            applyNewAdminPassword(current, adminUserPassword, region);
+        boolean wasManaged = current.getAdminPasswordSecretArn() != null;
+        boolean managed = manageAdminPassword == null ? wasManaged : manageAdminPassword;
+        if (managed && adminUserPassword != null) {
+            throw ServerlessSupport.validation("adminUserPassword cannot be supplied while admin credentials are managed.");
+        }
+        if (!managed && wasManaged && blankToNull(adminUserPassword) == null) {
+            throw ServerlessSupport.validation("adminUserPassword is required when disabling managed admin credentials.");
+        }
+        if (managed) {
+            updated.setAdminUsername(adminUserOf(updated));
+            if (!wasManaged) {
+                updated.setAdminUserPassword(runtime.generatePassword());
+            }
+            if (adminPasswordSecretKmsKeyId != null) {
+                updated.setAdminPasswordSecretKmsKeyId(adminPasswordSecretKmsKeyId);
+            }
+        } else if (blankToNull(adminUserPassword) != null) {
             updated.setAdminUserPassword(adminUserPassword);
         }
+        if (!managed) {
+            updated.setAdminPasswordSecretArn(null);
+            updated.setAdminPasswordSecretKmsKeyId(null);
+        }
+        boolean rotated = !Objects.equals(current.getAdminUserPassword(), updated.getAdminUserPassword());
+        boolean secretUpdated = managed && wasManaged
+                && (!Objects.equals(current.getAdminUsername(), updated.getAdminUsername())
+                || !Objects.equals(current.getAdminPasswordSecretKmsKeyId(), updated.getAdminPasswordSecretKmsKeyId()));
+        boolean backendChanged = false;
+        boolean storeAttempted = false;
         try {
-            namespaces.put(key, updated);
-        } catch (RuntimeException e) {
-            if (rotated) {
-                try {
-                    restoreAdminPassword(current, region);
-                } catch (RuntimeException restoreFailure) {
-                    LOG.errorv(restoreFailure, "Could not restore the admin password of namespace {0}; "
-                            + "the backend may reject the stored password", namespaceName);
-                    e.addSuppressed(restoreFailure);
-                }
+            if (managed && !wasManaged) {
+                requireAdminSecrets().create(updated, adminPasswordSecretKmsKeyId, region);
+            } else if (secretUpdated) {
+                requireAdminSecrets().update(updated, region);
             }
-            throw e;
+            if (rotated) {
+                applyNewAdminPassword(current, updated.getAdminUserPassword(), region);
+                backendChanged = true;
+            }
+            storeAttempted = true;
+            namespaces.put(key, updated);
+            if (wasManaged && !managed) {
+                requireAdminSecrets().delete(current, region);
+            }
+        } catch (RuntimeException failure) {
+            if (storeAttempted) {
+                compensate(() -> namespaces.put(key, current), failure, "restore namespace credentials");
+            }
+            if (backendChanged) {
+                compensate(() -> restoreAdminPassword(current, region), failure, "restore backend admin password");
+            }
+            if (managed && !wasManaged && updated.getAdminPasswordSecretArn() != null) {
+                compensate(() -> requireAdminSecrets().delete(updated, region), failure, "delete orphaned admin secret");
+            } else if (secretUpdated) {
+                compensate(() -> requireAdminSecrets().update(current, region), failure, "restore managed admin secret");
+            }
+            throw failure;
         }
         return updated;
     }
 
     public synchronized Namespace deleteNamespace(String namespaceName, String region) {
-        Namespace deleted = new Namespace(getNamespace(namespaceName, region));
+        Namespace current = getNamespace(namespaceName, region);
+        Namespace deleted = new Namespace(current);
         // A workgroup cannot outlive its namespace; the model lists ConflictException for this call
         // but not its trigger, so this guard is the single place to relax if AWS turns out to differ.
         if (workgroupOf(namespaceName, region).isPresent()) {
             throw ServerlessSupport.conflict("The namespace " + namespaceName + " still has a workgroup. Delete the workgroup first.");
         }
-        namespaces.delete(storageKey(region, namespaceName));
+        String key = storageKey(region, namespaceName);
+        try {
+            namespaces.delete(key);
+            if (deleted.getAdminPasswordSecretArn() != null) {
+                requireAdminSecrets().delete(deleted, region);
+            }
+        } catch (RuntimeException failure) {
+            compensate(() -> namespaces.put(key, current), failure, "restore namespace after failed deletion");
+            throw failure;
+        }
         deleted.setStatus("DELETING");
         return deleted;
     }
@@ -829,15 +922,25 @@ public class RedshiftServerlessService implements Resettable {
         }
         return new WorkgroupTarget(workgroup.getWorkgroupArn(), workgroup.getWorkgroupName(),
                 workgroup.getRuntimeHost(), workgroup.getRuntimePort(), namespace.getDbName(),
-                workgroup.getMasterUsername(), namespace.getAdminUserPassword(), adminUserOf(namespace), namespace.getIamRoles());
+                workgroup.getMasterUsername(), namespace.getAdminUserPassword(), adminUserOf(namespace),
+                namespace.getIamRoles(), namespace.getAdminPasswordSecretArn());
     }
 
     /** Connection details of a workgroup's backend; {@code adminUsername} is the name clients log in with. */
     public record WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
-                                  String masterUsername, String masterPassword, String adminUsername, List<String> iamRoleArns) {
+                                  String masterUsername, String masterPassword, String adminUsername,
+                                  List<String> iamRoleArns, String adminPasswordSecretArn) {
+        public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
+                               String masterUsername, String masterPassword, String adminUsername,
+                               List<String> iamRoleArns) {
+            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
+                    iamRoleArns, null);
+        }
+
         public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
                                String masterUsername, String masterPassword, String adminUsername) {
-            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername, List.of());
+            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
+                    List.of(), null);
         }
 
         public WorkgroupTarget {
@@ -917,6 +1020,36 @@ public class RedshiftServerlessService implements Resettable {
 
     private static String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value;
+    }
+
+    private RedshiftServerlessAdminSecrets requireAdminSecrets() {
+        if (adminSecrets == null) {
+            throw new AwsException("InternalServerException", "Secrets Manager is unavailable.", 500);
+        }
+        return adminSecrets;
+    }
+
+    private static void validateManagedPassword(Boolean manage, String password, String secretKey) {
+        if (Boolean.TRUE.equals(manage) && password != null) {
+            throw ServerlessSupport.validation("adminUserPassword cannot be supplied when manageAdminPassword is true.");
+        }
+        if (secretKey != null) {
+            if (!Boolean.TRUE.equals(manage)) {
+                throw ServerlessSupport.validation("adminPasswordSecretKmsKeyId requires manageAdminPassword to be true.");
+            }
+            ServerlessSupport.requireText(secretKey, "adminPasswordSecretKmsKeyId");
+        }
+    }
+
+    private static void compensate(Runnable action, RuntimeException failure, String operation) {
+        try {
+            action.run();
+        } catch (RuntimeException rollbackFailure) {
+            LOG.errorv(rollbackFailure, "Could not {0}", operation);
+            if (rollbackFailure != failure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+        }
     }
 
     private Optional<Workgroup> workgroupOf(String namespaceName, String region) {

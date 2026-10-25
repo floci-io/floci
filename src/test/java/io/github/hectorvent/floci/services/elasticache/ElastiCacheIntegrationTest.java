@@ -191,6 +191,44 @@ class ElastiCacheIntegrationTest {
 
     @Test
     @Order(8)
+    void userTagsCanBeAddedListedAndRemoved() {
+        given()
+            .formParam("Action", "AddTagsToResource")
+            .formParam("ResourceName", "arn:aws:elasticache:us-east-1:000000000000:user:" + USER_ID)
+            .formParam("Tags.Tag.1.Key", "environment")
+            .formParam("Tags.Tag.1.Value", "test")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AddTagsToResourceResponse.AddTagsToResourceResult.TagList.Tag.Key", equalTo("environment"))
+            .body("AddTagsToResourceResponse.AddTagsToResourceResult.TagList.Tag.Value", equalTo("test"));
+
+        given()
+            .formParam("Action", "ListTagsForResource")
+            .formParam("ResourceName", "arn:aws:elasticache:us-east-1:000000000000:user:" + USER_ID)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListTagsForResourceResponse.ListTagsForResourceResult.TagList.Tag.Key", equalTo("environment"));
+
+        given()
+            .formParam("Action", "RemoveTagsFromResource")
+            .formParam("ResourceName", "arn:aws:elasticache:us-east-1:000000000000:user:" + USER_ID)
+            .formParam("TagKeys.member.1", "environment")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RemoveTagsFromResourceResponse.RemoveTagsFromResourceResult.TagList", notNullValue());
+    }
+
+    @Test
+    @Order(9)
     void unassociatedUserIsRejected() throws Exception {
         // Before associating the user with the group, auth should fail
         String reply = sendCommand(firstProxyPort, respArray("AUTH", USER_NAME, INITIAL_PASSWORD));
@@ -198,7 +236,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void associateUserWithGroup() {
         given()
             .formParam("Action", "ModifyReplicationGroup")
@@ -213,7 +251,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void describeUsersIncludesCreatedUser() {
         given()
             .formParam("Action", "DescribeUsers")
@@ -227,7 +265,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void crossGroupAuthIsRejected() throws Exception {
         // Ensure user exists if this test is run in isolation
         try {
@@ -284,7 +322,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void userPasswordAuthWorks() throws Exception {
         try (Socket socket = openSocket(firstProxyPort)) {
             write(socket, respArray("AUTH", USER_NAME, INITIAL_PASSWORD));
@@ -296,7 +334,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void modifyUserPasswordInvalidatesOldPasswordAndAcceptsNewPassword() throws Exception {
         given()
             .formParam("Action", "ModifyUser")
@@ -323,7 +361,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void deleteUserRemovesUserFromDescribeUsers() {
         given()
             .formParam("Action", "DeleteUser")
@@ -346,7 +384,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(15)
+    @Order(16)
     void deleteReplicationGroupReleasesProxyPortForReuse() {
         given()
             .formParam("Action", "DeleteReplicationGroup")
@@ -389,7 +427,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(16)
+    @Order(17)
     void transitEncryptionReplicationGroupAuthenticatesPasswordAndNoAuthUsers() throws Exception {
         String transitGroupId = "it-ec-transit-rbac";
         String passUserId = "it-transit-pass-user";
@@ -499,7 +537,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(17)
+    @Order(18)
     void replicationGroupWithNoAuthDefaultMemberAdmitsUnauthenticatedClients() throws Exception {
         String groupId = "it-ec-def-noauth";
         String defUserId = "it-def-noauth-uid";
@@ -616,7 +654,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(18)
+    @Order(19)
     void replicationGroupWithMembersWithoutDefaultMemberRequiresAuth() throws Exception {
         String groupId = "it-ec-nodef-members";
         String passUserId = "it-nodef-pass-uid";
@@ -695,7 +733,7 @@ class ElastiCacheIntegrationTest {
     }
 
     @Test
-    @Order(19)
+    @Order(20)
     void replicationGroupWithDisabledDefaultUserRequiresAuth() throws Exception {
         String groupId = "it-ec-disabled-def";
         String defUserId = "it-disabled-def-uid";
@@ -821,7 +859,7 @@ class ElastiCacheIntegrationTest {
     }
 
     private static Socket openSocket(int port) throws IOException {
-        Socket socket = new Socket("localhost", port);
+        Socket socket = ElastiCacheTestConnections.openSocket("localhost", port);
         socket.setSoTimeout(SOCKET_TIMEOUT_MS);
         return socket;
     }

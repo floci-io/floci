@@ -30,7 +30,6 @@ class SesConfigurationSetMemberTypeIntegrationTest {
     private static final String MISSING_CS_PATH = CREATE + "/" + MISSING_CS;
     private static final String DESTINATIONS = MISSING_CS_PATH + "/event-destinations";
     private static final String UPDATE = "/v2/email/update-configuration-sets";
-    private static final String NOT_AN_OBJECT = "Request body must be a JSON object.";
 
     static Stream<Arguments> createConfigurationSetCases() {
         return Stream.of(
@@ -180,7 +179,8 @@ class SesConfigurationSetMemberTypeIntegrationTest {
     @ParameterizedTest(name = "{0} {1}")
     @MethodSource("nonObjectBodyEndpoints")
     void nonObjectBody_isRejectedBeforeTheShapeCheck(String method, String path) {
-        assertError(method, path, "[]", "BadRequestException", NOT_AN_OBJECT);
+        assertError(method, path, "[]", "SerializationException", LIST);
+        assertError(method, path, "\"x\"", "SerializationException", null);
     }
 
     @ParameterizedTest(name = "{0} {1}")

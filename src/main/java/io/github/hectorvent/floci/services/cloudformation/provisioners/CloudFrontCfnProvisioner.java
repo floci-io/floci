@@ -565,6 +565,10 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
                 if (connectionTimeout != null) {
                     origin.setConnectionTimeout(connectionTimeout);
                 }
+                Integer responseCompletionTimeout = cfnInt(node, "ResponseCompletionTimeout", engine);
+                if (responseCompletionTimeout != null) {
+                    origin.setResponseCompletionTimeout(responseCompletionTimeout);
+                }
                 JsonNode originCustomHeaders = node.path("OriginCustomHeaders");
                 if (originCustomHeaders.isArray()) {
                     List<Map<String, String>> customHeaders = new ArrayList<>();
@@ -587,6 +591,10 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
                     Integer originReadTimeout = cfnInt(custom, "OriginReadTimeout", engine);
                     if (originReadTimeout != null) {
                         coc.put("OriginReadTimeout", originReadTimeout);
+                    }
+                    Integer originKeepaliveTimeout = cfnInt(custom, "OriginKeepaliveTimeout", engine);
+                    if (originKeepaliveTimeout != null) {
+                        coc.put("OriginKeepaliveTimeout", originKeepaliveTimeout);
                     }
                     origin.setCustomOriginConfig(coc);
                 } else {

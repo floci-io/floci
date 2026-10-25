@@ -1,10 +1,18 @@
 package io.github.hectorvent.floci.services.elasticache.proxy;
 
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
+import io.github.hectorvent.floci.services.elasticache.model.TransitEncryption;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocket;
+import java.io.ByteArrayInputStream;
+import java.io.EOFException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.SequenceInputStream;
 import java.net.Socket;
+import java.util.function.Supplier;
 
 /**
  * TCP auth proxy for a single ElastiCache replication group.
@@ -14,21 +22,65 @@ import java.net.Socket;
 public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
 
     private static final Logger LOG = Logger.getLogger(ElastiCacheAuthProxy.class);
+    /** The content type of a TLS handshake record, the first byte of every ClientHello. */
+    private static final int TLS_HANDSHAKE_RECORD = 0x16;
 
     private final String groupId;
     private final AuthMode authMode;
     private final PasswordValidator passwordValidator;
     private final SigV4Validator sigV4Validator;
+    private final Supplier<SSLContext> tlsContext;
 
     public ElastiCacheAuthProxy(String groupId, AuthMode authMode,
                                 String backendHost, int backendPort,
                                 PasswordValidator passwordValidator,
                                 SigV4Validator sigV4Validator) {
+        this(groupId, authMode, backendHost, backendPort, passwordValidator, sigV4Validator, null);
+    }
+
+    public ElastiCacheAuthProxy(String groupId, AuthMode authMode,
+                                String backendHost, int backendPort,
+                                PasswordValidator passwordValidator, SigV4Validator sigV4Validator,
+                                Supplier<SSLContext> tlsContext) {
         super(LOG, "ElastiCache", "ec", groupId, backendHost, backendPort);
         this.groupId = groupId;
         this.authMode = authMode;
         this.passwordValidator = passwordValidator;
         this.sigV4Validator = sigV4Validator;
+        this.tlsContext = tlsContext;
+    }
+
+    @Override
+    protected ClientTransport clientTransport(Socket client) throws IOException {
+        TransitEncryption encryption = tlsContext == null ? TransitEncryption.NONE : passwordValidator.transitEncryption();
+        return switch (encryption) {
+            case NONE -> ClientTransport.unencrypted(client);
+            case REQUIRED -> ClientTransport.encrypted(handshake(tlsContext.get().getSocketFactory()
+                    .createSocket(client, client.getInetAddress().getHostAddress(), client.getPort(), true), client));
+            case PREFERRED -> eitherTransport(client);
+        };
+    }
+
+    /** Both kinds are taken: a client that does not open with a TLS handshake is speaking RESP in the clear. */
+    private ClientTransport eitherTransport(Socket client) throws IOException {
+        int first = client.getInputStream().read();
+        if (first == -1) {
+            throw new EOFException("client closed the connection before sending anything");
+        }
+        InputStream consumed = new ByteArrayInputStream(new byte[]{(byte) first});
+        if (first != TLS_HANDSHAKE_RECORD) {
+            return new ClientTransport(client, new SequenceInputStream(consumed, client.getInputStream()), false);
+        }
+        return ClientTransport.encrypted(handshake(tlsContext.get().getSocketFactory()
+                .createSocket(client, consumed, true), client));
+    }
+
+    private static SSLSocket handshake(Socket layered, Socket client) throws IOException {
+        SSLSocket encrypted = (SSLSocket) layered;
+        encrypted.setUseClientMode(false);
+        encrypted.setSoTimeout(client.getSoTimeout());
+        encrypted.startHandshake();
+        return encrypted;
     }
 
     @Override
@@ -110,6 +162,11 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     @FunctionalInterface
     public interface PasswordValidator {
         boolean validatePassword(String username, String password);
+
+        /** Read per connection: a modify can move the cache from preferred to required while the proxy runs. */
+        default TransitEncryption transitEncryption() {
+            return TransitEncryption.NONE;
+        }
 
         default boolean hasMembers() {
             return false;

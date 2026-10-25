@@ -541,6 +541,58 @@ public class CodeArtifactController {
         return ok(response);
     }
 
+    @POST
+    @Path("/v1/package/versions/update_status")
+    public Response updatePackageVersionsStatus(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                                 @QueryParam("domain-owner") String domainOwner,
+                                                 @QueryParam("repository") String repository,
+                                                 @QueryParam("format") String format,
+                                                 @QueryParam("namespace") String namespace,
+                                                 @QueryParam("package") String packageName, String body) {
+        JsonNode req = readTree(body);
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.updatePackageVersionsStatus(region,
+                domain, domainOwner, repository, format, namespace, packageName,
+                readStringArray(req.get("versions"), "versions"), readStringMap(req.get("versionRevisions")),
+                req.path("expectedStatus").asText(null), req.path("targetStatus").asText(null));
+        return ok(packageVersionStatusChangeResponse(result));
+    }
+
+    @POST
+    @Path("/v1/package/versions/dispose")
+    public Response disposePackageVersions(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                            @QueryParam("domain-owner") String domainOwner,
+                                            @QueryParam("repository") String repository,
+                                            @QueryParam("format") String format,
+                                            @QueryParam("namespace") String namespace,
+                                            @QueryParam("package") String packageName, String body) {
+        JsonNode req = readTree(body);
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.PackageVersionStatusChangeResult result = service.disposePackageVersions(region, domain,
+                domainOwner, repository, format, namespace, packageName,
+                readStringArray(req.get("versions"), "versions"), readStringMap(req.get("versionRevisions")),
+                req.path("expectedStatus").asText(null));
+        return ok(packageVersionStatusChangeResponse(result));
+    }
+
+    private ObjectNode packageVersionStatusChangeResponse(CodeArtifactService.PackageVersionStatusChangeResult
+            result) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode successfulVersions = response.putObject("successfulVersions");
+        result.successfulVersions().forEach((version, outcome) -> {
+            ObjectNode node = successfulVersions.putObject(version);
+            node.put("revision", outcome.revision());
+            node.put("status", outcome.status());
+        });
+        ObjectNode failedVersions = response.putObject("failedVersions");
+        result.failedVersions().forEach((version, failure) -> {
+            ObjectNode node = failedVersions.putObject(version);
+            node.put("errorCode", failure.errorCode());
+            node.put("errorMessage", failure.errorMessage());
+        });
+        return response;
+    }
+
     // -------------------------------------------------------------------- tags
 
     @POST

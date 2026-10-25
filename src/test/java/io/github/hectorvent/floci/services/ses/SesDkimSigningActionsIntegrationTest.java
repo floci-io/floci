@@ -207,7 +207,8 @@ class SesDkimSigningActionsIntegrationTest {
     void putDkimSigningAttributes_nonObjectBody_returns400() {
         given().contentType("application/json").header("Authorization", V2_AUTH).body("[]")
         .when().put("/v2/email/identities/dkim-nonobj.floci.test/dkim/signing")
-        .then().statusCode(400).body("__type", equalTo("BadRequestException"));
+        .then().statusCode(400).body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("Start of list found where not expected"));
     }
 
     @Test

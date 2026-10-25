@@ -37,6 +37,27 @@ class IamActionRegistryTest {
     private final IamActionRegistry registry = new IamActionRegistry();
 
     @ParameterizedTest
+    @CsvSource({"PUT,PutProvisionedConcurrencyConfig", "GET,GetProvisionedConcurrencyConfig",
+            "DELETE,DeleteProvisionedConcurrencyConfig"})
+    void provisionedConcurrencyRoutesResolveTheirActions(String method, String operation) {
+        ContainerRequestContext ctx = mockCtx(method, "/2019-09-30/functions/example/provisioned-concurrency",
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertEquals("lambda:" + operation, registry.resolveRoute("lambda", ctx));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"ALL,ListProvisionedConcurrencyConfigs", "all,GetProvisionedConcurrencyConfig",
+            "OTHER,GetProvisionedConcurrencyConfig"})
+    void provisionedConcurrencyListMarkerSelectsItsOwnAction(String marker, String operation) {
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("List", marker);
+        query.add("Qualifier", "live");
+        ContainerRequestContext ctx = mockCtx("GET", "/2019-09-30/functions/example/provisioned-concurrency",
+                query, null, "");
+        assertEquals("lambda:" + operation, registry.resolveRoute("lambda", ctx));
+    }
+
+    @ParameterizedTest
     @CsvSource({"groups,CreateGroup", "get-group,GetGroup", "delete-group,DeleteGroup",
             "group-resources,GroupResources", "list-group-resources,ListGroupResources"})
     void resourceGroupsManagementRoutesResolveTheirOwnActions(String path, String operation) {
@@ -340,6 +361,46 @@ class IamActionRegistryTest {
         assertEquals("ses:DeleteSuppressedDestination", registry.resolveRoute("ses",
                 mockCtx("DELETE", "/v2/email/suppression/addresses/a%2Fb@example.com", new MultivaluedHashMap<>(),
                         MediaType.APPLICATION_JSON_TYPE, "{}")));
+    }
+
+    @Test
+    void aTrailingSlashIsCheckedAsTheRouteWithoutIt() {
+        // The router matches /clusters/ as /clusters, so the rule ending at the route's last segment covers it.
+        // An S3 path is matched as sent, as before: a key may end in a slash.
+        String[][] routes = {
+            {"eks", "POST", "/clusters/", "eks:CreateCluster"},
+            {"eks", "GET", "/clusters/c/node-groups/ng/", "eks:DescribeNodegroup"},
+            {"scheduler", "GET", "/schedules/", "scheduler:ListSchedules"},
+            {"pipes", "GET", "/v1/pipes/p/", "pipes:DescribePipe"},
+            {"lambda", "GET", "/2015-03-31/functions/fn/", "lambda:GetFunction"},
+            {"s3", "GET", "/bucket/", "s3:ListBucket"},
+            {"s3", "GET", "/bucket/folder/", "s3:GetObject"},
+            {"s3", "PUT", "/bucket//", "s3:PutObject"},
+            {"s3", "GET", "/bucket//", "s3:GetObject"},
+            {"s3", "DELETE", "/bucket//", "s3:DeleteObject"},
+        };
+        for (String[] route : routes) {
+            assertEquals(route[3], registry.resolveRoute(route[0], mockCtx(route[1], route[2],
+                    new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), route[2]);
+        }
+    }
+
+    @Test
+    void anEksAccessEntryRouteTakesThePrincipalAsTheRestOfThePath() {
+        // EKS reads the principal greedily, so a GET or DELETE under an entry reads or deletes an entry.
+        String entry = "/clusters/c/access-entries/arn:aws:iam::000000000000:role/team/worker";
+        String[][] routes = {
+            {"GET", entry, "eks:DescribeAccessEntry"},
+            {"GET", entry + "/access-policies", "eks:DescribeAccessEntry"},
+            {"DELETE", entry + "/access-policies/arn:aws:eks::aws:cluster-access-policy/Admin", "eks:DeleteAccessEntry"},
+            {"POST", entry + "/access-policies", "eks:AssociateAccessPolicy"},
+            {"POST", entry, "eks:UpdateAccessEntry"},
+            {"GET", "/clusters/c/access-entries", "eks:ListAccessEntries"},
+        };
+        for (String[] route : routes) {
+            assertEquals(route[2], registry.resolveRoute("eks", mockCtx(route[0], route[1],
+                    new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), route[1]);
+        }
     }
 
     @Test
@@ -661,6 +722,7 @@ class IamActionRegistryTest {
         assertEquals("s3:ListBucketVersions", bucketAction("GET", "versions"));
         assertEquals("s3:ListBucketMultipartUploads", bucketAction("GET", "uploads"));
         assertEquals("s3:GetBucketPolicy", bucketAction("GET", "policy"));
+        assertEquals("s3:GetBucketPolicyStatus", bucketAction("GET", "policyStatus"));
         assertEquals("s3:GetLifecycleConfiguration", bucketAction("GET", "lifecycle"));
         assertEquals("s3:GetEncryptionConfiguration", bucketAction("GET", "encryption"));
     }

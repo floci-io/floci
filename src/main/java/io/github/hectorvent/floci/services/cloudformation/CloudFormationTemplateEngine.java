@@ -51,6 +51,13 @@ public class CloudFormationTemplateEngine {
         String resolve(String stackName, String outputName, String region, String roleArn);
     }
 
+    /**
+     * Internal attribute on a stub whose type is served by a provisioner whose service is turned
+     * off. The template engine reads it to refuse {@code Fn::GetAtt} on an attribute the stub
+     * does not have, instead of publishing the unresolved placeholder.
+     */
+    public static final String SERVICE_DISABLED_ATTR = "__FlociServiceDisabled";
+
     private final String accountId;
     private final String region;
     private final String stackName;
@@ -797,6 +804,11 @@ public class CloudFormationTemplateEngine {
         // Provisioners keep private state under __Floci keys; AWS resolves no such attribute.
         if (attrs != null && attrs.containsKey(attrName) && !attrName.startsWith("__Floci")) {
             return attrs.get(attrName);
+        }
+        if (attrs != null && attrs.containsKey(SERVICE_DISABLED_ATTR)) {
+            throw new AwsException("ValidationError", "Template error: " + logicalId
+                    + " was stubbed because its service is disabled, so attribute " + attrName
+                    + " is unavailable.", 400);
         }
         LOG.warnv("Unresolved GetAtt: {0}.{1}", logicalId, attrName);
         unresolvedIntrinsics.add("Fn::GetAtt " + logicalId + "." + attrName);

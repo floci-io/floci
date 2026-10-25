@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.dsql.dataplane;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.dsql.DsqlPrincipals;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.testing.MutableClock;
 import jakarta.enterprise.inject.Instance;
@@ -26,8 +28,11 @@ class DsqlEndpointTest {
     void createEndpoint() {
         @SuppressWarnings("unchecked")
         Instance<ScpProvider> scpProvider = mock(Instance.class);
+        @SuppressWarnings("unchecked")
+        Instance<ResourcePolicyProvider> resourcePolicyProviders = mock(Instance.class);
         endpoint = new DsqlEndpoint(mock(DsqlTlsCertificates.class), mock(IamService.class),
-                mock(IamPolicyEvaluator.class), scpProvider, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), clock);
+                mock(IamPolicyEvaluator.class), scpProvider, resourcePolicyProviders, mock(DsqlPrincipals.class),
+                mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), clock);
     }
 
     @AfterEach

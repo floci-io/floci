@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.elbv2.model.LoadBalancer;
 import io.github.hectorvent.floci.services.elbv2.model.Rule;
 import io.github.hectorvent.floci.services.elbv2.model.RuleCondition;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -67,6 +68,61 @@ class ElbV2CfnProvisionerTest {
     private final ElbV2Service elb = mock(ElbV2Service.class);
     private final ElbV2CfnProvisioner provisioner = new ElbV2CfnProvisioner(elb);
     private final ObjectMapper mapper = new ObjectMapper();
+
+    @BeforeEach
+    void defaultListenerLoadBalancer() {
+        LoadBalancer lb = new LoadBalancer();
+        lb.setType("application");
+        when(elb.describeLoadBalancers(eq(REGION), anyList(), isNull(), isNull(), isNull()))
+                .thenReturn(List.of(lb));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void gatewayListenerLeavesProtocolAndPortUnset(boolean update) {
+        LoadBalancer lb = new LoadBalancer();
+        lb.setType("gateway");
+        when(elb.describeLoadBalancers(REGION, List.of(LB_ARN), null, null, null)).thenReturn(List.of(lb));
+        if (update) {
+            when(elb.describeListeners(REGION, null, List.of(LISTENER_ARN))).thenReturn(List.of(listener(LB_ARN)));
+            when(elb.modifyListener(eq(REGION), eq(LISTENER_ARN), isNull(), isNull(), isNull(),
+                    anyList(), anyList(), isNull())).thenReturn(listener(LB_ARN));
+        } else {
+            when(elb.createListener(eq(REGION), eq(LB_ARN), isNull(), isNull(), isNull(),
+                    anyList(), anyList(), isNull(), eq(Map.of()))).thenReturn(listener(LB_ARN));
+        }
+        StackResource resource = resource("AWS::ElasticLoadBalancingV2::Listener", "Listener");
+
+        provisioner.provision(resource, mapper.createObjectNode().put("LoadBalancerArn", LB_ARN),
+                ctx(update ? LISTENER_ARN : null));
+
+        assertEquals(LISTENER_ARN, resource.getPhysicalId());
+        assertEquals(LISTENER_ARN, resource.getAttributes().get("ListenerArn"));
+        if (update) {
+            verify(elb).modifyListener(eq(REGION), eq(LISTENER_ARN), isNull(), isNull(), isNull(),
+                    anyList(), anyList(), isNull());
+        } else {
+            verify(elb).createListener(eq(REGION), eq(LB_ARN), isNull(), isNull(), isNull(),
+                    anyList(), anyList(), isNull(), eq(Map.of()));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"HTTP", ""})
+    void gatewayListenerPassesExplicitProtocolToService(String protocol) {
+        LoadBalancer lb = new LoadBalancer();
+        lb.setType("gateway");
+        when(elb.describeLoadBalancers(REGION, List.of(LB_ARN), null, null, null)).thenReturn(List.of(lb));
+        when(elb.createListener(eq(REGION), eq(LB_ARN), eq(protocol), isNull(), isNull(),
+                anyList(), anyList(), isNull(), eq(Map.of()))).thenReturn(listener(LB_ARN));
+        StackResource resource = resource("AWS::ElasticLoadBalancingV2::Listener", "Listener");
+
+        provisioner.provision(resource, mapper.createObjectNode().put("LoadBalancerArn", LB_ARN)
+                .put("Protocol", protocol), ctx());
+
+        verify(elb).createListener(eq(REGION), eq(LB_ARN), eq(protocol), isNull(), isNull(),
+                anyList(), anyList(), isNull(), eq(Map.of()));
+    }
 
     private ProvisionContext ctx() {
         return ctx(null);

@@ -6,6 +6,34 @@
 
 Floci manages real Valkey/Redis Docker containers and proxies TCP connections to them. This means any Redis client works — including IAM authentication.
 
+## Encrypted cache connections
+
+Redis/Valkey replication groups with transit encryption enabled take TLS at the advertised
+proxy endpoint. This includes groups using an AUTH token or IAM authentication, and a group
+remains encrypted when its last user group is removed. With `TransitEncryptionMode` set to
+`preferred`, the endpoint takes both TLS and unencrypted connections so clients can move to
+TLS; any other encrypted group takes TLS only. A modify that moves a `preferred` group to
+`required` closes its open unencrypted connections, as AWS does, and its TLS connections carry
+on. AWS adds new TLS endpoints while a group is `preferred`; Floci serves both kinds on the one
+endpoint. Serverless Redis/Valkey endpoints take TLS only. Unencrypted caches and Memcached
+retain their existing transport.
+
+The cache listener uses a server certificate issued by Floci's shared local CA, including
+the default Floci endpoint names, IPv4 and IPv6 loopback, `host.docker.internal`,
+the `floci.base-url` host, and the configured Floci and cluster-announce hostnames.
+The listener renews its leaf certificate a minute before it expires, never past the CA's own
+expiry, while retaining the same trusted CA.
+Trust `{persistent-path}/tls/floci-root-ca.crt` or the CA from `GET /_floci/ca.pem`.
+The main HTTP listener's TLS setting does not disable cache transit encryption.
+
+```bash
+valkey-cli --tls --cacert ./floci-root-ca.crt -h localhost -p "$CACHE_PORT" \
+  --user "$CACHE_USER" --askpass PING
+```
+
+TLS terminates in Floci's cache proxy; the Docker backend hop retains its existing
+transport. This does not add Memcached transit encryption or change cache-user ACL enforcement.
+
 ## Supported Management Actions
 
 <!-- floci:actions:start -->
@@ -40,6 +68,8 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `ModifyCacheParameterGroup` | Set parameters on a group |
 | `DescribeCacheParameters` | List the parameters set on a group |
 | `DeleteCacheParameterGroup` | Delete a cache parameter group |
+| `AddTagsToResource` | - |
+| `RemoveTagsFromResource` | - |
 | `ListTagsForResource` | Read stored tags for supported ElastiCache resource ARNs |
 <!-- floci:actions:end -->
 
@@ -153,8 +183,9 @@ request may send them, and the describe will not report them back.
 `SecurityGroupIds` supplied to `CreateReplicationGroup` are stored with the group and returned
 on every member by `DescribeCacheClusters` as `SecurityGroups` memberships with `Status=active`.
 This includes shards and replicas in cluster mode. Groups without stored IDs return no memberships.
-The IDs are control-plane
-metadata, not network rules applied to the backing cache containers.
+`ModifyReplicationGroup` accepts `SecurityGroupIds` and replaces the whole stored list, on the
+group and every member; a modify that names none leaves the memberships untouched. The IDs are
+control-plane metadata, not network rules applied to the backing cache containers.
 
 `CreateReplicationGroup` provisions a real sharded Valkey cluster when the request asks for one:
 `NumNodeGroups` greater than 1, a `default.*.cluster.on` parameter group, a custom parameter group
@@ -258,6 +289,33 @@ deleted: `DeleteCacheParameterGroup` answers `InvalidCacheParameterGroupState` u
 replication group is gone. The reference counts from the moment `CreateReplicationGroup` accepts
 the name, not from when the group is stored, so a delete that lands while that create is still
 provisioning its container is refused too.
+
+## Engine version and backend image
+
+`EngineVersion` is control-plane metadata. For Redis/Valkey replication groups and
+standalone cache clusters, Floci starts the image configured by
+`floci.services.elasticache.default-image` (`FLOCI_SERVICES_ELASTICACHE_DEFAULT_IMAGE`),
+whose default is `valkey/valkey:8`. The requested version does not select the image.
+For example, a request with `Engine=valkey` and `EngineVersion=7.2` can describe itself
+as 7.2 while `HELLO 2` or `INFO server` reports the Valkey 8 version in that image.
+Redis compatibility version fields can differ from the native Valkey version.
+
+To test with Valkey 7.2, configure the backend image before creating the cache:
+
+```bash
+FLOCI_SERVICES_ELASTICACHE_DEFAULT_IMAGE=valkey/valkey:7.2
+```
+
+This setting applies to every Redis/Valkey cache in that Floci process, including
+cluster-mode nodes. Restoring persisted runtimes after a Floci restart uses the
+current image setting too. Use separate Floci instances when tests require different
+backend versions, and select a patch tag or digest when an exact build is required.
+Changing `EngineVersion` alone does not upgrade or downgrade a running backend.
+Check `INFO server` (including `valkey_version` for Valkey) to verify the running build;
+describe responses report the stored request metadata.
+
+Memcached uses the separate `floci.services.elasticache.default-memcached-image`
+(`FLOCI_SERVICES_ELASTICACHE_DEFAULT_MEMCACHED_IMAGE`) setting, default `memcached:1.6`.
 
 ## Configuration
 

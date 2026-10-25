@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -160,8 +161,32 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .contentType("application/xml")
             .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(3))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.networkBorderGroup",
+                    everyItem(equalTo("us-east-1")))
             .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].zoneName",
                     startsWith("us-east-1"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"eu-west-1", "us-gov-west-1", "cn-north-1"})
+    @Order(337)
+    void availabilityZoneBorderGroupUsesTheRequestedRegion(String region) {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Version", "2016-11-15")
+            .formParam("ZoneName.1", region + "b")
+            .header("Authorization", AUTH_HEADER.replace("us-east-1", region))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(1))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].networkBorderGroup",
+                    equalTo(region))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].zoneName",
+                    equalTo(region + "b"))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].zoneType",
+                    equalTo("availability-zone"));
     }
 
     // DescribeAvailabilityZones parameter validation and filtering

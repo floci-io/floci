@@ -63,8 +63,8 @@ public class RedshiftServerlessRuntime {
 
     /**
      * Starts (or, when {@code adopt} is set, re-attaches to) the container and fronts it with the
-     * auth proxy on {@code endpoint}. Anything started before a failure is torn down again, so a
-     * failed call leaves neither a container nor a bound port behind.
+     * auth proxy on {@code endpoint}. Failed startup removes newly created containers and closes
+     * the proxy; adopted containers are preserved for another recovery attempt.
      */
     public Backend start(String accountId, String region, String workgroupName, String masterUsername,
                          String masterPassword, String dbName, Endpoint endpoint, boolean adopt,
@@ -72,8 +72,8 @@ public class RedshiftServerlessRuntime {
         String backendId = backendId(region, workgroupName);
         try {
             RedshiftContainerHandle handle = adopt
-                    ? containerManager.adoptOrStart(accountId, backendId, masterUsername, masterPassword, dbName)
-                    : containerManager.start(accountId, backendId, masterUsername, masterPassword, dbName);
+                    ? containerManager.adoptOrStart(accountId, backendId, masterUsername, masterPassword, dbName, "serverless")
+                    : containerManager.start(accountId, backendId, masterUsername, masterPassword, dbName, "serverless");
             proxyManager.startProxy(relayKey(accountId, backendId), endpoint.getPort(),
                     handle.getHost(), handle.getPort(), endpoint.getAddress(),
                     masterUsername, masterPassword, dbName,
@@ -206,7 +206,7 @@ public class RedshiftServerlessRuntime {
             LOG.warnv(e, "Could not stop the proxy while rolling back workgroup backend {0}", backendId);
         }
         try {
-            containerManager.stop(accountId, backendId);
+            containerManager.rollbackStartup(accountId, backendId);
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not remove the container while rolling back workgroup backend {0}", backendId);
         }

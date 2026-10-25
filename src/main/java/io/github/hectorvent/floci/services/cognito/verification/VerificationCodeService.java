@@ -70,14 +70,23 @@ public final class VerificationCodeService {
      */
     public String issue(String userPoolId, String username,
                         VerificationCode.Purpose purpose, Duration ttl) {
+        return issueTracked(userPoolId, username, purpose, ttl).code();
+    }
+
+    public record IssuedCode(String code, String hash) {
+    }
+
+    /** Issue a code with an identity that can safely withdraw only this issuance. */
+    public IssuedCode issueTracked(String userPoolId, String username,
+                                  VerificationCode.Purpose purpose, Duration ttl) {
         String key = VerificationCode.storageKey(userPoolId, username, purpose);
         synchronized (lockFor(key)) {
             return issueUnderLock(key, userPoolId, username, purpose, ttl);
         }
     }
 
-    private String issueUnderLock(String key, String userPoolId, String username,
-                                  VerificationCode.Purpose purpose, Duration ttl) {
+    private IssuedCode issueUnderLock(String key, String userPoolId, String username,
+                                      VerificationCode.Purpose purpose, Duration ttl) {
         Optional<VerificationCode> existing = store.get(key);
         if (existing.isPresent() && !existing.get().isConsumed()) {
             Duration since = Duration.between(existing.get().getIssuedAt(), clock.instant());
@@ -101,7 +110,7 @@ public final class VerificationCodeService {
             userPoolId, username, purpose, hash, salt, now, now.plus(ttl), MAX_ATTEMPTS
         );
         store.put(key, vc);
-        return code;
+        return new IssuedCode(code, hash);
     }
 
     /**
@@ -182,6 +191,27 @@ public final class VerificationCodeService {
     public void invalidatePrevious(String userPoolId, String username,
                                    VerificationCode.Purpose purpose) {
         invalidate(VerificationCode.storageKey(userPoolId, username, purpose));
+    }
+
+    public boolean hasUsableCode(String userPoolId, String username,
+                                 VerificationCode.Purpose purpose) {
+        String key = VerificationCode.storageKey(userPoolId, username, purpose);
+        synchronized (lockFor(key)) {
+            return store.get(key).map(code -> !code.isConsumed()
+                    && !code.isExpired(clock.instant())
+                    && code.getAttemptsRemaining() > 0).orElse(false);
+        }
+    }
+
+    /** Withdraw only the code issued by the caller, preserving a newer replacement. */
+    public void invalidateIfCurrent(String userPoolId, String username,
+                                    VerificationCode.Purpose purpose, IssuedCode issued) {
+        String key = VerificationCode.storageKey(userPoolId, username, purpose);
+        synchronized (lockFor(key)) {
+            if (store.get(key).map(current -> current.getCodeHash().equals(issued.hash())).orElse(false)) {
+                store.delete(key);
+            }
+        }
     }
 
     /**

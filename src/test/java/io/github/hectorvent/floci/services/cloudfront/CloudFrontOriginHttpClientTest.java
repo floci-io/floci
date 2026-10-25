@@ -8,6 +8,9 @@ import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import org.apache.hc.client5.http.DnsResolver;
+import org.apache.hc.client5.http.protocol.HttpClientContext;
+import org.apache.hc.core5.http.message.BasicHttpResponse;
+import org.apache.hc.core5.util.TimeValue;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.junit.jupiter.api.Test;
 
@@ -18,6 +21,7 @@ import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -25,6 +29,8 @@ import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.UnknownHostException;
 import java.net.http.HttpRequest;
@@ -48,6 +54,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class CloudFrontOriginHttpClientTest {
 
@@ -373,7 +380,9 @@ class CloudFrontOriginHttpClientTest {
                 resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
             CloudFrontOriginHttpClient.OriginTimeouts timeouts =
                     new CloudFrontOriginHttpClient.OriginTimeouts(
-                            Duration.ofSeconds(1), Duration.ofMillis(200), 3);
+                            Duration.ofSeconds(1), Duration.ofMillis(200), 3,
+                            CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
             HttpRequest request = request("http://origin.invalid:" + server.getAddress().getPort() + "/");
 
             long started = System.nanoTime();
@@ -399,7 +408,9 @@ class CloudFrontOriginHttpClientTest {
                 resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
             CloudFrontOriginHttpClient.OriginTimeouts timeouts =
                     new CloudFrontOriginHttpClient.OriginTimeouts(
-                            Duration.ofSeconds(1), Duration.ofMillis(200), 1);
+                            Duration.ofSeconds(1), Duration.ofMillis(200), 1,
+                            CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
             HttpRequest request = request("http://origin.invalid:" + server.getAddress().getPort() + "/");
 
             assertThrows(CloudFrontOriginTimeoutException.class, () -> get(client, request, timeouts));
@@ -420,7 +431,9 @@ class CloudFrontOriginHttpClientTest {
                 resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
             CloudFrontOriginHttpClient.OriginTimeouts timeouts =
                     new CloudFrontOriginHttpClient.OriginTimeouts(
-                            Duration.ofSeconds(1), Duration.ofMillis(200), 3);
+                            Duration.ofSeconds(1), Duration.ofMillis(200), 3,
+                            CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
             HttpRequest request = HttpRequest.newBuilder(URI.create(
                             "http://origin.invalid:" + server.getAddress().getPort() + "/"))
                     .method("POST", HttpRequest.BodyPublishers.noBody())
@@ -443,7 +456,9 @@ class CloudFrontOriginHttpClientTest {
                 resolver, List.of("blackhole.invalid"))) {
             CloudFrontOriginHttpClient.OriginTimeouts timeouts =
                     new CloudFrontOriginHttpClient.OriginTimeouts(
-                            Duration.ofMillis(100), Duration.ofSeconds(5), 3);
+                            Duration.ofMillis(100), Duration.ofSeconds(5), 3,
+                            CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
             HttpRequest request = HttpRequest.newBuilder(URI.create("http://blackhole.invalid:81/"))
                     .method("POST", HttpRequest.BodyPublishers.noBody())
                     .build();
@@ -467,7 +482,9 @@ class CloudFrontOriginHttpClientTest {
                 resolver, List.of("refused.invalid"))) {
             CloudFrontOriginHttpClient.OriginTimeouts timeouts =
                     new CloudFrontOriginHttpClient.OriginTimeouts(
-                            Duration.ofSeconds(1), Duration.ofSeconds(5), 3);
+                            Duration.ofSeconds(1), Duration.ofSeconds(5), 3,
+                            CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
             HttpRequest request = HttpRequest.newBuilder(URI.create(
                             "http://refused.invalid:" + refusedPort + "/"))
                     .method("POST", HttpRequest.BodyPublishers.noBody())
@@ -489,7 +506,9 @@ class CloudFrontOriginHttpClientTest {
                 resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
             CloudFrontOriginHttpClient.OriginTimeouts timeouts =
                     new CloudFrontOriginHttpClient.OriginTimeouts(
-                            Duration.ofSeconds(1), Duration.ofMillis(150), 1);
+                            Duration.ofSeconds(1), Duration.ofMillis(150), 1,
+                            CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
             HttpRequest request = request("http://origin.invalid:" + server.getAddress().getPort() + "/");
 
             long started = System.nanoTime();
@@ -502,6 +521,332 @@ class CloudFrontOriginHttpClientTest {
         } finally {
             release.countDown();
             server.stop(0);
+        }
+    }
+
+    @Test
+    void theCompletionTimeoutBoundsTheWaitForTheResponseHeaders() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        CountDownLatch release = new CountDownLatch(1);
+        HttpServer server = holdingServer(hits, release);
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            // The read timeout is far longer than the completion timeout, so the completion timeout
+            // is the one that has to end the request.
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                    new CloudFrontOriginHttpClient.OriginTimeouts(
+                            Duration.ofSeconds(1), Duration.ofSeconds(30), 1,
+                            Duration.ofMillis(500),
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
+            HttpRequest request = request("http://origin.invalid:" + server.getAddress().getPort() + "/");
+
+            long started = System.nanoTime();
+            assertThrows(CloudFrontOriginTimeoutException.class, () -> get(client, request, timeouts));
+            long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+            assertTrue(elapsedMillis < 5000,
+                    "expected the 500 ms completion timeout to end the request, not the 30 s read "
+                            + "timeout, took " + elapsedMillis + " ms");
+        } finally {
+            release.countDown();
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void theCompletionTimeoutBoundsTheRetriesToo() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        CountDownLatch release = new CountDownLatch(1);
+        HttpServer server = holdingServer(hits, release);
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                    new CloudFrontOriginHttpClient.OriginTimeouts(
+                            Duration.ofSeconds(1), Duration.ofSeconds(30), 3,
+                            Duration.ofMillis(600),
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
+            HttpRequest request = request("http://origin.invalid:" + server.getAddress().getPort() + "/");
+
+            long started = System.nanoTime();
+            assertThrows(CloudFrontOriginTimeoutException.class, () -> get(client, request, timeouts));
+            long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+            assertTrue(elapsedMillis < 3000,
+                    "expected the completion timeout to bound the retries as well, took "
+                            + elapsedMillis + " ms");
+        } finally {
+            release.countDown();
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void theCompletionTimeoutEndsAResponseThatNeverCompletes() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        server.createContext("/", exchange -> {
+            exchange.sendResponseHeaders(200, 0);
+            try (OutputStream out = exchange.getResponseBody()) {
+                // A body that never ends: it keeps sending, one byte at a time, past the deadline.
+                for (int sent = 0; sent < 200; sent++) {
+                    out.write('x');
+                    out.flush();
+                    Thread.sleep(100);
+                }
+            } catch (IOException | InterruptedException expected) {
+                // The client ended the connection, which is what the completion timeout does.
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                    new CloudFrontOriginHttpClient.OriginTimeouts(
+                            Duration.ofSeconds(1), Duration.ofSeconds(30), 1,
+                            Duration.ofMillis(700),
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
+            CloudFrontOriginHttpClient.OpenResponse response =
+                    get(client, request("http://origin.invalid:" + server.getAddress().getPort() + "/"),
+                            timeouts);
+
+            long started = System.nanoTime();
+            assertThrows(CloudFrontOriginTimeoutException.class, () -> readAll(response));
+            long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+            assertTrue(elapsedMillis < 5000,
+                    "expected the 700 ms completion timeout to end the body, took " + elapsedMillis
+                            + " ms");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void keepsTheOriginConnectionForTheConfiguredKeepAlive() throws Exception {
+        List<InetSocketAddress> peers = new CopyOnWriteArrayList<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            peers.add(exchange.getRemoteAddress());
+            byte[] body = "origin-ok".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            String uri = "http://origin.invalid:" + server.getAddress().getPort() + "/";
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                    new CloudFrontOriginHttpClient.OriginTimeouts(
+                            Duration.ofSeconds(1), Duration.ofSeconds(5), 1,
+                            CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
+                            Duration.ofSeconds(300));
+            readAll(get(client, request(uri), timeouts));
+            readAll(get(client, request(uri), timeouts));
+
+            assertEquals(2, peers.size());
+            assertEquals(peers.get(0), peers.get(1),
+                    "the connection was kept for the configured keep-alive and reused");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void theKeepAliveStrategyReturnsTheOriginsKeepAlive() {
+        CloudFrontOriginHttpClient.KeepAliveStrategy strategy =
+                new CloudFrontOriginHttpClient.KeepAliveStrategy();
+        // The context the client sends, so the test fails if it stops carrying the keep-alive.
+        CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                new CloudFrontOriginHttpClient.OriginTimeouts(
+                        Duration.ofSeconds(1), Duration.ofSeconds(30), 1,
+                        CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT,
+                        Duration.ofSeconds(2));
+        HttpClientContext context = CloudFrontOriginHttpClient.context(timeouts);
+
+        assertEquals(TimeValue.ofSeconds(2),
+                strategy.getKeepAliveDuration(new BasicHttpResponse(200), context));
+
+        BasicHttpResponse originAsksForLess = new BasicHttpResponse(200);
+        originAsksForLess.addHeader("Keep-Alive", "timeout=1");
+        assertEquals(TimeValue.ofSeconds(1),
+                strategy.getKeepAliveDuration(originAsksForLess, context),
+                "the origin's own Keep-Alive header shortens the setting");
+
+        BasicHttpResponse originAsksForMore = new BasicHttpResponse(200);
+        originAsksForMore.addHeader("Keep-Alive", "timeout=30");
+        assertEquals(TimeValue.ofSeconds(2),
+                strategy.getKeepAliveDuration(originAsksForMore, context),
+                "the setting caps what the origin asks for");
+
+        assertEquals(
+                TimeValue.ofSeconds(CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS),
+                strategy.getKeepAliveDuration(new BasicHttpResponse(200), HttpClientContext.create()),
+                "a request with no keep-alive setting uses the default");
+    }
+
+    @Test
+    void theCompletionTimeoutEndsAStalledBody() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        server.createContext("/", exchange -> {
+            exchange.sendResponseHeaders(200, 1024);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write('x');
+                out.flush();
+                // The body then stalls: the headers arrived, the rest of the body never does.
+                Thread.sleep(30_000);
+            } catch (IOException | InterruptedException expected) {
+                // The client ended the connection, which is what the completion timeout does.
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
+            // The read timeout is far longer than the completion timeout, so the completion timeout
+            // is the one that has to end the stalled body.
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                    new CloudFrontOriginHttpClient.OriginTimeouts(
+                            Duration.ofSeconds(1), Duration.ofSeconds(30), 1,
+                            Duration.ofMillis(700),
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
+            CloudFrontOriginHttpClient.OpenResponse response = get(client,
+                    request("http://origin.invalid:" + server.getAddress().getPort() + "/"), timeouts);
+
+            long started = System.nanoTime();
+            CloudFrontOriginTimeoutException failure = assertThrows(CloudFrontOriginTimeoutException.class,
+                    () -> readAll(response));
+            long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+            assertEquals(CloudFrontServingController.ORIGIN_TIMEOUT_MESSAGE, failure.getMessage());
+            assertTrue(elapsedMillis < 5000,
+                    "expected the 700 ms completion timeout to end the stalled body, took "
+                            + elapsedMillis + " ms");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void aSlowViewerDoesNotExpireAResponseTheOriginFinishedInTime() throws Exception {
+        byte[] body = "a body the origin answered in full".getBytes(StandardCharsets.UTF_8);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+
+        AtomicLong clock = new AtomicLong();
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"), clock::get)) {
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                    new CloudFrontOriginHttpClient.OriginTimeouts(
+                            Duration.ofSeconds(1), Duration.ofSeconds(30), 1,
+                            Duration.ofMillis(500),
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
+            CloudFrontOriginHttpClient.OpenResponse response = get(client,
+                    request("http://origin.invalid:" + server.getAddress().getPort() + "/"), timeouts);
+
+            // The viewer reads the body far slower than the completion timeout allows: a second
+            // passes between reads. The origin answered in time, so the response is not expired.
+            ByteArrayOutputStream received = new ByteArrayOutputStream();
+            try (InputStream origin = response.body()) {
+                byte[] chunk = new byte[4];
+                int read;
+                while ((read = origin.read(chunk)) != -1) {
+                    received.write(chunk, 0, read);
+                    clock.addAndGet(Duration.ofSeconds(1).toNanos());
+                }
+            }
+            assertArrayEquals(body, received.toByteArray());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void theCompletionTimeoutBoundsTheConnectionToTheOrigin() throws Exception {
+        // An address that blackholes the connection: the attempt is never answered.
+        InetAddress blackhole = InetAddress.getByName("10.255.255.1");
+        assumeTrue(connectionHangs(blackhole),
+                "the environment answers the connection attempt instead of dropping it");
+        try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                resolver(blackhole), List.of("origin.invalid"))) {
+            // The connect timeout is far longer than the completion timeout, so the completion
+            // timeout is the one that has to end the connection attempt.
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                    new CloudFrontOriginHttpClient.OriginTimeouts(
+                            Duration.ofSeconds(10), Duration.ofSeconds(30), 1,
+                            Duration.ofMillis(500),
+                            CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
+            HttpRequest request = request("http://origin.invalid:80/");
+
+            long started = System.nanoTime();
+            assertThrows(CloudFrontOriginTimeoutException.class, () -> get(client, request, timeouts));
+            long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+            assertTrue(elapsedMillis < 5000,
+                    "expected the 500 ms completion timeout to end the connection attempt, not the "
+                            + "10 s connect timeout, took " + elapsedMillis + " ms");
+        }
+    }
+
+    @Test
+    void theCompletionTimeoutBoundsTheTlsHandshake() throws Exception {
+        // An origin that accepts the connection and never answers the handshake.
+        InetAddress loopback = InetAddress.getByName("127.0.0.1");
+        try (ServerSocket socket = new ServerSocket(0, 1, loopback)) {
+            Thread acceptor = new Thread(() -> {
+                try (Socket accepted = socket.accept()) {
+                    Thread.sleep(30_000);
+                } catch (IOException | InterruptedException expected) {
+                    // The client gave up on the handshake.
+                }
+            });
+            acceptor.setDaemon(true);
+            acceptor.start();
+
+            try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
+                    resolver(loopback), List.of("origin.invalid"))) {
+                CloudFrontOriginHttpClient.OriginTimeouts timeouts =
+                        new CloudFrontOriginHttpClient.OriginTimeouts(
+                                Duration.ofSeconds(10), Duration.ofSeconds(30), 1,
+                                Duration.ofMillis(500),
+                                CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT);
+                HttpRequest request = request("https://origin.invalid:" + socket.getLocalPort() + "/");
+
+                long started = System.nanoTime();
+                assertThrows(CloudFrontOriginTimeoutException.class, () -> get(client, request, timeouts));
+                long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+                assertTrue(elapsedMillis < 5000,
+                        "expected the 500 ms completion timeout to end the handshake, not the 10 s "
+                                + "connect timeout, took " + elapsedMillis + " ms");
+            }
+        }
+    }
+
+    /**
+     * Whether a connection to {@code address} hangs, as a blackholed address does: the attempt has
+     * to be dropped rather than answered for the origin connect timeout to be the one under test.
+     */
+    private static boolean connectionHangs(InetAddress address) {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(address, 80), 500);
+            return false;
+        } catch (SocketTimeoutException expected) {
+            return true;
+        } catch (IOException expected) {
+            return false;
         }
     }
 

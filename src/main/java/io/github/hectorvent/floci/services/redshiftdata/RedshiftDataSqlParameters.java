@@ -9,8 +9,11 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Translates Redshift Data API {@code SqlParameter} bindings into JDBC
@@ -23,6 +26,8 @@ import java.util.Map;
  * {@link PreparedStatement#setString}; PostgreSQL coerces to the column type.
  */
 final class RedshiftDataSqlParameters {
+
+    private static final Pattern PARAMETER_NAME = Pattern.compile("[0-9a-zA-Z_]+");
 
     private RedshiftDataSqlParameters() {
     }
@@ -85,6 +90,42 @@ final class RedshiftDataSqlParameters {
             }
         }
         return byName;
+    }
+
+    static Map<String, String> parseBatchParameters(JsonNode request, List<String> sqls) {
+        JsonNode supplied = request.get("Parameters");
+        if (supplied != null && !supplied.isNull()) {
+            if (!supplied.isArray() || supplied.isEmpty()) {
+                throw new AwsException("ValidationException", "Parameters must be a non-empty array of {name, value} objects.", 400);
+            }
+            for (JsonNode parameter : supplied) {
+                JsonNode name = parameter.path("name");
+                JsonNode value = parameter.path("value");
+                if (!name.isTextual() || !PARAMETER_NAME.matcher(name.textValue()).matches()
+                        || !value.isTextual() || value.textValue().isEmpty()) {
+                    throw new AwsException("ValidationException",
+                            "Each parameter must have a name matching [0-9a-zA-Z_]+ and a non-empty string value.", 400);
+                }
+            }
+        }
+        Map<String, String> parameters = parseParameters(request, "Parameters");
+        Set<String> referenced = new LinkedHashSet<>();
+        for (String sql : sqls) {
+            referenced.addAll(parse(sql).parameterOrder());
+        }
+        for (String name : referenced) {
+            if (!parameters.containsKey(name)) {
+                throw new AwsException("ValidationException",
+                        "SQL references parameter :" + name + " but no matching value was supplied.", 400);
+            }
+        }
+        for (String name : parameters.keySet()) {
+            if (!referenced.contains(name)) {
+                throw new AwsException("ValidationException",
+                        "Parameter :" + name + " is not referenced by any SQL statement in the batch.", 400);
+            }
+        }
+        return parameters;
     }
 
     /**

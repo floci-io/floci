@@ -13,6 +13,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /**
  * Holds the futures that custom-resource ResponseURL callbacks complete.
@@ -31,23 +33,37 @@ public class CustomResourceResponseStore implements CustomResourceLiveness {
     private static final Logger LOG = Logger.getLogger(CustomResourceResponseStore.class);
     private final ConcurrentHashMap<String, Pending> pending = new ConcurrentHashMap<>();
     private final ProviderFrameworkDetector providerFrameworkDetector;
+    private final LongSupplier nanoTime;
+    private final Supplier<CompletableFuture<JsonNode>> responseFuture;
 
     @Inject
     CustomResourceResponseStore(ProviderFrameworkDetector providerFrameworkDetector) {
+        this(providerFrameworkDetector, System::nanoTime, CompletableFuture::new);
+    }
+
+    CustomResourceResponseStore(ProviderFrameworkDetector providerFrameworkDetector, LongSupplier nanoTime,
+                                Supplier<CompletableFuture<JsonNode>> responseFuture) {
         this.providerFrameworkDetector = providerFrameworkDetector;
+        this.nanoTime = nanoTime;
+        this.responseFuture = responseFuture;
     }
 
     /** A waiting caller: the future its callback completes, and when it last saw progress. */
     private static final class Pending {
-        private final CompletableFuture<JsonNode> future = new CompletableFuture<>();
+        private final CompletableFuture<JsonNode> future;
         // nanoTime, not wall-clock: this measures an elapsed interval and must not jump with NTP.
-        private final AtomicLong lastActivity = new AtomicLong(System.nanoTime());
+        private final AtomicLong lastActivity;
+
+        private Pending(CompletableFuture<JsonNode> future, long now) {
+            this.future = future;
+            this.lastActivity = new AtomicLong(now);
+        }
     }
 
     /** Registers a fresh token and returns it. Call before invoking the Lambda. */
     public String register() {
         String token = UUID.randomUUID().toString();
-        pending.put(token, new Pending());
+        pending.put(token, new Pending(responseFuture.get(), nanoTime.getAsLong()));
         return token;
     }
 
@@ -71,7 +87,7 @@ public class CustomResourceResponseStore implements CustomResourceLiveness {
     public void touch(String token) {
         Pending entry = pending.get(token);
         if (entry != null) {
-            entry.lastActivity.set(System.nanoTime());
+            entry.lastActivity.set(nanoTime.getAsLong());
         }
     }
 
@@ -110,10 +126,10 @@ public class CustomResourceResponseStore implements CustomResourceLiveness {
         // handler PUTs from inside the invoke the caller is blocked on: charging that execution time
         // here would leave a slow handler — a cold container start, or two of them nested — with a
         // budget already spent by the time await was entered. A handler that just returned is not idle.
-        entry.lastActivity.set(System.nanoTime());
+        entry.lastActivity.set(nanoTime.getAsLong());
         try {
             while (true) {
-                long remaining = idleNanos - (System.nanoTime() - entry.lastActivity.get());
+                long remaining = idleNanos - (nanoTime.getAsLong() - entry.lastActivity.get());
                 if (remaining <= 0) {
                     // A response that has already arrived is a response, whatever the clock says. The
                     // future outranks the budget: complete() can land before await is ever entered, and

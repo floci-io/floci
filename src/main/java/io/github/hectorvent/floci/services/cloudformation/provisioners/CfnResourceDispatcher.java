@@ -110,27 +110,45 @@ public class CfnResourceDispatcher {
                 if (arn != null && arn.startsWith(STUB_ARN_PREFIX)) {
                     resource.getAttributes().remove("Arn");
                 }
+                // The service is back on, so the real resource has every attribute it declares.
+                resource.getAttributes().remove(CloudFormationTemplateEngine.SERVICE_DISABLED_ATTR);
+            } else if (registry.isServiceDisabled(resourceType) && existingPhysicalId != null
+                    && !isStub(existingPhysicalId, resource.getAttributes())) {
+                // A real resource a stack created while the service was on. Stubbing it would
+                // replace its physical id and the stack would lose the entity, so refuse instead.
+                throw new AwsException("ValidationError", "The service for " + resourceType
+                        + " is disabled, so the existing resource " + existingPhysicalId
+                        + " cannot be updated.", 400);
             } else if (!stubUnsupportedResourceTypesAllowed()) {
                 // Before the physical id below is assigned, so the Cloud Control path sees a
                 // resource with none and reports this message rather than a success. On the stack
                 // path the catch below turns it into CREATE_FAILED with the same sentence, which
                 // rolls the stack back.
-                throw new AwsException("ValidationError", unsupportedResourceTypeMessage(resourceType), 400);
+                throw new AwsException("ValidationError", unavailableResourceTypeMessage(resourceType), 400);
             } else {
                 // Warn, not debug, and a status reason on the resource: the stub reports
                 // CREATE_COMPLETE while creating nothing, so without both the stack is
                 // indistinguishable from one where every resource was really provisioned. The
                 // reason reaches DescribeStackEvents through the event CloudFormationService
                 // already builds from it.
-                LOG.warnv("Stubbing unsupported resource type {0} ({1}): nothing is created "
-                                + "for it. Set floci.services.cloudformation."
-                                + "allow-stub-unsupported-resource-types=false to fail the "
-                                + "stack instead.",
-                        resourceType, logicalId);
-                resource.setStatusReason(unsupportedResourceTypeMessage(resourceType)
+                if (registry.isServiceDisabled(resourceType)) {
+                    LOG.warnv("Stubbing resource type {0} ({1}): its service is disabled, so nothing "
+                                    + "is created for it. {2}",
+                            resourceType, logicalId, enableServiceHint(resourceType));
+                } else {
+                    LOG.warnv("Stubbing unsupported resource type {0} ({1}): nothing is created "
+                                    + "for it. Set floci.services.cloudformation."
+                                    + "allow-stub-unsupported-resource-types=false to fail the "
+                                    + "stack instead.",
+                            resourceType, logicalId);
+                }
+                resource.setStatusReason(unavailableResourceTypeMessage(resourceType)
                         + " It was stubbed and nothing was created for it.");
                 resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
                 resource.getAttributes().put("Arn", STUB_ARN_PREFIX + logicalId);
+                if (registry.isServiceDisabled(resourceType)) {
+                    resource.getAttributes().put(CloudFormationTemplateEngine.SERVICE_DISABLED_ATTR, "true");
+                }
             }
             resource.setStatus("CREATE_COMPLETE");
         } catch (Exception e) {
@@ -171,6 +189,21 @@ public class CfnResourceDispatcher {
      */
     private boolean stubUnsupportedResourceTypesAllowed() {
         return config == null || config.services().cloudformation().allowStubUnsupportedResourceTypes();
+    }
+
+    /** What Floci says about a resource type it will not provision: unsupported, or its service is off. */
+    private String unavailableResourceTypeMessage(String resourceType) {
+        if (!registry.isServiceDisabled(resourceType)) {
+            return unsupportedResourceTypeMessage(resourceType);
+        }
+        return "Resource type " + resourceType + " is not provisioned because its Floci service is disabled. "
+                + enableServiceHint(resourceType);
+    }
+
+    private String enableServiceHint(String resourceType) {
+        String flag = registry.serviceEnabledFlag(resourceType);
+        return flag == null ? "Enable the service to provision it."
+                : "Set " + flag + "=true to provision it.";
     }
 
     /** The one sentence Floci says about a resource type it has no provisioner for. */
@@ -218,6 +251,12 @@ public class CfnResourceDispatcher {
         if (owner != null) {
             owner.delete(resource, region);
             return;
+        }
+        if (registry.isServiceDisabled(resourceType)
+                && !isStub(resource.getPhysicalId(), resource.getAttributes())) {
+            // Completing this delete would drop the stack's record of an entity still there.
+            throw new AwsException("ValidationError", "The service for " + resourceType
+                    + " is disabled, so " + resource.getPhysicalId() + " cannot be deleted.", 400);
         }
         delete(resourceType, resource.getPhysicalId(), region);
     }

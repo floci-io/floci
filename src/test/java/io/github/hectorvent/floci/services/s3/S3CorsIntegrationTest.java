@@ -759,4 +759,58 @@ class S3CorsIntegrationTest {
             .header("Access-Control-Allow-Origin", equalTo("*"))
             .header("Access-Control-Allow-Credentials", nullValue());
     }
+
+    // ── AllowedHeader wildcards ──────────────────────────────────────────────
+
+    @Test
+    @Order(85)
+    void allowedHeaderWithWildcardMatchesHeadersByPrefix() {
+        String bucket = "cors-header-wildcard-bucket";
+        String corsXml = "<CORSConfiguration>" +
+                "  <CORSRule>" +
+                "    <AllowedOrigin>https://example.com</AllowedOrigin>" +
+                "    <AllowedMethod>PUT</AllowedMethod>" +
+                "    <AllowedHeader>x-amz-*</AllowedHeader>" +
+                "    <AllowedHeader>Content-*</AllowedHeader>" +
+                "  </CORSRule>" +
+                "</CORSConfiguration>";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().contentType("application/xml").body(corsXml)
+        .when()
+            .put("/" + bucket + "?cors")
+        .then()
+            .statusCode(200);
+
+        // Browsers send header names in lower case; each one is allowed by name.
+        given()
+            .header("Origin", "https://example.com")
+            .header("Access-Control-Request-Method", "PUT")
+            .header("Access-Control-Request-Headers", "content-type,x-amz-meta-owner,x-amz-date")
+        .when()
+            .options("/" + bucket + "/upload-key")
+        .then()
+            .statusCode(200)
+            .header("Access-Control-Allow-Origin", equalTo("https://example.com"))
+            .header("Access-Control-Allow-Headers", equalTo("content-type, x-amz-meta-owner, x-amz-date"));
+
+        // A header no pattern covers is still refused.
+        given()
+            .header("Origin", "https://example.com")
+            .header("Access-Control-Request-Method", "PUT")
+            .header("Access-Control-Request-Headers", "content-type,authorization")
+        .when()
+            .options("/" + bucket + "/upload-key")
+        .then()
+            .statusCode(403);
+
+        // A preflight that asks for no headers gets no Access-Control-Allow-Headers.
+        given()
+            .header("Origin", "https://example.com")
+            .header("Access-Control-Request-Method", "PUT")
+        .when()
+            .options("/" + bucket + "/upload-key")
+        .then()
+            .statusCode(200)
+            .header("Access-Control-Allow-Headers", nullValue());
+    }
 }

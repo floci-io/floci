@@ -907,14 +907,17 @@ class IotMqttBrokerServiceTest {
         assertEquals("CLIENT_ERROR", disconnected.get(0).get("disconnectReason").asText());
     }
 
-    /** A PUBLISH beyond the decoder's packet limit never reaches the publish handler, yet AWS reports the same client error. */
+    /** The decoder rejects an oversized advertised length before reading the body or invoking the publish handler. */
     @Test
     void aPacketAboveTheDecoderLimitEndsTheSessionWithAClientError() throws Exception {
         startBrokerRecordingPublishes();
         try (Socket socket = rawConnect("undecodable")) {
-            rawPublish(socket, 0, "devices/d1/huge", new byte[150 * 1024]);
+            byte[] body = new byte[150 * 1024];
+            byte[] frame = packet(0x30, body);
+            socket.getOutputStream().write(frame, 0, frame.length - body.length);
 
             awaitPresence("disconnected", "undecodable", 1);
+            assertEquals(-1, socket.getInputStream().read(), "the decoder closes without waiting for the body");
         }
         barrier();
 

@@ -45,15 +45,18 @@ class IamRestRouteCoverageTest {
      * Operations Floci does not serve, whose request runs as another operation instead and so is checked
      * as that one: S3 has no bucket metadata configuration, and {@code ?metadataConfiguration} on a
      * bucket falls through to ListObjects and DeleteBucket. Checking it as the metadata table action
-     * would let that action list or delete the bucket.
+     * would let that action list or delete the bucket. EKS takes an access entry's principal as the rest
+     * of the path, so an entry's access policy routes read and delete the entry of a longer principal.
      */
     private static final Map<String, String> RUN_AS_ANOTHER_OPERATION = Map.of(
             "GetBucketMetadataConfiguration", "s3:ListBucket",
-            "DeleteBucketMetadataConfiguration", "s3:DeleteBucket");
+            "DeleteBucketMetadataConfiguration", "s3:DeleteBucket",
+            "ListAssociatedAccessPolicies", "eks:DescribeAccessEntry",
+            "DisassociateAccessPolicy", "eks:DeleteAccessEntry");
 
     /** Models every operation of which is checked: the services whose routes the registry maps in full. */
     private static final Set<String> FULLY_ROUTED_MODELS =
-            Set.of("scheduler", "pipes", "lambda", "lambda-microvms", "lambda-core");
+            Set.of("scheduler", "pipes", "eks", "lambda", "lambda-microvms", "lambda-core", "dsql");
 
     private final IamActionRegistry registry = new IamActionRegistry();
 
@@ -91,7 +94,8 @@ class IamRestRouteCoverageTest {
                 Map.Entry<String, JsonNode> operation = operations.next();
                 Route route = new Route(scope, model, operation.getKey(), operation.getValue().path("method").asText(),
                         operation.getValue().path("requestUri").asText());
-                String expected = authorized.path(scope).path(operation.getKey()).asText(scope + ":" + operation.getKey());
+                String expected = RUN_AS_ANOTHER_OPERATION.getOrDefault(operation.getKey(),
+                        authorized.path(scope).path(operation.getKey()).asText(scope + ":" + operation.getKey()));
                 tests.add(DynamicTest.dynamicTest(model + " " + operation.getKey(),
                         () -> assertEquals(expected, resolve(route), route.toString())));
             }

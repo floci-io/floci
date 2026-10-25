@@ -204,6 +204,14 @@ class S3PublicPolicyStatusTest {
     }
 
     @Test
+    void notPrincipalWildcardIsNotPublic() {
+        assertFalse(isPublic("""
+                {"Statement":[{"NotPrincipal":"*",
+                "Resource":"*","Action":"s3:GetObject","Effect":"Allow"}]}
+                """));
+    }
+
+    @Test
     void aSingleStatementObjectIsEvaluated() {
         assertTrue(isPublic("""
                 {"Statement":{"Principal":"*","Resource":"*","Action":"s3:GetObject","Effect":"Allow"}}

@@ -89,6 +89,7 @@ class ContainerLauncherTest {
     @Mock RuntimeApiServer runtimeApiServer;
     @Mock DockerClient dockerClient;
     @Mock LambdaExecutionRoleCredentials executionRoleCredentials;
+    @Mock LambdaLayerService layerService;
 
     @TempDir
     Path tempDir;
@@ -144,7 +145,7 @@ class ContainerLauncherTest {
         LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
         launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
-                mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class), awsEnv,
+                layerService, awsEnv,
                 executionRoleCredentials);
 
         when(runtimeApiServerFactory.create()).thenReturn(runtimeApiServer);
@@ -661,6 +662,16 @@ class ContainerLauncherTest {
         verify(lifecycleManager, never()).createAndStart(any());
     }
 
+    private static LambdaFunction imageFunction() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("image-function");
+        fn.setAccountId("222233334444");
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:222233334444:function:image-function");
+        fn.setPackageType("Image");
+        fn.setImageUri("unit-lambda:latest");
+        return fn;
+    }
+
     @Test
     void launchFunction_injectsDefaultAwsCredentials() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("creds-defaults"));
@@ -680,6 +691,120 @@ class ContainerLauncherTest {
                 "AWS_SECRET_ACCESS_KEY should be injected when awsConfigPath is absent");
         assertTrue(env.stream().anyMatch(e -> e.startsWith("AWS_SESSION_TOKEN=")),
                 "AWS_SESSION_TOKEN should be injected when awsConfigPath is absent");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"$LATEST", "1", "7"})
+    void onDemandLaunchUsesTheSelectedVersion(String version) {
+        LambdaFunction fn = imageFunction();
+        fn.setVersion(version);
+        fn.setEnvironment(Map.of("AWS_LAMBDA_FUNCTION_VERSION", "user-override"));
+
+        launcher.launch(fn);
+
+        assertEquals(List.of("AWS_LAMBDA_FUNCTION_VERSION=" + version),
+                captureRealContainerSpec().env().stream()
+                        .filter(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION=")).toList());
+    }
+
+    @Test
+    void provisionedLaunchUsesTheImmutableVersionAndPlatformInitializationType() throws Exception {
+        stubExtensionDiscovery("example-extension");
+        when(logStreamer.execLogCallbackForAccount(anyString(), anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(new ResultCallback.Adapter<>());
+        LambdaFunction fn = imageFunction();
+        fn.setVersion("7");
+        fn.setEnvironment(Map.of("AWS_LAMBDA_INITIALIZATION_TYPE", "on-demand",
+                "AWS_LAMBDA_FUNCTION_VERSION", "$LATEST"));
+        launcher.launchProvisioned(fn);
+        List<String> env = captureRealContainerSpec().env();
+        assertEquals(List.of("AWS_LAMBDA_FUNCTION_VERSION=7"),
+                env.stream().filter(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION=")).toList());
+        assertEquals(List.of("AWS_LAMBDA_INITIALIZATION_TYPE=provisioned-concurrency"),
+                env.stream().filter(value -> value.startsWith("AWS_LAMBDA_INITIALIZATION_TYPE=")).toList());
+        verify(runtimeApiServer).expectExtensions(1);
+        verify(runtimeApiServer, never()).awaitExtensionsReady(anyLong());
+        verify(runtimeApiServer, never()).enqueue(any());
+    }
+
+    @Test
+    void provisionedLaunchRefusesFailedExtensionDiscoveryAndCleansTheCreatedRuntime() {
+        LambdaFunction fn = imageFunction();
+        fn.setVersion("1");
+        CopyArchiveFromContainerCmd archive = mock(CopyArchiveFromContainerCmd.class);
+        when(dockerClient.copyArchiveFromContainerCmd("container-123", "/opt/extensions")).thenReturn(archive);
+        when(archive.exec()).thenThrow(new IllegalStateException("controlled archive failure"));
+        assertThrows(RuntimeException.class, () -> launcher.launchProvisioned(fn));
+        verify(runtimeApiServerFactory).release(runtimeApiServer);
+        verify(runtimeApiServer, never()).expectExtensions(0);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void provisionedLaunchCopiesTheStoredAccountsLayerWithoutAmbientLookup(boolean legacyAccount) throws Exception {
+        LambdaFunction fn = imageFunction();
+        fn.setAccountId(legacyAccount ? null : "123456789012");
+        fn.setFunctionArn("arn:aws:lambda:eu-west-1:123456789012:function:layer-function");
+        fn.setVersion("1");
+        String arn = "arn:aws:lambda:eu-west-1:123456789012:layer:owned:1";
+        fn.setLayers(List.of(arn));
+        Path layerPath = Files.createDirectory(tempDir.resolve("owned-layer"));
+        Files.writeString(layerPath.resolve("dependency.txt"), "owned");
+        LambdaLayerVersion layer = new LambdaLayerVersion();
+        layer.setCodeLocalPath(layerPath.toString());
+        when(layerService.resolveLayerByArnForAccount(arn, "123456789012", "eu-west-1")).thenReturn(layer);
+        stubExtensionDiscovery();
+
+        launcher.launchProvisioned(fn);
+
+        assertTrue(capturedRemotePaths.contains("/opt"));
+        verify(layerService, never()).resolveLayerByArn(anyString());
+        verify(lifecycleManager).startCreated(eq("container-123"), any());
+        verify(runtimeApiServer).expectExtensions(0);
+    }
+
+    @ParameterizedTest
+    @MethodSource("unavailableLayerPaths")
+    void provisionedLaunchRefusesMissingLayerInputsAndCleansBeforeStart(String pathKind) throws Exception {
+        LambdaFunction fn = imageFunction();
+        fn.setAccountId("123456789012");
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:123456789012:function:missing-layer");
+        fn.setVersion("1");
+        String arn = "arn:aws:lambda:us-east-1:123456789012:layer:missing:1";
+        fn.setLayers(List.of(arn));
+        if (!"unresolved".equals(pathKind)) {
+            LambdaLayerVersion layer = new LambdaLayerVersion();
+            if ("absent".equals(pathKind)) {
+                layer.setCodeLocalPath(tempDir.resolve("absent").toString());
+            } else if ("regular-file".equals(pathKind)) {
+                layer.setCodeLocalPath(Files.writeString(tempDir.resolve("not-a-directory"), "data").toString());
+            }
+            when(layerService.resolveLayerByArnForAccount(eq(arn), eq("123456789012"), anyString()))
+                    .thenReturn(layer);
+        }
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> launcher.launchProvisioned(fn));
+        assertTrue(error.getMessage().startsWith("Configured layer is unavailable for provisioned initialization:"));
+        verify(lifecycleManager, never()).startCreated(anyString(), any());
+        verify(lifecycleManager).stopAndRemove("container-123", null);
+        verify(runtimeApiServerFactory).release(runtimeApiServer);
+        verify(runtimeApiServer, never()).expectExtensions(anyInt());
+        verify(runtimeApiServer, never()).enqueue(any());
+    }
+
+    private static Stream<String> unavailableLayerPaths() {
+        return Stream.of("unresolved", "null-path", "absent", "regular-file");
+    }
+
+    @Test
+    void ordinaryLaunchRetainsItsUnresolvedLayerBehavior() {
+        LambdaFunction fn = imageFunction();
+        String arn = "arn:aws:lambda:us-east-1:123456789012:layer:missing:1";
+        fn.setLayers(List.of(arn));
+        launcher.launch(fn);
+        verify(layerService).resolveLayerByArnForAccount(arn, "222233334444", "us-east-1");
+        verify(layerService, never()).resolveLayerByArn(anyString());
+        verify(lifecycleManager).startCreated(eq("container-123"), any());
     }
 
     @Test
@@ -1024,6 +1149,46 @@ class ContainerLauncherTest {
         launcher.stop(handle);
 
         verify(executionRoleCredentials).unregister("222233334444", "ASIASTOPSESSION");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void stopRevokesCredentialsOnFailureAndRetainsRuntimeUntilRemovalSucceeds(boolean extensions) throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("role-session-stop-retry"));
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("role-session-stop-retry-fn");
+        fn.setAccountId("222233334444");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        when(executionRoleCredentials.forFunction(fn)).thenReturn(Optional.of(
+                new SessionCreds("ASIARETRYSESSION", "role-secret", "role-token")));
+        when(runtimeApiServer.hasRegisteredExtensions()).thenReturn(extensions);
+        ContainerHandle handle = launcher.launch(fn);
+        int timeout = extensions ? 2 : 1;
+        IllegalStateException failure = new IllegalStateException("Docker removal failed");
+        doThrow(failure).doNothing().when(lifecycleManager)
+                .stopAndRemoveStrict("container-123", null, timeout);
+
+        assertSame(failure, assertThrows(IllegalStateException.class, () -> launcher.stop(handle)));
+
+        verify(runtimeApiServer).quiesce();
+        verify(runtimeApiServer, never()).close();
+        verify(runtimeApiServerFactory, never()).release(runtimeApiServer);
+        verify(executionRoleCredentials).unregister("222233334444", "ASIARETRYSESSION");
+
+        launcher.stop(handle);
+
+        InOrder order = inOrder(lifecycleManager, runtimeApiServer, runtimeApiServerFactory,
+                executionRoleCredentials);
+        order.verify(runtimeApiServer).quiesce();
+        order.verify(lifecycleManager).stopAndRemoveStrict("container-123", null, timeout);
+        order.verify(executionRoleCredentials).unregister("222233334444", "ASIARETRYSESSION");
+        order.verify(runtimeApiServer).quiesce();
+        order.verify(lifecycleManager).stopAndRemoveStrict("container-123", null, timeout);
+        order.verify(executionRoleCredentials).unregister("222233334444", "ASIARETRYSESSION");
+        order.verify(runtimeApiServer).close();
+        order.verify(runtimeApiServerFactory).release(runtimeApiServer);
     }
 
     @Test

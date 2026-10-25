@@ -357,6 +357,111 @@ class SamTransformProcessorTest {
                 "only the first ten characters name the version");
     }
 
+    /** As in SAM, the function's Description reaches the Lambda function as written. */
+    @Test
+    void expandSamTemplate_functionDescriptionIsCopiedToTheFunction() throws Exception {
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Parameters": {"Purpose": {"Type": "String", "Default": "orders"}},
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler", "Runtime": "nodejs20.x",
+                    "InlineCode": "exports.handler = async () => ({});"%s
+                  }
+                }
+              }
+            }
+            """;
+
+        assertEquals("\"Orders API\"", functionDescription(template.formatted(", \"Description\": \"Orders API\"")));
+        assertEquals("{\"Ref\":\"Purpose\"}", functionDescription(template.formatted(
+                ", \"Description\": {\"Ref\": \"Purpose\"}")), "an intrinsic function is left to CloudFormation");
+        assertEquals("\"Orders API\"", functionDescription(template.formatted(
+                ", \"Description\": \"Orders API\", \"AutoPublishAlias\": \"live\"")),
+                "AutoPublishAlias without AutoPublishCodeSha256 leaves it as written");
+        assertEquals("\"Orders API\"", functionDescription(template.formatted(
+                ", \"Description\": \"Orders API\", \"AutoPublishCodeSha256\": \"abc\"")),
+                "AutoPublishCodeSha256 without AutoPublishAlias leaves it as written");
+        assertTrue(processor.expandSamTemplate(objectMapper.readTree(template.formatted(""))).path("Resources")
+                .path("MyFunc").path("Properties").path("Description").isMissingNode());
+        String allProperties = ", \"AutoPublishAlias\": \"live\", \"AutoPublishAliasAllProperties\": true";
+        assertNotEquals(publishedVersionId(template.formatted(allProperties + ", \"Description\": \"first\"")),
+                publishedVersionId(template.formatted(allProperties + ", \"Description\": \"second\"")),
+                "under AutoPublishAliasAllProperties a new Description names a new version");
+    }
+
+    /**
+     * With AutoPublishAlias, SAM appends a given AutoPublishCodeSha256 to the function's Description, so
+     * that a new value alone changes the function and a version publishes for it. A function without a
+     * description gets the bare hash, a plain string gets the hash after a space, and an intrinsic
+     * function is wrapped in an Fn::Join with the hash.
+     */
+    @Test
+    void expandSamTemplate_autoPublishCodeSha256IsAppendedToTheDescription() throws Exception {
+        String template = """
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Parameters": {
+                "AutoPublishCodeSha256": {"Type": "String",
+                  "Default": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"},
+                "Purpose": {"Type": "String", "Default": "orders"}
+              },
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler", "Runtime": "nodejs20.x", "AutoPublishAlias": "live",
+                    "InlineCode": "exports.handler = async () => ({});", "AutoPublishCodeSha256": %s%s
+                  }
+                }
+              }
+            }
+            """;
+        String sha = "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b";
+        String ref = "{\"Ref\": \"AutoPublishCodeSha256\"}";
+
+        assertEquals("\"" + sha + "\"", functionDescription(template.formatted(ref, "")));
+        assertEquals("\"My testing description " + sha + "\"",
+                functionDescription(template.formatted(ref, ", \"Description\": \"My testing description\"")));
+        assertEquals("{\"Fn::Join\":[\" \",[{\"Fn::Join\":[\":\",[\"a\",\"b\",\"c\"]]},\"" + sha + "\"]]}",
+                functionDescription(template.formatted(ref,
+                        ", \"Description\": {\"Fn::Join\": [\":\", [\"a\", \"b\", \"c\"]]}")));
+
+        assertEquals("\"payments abc\"", functionDescription(template.formatted("\"abc\"",
+                ", \"Description\": {\"Ref\": \"Purpose\"}"), Map.of("Purpose", "payments")),
+                "a parameter is resolved first, as SAM resolves it");
+        assertEquals("{\"Fn::Join\":[\" \",[{\"Fn::Sub\":\"payments handler\"},\"abc\"]]}",
+                functionDescription(template.formatted("\"abc\"", ", \"Description\": {\"Fn::Sub\": "
+                        + "\"${Purpose} handler\"}"), Map.of("Purpose", "payments")),
+                "any other intrinsic function stays, with its parameters resolved");
+        assertEquals("\"abc\"", functionDescription(template.formatted("\"abc\"", ", \"Description\": \"\"")));
+        assertEquals("\"orders\"", functionDescription(template.formatted("\"\"", ", \"Description\": \"orders\"")),
+                "an empty AutoPublishCodeSha256 appends nothing");
+        assertEquals("{\"Ref\":\"Purpose\"}", functionDescription(template.formatted("\"\"",
+                ", \"Description\": {\"Ref\": \"Purpose\"}"), Map.of("Purpose", "payments")),
+                "with nothing appended the Description stays as written");
+        assertEquals("\"Shared abc\"", functionDescription(template.formatted("\"abc\"", "").replace("\"Resources\"",
+                "\"Globals\": {\"Function\": {\"Description\": \"Shared\"}}, \"Resources\"")),
+                "a Description from Globals takes the value too");
+        assertEquals("\"orders \"", functionDescription(template.formatted(ref, ", \"Description\": \"orders\""),
+                Map.of("AutoPublishCodeSha256", "")),
+                "SAM tests the property as written, so a Ref to an empty value still appends it");
+        assertEquals("\"\"", functionDescription(template.formatted(ref, ""), Map.of("AutoPublishCodeSha256", "")),
+                "and a function without a Description gets an empty one");
+    }
+
+    private String functionDescription(String template) throws Exception {
+        return functionDescription(template, Map.of());
+    }
+
+    private String functionDescription(String template, Map<String, String> parameterValues) throws Exception {
+        return processor.expandSamTemplate(objectMapper.readTree(template), parameterValues).path("Resources")
+                .path("MyFunc").path("Properties").path("Description").toString();
+    }
+
     /** SAM's types for the other version properties, and VersionDeletionPolicy needs AutoPublishAlias. */
     @Test
     void expandSamTemplate_versionPropertiesHaveSamsTypes() throws Exception {

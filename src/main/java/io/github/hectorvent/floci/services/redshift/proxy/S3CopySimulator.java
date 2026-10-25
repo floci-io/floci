@@ -68,6 +68,13 @@ public final class S3CopySimulator {
     private S3CopySimulator() {
     }
 
+    private static void requireDefaultIamRole(CopyStatementParser.S3Statement statement) {
+        if (statement.defaultIamRoleRequested() && statement.iamRoleArn() == null) {
+            throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "No default IAM role is associated with the Redshift cluster", null);
+        }
+    }
+
     record CopyInput(CopyStatementParser.S3CopyFrom spec, List<String> keys, S3Service s3,
                      IamService iamService, RedshiftRoleAccess.RoleSession roleSession) {
     }
@@ -107,6 +114,7 @@ public final class S3CopySimulator {
 
     static CopyInput prepareCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
                                  String clusterAccountId, List<String> associatedRoleArns) {
+        requireDefaultIamRole(spec);
         RedshiftRoleAccess.RoleSession roleSession = spec.iamRoleArn() != null
                 ? RedshiftRoleAccess.resolveRoleSession(spec.iamRoleArn(), iamService, clusterAccountId, associatedRoleArns)
                 : null;
@@ -204,6 +212,7 @@ public final class S3CopySimulator {
 
     static UnloadCollector prepareUnload(CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService,
                                          String clusterAccountId, List<String> associatedRoleArns) {
+        requireDefaultIamRole(spec);
         RedshiftRoleAccess.RoleSession roleSession = spec.iamRoleArn() != null
                 ? RedshiftRoleAccess.resolveRoleSession(spec.iamRoleArn(), iamService, clusterAccountId, associatedRoleArns)
                 : null;

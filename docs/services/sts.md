@@ -138,6 +138,8 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, `AssumeRole` also evaluates 
 (`AssumeRolePolicyDocument`) against the caller and returns `AccessDenied` if it is not permitted. AWS principal
 forms are matched: `"*"`, an account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs;
 and an explicit `Deny` always wins. Both `Action` and `NotAction` elements are honored when matching `sts:AssumeRole`.
+The caller's own identity policy must allow `sts:AssumeRole` too, evaluated against the role's ARN, so a policy can
+allow assuming one role and not another. Other STS actions are evaluated against `*`, whatever `RoleArn` they carry.
 
 The caller is the account that owns the request's credentials, whether they sign the
 `Authorization` header or a presigned query string: an IAM user's or a role session's access key
@@ -157,9 +159,6 @@ when its condition matches.
 - **Session tags and source identity are not modelled.** `aws:RequestTag/*`, `aws:TagKeys`,
   `sts:TransitiveTagKeys` and `sts:SourceIdentity` are not in the request context, so a condition
   on them does not match, and `sts:TagSession` and `sts:SetSourceIdentity` are not checked.
-- **The caller's own permission is checked against `*`.** The caller's identity policy must allow
-  `sts:AssumeRole`, but it is evaluated for resource `*` rather than the role's ARN, so a policy
-  that names the role in `Resource` does not grant it.
 
 ## Web Identity Validation (IRSA)
 

@@ -323,7 +323,8 @@ class RdsBackendEndpointRefreshIntegrationTest {
     }
 
     private void waitForPostgres(String containerId) {
-        String[] command = {"pg_isready", "-U", USER, "-d", DATABASE};
+        // The image's temporary initialization server accepts only Unix-socket connections.
+        String[] command = {"pg_isready", "-h", "127.0.0.1", "-U", USER, "-d", DATABASE};
         ContainerExec.Result lastResult = null;
         for (int attempt = 0; attempt < 60; attempt++) {
             lastResult = ContainerExec.run(dockerClient, containerId, command, 5);
@@ -372,7 +373,7 @@ class RdsBackendEndpointRefreshIntegrationTest {
             return;
         }
         try {
-            dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+            dockerClient.removeContainerCmd(containerId).withForce(true).withRemoveVolumes(true).exec();
         } catch (DockerException ignored) {
             // best effort
         }

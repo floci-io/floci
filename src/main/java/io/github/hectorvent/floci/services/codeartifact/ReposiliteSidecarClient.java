@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -42,11 +43,26 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     private static final String FORMAT = "maven";
     private static final Logger LOG = Logger.getLogger(ReposiliteSidecarClient.class);
     private static final String MAVEN_SETTINGS_PATH = "/api/settings/domain/maven";
+    /**
+     * {@link SidecarConcurrency#mapBounded}'s key for every {@code listPackageVersions} call: one
+     * shared constant, since {@link ReposiliteSidecarManager} backs every CodeArtifact Maven
+     * repository with the same single container, unlike pypiserver's one-container-per-repository
+     * shape.
+     */
+    private static final String SHARED_CONTAINER_KEY = "reposilite";
     private static final int REPOSITORY_READY_POLL_MAX_MS = 3_000;
     private static final int REPOSITORY_READY_POLL_INTERVAL_MS = 50;
     /** Real Maven metadata's own documented {@code lastUpdated} shape: UTC, {@code yyyyMMddHHmmss}. */
     private static final DateTimeFormatter METADATA_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
             .withZone(ZoneOffset.UTC);
+    /**
+     * The two checksum extensions a real {@code mvn deploy} always PUTs alongside {@code
+     * maven-metadata.xml} itself (confirmed against a real deploy's own request log): SHA-1 and
+     * MD5, Maven's two long-standing defaults. SHA-256/SHA-512 are a newer, still-optional addition
+     * no client this repository's own integration tests exercise ever sends, so neither is handled
+     * by {@link #recordVersionDisposed}'s own checksum upkeep.
+     */
+    private static final List<String> METADATA_CHECKSUM_EXTENSIONS = List.of("sha1", "md5");
 
     private final ReposiliteSidecarManager manager;
     private final ObjectMapper mapper;
@@ -274,6 +290,12 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
      * "when this version became complete." A version directory with no {@code FILE} entries at
      * all (never happens through a real deploy, but not assumed impossible) reports no timestamp
      * rather than guessing one.
+     *
+     * <p>The per-version details requests run through {@link SidecarConcurrency#mapBounded}, not a
+     * plain sequential loop: an artifact with many versions used to make every one of those
+     * requests one at a time before returning even a single-result page. Keyed by {@link
+     * #SHARED_CONTAINER_KEY} so the concurrency cap holds across simultaneous calls too, since
+     * every Maven repository shares the one Reposilite container.
      */
     @Override
     public List<PackageVersionTimestamp> listPackageVersions(String repositoryContainerId, String domain,
@@ -295,16 +317,15 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
             throw new IllegalStateException("Could not list versions of " + packageName + " on the Reposilite "
                     + "sidecar: upstream returned " + artifactResponse.statusCode());
         }
-        List<PackageVersionTimestamp> result = new ArrayList<>();
+        List<String> versions = new ArrayList<>();
         for (JsonNode entry : readTree(artifactResponse.body()).path("files")) {
-            if (!"DIRECTORY".equals(entry.path("type").asText())) {
-                continue;
+            if ("DIRECTORY".equals(entry.path("type").asText())) {
+                versions.add(entry.path("name").asText());
             }
-            String version = entry.path("name").asText();
-            result.add(new PackageVersionTimestamp(version, latestFileTimestamp(baseUrl,
-                    versionDetailsPath(repositoryContainerId, namespace, packageName, version))));
         }
-        return result;
+        return SidecarConcurrency.mapBounded(SHARED_CONTAINER_KEY, versions, version -> new PackageVersionTimestamp(
+                version, latestFileTimestamp(baseUrl, versionDetailsPath(repositoryContainerId, namespace,
+                        packageName, version))));
     }
 
     private Instant latestFileTimestamp(String baseUrl, String versionDetailsPath) {
@@ -455,6 +476,201 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
                 .end("versioning")
                 .end("metadata");
         deployArtifact(repositoryContainerId, gav, metadata.build().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * {@link #recordVersionAvailable}'s dispose-time counterpart (found missing by Qodo review on
+     * the PR that added {@code DisposePackageVersions}): without this, a disposed Maven version's
+     * real asset files are gone from its own version directory, but {@code mvn}/{@code gradle}
+     * resolving dependencies straight against the artifact-level {@code maven-metadata.xml} (not
+     * through this emulator's own {@code ListPackageVersions}, which already reads the override
+     * store and correctly stops reporting it) would keep seeing it listed as available. Removes
+     * {@code version} from the metadata's own {@code versions} list and recomputes {@code latest}/
+     * {@code release} from whatever remains, in the same append order the metadata already
+     * preserves: the list is never re-sorted, so its last surviving entry is still the most
+     * recently deployed one, exactly the same invariant {@link #recordVersionAvailable} relies on
+     * when adding to it. A metadata file that would end up with no versions left is deleted
+     * outright rather than written back empty, matching how a package that never had a version
+     * published has no metadata file at all. A missing metadata file, or one that never named this
+     * version to begin with (both possible if this is called more than once, or for a version
+     * recorded before {@code maven-metadata.xml} existed), is a no-op either way.
+     *
+     * <p>Raised by Greptile's review: both the DELETE below (when no version is left to list) and
+     * the rewrite ({@link #deployArtifact}) ignored whatever Reposilite actually answered, so a
+     * disposal could report success while the metadata on disk still named the just-deleted
+     * version. Checked against the exact same {@code IllegalStateException}-on-failure convention
+     * {@link #deletePackageVersionAsset} already uses for the asset deletes this runs after (see
+     * {@code CodeArtifactService#deleteContainerBackedVersionAssets}'s own javadoc for why this
+     * runs last): a thrown exception here propagates the same way a failed asset delete already
+     * does, rather than this method silently reporting a metadata update that never actually took.
+     *
+     * <p>Also raised by Greptile's review: a real {@code mvn deploy} always PUTs {@code
+     * maven-metadata.xml.sha1}/{@code .md5} right alongside the metadata file itself, so this
+     * method's own server-side rewrite (or removal) of the metadata content must carry those two
+     * checksum siblings along with it ({@link #METADATA_CHECKSUM_EXTENSIONS}): left untouched, a
+     * Maven client verifying the checksum of the metadata it just fetched would see it disagree
+     * with content this method itself just changed underneath it.
+     *
+     * <p>Raised again by Greptile's review, once a dispose retry (see {@code
+     * CodeArtifactService#checkStatusTransitionAllowed}'s own javadoc) became possible: a retry
+     * whose first attempt already finished the metadata rewrite or removal, but then failed on
+     * exactly a checksum write or delete, used to hit one of the two early returns below and
+     * report success without ever repairing that stale checksum, since neither {@code existing}
+     * being empty nor {@code version} being already absent from it means the checksums are
+     * actually right. Both early-return branches now repair the checksums too, every time, not
+     * just on the one call that happened to also touch the metadata itself.
+     *
+     * <p>Raised again by Greptile's review: {@link #fetchArtifact} itself returns {@code empty()}
+     * for every non-200 response, 500/503 included, the same conflation {@link
+     * #deleteArtifactIfPresent}'s own existence check already had fixed for it. A transient read
+     * failure here looked identical to "the metadata file genuinely does not exist," which would
+     * delete the checksums and report a successful disposal while the metadata on disk still
+     * named the version this was supposed to remove. Reads the metadata through a dedicated check
+     * that only takes the empty branch on a confirmed 404, throwing on anything else, the same
+     * convention {@link #deleteArtifactIfPresent}'s own HEAD check already uses.
+     *
+     * <p>Known, documented gap left out of scope (also raised by Greptile's review): this
+     * method's own read-modify-write of {@code maven-metadata.xml} has no lock around it, so a
+     * concurrent {@link #recordVersionAvailable} (a native {@code mvn deploy} adding a different
+     * version to the same artifact) that reads the file between this method's own read and write
+     * can have its update silently overwritten by this call's stale copy, or removed outright if
+     * this call's own last-version branch deletes the file instead. This is not new: {@link
+     * #recordVersionAvailable} already has the identical unlocked read-modify-write shape on its
+     * own, so two concurrent deploys of different versions to the same artifact can already lose
+     * one's update today, with no disposal involved at all. This method is simply a second
+     * caller that inherits that same pre-existing hole rather than one that introduces it.
+     * Coordinating every writer of this one file (a lock keyed by repository and artifact,
+     * shared across every caller) is a real fix, just not one scoped to adding {@code
+     * DisposePackageVersions} itself; tracked separately rather than folded in here.
+     */
+    @Override
+    public void recordVersionDisposed(String repositoryContainerId, String namespace, String packageName,
+            String version) {
+        String gav = artifactMetadataGav(namespace, packageName);
+        Optional<FetchedArtifact> existing = fetchArtifactConfirmingMissing(repositoryContainerId, gav);
+        if (existing.isEmpty()) {
+            for (String extension : METADATA_CHECKSUM_EXTENSIONS) {
+                deleteArtifactIfPresent(repositoryContainerId, gav + "." + extension);
+            }
+            return;
+        }
+        String xml = new String(existing.get().content(), StandardCharsets.UTF_8);
+        List<String> versions = new ArrayList<>(XmlParser.extractAll(xml, "version"));
+        if (!versions.remove(version)) {
+            writeMetadataChecksum(repositoryContainerId, gav + ".sha1", Digests.sha1Hex(existing.get().content()));
+            writeMetadataChecksum(repositoryContainerId, gav + ".md5", Digests.md5Hex(existing.get().content()));
+            return;
+        }
+        String baseUrl = manager.ensureReady();
+        if (versions.isEmpty()) {
+            HttpRequest request = authenticated(baseUrl, repositoryContainerId, gav).DELETE().build();
+            HttpResponse<Void> response = send(request, BodyHandlers.discarding());
+            if (response.statusCode() != 200) {
+                throw new IllegalStateException("Could not remove " + packageName + "'s maven-metadata.xml from "
+                        + "the Reposilite sidecar after disposing its last version " + version
+                        + ": upstream returned " + response.statusCode());
+            }
+            for (String extension : METADATA_CHECKSUM_EXTENSIONS) {
+                deleteArtifactIfPresent(repositoryContainerId, gav + "." + extension);
+            }
+            return;
+        }
+        String groupId = XmlParser.extractFirst(xml, "groupId", namespace);
+        String artifactId = XmlParser.extractFirst(xml, "artifactId", packageName);
+        String latest = versions.get(versions.size() - 1);
+        String release = null;
+        for (int i = versions.size() - 1; i >= 0; i--) {
+            if (!versions.get(i).endsWith("-SNAPSHOT")) {
+                release = versions.get(i);
+                break;
+            }
+        }
+        XmlBuilder metadata = new XmlBuilder().start("metadata")
+                .elem("groupId", groupId)
+                .elem("artifactId", artifactId)
+                .start("versioning")
+                .elem("latest", latest)
+                .elem("release", release)
+                .start("versions");
+        for (String v : versions) {
+            metadata.elem("version", v);
+        }
+        metadata.end("versions")
+                .elem("lastUpdated", METADATA_TIMESTAMP.format(Instant.now()))
+                .end("versioning")
+                .end("metadata");
+        byte[] metadataBytes = metadata.build().getBytes(StandardCharsets.UTF_8);
+        DeployOutcome outcome = deployArtifact(repositoryContainerId, gav, metadataBytes);
+        if (!outcome.wroteNewContent()) {
+            throw new IllegalStateException("Could not update " + packageName + "'s maven-metadata.xml on the "
+                    + "Reposilite sidecar after disposing version " + version + ": upstream returned "
+                    + outcome.status());
+        }
+        writeMetadataChecksum(repositoryContainerId, gav + ".sha1", Digests.sha1Hex(metadataBytes));
+        writeMetadataChecksum(repositoryContainerId, gav + ".md5", Digests.md5Hex(metadataBytes));
+    }
+
+    /** {@link #recordVersionDisposed}'s own checksum-rewrite counterpart to {@link #deployArtifact}. */
+    /**
+     * Raised by Greptile's review: {@code wroteNewContent()} is {@code false} both for a genuine
+     * failure and for {@link #deployArtifact}'s own idempotent short-circuit (the checksum
+     * already on the sidecar matches {@code hex} byte for byte, so nothing needed to be sent at
+     * all), and checking it alone could not tell the two apart. A disposal retry whose {@code
+     * .sha1} write already landed on an earlier attempt, but then failed on {@code .md5}, would
+     * see that already-correct {@code .sha1} hit this exact short-circuit every time, getting
+     * flagged as a failure that stopped the retry before it ever reached {@code .md5} again. Only
+     * the real HTTP status is checked now, the same success codes {@link #deployArtifact} itself
+     * already treats as success.
+     */
+    private void writeMetadataChecksum(String repositoryContainerId, String checksumGav, String hex) {
+        DeployOutcome outcome = deployArtifact(repositoryContainerId, checksumGav,
+                hex.getBytes(StandardCharsets.UTF_8));
+        if (outcome.status() != 200 && outcome.status() != 201) {
+            throw new IllegalStateException("Could not update checksum " + checksumGav + " on the Reposilite "
+                    + "sidecar: upstream returned " + outcome.status());
+        }
+    }
+
+    /**
+     * {@link #recordVersionDisposed}'s own checksum-removal counterpart, for the case where the
+     * metadata file itself is removed outright rather than rewritten. A checksum that was never
+     * there to begin with (a client that only ever pushed one of the two, or a sidecar restored
+     * from a snapshot older than this method) is a no-op, the same tolerance {@link
+     * #recordVersionDisposed} already extends to a metadata file missing version to begin with.
+     *
+     * <p>Checks existence with a HEAD first rather than guessing at a "not found" status for the
+     * DELETE itself: confirmed against a real Reposilite instance, deleting a path that was never
+     * there returns 500, not 404, so treating 404 as the tolerated case (as an earlier version of
+     * this method did) still threw on the common case of a checksum a real {@code mvn deploy}
+     * simply never pushed.
+     *
+     * <p>Raised by Greptile's review: {@link #artifactExists} itself treats every non-200 HEAD
+     * response as "absent," 500/503 included, which would let a genuine sidecar failure here look
+     * identical to a confirmed-missing checksum and silently skip the delete instead of surfacing
+     * it. This checks the HEAD status directly instead, so only a confirmed 404 is tolerated as
+     * absent; anything else (a real error, not a clean answer either way) throws, the same
+     * {@code IllegalStateException}-on-failure convention this method's own DELETE already uses,
+     * so a caller can tell a skipped-because-confirmed-gone checksum apart from one this could not
+     * even check.
+     */
+    private void deleteArtifactIfPresent(String repositoryContainerId, String gav) {
+        String baseUrl = manager.ensureReady();
+        HttpRequest headRequest = authenticated(baseUrl, repositoryContainerId, gav)
+                .method("HEAD", BodyPublishers.noBody()).build();
+        int headStatus = send(headRequest, BodyHandlers.discarding()).statusCode();
+        if (headStatus == 404) {
+            return;
+        }
+        if (headStatus != 200) {
+            throw new IllegalStateException("Could not check whether " + gav + " exists on the Reposilite "
+                    + "sidecar before deleting it: upstream returned " + headStatus);
+        }
+        HttpRequest request = authenticated(baseUrl, repositoryContainerId, gav).DELETE().build();
+        HttpResponse<Void> response = send(request, BodyHandlers.discarding());
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not delete " + gav + " from the Reposilite sidecar: upstream "
+                    + "returned " + response.statusCode());
+        }
     }
 
     private static String artifactMetadataGav(String namespace, String packageName) {
@@ -698,6 +914,28 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     /** Fetches {@code repoId}'s {@code gav} path, or {@link Optional#empty()} on a non-200 response. */
     public Optional<FetchedArtifact> fetchArtifact(String repoId, String gav) {
         return fetchArtifact(manager.ensureReady(), repoId, gav);
+    }
+
+    /**
+     * {@link #recordVersionDisposed}'s own counterpart to {@link #fetchArtifact}: that method's
+     * {@code empty()} is not safe to read as "confirmed absent" everywhere, since it also means
+     * "any non-200," 500/503 included. This only takes the empty branch on an actual 404,
+     * throwing on anything else so a transient read failure is surfaced rather than treated as
+     * the file never having existed.
+     */
+    private Optional<FetchedArtifact> fetchArtifactConfirmingMissing(String repositoryContainerId, String gav) {
+        String baseUrl = manager.ensureReady();
+        HttpRequest request = authenticated(baseUrl, repositoryContainerId, gav).GET().build();
+        HttpResponse<byte[]> response = send(request, BodyHandlers.ofByteArray());
+        if (response.statusCode() == 404) {
+            return Optional.empty();
+        }
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not read " + gav + " from the Reposilite sidecar: upstream "
+                    + "returned " + response.statusCode());
+        }
+        String contentType = response.headers().firstValue("Content-Type").orElse("application/octet-stream");
+        return Optional.of(new FetchedArtifact(response.body(), contentType));
     }
 
     private Optional<FetchedArtifact> fetchArtifact(String baseUrl, String repoId, String gav) {

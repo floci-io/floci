@@ -468,6 +468,7 @@ public class ElbV2QueryHandler {
         String listenerArn = p.getFirst("ListenerArn");
         String protocol = p.getFirst("Protocol");
         Integer port = parseIntOrNull(p.getFirst("Port"));
+        ElbV2Service.validatePort(port, "port");
         String sslPolicy = p.getFirst("SslPolicy");
         List<String> certs = parseCertificateList(p, "Certificates");
         List<Action> defaultActions = parseActions(p, "DefaultActions", false);

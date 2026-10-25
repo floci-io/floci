@@ -15,9 +15,7 @@ import io.github.hectorvent.floci.services.oam.model.OamSink;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -381,7 +379,7 @@ public class OamService {
     public static int decodeToken(String token) {
         if (token == null || token.isBlank()) return 0;
         try {
-            int offset = Integer.parseInt(new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8));
+            int offset = Integer.parseInt(Base64Url.decode(token));
             if (offset < 0) throw new NumberFormatException();
             return offset;
         } catch (Exception e) {

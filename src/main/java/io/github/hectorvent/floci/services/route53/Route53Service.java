@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.DomainNames;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.dns.DnsLookupHelper;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -83,7 +84,7 @@ public class Route53Service implements Resettable {
                 r53.defaultNameserver2(),
                 r53.defaultNameserver3(),
                 r53.defaultNameserver4()
-        );
+        ).stream().map(Route53Service::delegationName).toList();
         this.defaultAccountId = config.defaultAccountId();
         this.regionResolver = regionResolver;
         this.ec2Service = ec2Service;
@@ -430,17 +431,17 @@ public class Route53Service implements Resettable {
                 recordStore.get(zoneId).orElse(List.of()));
 
         records.sort((a, b) -> {
-            int cmp = a.getName().compareTo(b.getName());
+            int cmp = normalizeRecordName(a.getName()).compareTo(normalizeRecordName(b.getName()));
             if (cmp != 0) return cmp;
             return a.getType().compareTo(b.getType());
         });
 
         if (startName != null && !startName.isEmpty()) {
-            String normalizedStart = normalizeName(startName);
+            String normalizedStart = normalizeRecordName(startName);
             final String finalStartType = startType;
             records = records.stream()
                     .filter(r -> {
-                        int cmp = r.getName().compareTo(normalizedStart);
+                        int cmp = normalizeRecordName(r.getName()).compareTo(normalizedStart);
                         if (cmp > 0) return true;
                         if (cmp == 0 && finalStartType != null && !finalStartType.isEmpty()) {
                             return r.getType().compareTo(finalStartType) >= 0;
@@ -869,7 +870,7 @@ public class Route53Service implements Resettable {
         if (deadline == null) {
             return false;
         }
-        if (System.nanoTime() >= deadline) {
+        if (mutationTimeNanos() >= deadline) {
             busyUntilNanos.remove(zoneId, deadline);
             return false;
         }
@@ -880,13 +881,38 @@ public class Route53Service implements Resettable {
         if (vpcAssociationControlPlaneDelayMs <= 0) {
             return;
         }
-        busyUntilNanos.put(zoneId, System.nanoTime()
+        busyUntilNanos.put(zoneId, mutationTimeNanos()
                 + TimeUnit.MILLISECONDS.toNanos(vpcAssociationControlPlaneDelayMs));
+    }
+
+    long mutationTimeNanos() {
+        return System.nanoTime();
     }
 
     public static String normalizeName(String name) {
         if (name == null || name.isEmpty()) return name;
         return name.endsWith(".") ? name : name + ".";
+    }
+
+    /**
+     * A configured nameserver as the delegation set lists it: without surrounding whitespace, which
+     * the config does not trim, and without the final dot, as Route 53 lists it. {@code strip()}
+     * also removes the Unicode spaces that {@code trim()} keeps.
+     */
+    private static String delegationName(String configured) {
+        return DnsLookupHelper.normalizeTarget(configured.strip());
+    }
+
+    public static String normalizeRecordName(String name) {
+        String normalized = normalizeName(name);
+        if (normalized == null) {
+            return null;
+        }
+        StringBuilder result = new StringBuilder(normalized.length());
+        for (int i = 0; i < normalized.length(); i++) {
+            result.append(asciiLower(normalized.charAt(i)));
+        }
+        return result.toString();
     }
 
     private static String generateZoneId() {
@@ -920,7 +946,7 @@ public class Route53Service implements Resettable {
         soa.setType("SOA");
         soa.setTtl(900L);
         soa.setRecords(List.of(new ResourceRecord(
-                nameServers.get(0) + " awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400")));
+                normalizeName(nameServers.get(0)) + " awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400")));
         records.add(soa);
 
         ResourceRecordSet ns = new ResourceRecordSet();
@@ -928,7 +954,7 @@ public class Route53Service implements Resettable {
         ns.setType("NS");
         ns.setTtl(172800L);
         ns.setRecords(nameServers.stream()
-                .map(n -> new ResourceRecord(n + "."))
+                .map(n -> new ResourceRecord(normalizeName(n)))
                 .toList());
         records.add(ns);
 
@@ -936,7 +962,7 @@ public class Route53Service implements Resettable {
     }
 
     private boolean isApexSoaOrNs(ResourceRecordSet rrs, String zoneName) {
-        return rrs.getName().equals(zoneName) &&
+        return normalizeRecordName(rrs.getName()).equals(normalizeRecordName(zoneName)) &&
                 ("SOA".equals(rrs.getType()) || "NS".equals(rrs.getType()));
     }
 
@@ -975,23 +1001,29 @@ public class Route53Service implements Resettable {
 
     private void applyChange(String action, ResourceRecordSet rrs, List<ResourceRecordSet> current) {
         switch (action) {
-            case "CREATE" -> current.add(rrs);
+            case "CREATE" -> {
+                ResourceRecordSet normalized = new ResourceRecordSet(rrs);
+                normalized.setName(normalizeRecordName(rrs.getName()));
+                current.add(normalized);
+            }
             case "DELETE" -> current.remove(deleteTarget(current, rrs));
             case "UPSERT" -> {
                 current.removeIf(r -> sameRecord(r, rrs));
-                current.add(rrs);
+                ResourceRecordSet normalized = new ResourceRecordSet(rrs);
+                normalized.setName(normalizeRecordName(rrs.getName()));
+                current.add(normalized);
             }
         }
     }
 
     /**
      * Whether two record sets share an identity: name, type and set identifier. Route 53 treats a
-     * name with or without the trailing dot as the same, and requires a set identifier of at least one
+     * name with ASCII case differences or without the trailing dot as the same, and requires a set identifier of at least one
      * character, so a blank one is none. That also matches a record an earlier CloudFormation
      * provisioner stored with the template's undotted Name or empty SetIdentifier.
      */
     public static boolean sameRecord(ResourceRecordSet a, ResourceRecordSet b) {
-        return normalizeName(a.getName()).equals(normalizeName(b.getName()))
+        return normalizeRecordName(a.getName()).equals(normalizeRecordName(b.getName()))
                 && a.getType().equals(b.getType())
                 && Objects.equals(blankToNull(a.getSetIdentifier()), blankToNull(b.getSetIdentifier()));
     }
@@ -1033,8 +1065,16 @@ public class Route53Service implements Resettable {
             return a == b;
         }
         return Objects.equals(a.getHostedZoneId(), b.getHostedZoneId())
-                && Objects.equals(a.getDnsName(), b.getDnsName())
+                && aliasDnsNamesMatch(a.getDnsName(), b.getDnsName())
                 && a.isEvaluateTargetHealth() == b.isEvaluateTargetHealth();
+    }
+
+    private static boolean aliasDnsNamesMatch(String a, String b) {
+        return Objects.equals(normalizeRecordName(a), normalizeRecordName(b));
+    }
+
+    private static char asciiLower(char c) {
+        return c >= 'A' && c <= 'Z' ? (char) (c + ('a' - 'A')) : c;
     }
 
     private static boolean recordValuesMatch(List<ResourceRecord> a, List<ResourceRecord> b) {

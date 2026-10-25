@@ -13,9 +13,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -349,8 +347,7 @@ public class DynamoDbDataSourceInvoker implements AppSyncDataSourceInvoker {
 
     private JsonNode decodeNextToken(String nextToken) {
         try {
-            byte[] decoded = Base64.getUrlDecoder().decode(nextToken);
-            return objectMapper.readTree(new String(decoded, StandardCharsets.UTF_8));
+            return objectMapper.readTree(Base64Url.decode(nextToken));
         } catch (Exception e) {
             throw new AwsException("InternalFailureException",
                     "The nextToken handed to the DynamoDB data source is not one Floci issued", 500);

@@ -9,6 +9,8 @@ import java.time.Duration;
  * API references document. {@code OriginReadTimeout} accepts 1-120 seconds, default 30;
  * {@code OriginKeepaliveTimeout} accepts 1-300 seconds, default 5; {@code ConnectionTimeout}
  * accepts 1-10 seconds, default 10; {@code ConnectionAttempts} accepts 1-3, default 3.
+ * {@code ResponseCompletionTimeout} has no maximum: unset, or 0, leaves the origin as long as it
+ * wants to take, and a set value bounds the whole request to the origin.
  */
 final class CloudFrontOriginTimeouts {
 
@@ -29,6 +31,10 @@ final class CloudFrontOriginTimeouts {
             Duration.ofSeconds(DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS);
     static final Duration DEFAULT_CONNECTION_TIMEOUT =
             Duration.ofSeconds(DEFAULT_CONNECTION_TIMEOUT_SECONDS);
+    /** No completion timeout: the origin may take as long as it wants to answer. */
+    static final Duration DEFAULT_RESPONSE_COMPLETION_TIMEOUT = Duration.ZERO;
+    static final Duration DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT =
+            Duration.ofSeconds(DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS);
 
     private CloudFrontOriginTimeouts() {
     }

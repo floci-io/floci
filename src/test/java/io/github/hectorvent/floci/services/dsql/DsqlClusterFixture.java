@@ -15,6 +15,8 @@ import java.util.Properties;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -63,6 +65,24 @@ public final class DsqlClusterFixture {
 
     public String host() {
         return host;
+    }
+
+    public String identifier() {
+        return identifier;
+    }
+
+    public String arn() {
+        return "arn:aws:dsql:" + REGION + ":" + ACCOUNT + ":cluster/" + identifier;
+    }
+
+    /** Gives the cluster {@code policy} through the control plane, as the account's root. */
+    public void putPolicy(String policy) {
+        dsql().body(Map.of("policy", policy)).post("/cluster/" + identifier + "/policy").then().statusCode(200);
+    }
+
+    /** Takes the cluster's policy away, if it has one. */
+    public void removePolicy() {
+        dsql().delete("/cluster/" + identifier + "/policy").then().statusCode(anyOf(is(200), is(404)));
     }
 
     public String url() {

@@ -13,6 +13,7 @@ import org.jboss.logging.Logger;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * Says once, at startup, what an unreachable Docker daemon costs.
@@ -32,11 +33,11 @@ public class DockerAvailabilityReport {
     /** Ping Docker, report and carry on: their control plane works without a container. */
     static final List<String> METADATA_ONLY = List.of(
             "rds", "elasticache", "memorydb", "opensearch", "neptune", "docdb", "msk", "eks",
-            "timestreaminfluxdb");
+            "timestreaminfluxdb", "ec2");
 
     /** Run a container per request and fail that request (or its build, task, job) without Docker. */
     static final List<String> FAIL_ON_USE = List.of(
-            "lambda", "ecs", "ec2", "codebuild", "batch", "sagemaker", "appsync", "pipes", "mwaa",
+            "lambda", "ecs", "codebuild", "batch", "sagemaker", "appsync", "pipes", "mwaa",
             "amazonmq", "kinesisanalytics", "redshift", "redshift-serverless", "rds-data", "athena", "ecr",
             "codeartifact", "verifiedpermissions");
 
@@ -60,7 +61,7 @@ public class DockerAvailabilityReport {
 
     void report() {
         Set<String> enabled = Set.copyOf(serviceRegistry.getEnabledServices());
-        List<String> metadataOnly = METADATA_ONLY.stream().filter(enabled::contains).toList();
+        List<String> metadataOnly = metadataOnly(enabled);
         List<String> failOnUse = failOnUse(enabled);
         if (metadataOnly.isEmpty() && failOnUse.isEmpty()) {
             return;
@@ -76,12 +77,27 @@ public class DockerAvailabilityReport {
                 metadataOnly, failOnUse);
     }
 
+    List<String> metadataOnly(Set<String> enabled) {
+        return METADATA_ONLY.stream()
+                .filter(enabled::contains)
+                .filter(service -> !needsDockerWhenConfigured(service))
+                .toList();
+    }
+
     List<String> failOnUse(Set<String> enabled) {
-        return FAIL_ON_USE.stream()
+        return Stream.concat(METADATA_ONLY.stream().filter(this::needsDockerWhenConfigured), FAIL_ON_USE.stream())
                 .filter(enabled::contains)
                 .filter(service -> !runsWithoutLocalDocker(service))
                 .map(service -> "pipes".equals(service) ? "pipes (Kafka sources)" : service)
                 .toList();
+    }
+
+    /**
+     * A metadata-only service that a setting makes fail without Docker: with security-group
+     * enforcement on, an EC2 launch with no daemon fails instead of running as metadata only.
+     */
+    boolean needsDockerWhenConfigured(String service) {
+        return "ec2".equals(service) && config.network().securityGroupEnforcement().enabled();
     }
 
     /** A service whose container work goes somewhere other than the local daemon. */

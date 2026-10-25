@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -14,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Predicate;
 
 /**
  * Helpers shared by the SES v2 REST JSON controllers: body and member shape checks that answer
@@ -27,7 +29,9 @@ final class SesV2Json {
     /** The deserializer's wording, which {@link SesV2RequestShapes}' walk of the body shapes shares. */
     static final String SERIALIZATION_EXCEPTION = "SerializationException";
     static final String CONVERSION = "%s can not be converted to a %s";
+    static final String INTEGER_CONVERSION = "%s can not be converted to an Integer";
     static final String EXPECTED_NULL = "Expected null";
+    static final String EXPECTED_MAP = "Expected map or null";
     static final String EXPECTED_LIST = "Expected list or null";
     static final String LIST_NOT_EXPECTED = "Start of list found where not expected";
     static final String OBJECT_NOT_EXPECTED = "Start of structure or map found where not expected.";
@@ -52,11 +56,15 @@ final class SesV2Json {
         };
     }
 
+    /** A request body that is not a JSON object: AWS names a list and answers anything else without a message. */
     static void requireJsonObject(JsonNode root) {
-        if (root == null || !root.isObject()) {
-            throw new AwsException("BadRequestException",
-                    "Request body must be a JSON object.", 400);
+        if (root != null && root.isObject()) {
+            return;
         }
+        if (root != null && root.isArray()) {
+            throw unexpectedStartError(root);
+        }
+        throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
     }
 
     static JsonNode requireObjectOrAbsent(JsonNode parent, String fieldName) {
@@ -107,17 +115,23 @@ final class SesV2Json {
         return !node.isMissingNode() && !node.isNull() && !node.isTextual();
     }
 
-    /** Parse an option PUT body into a JSON object, treating an empty body as {}. */
+    /**
+     * Parse a request body into a JSON object. Only an empty body reads as {}: AWS answers a
+     * whitespace-only body, malformed JSON and a trailing token after the object (even a second
+     * value) with a {@code SerializationException} without a message.
+     */
     static JsonNode readOptionBody(ObjectMapper objectMapper, String body) {
-        try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
-            return request;
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        if (body == null || body.isEmpty()) {
+            return objectMapper.createObjectNode();
         }
+        JsonNode request;
+        try {
+            request = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(body);
+        } catch (JsonProcessingException e) {
+            throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
+        }
+        requireJsonObject(request);
+        return request;
     }
 
     /** Read an optional string member, rejecting a non-string value the way the AWS deserialization layer does. */
@@ -152,21 +166,6 @@ final class SesV2Json {
         throw scalarTypeError(node, "Boolean");
     }
 
-    /**
-     * A structure member as the AWS deserializer reads it: absent or null is returned as is, an
-     * array is "Start of list found where not expected" and any other non-object "Expected null".
-     */
-    private static JsonNode structureMemberOrAbsent(JsonNode parent, String field) {
-        JsonNode node = parent.path(field);
-        if (node.isMissingNode() || node.isNull() || node.isObject()) {
-            return node;
-        }
-        if (node.isArray()) {
-            throw unexpectedStartError(node);
-        }
-        throw expectedNullError();
-    }
-
     /** A string member with the AWS deserializer's message for each wrong JSON type. */
     private static String typedStringMemberOrAbsent(JsonNode parent, String field) {
         JsonNode node = parent.path(field);
@@ -185,9 +184,15 @@ final class SesV2Json {
      * JSON type gets the deserializer's message for it.
      */
     static Map<String, String> stringMapMemberOrAbsent(JsonNode parent, String field) {
-        JsonNode node = structureMemberOrAbsent(parent, field);
+        JsonNode node = parent.path(field);
         if (node.isMissingNode() || node.isNull()) {
             return null;
+        }
+        if (node.isArray()) {
+            throw unexpectedStartError(node);
+        }
+        if (!node.isObject()) {
+            throw expectedMapError();
         }
         Map<String, String> values = new LinkedHashMap<>();
         for (Map.Entry<String, JsonNode> entry : node.properties()) {
@@ -203,6 +208,22 @@ final class SesV2Json {
      * an empty one.
      */
     static Map<String, String> filterValues(Map<String, String> filter, List<String> keys) {
+        return filterValues(filter, keys, String::isEmpty, "Member must have length greater than or equal to 1");
+    }
+
+    /**
+     * As above, for a filter whose values are bounded above too. SES printed both bounds for an
+     * empty value, so a value over the bound is taken to be answered the same way.
+     */
+    static Map<String, String> filterValues(Map<String, String> filter, List<String> keys, int maxValueLength) {
+        return filterValues(filter, keys,
+                v -> v.isEmpty() || v.codePointCount(0, v.length()) > maxValueLength,
+                "Member must have length less than or equal to " + maxValueLength
+                        + ", Member must have length greater than or equal to 1");
+    }
+
+    private static Map<String, String> filterValues(Map<String, String> filter, List<String> keys,
+                                                    Predicate<String> invalidValue, String valueConstraint) {
         if (filter == null) {
             return Map.of();
         }
@@ -211,10 +232,10 @@ final class SesV2Json {
                     + "failed to satisfy constraint: Map keys must satisfy constraint: "
                     + "[Member must satisfy enum value set: [" + String.join(", ", keys) + "]]");
         }
-        if (filter.containsValue("")) {
+        if (filter.values().stream().anyMatch(v -> v != null && invalidValue.test(v))) {
             throw SmithyValidationErrors.badRequest( "Value at 'filter' "
                     + "failed to satisfy constraint: Map value must satisfy constraint: "
-                    + "[Member must have length greater than or equal to 1]");
+                    + "[" + valueConstraint + "]");
         }
         Map<String, String> values = new LinkedHashMap<>();
         filter.forEach((key, value) -> {
@@ -240,9 +261,14 @@ final class SesV2Json {
         return unexpectedStartError(node);
     }
 
-    /** The deserializer's message for a structure or map member given a scalar. */
+    /** The deserializer's message for a structure member given a scalar. */
     static AwsException expectedNullError() {
         return new AwsException(SERIALIZATION_EXCEPTION, EXPECTED_NULL, 400);
+    }
+
+    /** The deserializer's message for a map member given a scalar. */
+    static AwsException expectedMapError() {
+        return new AwsException(SERIALIZATION_EXCEPTION, EXPECTED_MAP, 400);
     }
 
     /** The deserializer's message for a list member given a scalar. */
@@ -291,18 +317,26 @@ final class SesV2Json {
         return values;
     }
 
-    // Integer variant of stringMemberOrAbsent: absent/null returns null, non-integral JSON is
-    // rejected rather than coerced, and so is an integral value outside the int range (intValue
-    // would silently truncate it).
+    // Integer variant of stringMemberOrAbsent: absent/null returns null and a string, a boolean, an
+    // object or a list gets the deserializer's message for it. A number is narrowed to an int: AWS
+    // accepts 1.5 and range-checks 4294967296 as 2147483647, which a double-to-int cast reproduces
+    // where intValue would truncate 4294967296 to 0.
     static Integer intMemberOrAbsent(JsonNode parent, String field) {
         JsonNode n = parent.path(field);
         if (n.isMissingNode() || n.isNull()) {
             return null;
         }
-        if (!n.isIntegralNumber() || !n.canConvertToInt()) {
-            throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
+        if (n.isTextual()) {
+            throw new AwsException(SERIALIZATION_EXCEPTION, INTEGER_CONVERSION.formatted("STRING_VALUE"), 400);
         }
-        return n.intValue();
+        if (n.isBoolean()) {
+            throw new AwsException(SERIALIZATION_EXCEPTION,
+                    INTEGER_CONVERSION.formatted(n.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE"), 400);
+        }
+        if (n.isContainerNode()) {
+            throw unexpectedStartError(n);
+        }
+        return (int) n.doubleValue();
     }
 
     static String readRequiredStringField(JsonNode request, String fieldName) {

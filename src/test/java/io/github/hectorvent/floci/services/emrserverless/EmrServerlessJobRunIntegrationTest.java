@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.config.JsonConfig;
 import io.restassured.config.RestAssuredConfig;
+import io.restassured.path.json.JsonPath;
 import io.restassured.path.json.config.JsonPathConfig;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
@@ -44,10 +45,14 @@ class EmrServerlessJobRunIntegrationTest {
     }
 
     private static String createApplication(String extra) {
+        return createApplicationOn("emr-7.5.0", extra);
+    }
+
+    private static String createApplicationOn(String releaseLabel, String extra) {
         return givenReq()
                 .body("""
-                        {"name": "jobs-%s", "releaseLabel": "emr-7.5.0", "type": "SPARK", "clientToken": "%s"%s}
-                        """.formatted(UUID.randomUUID(), UUID.randomUUID(), extra))
+                        {"name": "jobs-%s", "releaseLabel": "%s", "type": "SPARK", "clientToken": "%s"%s}
+                        """.formatted(UUID.randomUUID(), releaseLabel, UUID.randomUUID(), extra))
                 .when().post("/applications")
                 .then().statusCode(200)
                 .extract().path("applicationId");
@@ -115,6 +120,9 @@ class EmrServerlessJobRunIntegrationTest {
                 .body("jobRun.totalExecutionDurationSeconds", equalTo(0))
                 .body("jobRun.startedAt", instanceOf(Number.class))
                 .body("jobRun.endedAt", instanceOf(Number.class))
+                .body("jobRun.attempt", equalTo(1))
+                .body("jobRun.attemptCreatedAt", instanceOf(Number.class))
+                .body("jobRun.attemptUpdatedAt", instanceOf(Number.class))
                 .body("jobRun", not(hasKey("hive")));
     }
 
@@ -369,6 +377,9 @@ class EmrServerlessJobRunIntegrationTest {
                 .body("jobRuns[0].type", equalTo("SPARK"))
                 .body("jobRuns[0].releaseLabel", equalTo("emr-7.5.0"))
                 .body("jobRuns[0].createdBy", equalTo("arn:aws:iam::000000000000:root"))
+                .body("jobRuns[0].attempt", equalTo(1))
+                .body("jobRuns[0].attemptCreatedAt", instanceOf(Number.class))
+                .body("jobRuns[0].attemptUpdatedAt", instanceOf(Number.class))
                 .body("jobRuns[0]", not(hasKey("jobRunId")))
                 .body("jobRuns[0]", not(hasKey("jobDriver")));
     }
@@ -466,10 +477,141 @@ class EmrServerlessJobRunIntegrationTest {
     }
 
     @Test
+    void listJobRunsRefusesStatesAndModesThatDoNotExist() {
+        String base = "/applications/" + createApplication("") + "/jobruns";
+
+        givenReq().queryParam("states", List.of("RUNNING", "SUCCEEDED")).queryParam("mode", "batch")
+                .when().get(base)
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("2 validation errors detected: "
+                        + "Value '[RUNNING, SUCCEEDED]' at 'states' failed to satisfy constraint: Member must "
+                        + "satisfy constraint: [Member must satisfy enum value set: [SUBMITTED, PENDING, SCHEDULED, "
+                        + "RUNNING, SUCCESS, FAILED, CANCELLING, CANCELLED, QUEUED]]; "
+                        + "Value 'batch' at 'mode' failed to satisfy constraint: Member must satisfy enum value set: "
+                        + "[BATCH, STREAMING]"));
+        givenReq().queryParam("states", List.of("SUBMITTED", "PENDING", "SCHEDULED", "RUNNING", "SUCCESS", "FAILED",
+                        "CANCELLING", "CANCELLED", "QUEUED"))
+                .when().get(base)
+                .then().statusCode(400)
+                .body("message", equalTo("1 validation error detected: Value '[SUBMITTED, PENDING, SCHEDULED, "
+                        + "RUNNING, SUCCESS, FAILED, CANCELLING, CANCELLED, QUEUED]' at 'states' failed to satisfy "
+                        + "constraint: Member must have length less than or equal to 8"));
+    }
+
+    @Test
     void listJobRunsOfAnUnknownApplicationIsEmpty() {
         givenReq().when().get("/applications/00missing0000000/jobruns")
                 .then().statusCode(200)
                 .body("jobRuns", empty());
+    }
+
+    @Test
+    void fromRelease711ABatchRunsTimeoutIsOneToTenThousandEightyMinutes() {
+        String current = createApplicationOn("emr-7.11.0", "");
+        for (String timeout : List.of(", \"executionTimeoutMinutes\": 0",
+                ", \"executionTimeoutMinutes\": 10081", ", \"mode\": \"BATCH\", \"executionTimeoutMinutes\": 0")) {
+            startJobRun(current, sparkRun(UUID.randomUUID().toString(), timeout))
+                    .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", equalTo("executionTimeoutMinutes must be between 1 and 10080 for a BATCH job "
+                            + "run on release emr-7.11.0 or later."));
+        }
+        givenReq().when().get("/applications/" + current)
+                .then().body("application.state", equalTo("CREATED"));
+
+        startJobRun(current, sparkRun(UUID.randomUUID().toString(), ", \"executionTimeoutMinutes\": 10080"))
+                .then().statusCode(200);
+        startJobRun(current, sparkRun(UUID.randomUUID().toString(),
+                ", \"mode\": \"STREAMING\", \"executionTimeoutMinutes\": 0"))
+                .then().statusCode(200);
+        String earlier = createApplicationOn("emr-7.10.0", "");
+        for (String timeout : List.of(", \"executionTimeoutMinutes\": 0", ", \"executionTimeoutMinutes\": 1000000")) {
+            startJobRun(earlier, sparkRun(UUID.randomUUID().toString(), timeout)).then().statusCode(200);
+        }
+    }
+
+    @Test
+    void aRunIsItsOneAttempt() {
+        String applicationId = createApplication("");
+        String path = "/applications/" + applicationId + "/jobruns/"
+                + startedRunId(applicationId, sparkRun(UUID.randomUUID().toString(), ""));
+        JsonPath run = givenReq().config(DECIMAL_NUMBERS).when().get(path)
+                .then().statusCode(200).extract().jsonPath();
+
+        assertEquals(1, run.getInt("jobRun.attempt"));
+        assertEquals(run.<BigDecimal>get("jobRun.createdAt"), run.<BigDecimal>get("jobRun.attemptCreatedAt"));
+        assertEquals(run.<BigDecimal>get("jobRun.updatedAt"), run.<BigDecimal>get("jobRun.attemptUpdatedAt"));
+
+        givenReq().queryParam("attempt", 1).when().get(path)
+                .then().statusCode(200).body("jobRun.attempt", equalTo(1));
+        givenReq().queryParam("attempt", 2).when().get(path)
+                .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        givenReq().queryParam("attempt", 0).when().get(path)
+                .then().statusCode(400)
+                .body("message", equalTo("1 validation error detected: Value '0' at 'attempt' failed to satisfy "
+                        + "constraint: Member must have value greater than or equal to 1"));
+        givenReq().queryParam("attempt", "first").when().get(path)
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+        // An empty value never reaches the parameter: RESTEasy Reactive binds it as null, so it reads as
+        // no attempt, the latest one, as Pagination.parseMaxResults reads an empty maxResults.
+        givenReq().queryParam("attempt", "").when().get(path)
+                .then().statusCode(200).body("jobRun.attempt", equalTo(1));
+    }
+
+    @Test
+    void listJobRunAttemptsReportsTheRunsOneAttempt() {
+        String applicationId = createApplication("");
+        String jobRunId = startedRunId(applicationId,
+                sparkRun(UUID.randomUUID().toString(), ", \"name\": \"nightly\", \"mode\": \"BATCH\""));
+        String path = "/applications/" + applicationId + "/jobruns/" + jobRunId;
+        JsonPath run = givenReq().config(DECIMAL_NUMBERS).when().get(path)
+                .then().statusCode(200).extract().jsonPath();
+
+        JsonPath attempts = givenReq().config(DECIMAL_NUMBERS).when().get(path + "/attempts")
+                .then().statusCode(200)
+                .body("jobRunAttempts", hasSize(1))
+                .body("$", not(hasKey("nextToken")))
+                .extract().jsonPath();
+        assertEquals(applicationId, attempts.getString("jobRunAttempts[0].applicationId"));
+        assertEquals(jobRunId, attempts.getString("jobRunAttempts[0].id"));
+        assertEquals("nightly", attempts.getString("jobRunAttempts[0].name"));
+        assertEquals("BATCH", attempts.getString("jobRunAttempts[0].mode"));
+        assertEquals(run.getString("jobRun.arn"), attempts.getString("jobRunAttempts[0].arn"));
+        assertEquals("arn:aws:iam::000000000000:root", attempts.getString("jobRunAttempts[0].createdBy"));
+        assertEquals(run.<BigDecimal>get("jobRun.createdAt"),
+                attempts.<BigDecimal>get("jobRunAttempts[0].jobCreatedAt"));
+        assertEquals(run.<BigDecimal>get("jobRun.createdAt"), attempts.<BigDecimal>get("jobRunAttempts[0].createdAt"));
+        assertEquals(run.<BigDecimal>get("jobRun.updatedAt"), attempts.<BigDecimal>get("jobRunAttempts[0].updatedAt"));
+        assertEquals(ROLE, attempts.getString("jobRunAttempts[0].executionRole"));
+        assertEquals("SUCCESS", attempts.getString("jobRunAttempts[0].state"));
+        assertEquals("emr-7.5.0", attempts.getString("jobRunAttempts[0].releaseLabel"));
+        assertEquals("SPARK", attempts.getString("jobRunAttempts[0].type"));
+        assertEquals(1, attempts.getInt("jobRunAttempts[0].attempt"));
+    }
+
+    @Test
+    void listJobRunAttemptsRefusesAPageLargerThanFiftyAndAnUnknownRun() {
+        String applicationId = createApplication("");
+        String jobRunId = startedRunId(applicationId, sparkRun(UUID.randomUUID().toString(), ""));
+
+        givenReq().queryParam("maxResults", 51)
+                .when().get("/applications/" + applicationId + "/jobruns/" + jobRunId + "/attempts")
+                .then().statusCode(400)
+                .body("message", equalTo("1 validation error detected: Value '51' at 'maxResults' failed to "
+                        + "satisfy constraint: Member must have value less than or equal to 50"));
+        givenReq().when().get("/applications/" + applicationId + "/jobruns/00missing0000000/attempts")
+                .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        givenReq().when().get("/applications/00missing0000000/jobruns/" + jobRunId + "/attempts")
+                .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        givenReq().queryParam("nextToken", "bm90LWEtdG9rZW4")
+                .when().get("/applications/" + applicationId + "/jobruns/" + jobRunId + "/attempts")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"));
     }
 
     @Test

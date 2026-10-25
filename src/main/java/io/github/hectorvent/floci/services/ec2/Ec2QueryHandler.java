@@ -106,6 +106,10 @@ public class Ec2QueryHandler {
                 case "DeleteVpc" -> handleDeleteVpc(params, region);
                 case "ModifyVpcAttribute" -> handleModifyVpcAttribute(params, region);
                 case "DescribeVpcAttribute" -> handleDescribeVpcAttribute(params, region);
+                case "CreateDhcpOptions" -> handleCreateDhcpOptions(params, region);
+                case "DescribeDhcpOptions" -> handleDescribeDhcpOptions(params, region);
+                case "AssociateDhcpOptions" -> handleAssociateDhcpOptions(params, region);
+                case "DeleteDhcpOptions" -> handleDeleteDhcpOptions(params, region);
                 case "DescribeVpcEndpointServices" -> handleDescribeVpcEndpointServices(params, region);
                 case "CreateVpcEndpoint" -> handleCreateVpcEndpoint(params, region);
                 case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
@@ -872,12 +876,28 @@ public class Ec2QueryHandler {
             }
         }
 
+        LaunchTemplateData.CapacityReservationSpecification capacitySpecification = launchTemplateData == null
+                ? null : launchTemplateData.getCapacityReservationSpecification();
+        if (anyParamStartsWith(p, "CapacityReservationSpecification.")) {
+            capacitySpecification = new LaunchTemplateData.CapacityReservationSpecification();
+            capacitySpecification.setCapacityReservationPreference(
+                    p.getFirst("CapacityReservationSpecification.CapacityReservationPreference"));
+            if (anyParamStartsWith(p, "CapacityReservationSpecification.CapacityReservationTarget.")) {
+                LaunchTemplateData.CapacityReservationTarget target = new LaunchTemplateData.CapacityReservationTarget();
+                target.setCapacityReservationId(
+                        p.getFirst("CapacityReservationSpecification.CapacityReservationTarget.CapacityReservationId"));
+                target.setCapacityReservationResourceGroupArn(p.getFirst(
+                        "CapacityReservationSpecification.CapacityReservationTarget.CapacityReservationResourceGroupArn"));
+                capacitySpecification.setCapacityReservationTarget(target);
+            }
+        }
+
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")),
                 p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
-                "spot".equals(marketType), privateIpAddress);
+                "spot".equals(marketType), privateIpAddress, capacitySpecification);
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -896,8 +916,9 @@ public class Ec2QueryHandler {
                 .elem("ownerId", res.getOwnerId())
                 .start("groupSet").end("groupSet")
                 .start("instancesSet");
+        Map<String, String> capacityAssociations = service.capacityReservationAssociations(region);
         for (Instance inst : res.getInstances()) {
-            xml.start("item").raw(instanceXml(inst)).end("item");
+            xml.start("item").raw(instanceXml(inst, capacityAssociations)).end("item");
         }
         xml.end("instancesSet")
                 .end("RunInstancesResponse");
@@ -1021,7 +1042,8 @@ public class Ec2QueryHandler {
                         null,
                         0,
                         launch.availabilityZone(), launch.metadataOptions(), null, launch.encodedUserData(), false,
-                        null, null, launch.blockDeviceMappings(), "spot".equals(capacityType));
+                        null, null, launch.blockDeviceMappings(), "spot".equals(capacityType), null,
+                        launch.capacityReservationSpecification());
                 Instance instance = reservation.getInstances().get(0);
                 launchedInstanceIds.add(instance.getInstanceId());
                 results.add(new FleetLaunchResult(instance, launch));
@@ -1185,7 +1207,7 @@ public class Ec2QueryHandler {
                 template.getMetadataOptions(),
                 template.effectiveSecurityGroupIds(),
                 new ArrayList<>(tags.values()),
-                template.getBlockDeviceMappings());
+                template.getBlockDeviceMappings(), template.getCapacityReservationSpecification());
     }
 
     /**
@@ -1233,7 +1255,8 @@ public class Ec2QueryHandler {
                                Boolean associatePublicIpAddress,
                                LaunchTemplateData.MetadataOptions metadataOptions,
                                List<String> securityGroupIds, List<Tag> instanceTags,
-                               List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings) {}
+                               List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings,
+                               LaunchTemplateData.CapacityReservationSpecification capacityReservationSpecification) {}
 
     private record FleetLaunchKey(String launchTemplateId, String launchTemplateName, String launchTemplateVersion,
                                   String instanceType, String imageId, String subnetId, String availabilityZone) {
@@ -1355,6 +1378,7 @@ public class Ec2QueryHandler {
                 .start("DescribeInstancesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("reservationSet");
+        Map<String, String> capacityAssociations = service.capacityReservationAssociations(region);
         for (Reservation res : reservations) {
             xml.start("item")
                     .elem("reservationId", res.getReservationId())
@@ -1362,7 +1386,7 @@ public class Ec2QueryHandler {
                     .start("groupSet").end("groupSet")
                     .start("instancesSet");
             for (Instance inst : res.getInstances()) {
-                xml.start("item").raw(instanceXml(inst)).end("item");
+                xml.start("item").raw(instanceXml(inst, capacityAssociations)).end("item");
             }
             xml.end("instancesSet").end("item");
         }
@@ -1662,6 +1686,112 @@ public class Ec2QueryHandler {
     private Response handleDeleteVpc(MultivaluedMap<String, String> p, String region) {
         service.deleteVpc(region, p.getFirst("VpcId"));
         return booleanResponse("DeleteVpc");
+    }
+
+    private Response handleCreateDhcpOptions(MultivaluedMap<String, String> p, String region) {
+        List<DhcpConfiguration> configurations = new ArrayList<>();
+        for (int i : numberedIndices(p, "DhcpConfiguration.")) {
+            String prefix = "DhcpConfiguration." + i;
+            String key = p.getFirst(prefix + ".Key");
+            if (key == null) {
+                throw new AwsException("MissingParameter", prefix + ".Key is required", 400);
+            }
+            List<String> values = numberedIndices(p, prefix + ".Value.").stream()
+                    .map(index -> p.getFirst(prefix + ".Value." + index)).toList();
+            configurations.add(new DhcpConfiguration(key, values));
+        }
+        List<Tag> tags = parseTagsForResource(p, "dhcp-options");
+        checkDryRun(p);
+        DhcpOptions options = service.createDhcpOptions(region, configurations);
+        try {
+            applyResourceTags(tags, region, options.getDhcpOptionsId());
+        } catch (RuntimeException failure) {
+            try {
+                service.deleteDhcpOptions(region, options.getDhcpOptionsId());
+            } catch (RuntimeException cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            throw failure;
+        }
+        return xmlResponse(new XmlBuilder()
+                .start("CreateDhcpOptionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("dhcpOptions").raw(dhcpOptionsXml(region, options)).end("dhcpOptions")
+                .end("CreateDhcpOptionsResponse").build());
+    }
+
+    private SortedSet<Integer> numberedIndices(MultivaluedMap<String, String> params, String prefix) {
+        SortedSet<Integer> indices = new TreeSet<>();
+        for (String name : params.keySet()) {
+            if (!name.startsWith(prefix)) {
+                continue;
+            }
+            String suffix = name.substring(prefix.length());
+            int dot = suffix.indexOf('.');
+            String number = dot < 0 ? suffix : suffix.substring(0, dot);
+            try {
+                int index = Integer.parseInt(number);
+                if (index < 1) {
+                    throw new NumberFormatException(number);
+                }
+                indices.add(index);
+            } catch (NumberFormatException invalid) {
+                throw new AwsException("InvalidParameterValue", "Invalid parameter index in " + name, 400);
+            }
+        }
+        return indices;
+    }
+
+    private Response handleDescribeDhcpOptions(MultivaluedMap<String, String> p, String region) {
+        int maxResults = parseIntParam(p, "MaxResults", 0);
+        if (p.containsKey("MaxResults") && maxResults == 0) {
+            throw new AwsException("InvalidMaxResults", "MaxResults must be between 5 and 1000", 400);
+        }
+        PaginatedResult<DhcpOptions> result = service.describeDhcpOptions(region, getList(p, "DhcpOptionsId"),
+                getFiltersList(p), maxResults, p.getFirst("NextToken"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeDhcpOptionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("dhcpOptionsSet");
+        for (DhcpOptions options : result.items()) {
+            xml.start("item").raw(dhcpOptionsXml(region, options)).end("item");
+        }
+        xml.end("dhcpOptionsSet");
+        if (result.nextToken() != null) {
+            xml.elem("nextToken", result.nextToken());
+        }
+        return xmlResponse(xml.end("DescribeDhcpOptionsResponse").build());
+    }
+
+    private Response handleAssociateDhcpOptions(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        service.associateDhcpOptions(region, p.getFirst("DhcpOptionsId"), p.getFirst("VpcId"));
+        return booleanResponse("AssociateDhcpOptions");
+    }
+
+    private Response handleDeleteDhcpOptions(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        service.deleteDhcpOptions(region, p.getFirst("DhcpOptionsId"));
+        return booleanResponse("DeleteDhcpOptions");
+    }
+
+    private String dhcpOptionsXml(String region, DhcpOptions options) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("dhcpOptionsId", options.getDhcpOptionsId())
+                .elem("ownerId", options.getOwnerId())
+                .start("dhcpConfigurationSet");
+        for (DhcpConfiguration configuration : options.getConfigurations()) {
+            xml.start("item").elem("key", configuration.getKey()).start("valueSet");
+            for (String value : configuration.getValues()) {
+                xml.start("item").elem("value", value).end("item");
+            }
+            xml.end("valueSet").end("item");
+        }
+        xml.end("dhcpConfigurationSet").start("tagSet");
+        for (Tag tag : service.resourceTags(region, options.getDhcpOptionsId())) {
+            xml.start("item").elem("key", tag.getKey()).elem("value", tag.getValue()).end("item");
+        }
+        return xml.end("tagSet").build();
     }
 
     private Response handleModifyVpcAttribute(MultivaluedMap<String, String> p, String region) {
@@ -3332,14 +3462,26 @@ public class Ec2QueryHandler {
     private Response handleRevokeSecurityGroupIngress(MultivaluedMap<String, String> p, String region) {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
-        service.revokeSecurityGroupIngress(region, groupId, perms);
+        List<String> ruleIds = getList(p, "SecurityGroupRuleId");
+        if (!ruleIds.isEmpty()) {
+            service.revokeSecurityGroupRulesByIds(region, groupId, ruleIds, false);
+        }
+        if (!perms.isEmpty() || ruleIds.isEmpty()) {
+            service.revokeSecurityGroupIngress(region, groupId, perms);
+        }
         return booleanResponse("RevokeSecurityGroupIngress");
     }
 
     private Response handleRevokeSecurityGroupEgress(MultivaluedMap<String, String> p, String region) {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
-        service.revokeSecurityGroupEgress(region, groupId, perms);
+        List<String> ruleIds = getList(p, "SecurityGroupRuleId");
+        if (!ruleIds.isEmpty()) {
+            service.revokeSecurityGroupRulesByIds(region, groupId, ruleIds, true);
+        }
+        if (!perms.isEmpty() || ruleIds.isEmpty()) {
+            service.revokeSecurityGroupEgress(region, groupId, perms);
+        }
         return booleanResponse("RevokeSecurityGroupEgress");
     }
 
@@ -4254,6 +4396,10 @@ public class Ec2QueryHandler {
                 p.getFirst("OutpostArn"),
                 p.getFirst("PlacementGroupArn"));
         applyResourceTags(resourceTags, region, reservation.getCapacityReservationId());
+        if (!resourceTags.isEmpty()) {
+            reservation = service.describeCapacityReservations(
+                    region, List.of(reservation.getCapacityReservationId()), Map.of()).getFirst();
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateCapacityReservationResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4546,6 +4692,7 @@ public class Ec2QueryHandler {
                     .elem("zoneName", az.get("zoneName"))
                     .elem("zoneState", az.get("state"))
                     .elem("regionName", az.get("regionName"))
+                    .elem("networkBorderGroup", az.get("networkBorderGroup"))
                     .elem("zoneId", az.get("zoneId"))
                     .elem("groupName", az.get("groupName"))
                     .elem("groupLongName", az.get("groupLongName"))
@@ -4728,11 +4875,15 @@ public class Ec2QueryHandler {
     private Response handleDescribeLaunchTemplateVersions(MultivaluedMap<String, String> p, String region) {
         String id = p.getFirst("LaunchTemplateId");
         String name = p.getFirst("LaunchTemplateName");
+        List<String> versions = getList(p, "LaunchTemplateVersion");
+        if (versions.isEmpty()) {
+            versions = getList(p, "Versions");
+        }
         List<LaunchTemplate> launchTemplates = service.describeLaunchTemplateVersions(
                 region,
                 id,
                 name,
-                getList(p, "Versions"));
+                versions, p.getFirst("MinVersion"), p.getFirst("MaxVersion"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeLaunchTemplateVersionsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4924,7 +5075,7 @@ public class Ec2QueryHandler {
 
     // ─── XML fragment builders ────────────────────────────────────────────────
 
-    private String instanceXml(Instance inst) {
+    private String instanceXml(Instance inst, Map<String, String> capacityAssociations) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("instanceId", inst.getInstanceId())
                 .elem("imageId", inst.getImageId())
@@ -5040,9 +5191,20 @@ public class Ec2QueryHandler {
                 .elem("enableResourceNameDnsARecord", "false")
                 .elem("enableResourceNameDnsAAAARecord", "false")
                 .end("privateDnsNameOptions")
-                .start("capacityReservationSpecification")
-                .elem("capacityReservationPreference", "open")
-                .end("capacityReservationSpecification");
+                .start("capacityReservationSpecification");
+        if (inst.getCapacityReservationTarget() != null || inst.getCapacityReservationGroupArn() != null) {
+            xml.start("capacityReservationTarget")
+                    .elem("capacityReservationId", inst.getCapacityReservationTarget())
+                    .elem("capacityReservationResourceGroupArn", inst.getCapacityReservationGroupArn())
+                    .end("capacityReservationTarget");
+        } else {
+            xml.elem("capacityReservationPreference", inst.getCapacityReservationPreference());
+        }
+        xml.end("capacityReservationSpecification");
+        String capacityReservationId = capacityAssociations.get(inst.getInstanceId());
+        if (capacityReservationId != null) {
+            xml.elem("capacityReservationId", capacityReservationId);
+        }
         if (inst.getRootVolumeId() != null) {
             xml.start("blockDeviceMapping")
                     .start("item")

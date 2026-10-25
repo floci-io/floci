@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver.CertificateMaterial;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
@@ -18,8 +19,6 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
-import io.vertx.core.net.PemKeyCertOptions;
-import io.vertx.core.net.SSLOptions;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -37,13 +36,11 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static io.github.hectorvent.floci.services.elbv2.ElbV2PublicationTestSupport.publishRuntime;
 import static io.github.hectorvent.floci.services.elbv2.ElbV2PublicationTestSupport.removeRuntime;
+import static io.github.hectorvent.floci.services.elbv2.ElbV2PublicationTestSupport.servedCertificate;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -80,7 +77,6 @@ class ElbV2TlsCohortTest {
         when(server.requestHandler(any())).thenReturn(server);
         when(server.listen()).thenReturn(Future.succeededFuture(server));
         when(server.close()).thenReturn(Future.succeededFuture());
-        when(server.updateSSLOptions(any(SSLOptions.class), eq(true))).thenReturn(Future.succeededFuture(true));
         CertificateGenerator generator = new CertificateGenerator();
         CertificateMaterial seed = material(generator, certificateArn, "seed.example.test");
         CertificateMaterial first = InlineMocks.inlineSpy(material(generator, certificateArn, "old.example.test"));
@@ -133,6 +129,8 @@ class ElbV2TlsCohortTest {
         try {
             publishRuntime(dataPlane, left, region, left.getPort(), List.of(fixedRule("left")));
             publishRuntime(dataPlane, right, region, right.getPort(), List.of(fixedRule("right")));
+            ArgumentCaptor<HttpServerOptions> options = ArgumentCaptor.forClass(HttpServerOptions.class);
+            verify(dataPlane.vertx).createHttpServer(options.capture());
             ArgumentCaptor<Handler<HttpServerRequest>> handler = ArgumentCaptor.captor();
             verify(server).requestHandler(handler.capture());
             leftMaterial.set(first);
@@ -171,19 +169,8 @@ class ElbV2TlsCohortTest {
             handler.getValue().handle(request);
             verify(response).setStatusCode(502);
             verify(response).end("No listener for host");
-            ArgumentCaptor<SSLOptions> updates = ArgumentCaptor.forClass(SSLOptions.class);
-            verify(server, atLeastOnce()).updateSSLOptions(updates.capture(), eq(true));
-            List<SSLOptions> orderedUpdates = updates.getAllValues();
-            PemKeyCertOptions preceding = assertInstanceOf(PemKeyCertOptions.class,
-                    orderedUpdates.get(orderedUpdates.size() - 2).getKeyCertOptions());
-            assertEquals(List.of(first.privateKey()),
-                    preceding.getKeyValues().stream().map(value -> value.toString()).toList());
-            PemKeyCertOptions finalOptions = assertInstanceOf(PemKeyCertOptions.class,
-                    orderedUpdates.getLast().getKeyCertOptions());
-            assertEquals(List.of(replacement.privateKey()),
-                    finalOptions.getKeyValues().stream().map(value -> value.toString()).toList());
-            assertEquals(List.of(replacement.certificateBody().stripTrailing() + "\n"),
-                    finalOptions.getCertValues().stream().map(value -> value.toString()).toList());
+            assertEquals(Pem.parseCertificate(replacement.certificateBody()),
+                    servedCertificate(options.getValue(), alias));
             removeRuntime(dataPlane, right.getListenerArn(), right.getPort());
             HttpServerRequest survivingRequest = mock(HttpServerRequest.class);
             HttpServerResponse survivingResponse = mock(HttpServerResponse.class);

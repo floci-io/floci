@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.services.organizations.OrganizationsService.OrganizationPaths;
 import io.github.hectorvent.floci.services.organizations.model.CreateAccountStatus;
 import io.github.hectorvent.floci.services.organizations.model.Handshake;
 import io.github.hectorvent.floci.services.organizations.model.HandshakeParty;
@@ -172,7 +173,7 @@ public class OrganizationsJsonHandler {
         OrganizationalUnit unit = service.createOrganizationalUnit(caller,
                 text(request, "ParentId"), text(request, "Name"), parseTags(request.path("Tags")));
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("OrganizationalUnit", organizationalUnitNode(unit));
+        response.set("OrganizationalUnit", organizationalUnitNode(unit, caller));
         return Response.ok(response).build();
     }
 
@@ -180,7 +181,7 @@ public class OrganizationsJsonHandler {
         OrganizationalUnit unit = service.updateOrganizationalUnit(caller,
                 text(request, "OrganizationalUnitId"), text(request, "Name"));
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("OrganizationalUnit", organizationalUnitNode(unit));
+        response.set("OrganizationalUnit", organizationalUnitNode(unit, caller));
         return Response.ok(response).build();
     }
 
@@ -192,16 +193,22 @@ public class OrganizationsJsonHandler {
     private Response describeOrganizationalUnit(JsonNode request, String caller) {
         OrganizationalUnit unit = service.describeOrganizationalUnit(caller, text(request, "OrganizationalUnitId"));
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("OrganizationalUnit", organizationalUnitNode(unit));
+        response.set("OrganizationalUnit", organizationalUnitNode(unit, caller));
         return Response.ok(response).build();
     }
 
     private Response listOrganizationalUnitsForParent(JsonNode request, String caller) {
+        OrganizationPaths paths = service.organizationPaths(caller);
         List<OrganizationalUnit> all = service.listOrganizationalUnitsForParent(caller, text(request, "ParentId"));
         PaginatedResult<OrganizationalUnit> page = page(all, OrganizationalUnit::getId, request);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode units = response.putArray("OrganizationalUnits");
-        page.items().forEach(unit -> units.add(organizationalUnitNode(unit)));
+        for (OrganizationalUnit unit : page.items()) {
+            String path = paths.unitPath(unit);
+            if (path != null) {
+                units.add(organizationalUnitNodeWithPath(unit, path));
+            }
+        }
         putNextToken(response, page.nextToken());
         return Response.ok(response).build();
     }
@@ -240,7 +247,8 @@ public class OrganizationsJsonHandler {
 
     private Response createAccount(JsonNode request, String caller, boolean govCloud) {
         CreateAccountStatus status = service.createAccount(caller,
-                text(request, "Email"), text(request, "AccountName"), parseTags(request.path("Tags")), govCloud);
+                text(request, "Email"), text(request, "AccountName"), parseTags(request.path("Tags")),
+                text(request, "RoleName"), govCloud);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("CreateAccountStatus", createAccountStatusNode(status));
         return Response.ok(response).build();
@@ -267,19 +275,21 @@ public class OrganizationsJsonHandler {
     private Response describeAccount(JsonNode request, String caller) {
         OrganizationAccount account = service.describeAccount(caller, text(request, "AccountId"));
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Account", accountNode(account));
+        response.set("Account", accountNode(account, caller));
         return Response.ok(response).build();
     }
 
     private Response listAccounts(JsonNode request, String caller) {
+        OrganizationPaths paths = service.organizationPaths(caller);
         PaginatedResult<OrganizationAccount> page =
                 page(service.listAccounts(caller), OrganizationAccount::getId, request);
-        return accountsResponse(page);
+        return accountsResponse(page, paths);
     }
 
     private Response listAccountsForParent(JsonNode request, String caller) {
+        OrganizationPaths paths = service.organizationPaths(caller);
         List<OrganizationAccount> all = service.listAccountsForParent(caller, text(request, "ParentId"));
-        return accountsResponse(page(all, OrganizationAccount::getId, request));
+        return accountsResponse(page(all, OrganizationAccount::getId, request), paths);
     }
 
     /**
@@ -296,7 +306,7 @@ public class OrganizationsJsonHandler {
         PaginatedResult<OrganizationAccount> page = page(accounts, OrganizationAccount::getId, request);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode accountsNode = response.putArray("Accounts");
-        page.items().forEach(account -> accountsNode.add(accountNode(account)));
+        page.items().forEach(account -> accountsNode.add(accountNode(account, caller)));
         putNextToken(response, page.nextToken());
         // PolicyType is the only field this operation's response can carry any
         // information in - Accounts is always empty by design (see javadoc above) - so
@@ -305,10 +315,15 @@ public class OrganizationsJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response accountsResponse(PaginatedResult<OrganizationAccount> page) {
+    private Response accountsResponse(PaginatedResult<OrganizationAccount> page, OrganizationPaths paths) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode accounts = response.putArray("Accounts");
-        page.items().forEach(account -> accounts.add(accountNode(account)));
+        for (OrganizationAccount account : page.items()) {
+            String path = paths.accountPath(account);
+            if (path != null) {
+                accounts.add(accountNodeWithPath(account, path));
+            }
+        }
         putNextToken(response, page.nextToken());
         return Response.ok(response).build();
     }
@@ -656,11 +671,26 @@ public class OrganizationsJsonHandler {
         return node;
     }
 
-    private ObjectNode organizationalUnitNode(OrganizationalUnit unit) {
+    private ObjectNode organizationalUnitNode(OrganizationalUnit unit, String caller) {
+        return organizationalUnitNodeWithPath(unit, service.organizationPath(caller, unit.getId()));
+    }
+
+    private ObjectNode organizationalUnitNodeWithPath(OrganizationalUnit unit, String path) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", unit.getId());
         node.put("Arn", unit.getArn());
         node.put("Name", unit.getName());
+        node.put("Path", path);
+        return node;
+    }
+
+    private ObjectNode accountNode(OrganizationAccount account, String caller) {
+        return accountNodeWithPath(account, service.organizationPath(caller, account.getId()));
+    }
+
+    private ObjectNode accountNodeWithPath(OrganizationAccount account, String path) {
+        ObjectNode node = accountNode(account);
+        node.putArray("Paths").add(path);
         return node;
     }
 

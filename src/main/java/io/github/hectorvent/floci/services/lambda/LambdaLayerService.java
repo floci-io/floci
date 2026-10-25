@@ -409,8 +409,7 @@ public class LambdaLayerService {
     public LambdaLayerVersion getLayerVersionByArn(String layerVersionArn) {
         if (layerVersionArn == null || layerVersionArn.isEmpty()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'arn' failed to satisfy constraint: "
-                            + "Member must not be null");
+                    SmithyValidationErrors.notNull("arn"));
         }
         if (layerVersionArn.length() > MAX_LAYER_VERSION_ARN_LENGTH
                 || !LAYER_VERSION_ARN.matcher(layerVersionArn).matches()) {

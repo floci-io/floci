@@ -105,7 +105,7 @@ class EcsContainerManagerSecurityGroupTest {
     void awsvpcTaskWithFirewallJoinsHelperNamespaceAndSkipsHostPorts() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(firewallManager.enabled()).thenReturn(true);
-        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any()))
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new SecurityGroupFirewallManager.Namespace("helper-id", "10.0.0.5"));
 
         NetworkInterface eni = new NetworkInterface();
@@ -149,14 +149,14 @@ class EcsContainerManagerSecurityGroupTest {
         verify(builder, never()).withNetworkMode(anyString());
         verify(builder, never()).withLabels(Map.of("io.floci.security-group.workload", "true"));
         verify(ec2Service, never()).createNetworkInterface(any(), any(), any(), any(), any(), any(), any());
-        verify(builder).withDynamicPort(80);
+        verify(builder).withPortBinding(80, 0, "127.0.0.1");
     }
 
     @Test
     void stopTaskUnregistersEniAndReleasingTheTaskNetworkDeletesIt() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(firewallManager.enabled()).thenReturn(true);
-        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any()))
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new SecurityGroupFirewallManager.Namespace("helper-id", "10.0.0.5"));
 
         NetworkInterface eni = new NetworkInterface();
@@ -192,7 +192,7 @@ class EcsContainerManagerSecurityGroupTest {
     void firelensRouterAndAppBothJoinTheHelperNamespace() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(firewallManager.enabled()).thenReturn(true);
-        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any()))
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new SecurityGroupFirewallManager.Namespace("helper-id", "10.0.0.5"));
 
         NetworkInterface eni = new NetworkInterface();
@@ -240,7 +240,7 @@ class EcsContainerManagerSecurityGroupTest {
         verify(builder, times(2)).withNetworkMode("container:helper-id");
         verify(builder, times(2)).withLabels(Map.of("io.floci.security-group.workload", "true"));
 
-        verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any());
+        verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any());
         verify(lifecycleManager).create(any());
         verify(lifecycleManager).startCreated(eq("router-id"), any());
         verify(lifecycleManager).createAndStart(any());

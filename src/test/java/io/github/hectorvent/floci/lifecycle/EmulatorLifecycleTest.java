@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentialsServer;
+import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheMemcachedService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
@@ -104,6 +105,7 @@ class EmulatorLifecycleTest {
     @Mock private io.github.hectorvent.floci.services.elbv2.ElbV2Service elbV2Service;
     @Mock private io.github.hectorvent.floci.services.elb.ElbClassicService elbClassicService;
     @Mock private EcsService ecsService;
+    @Mock private EksService eksService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
     @Mock private KinesisEventSourcePoller kinesisPoller;
@@ -166,7 +168,7 @@ class EmulatorLifecycleTest {
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, durableExecutionService, containerTeardowns,
                 persistentPathValidator,
-                dynamoDbRuntime, redshiftZeroEtlConsumer);
+                dynamoDbRuntime, redshiftZeroEtlConsumer, eksService);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(java.util.Collections.emptyIterator());
     }
@@ -214,12 +216,13 @@ class EmulatorLifecycleTest {
     }
 
     @Test
-    void stopsDynamoDbStreamConsumersBeforeTheFlushAndTheBackendBeforeStorageShutdown() {
+    void stopsStreamConsumersBeforeTheFlushAndTheBackendBeforeStorageShutdown() {
         emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
 
-        InOrder inOrder = Mockito.inOrder(dynamodbStreamsPoller, redshiftZeroEtlConsumer, storageFactory,
-                flociUiManager, dynamoDbRuntime);
+        InOrder inOrder = Mockito.inOrder(dynamodbStreamsPoller, kinesisPoller, redshiftZeroEtlConsumer,
+                storageFactory, flociUiManager, dynamoDbRuntime);
         inOrder.verify(dynamodbStreamsPoller).shutdown();
+        inOrder.verify(kinesisPoller).shutdown();
         inOrder.verify(redshiftZeroEtlConsumer).shutdown();
         inOrder.verify(storageFactory).flushAll();
         inOrder.verify(flociUiManager).shutdown();
@@ -283,6 +286,100 @@ class EmulatorLifecycleTest {
         inOrder.verify(storageFactory).loadAll();
         inOrder.verify(elbV2Service).restorePersistedRuntime();
         inOrder.verify(ecsService).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresPersistedEksClustersOnceTheHttpPortListens() throws Exception {
+        stubStorageConfig();
+        when(eksServiceConfig.enabled()).thenReturn(true);
+        when(eksServiceConfig.mock()).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+        verify(eksService, never()).restorePersistedRuntime();
+
+        emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566)));
+        verify(eksService).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresPersistedEksClustersOnlyOnceTheImdsServerHasStarted() throws Exception {
+        stubStorageConfig();
+        when(eksServiceConfig.enabled()).thenReturn(true);
+        when(eksServiceConfig.mock()).thenReturn(false);
+        when(eksServiceConfig.imds()).thenReturn(true);
+        CompletableFuture<Void> imdsStarted = new CompletableFuture<>();
+        when(ec2MetadataServer.start()).thenReturn(imdsStarted);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        Thread httpStart = Thread.ofVirtual().start(() ->
+                emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566))));
+        verify(eksService, Mockito.after(300).never()).restorePersistedRuntime();
+
+        imdsStarted.complete(null);
+        httpStart.join(5000);
+        verify(eksService).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresPersistedEksClustersAfterTheStartAndReadyHooks() throws Exception {
+        when(eksServiceConfig.enabled()).thenReturn(true);
+        when(eksServiceConfig.mock()).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(true);
+
+        emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566)));
+
+        InOrder inOrder = Mockito.inOrder(initializationHooksRunner, initLifecycleState, eksService);
+        inOrder.verify(initializationHooksRunner).run(InitializationHook.START);
+        inOrder.verify(initializationHooksRunner).run(InitializationHook.READY);
+        inOrder.verify(initLifecycleState).markReadyCompleted();
+        inOrder.verify(eksService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedEksRestoreLeavesTheEmulatorReady() throws Exception {
+        when(eksServiceConfig.enabled()).thenReturn(true);
+        when(eksServiceConfig.mock()).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+        doThrow(new IllegalStateException("corrupt cluster record")).when(eksService).restorePersistedRuntime();
+
+        try (MockedStatic<Quarkus> quarkus = Mockito.mockStatic(Quarkus.class,
+                Mockito.withSettings().mockMaker(MockMakers.INLINE))) {
+            emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566)));
+            quarkus.verify(Quarkus::asyncExit, never());
+        }
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void leavesEksUntouchedAtBootWhenEksIsDisabled() throws Exception {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+        emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566)));
+
+        verify(eksService, Mockito.never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void leavesEksUntouchedAtBootInMockMode() throws Exception {
+        stubStorageConfig();
+        when(eksServiceConfig.enabled()).thenReturn(true);
+        when(eksServiceConfig.mock()).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+        emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566)));
+
+        verify(eksService, Mockito.never()).restorePersistedRuntime();
     }
 
     @Test

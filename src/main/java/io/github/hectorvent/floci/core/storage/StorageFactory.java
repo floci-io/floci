@@ -9,6 +9,9 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -17,6 +20,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * Factory that creates {@link AccountAwareStorageBackend} instances based on configuration.
@@ -37,6 +41,7 @@ public class StorageFactory {
     private final Map<Path, StorageBackend<?, ?>> backendsByPath = new HashMap<>();
     private final List<HybridStorage<?, ?>> hybridBackends = new ArrayList<>();
     private final List<WalStorage<?, ?>> walBackends = new ArrayList<>();
+    private final List<PartitionedFileStorage<?>> partitionedBackends = new ArrayList<>();
     // Backends whose initial load has completed. create() loads each backend exactly once and
     // loadAll() only picks up backends that were never loaded, so neither path replays a store
     // that is already live or opens a second WAL writer on top of the first.
@@ -143,6 +148,122 @@ public class StorageFactory {
         return backend;
     }
 
+    /**
+     * Create an account-aware store whose values are maps, persisted under a directory named
+     * after {@code fileName} (without {@code .json}) as {@code shardCount} files per key, so a
+     * change to one entry rewrites only the file of its shard. Writers that change one map entry at a time use
+     * {@link AccountAwareStorageBackend#putEntry} and {@link AccountAwareStorageBackend#removeEntry}
+     * when {@link AccountAwareStorageBackend#writesEntries()} is true.
+     *
+     * <p>{@code persistent} writes a shard's file on every change and {@code hybrid} writes dirty
+     * shards on the flush interval. {@code wal} journals one record per changed entry and writes
+     * dirty shards on the WAL compaction interval. {@code memory} keeps the store in memory. An
+     * existing single-file store (a {@code wal}-mode snapshot and log included) is migrated into
+     * the directory on first load.
+     */
+    public synchronized <E> AccountAwareStorageBackend<Map<String, E>> createPartitioned(
+            String serviceName, String fileName, TypeReference<Map<String, Map<String, E>>> typeReference,
+            Class<E> entryType, int shardCount) {
+        String mode = resolveMode(serviceName);
+        if ("memory".equals(mode)) {
+            return create(serviceName, fileName, typeReference);
+        }
+        Path basePath = Path.of(config.storage().persistentPath());
+        Path directory = basePath.resolve(fileName.replace(".json", ""));
+        StorageBackend<?, ?> existing = backendsByPath.get(directory);
+        if (existing != null) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Map<String, E>> typed = (AccountAwareStorageBackend<Map<String, E>>) existing;
+            return typed;
+        }
+        PartitionedFileStorage.Mode writeMode;
+        long interval;
+        switch (mode) {
+            case "persistent" -> {
+                writeMode = PartitionedFileStorage.Mode.SYNC;
+                interval = 0;
+            }
+            case "hybrid" -> {
+                writeMode = PartitionedFileStorage.Mode.PERIODIC;
+                interval = resolveFlushInterval(serviceName);
+            }
+            case "wal" -> {
+                writeMode = PartitionedFileStorage.Mode.JOURNAL;
+                interval = config.storage().wal().compactionIntervalMs();
+            }
+            default -> throw new IllegalArgumentException("Unknown storage mode: " + mode);
+        }
+        PartitionedFileStorage<E> inner = new PartitionedFileStorage<>(directory,
+                legacyStore(basePath, fileName, typeReference, entryType), entryType, shardCount, writeMode,
+                interval);
+        partitionedBackends.add(inner);
+        LOG.infov("Storing {0} for service {1} in {2}, {3} file(s) per key", fileName, serviceName, directory,
+                shardCount);
+        AccountAwareStorageBackend<Map<String, E>> backend = new AccountAwareStorageBackend<>(
+                inner, requestContextInstance, config.defaultAccountId());
+        loadOnce(backend);
+        allBackends.add(backend);
+        backendsByPath.put(directory, backend);
+        return backend;
+    }
+
+    /**
+     * The single-file store to migrate into a partitioned store, whatever mode it last ran in:
+     * the plain file a {@code persistent} or {@code hybrid} store writes, or the snapshot and log
+     * of a {@link WalStorage}. When both exist, the one written last is the live one. Nothing is
+     * folded or deleted here; the partitioned store renames the files once its migration lands.
+     */
+    private static <E> PartitionedFileStorage.LegacyStore<E> legacyStore(
+            Path basePath, String fileName, TypeReference<Map<String, Map<String, E>>> typeReference,
+            Class<E> entryType) {
+        Path plainFile = basePath.resolve(fileName);
+        Path snapshot = basePath.resolve(fileName.replace(".json", "-snapshot.json"));
+        Path log = basePath.resolve(fileName.replace(".json", ".wal"));
+        PartitionedFileStorage.LegacyStore<E> plain = PartitionedFileStorage.LegacyStore.jsonFile(plainFile, entryType);
+        PartitionedFileStorage.LegacyStore<E> wal = new PartitionedFileStorage.LegacyStore<>() {
+            @Override
+            public List<Path> existingFiles() {
+                return Stream.of(snapshot, log).filter(Files::exists).toList();
+            }
+
+            @Override
+            public Map<String, Map<String, E>> read() {
+                return WalStorage.readContents(snapshot, log, typeReference);
+            }
+        };
+        return new PartitionedFileStorage.LegacyStore<>() {
+            private PartitionedFileStorage.LegacyStore<E> live() {
+                List<Path> walFiles = wal.existingFiles();
+                if (walFiles.isEmpty()) {
+                    return plain;
+                }
+                if (!Files.exists(plainFile)) {
+                    return wal;
+                }
+                return lastModified(plainFile) > walFiles.stream().mapToLong(StorageFactory::lastModified).max()
+                        .orElse(Long.MIN_VALUE) ? plain : wal;
+            }
+
+            @Override
+            public List<Path> existingFiles() {
+                return live().existingFiles();
+            }
+
+            @Override
+            public Map<String, Map<String, E>> read() throws IOException {
+                return live().read();
+            }
+        };
+    }
+
+    private static long lastModified(Path file) {
+        try {
+            return Files.getLastModifiedTime(file).toMillis();
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read the modification time of " + file, e);
+        }
+    }
+
     /** Load every managed backend that has not been loaded yet. Safe to call repeatedly. */
     public synchronized void loadAll() {
         for (StorageBackend<?, ?> backend : allBackends) {
@@ -158,11 +279,16 @@ public class StorageFactory {
         loadedBackends.add(backend);
     }
 
-    /** Flush all storage backends to disk. */
+    /**
+     * Flush all storage backends to disk. Every backend is flushed even when one fails; the first
+     * failure is then thrown, with the others attached as suppressed.
+     */
     public synchronized void flushAll() {
+        List<RuntimeException> failures = new ArrayList<>();
         for (StorageBackend<?, ?> backend : allBackends) {
-            backend.flush();
+            runCollecting(backend::flush, failures);
         }
+        throwFirst(failures);
     }
 
     /** Clear all storage backends. */
@@ -179,13 +305,37 @@ public class StorageFactory {
      * every WAL backend with an open writer that nothing closes.
      */
     public synchronized void shutdownAll() {
-        flushAll();
+        List<RuntimeException> failures = new ArrayList<>();
+        runCollecting(this::flushAll, failures);
         for (HybridStorage<?, ?> hybrid : hybridBackends) {
-            hybrid.shutdown();
+            runCollecting(hybrid::shutdown, failures);
         }
         for (WalStorage<?, ?> wal : walBackends) {
-            wal.shutdown();
+            runCollecting(wal::shutdown, failures);
         }
+        for (PartitionedFileStorage<?> partitioned : partitionedBackends) {
+            runCollecting(partitioned::shutdown, failures);
+        }
+        throwFirst(failures);
+    }
+
+    private static void runCollecting(Runnable step, List<RuntimeException> failures) {
+        try {
+            step.run();
+        } catch (RuntimeException e) {
+            failures.add(e);
+        }
+    }
+
+    private static void throwFirst(List<RuntimeException> failures) {
+        if (failures.isEmpty()) {
+            return;
+        }
+        RuntimeException first = failures.getFirst();
+        for (RuntimeException other : failures.subList(1, failures.size())) {
+            first.addSuppressed(other);
+        }
+        throw first;
     }
 
     private String resolveMode(String serviceName) {

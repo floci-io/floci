@@ -52,8 +52,7 @@ public class LambdaTargetResolver {
 
     /** The function a mapping invokes, or empty when it or its version or alias is gone. */
     public Optional<LambdaFunction> resolveMappingTarget(EventSourceMapping esm) {
-        String qualifier = esm.getFunctionArn() == null
-                ? null : LambdaArnUtils.resolve(esm.getFunctionArn()).qualifier();
+        String qualifier = mappingQualifier(esm);
         try {
             return Optional.of(resolveInvokeTargetForAccount(
                     esm.getAccountId(), esm.getRegion(), esm.getFunctionName(), qualifier));
@@ -63,6 +62,10 @@ public class LambdaTargetResolver {
             }
             throw e;
         }
+    }
+
+    static String mappingQualifier(EventSourceMapping esm) {
+        return esm.getFunctionArn() == null ? null : LambdaArnUtils.resolve(esm.getFunctionArn()).qualifier();
     }
 
     private LambdaFunction resolveTarget(String region, String name, String qualifier,

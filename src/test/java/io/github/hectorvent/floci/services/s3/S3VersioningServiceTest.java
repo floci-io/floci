@@ -13,9 +13,11 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -43,6 +45,266 @@ class S3VersioningServiceTest {
         s3Service.putBucketVersioning("versioned-bucket", "Enabled");
         s3Service.putBucketVersioning("versioned-bucket", "Suspended");
         assertEquals("Suspended", s3Service.getBucketVersioning("versioned-bucket"));
+    }
+
+    @Test
+    void versioningCannotBeSuspendedOnABucketWithObjectLock() {
+        s3Service.enableObjectLockOnCreate("versioned-bucket");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> s3Service.putBucketVersioning("versioned-bucket", "Suspended"));
+        assertEquals("InvalidBucketState", refused.getErrorCode());
+        assertEquals(409, refused.getHttpStatus());
+        assertEquals("An Object Lock configuration is present on this bucket, so the versioning state "
+                + "cannot be changed.", refused.getMessage());
+        assertEquals("Enabled", s3Service.getBucketVersioning("versioned-bucket"));
+
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        assertEquals("Enabled", s3Service.getBucketVersioning("versioned-bucket"));
+    }
+
+    @Test
+    void objectLockConfigurationNeedsVersioningEnabled() {
+        assertObjectLockConfigurationRefused();
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putBucketVersioning("versioned-bucket", "Suspended");
+        assertObjectLockConfigurationRefused();
+
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObjectLockConfiguration("versioned-bucket", "GOVERNANCE", "Days", 1);
+        assertEquals("GOVERNANCE", s3Service.getObjectLockConfiguration("versioned-bucket").mode());
+    }
+
+    @Test
+    void aMissingBucketAndAnUnknownStatusAreReportedBeforeObjectLock() {
+        assertEquals("NoSuchBucket", assertThrows(AwsException.class,
+                () -> s3Service.putBucketVersioning("missing-bucket", "Bogus")).getErrorCode());
+        assertEquals("NoSuchBucket", assertThrows(AwsException.class,
+                () -> s3Service.putObjectLockConfiguration("missing-bucket", null, null, 0)).getErrorCode());
+        s3Service.enableObjectLockOnCreate("versioned-bucket");
+        assertEquals("MalformedXML", assertThrows(AwsException.class,
+                () -> s3Service.putBucketVersioning("versioned-bucket", "Bogus")).getErrorCode());
+    }
+
+    private void assertObjectLockConfigurationRefused() {
+        AwsException refused = assertThrows(AwsException.class,
+                () -> s3Service.putObjectLockConfiguration("versioned-bucket", "GOVERNANCE", "Days", 1));
+        assertEquals("InvalidBucketState", refused.getErrorCode());
+        assertEquals(409, refused.getHttpStatus());
+        assertEquals("Versioning must be 'Enabled' on the bucket to apply a Object Lock configuration",
+                refused.getMessage());
+        assertEquals("ObjectLockConfigurationNotFoundError", assertThrows(AwsException.class,
+                () -> s3Service.getObjectLockConfiguration("versioned-bucket")).getErrorCode());
+    }
+
+    @Test
+    void suspendedPutReplacesAnArchivedNullVersionWithoutLeavingADuplicate() {
+        s3Service.putObject("versioned-bucket", "key",
+                "original null".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObject("versioned-bucket", "key",
+                "versioned".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putBucketVersioning("versioned-bucket", "Suspended");
+
+        S3Object replacement = s3Service.putObject("versioned-bucket", "key",
+                "replacement null".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        List<S3Object> versions = s3Service.listObjectVersions("versioned-bucket", "key", 100, null).versions();
+        assertEquals(1, versions.stream().filter(version -> version.getVersionId() == null).count());
+        S3Object listedNull = versions.stream().filter(version -> version.getVersionId() == null).findFirst().orElseThrow();
+        assertTrue(listedNull.isLatest());
+        assertEquals(replacement.getETag(), listedNull.getETag());
+        assertEquals("replacement null", new String(
+                s3Service.getObject("versioned-bucket", "key", "null").getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void suspendedDeleteRemovesAnArchivedNullVersion() {
+        s3Service.putObject("versioned-bucket", "key",
+                "original null".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObject("versioned-bucket", "key",
+                "versioned".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putBucketVersioning("versioned-bucket", "Suspended");
+
+        s3Service.deleteObject("versioned-bucket", "key");
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> s3Service.getObject("versioned-bucket", "key", "null"));
+        assertEquals("NoSuchVersion", missing.getErrorCode());
+    }
+
+    @Test
+    void deletingAnAbsentNullVersionDoesNotDeleteAKeyThatLooksLikeItsHistoryEntry() {
+        s3Service.putObject("versioned-bucket", "key#v#null",
+                "tricky".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        assertNull(s3Service.deleteObject("versioned-bucket", "key", "null"));
+        assertEquals("tricky", new String(
+                s3Service.getObject("versioned-bucket", "key#v#null").getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void archivingANullVersionDoesNotOverwriteAKeyThatLooksLikeItsLegacyHistoryEntry() {
+        s3Service.putObject("versioned-bucket", "key",
+                "null version".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putObject("versioned-bucket", "key#v#null",
+                "tricky".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+
+        S3Object replacement = s3Service.putObject("versioned-bucket", "key",
+                "replacement".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        assertEquals("tricky", new String(
+                s3Service.getObject("versioned-bucket", "key#v#null").getData(), StandardCharsets.UTF_8));
+        assertEquals("null version", new String(
+                s3Service.getObject("versioned-bucket", "key", "null").getData(), StandardCharsets.UTF_8));
+
+        s3Service.deleteObject("versioned-bucket", "key", replacement.getVersionId());
+
+        assertEquals("null version", new String(
+                s3Service.getObject("versioned-bucket", "key").getData(), StandardCharsets.UTF_8));
+        assertEquals("null version", new String(
+                s3Service.getObject("versioned-bucket", "key", "null").getData(), StandardCharsets.UTF_8));
+        assertEquals("tricky", new String(
+                s3Service.getObject("versioned-bucket", "key#v#null").getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void archivedNullVersionIsNotListedAsAnOrdinaryObject() {
+        s3Service.putObject("versioned-bucket", "key",
+                "null version".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObject("versioned-bucket", "key",
+                "replacement".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        List<S3Object> objects = s3Service.listObjects("versioned-bucket", null, null, 100);
+
+        assertEquals(1, objects.size());
+        assertEquals("key", objects.get(0).getKey());
+        assertNotNull(objects.get(0).getVersionId());
+    }
+
+    @Test
+    void archivedNullVersionWithLegacyMarkerInKeyIsListedOnce() {
+        String key = "key#v#part";
+        s3Service.putObject("versioned-bucket", key,
+                "null version".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object current = s3Service.putObject("versioned-bucket", key,
+                "replacement".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        List<S3Object> versions = s3Service.listObjectVersions(
+                "versioned-bucket", key, 100, null).versions();
+
+        assertEquals(1, versions.stream().filter(version -> version.getVersionId() == null).count());
+
+        s3Service.deleteObject("versioned-bucket", key, current.getVersionId());
+
+        versions = s3Service.listObjectVersions("versioned-bucket", key, 100, null).versions();
+        assertEquals(1, versions.size());
+        assertNull(versions.getFirst().getVersionId());
+        assertTrue(versions.getFirst().isLatest());
+    }
+
+    @Test
+    void staleMetadataUpdateDoesNotOverwriteAReplacementArchivedNullVersion() {
+        MetadataReplacementStore objectStore = new MetadataReplacementStore();
+        S3Service service = new S3Service(new InMemoryStorage<>(), objectStore, tempDir, true);
+        service.createBucket("versioned-bucket", "us-east-1");
+        service.putObject("versioned-bucket", "key",
+                "old".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        service.putBucketVersioning("versioned-bucket", "Enabled");
+        service.putObject("versioned-bucket", "key",
+                "numbered".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        objectStore.arm(service);
+
+        service.putObjectTagging("versioned-bucket", "key", "null", Map.of("stale", "tag"));
+
+        S3Object nullVersion = service.getObject("versioned-bucket", "key", "null");
+        assertEquals("replacement", new String(nullVersion.getData(), StandardCharsets.UTF_8));
+        assertEquals("replacement".length(), nullVersion.getSize());
+        assertTrue(service.getObjectTagging("versioned-bucket", "key", "null").isEmpty());
+    }
+
+    @Test
+    void currentNullSnapshotSurvivesArchiveAndPromotionDuringTheRead() {
+        SnapshotAbaStore objectStore = new SnapshotAbaStore();
+        S3Service service = new S3Service(new InMemoryStorage<>(), objectStore, tempDir, true);
+        service.createBucket("versioned-bucket", "us-east-1");
+        service.putObject("versioned-bucket", "key",
+                "original".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        service.putBucketVersioning("versioned-bucket", "Enabled");
+        objectStore.arm(service);
+
+        S3Object nullVersion = service.getObject("versioned-bucket", "key", "null");
+
+        assertEquals("original", new String(nullVersion.getData(), StandardCharsets.UTF_8));
+        assertEquals("original", new String(
+                service.getObject("versioned-bucket", "key").getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void latestNullSnapshotSurvivesArchiveAndPromotionDuringTheRead() {
+        SnapshotAbaStore objectStore = new SnapshotAbaStore();
+        S3Service service = new S3Service(new InMemoryStorage<>(), objectStore, tempDir, true);
+        service.createBucket("versioned-bucket", "us-east-1");
+        service.putObject("versioned-bucket", "key",
+                "original".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        service.putBucketVersioning("versioned-bucket", "Enabled");
+        objectStore.arm(service);
+
+        S3Object latest = service.getObject("versioned-bucket", "key");
+
+        assertEquals("original", new String(latest.getData(), StandardCharsets.UTF_8));
+        assertEquals("original", new String(
+                service.getObject("versioned-bucket", "key").getData(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void delayedMetadataUpdateDemotesTheNullHistoryEntryItTargets() {
+        MetadataArchiveStore objectStore = new MetadataArchiveStore();
+        S3Service service = new S3Service(new InMemoryStorage<>(), objectStore, tempDir, true);
+        service.createBucket("versioned-bucket", "us-east-1");
+        service.putObject("versioned-bucket", "key",
+                "original".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        service.putBucketVersioning("versioned-bucket", "Enabled");
+        objectStore.arm(service);
+
+        service.putObjectTagging("versioned-bucket", "key", "null", Map.of("kept", "tag"));
+
+        List<S3Object> versions = service.listObjectVersions("versioned-bucket", "key", 100, null).versions();
+        assertEquals(1, versions.stream().filter(S3Object::isLatest).count());
+        assertFalse(versions.stream()
+                .filter(version -> version.getVersionId() == null)
+                .findFirst()
+                .orElseThrow()
+                .isLatest());
+        assertEquals(Map.of("kept", "tag"), service.getObjectTagging("versioned-bucket", "key", "null"));
+    }
+
+    @Test
+    void archivedNullKeepsItsSequencerForSameMillisecondPromotionOrder() {
+        InMemoryStorage<String, S3Object> objectStore = new InMemoryStorage<>();
+        S3Service service = new S3Service(new InMemoryStorage<>(), objectStore, tempDir, true);
+        service.createBucket("versioned-bucket", "us-east-1");
+        service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object older = service.putObject("versioned-bucket", "key",
+                "older numbered".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        service.putBucketVersioning("versioned-bucket", "Suspended");
+        service.putObject("versioned-bucket", "key",
+                "newer null".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        Instant tied = Instant.parse("2026-10-21T00:00:00Z");
+        objectStore.get("versioned-bucket/key#v#" + older.getVersionId()).orElseThrow().setLastModified(tied);
+        objectStore.get("versioned-bucket/key").orElseThrow().setLastModified(tied);
+        service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object current = service.putObject("versioned-bucket", "key",
+                "current".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        service.deleteObject("versioned-bucket", "key", current.getVersionId());
+
+        assertEquals("newer null", new String(
+                service.getObject("versioned-bucket", "key").getData(), StandardCharsets.UTF_8));
     }
 
     @Test
@@ -524,6 +786,82 @@ class S3VersioningServiceTest {
 
         assertThrows(AwsException.class, () -> s3Service.getObject("versioned-bucket", "key"));
         assertDoesNotThrow(() -> s3Service.deleteBucket("versioned-bucket"));
+    }
+
+    private static final class MetadataReplacementStore extends InMemoryStorage<String, S3Object> {
+        private S3Service service;
+        private boolean armed;
+
+        private void arm(S3Service service) {
+            this.service = service;
+            armed = true;
+        }
+
+        @Override
+        public Optional<S3Object> get(String key) {
+            Optional<S3Object> result = super.get(key);
+            if (armed && key.indexOf('\0') >= 0) {
+                armed = false;
+                service.putBucketVersioning("versioned-bucket", "Suspended");
+                service.putObject("versioned-bucket", "key",
+                        "replacement".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+                service.putBucketVersioning("versioned-bucket", "Enabled");
+                service.putObject("versioned-bucket", "key",
+                        "latest".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+            }
+            return result;
+        }
+    }
+
+    private static final class MetadataArchiveStore extends InMemoryStorage<String, S3Object> {
+        private S3Service service;
+        private boolean armed;
+
+        private void arm(S3Service service) {
+            this.service = service;
+            armed = true;
+        }
+
+        @Override
+        public Optional<S3Object> get(String key) {
+            Optional<S3Object> result = super.get(key);
+            if (armed && "versioned-bucket/key".equals(key)) {
+                armed = false;
+                service.putObject("versioned-bucket", "key",
+                        "replacement".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+            }
+            return result;
+        }
+    }
+
+    private static final class SnapshotAbaStore extends InMemoryStorage<String, S3Object> {
+        private S3Service service;
+        private int stage = -1;
+        private String replacementVersionId;
+
+        private void arm(S3Service service) {
+            this.service = service;
+            stage = 0;
+        }
+
+        @Override
+        public Optional<S3Object> get(String key) {
+            if (!"versioned-bucket/key".equals(key) || stage < 0 || stage > 1) {
+                return super.get(key);
+            }
+            if (stage == 0) {
+                Optional<S3Object> original = super.get(key);
+                stage = -1;
+                replacementVersionId = service.putObject("versioned-bucket", "key",
+                        "replacement".getBytes(StandardCharsets.UTF_8), "text/plain", null).getVersionId();
+                stage = 1;
+                return original;
+            }
+            stage = -1;
+            service.deleteObject("versioned-bucket", "key", replacementVersionId);
+            stage = 2;
+            return super.get(key);
+        }
     }
 
 }

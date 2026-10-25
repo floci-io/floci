@@ -111,6 +111,10 @@ Two behaviors invert what the conversion block above does, both probed rather th
 - Neither `NumberOfRetries` nor the existence of the function a `LambdaArn` names is checked at configuration time, as on AWS. At delivery an ARN naming nothing fails as `Lambda.FunctionError`, and a `NumberOfRetries` above 100 is capped, a bound AWS does not impose so that one flush cannot occupy the flusher indefinitely.
 - A null entry in `Processors` or `Parameters`, which a raw JSON client can send, is ignored rather than reported; real AWS answers `InternalFailure` there, a fault of its own not worth reproducing.
 
+## Logging options
+
+`CloudWatchLoggingOptions` on the S3 and extended S3 destinations is stored and returned on both `S3DestinationDescription` and `ExtendedS3DestinationDescription`. A destination that never set it reads `{"Enabled": false}`, and an omitted `Enabled` reads `false`, as on AWS. `UpdateDestination` merges it a member at a time, so an update carrying only `{"Enabled": false}` keeps the stored log group and stream. `LogGroupName` and `LogStreamName` are validated against AWS's length and pattern constraints. With `Enabled` true both names are required, on the merged result for `UpdateDestination`, and a missing or empty one is refused with AWS's `InvalidArgumentException`, the group before the stream. Neither Floci nor AWS checks that the log group exists. Floci writes no delivery error logs to it.
+
 ## S3 object keys
 
 Delivered objects are named `<evaluated prefix><streamName>-<versionId>-<yyyy-MM-dd-HH-mm-ss>-<uuid><file extension>`, matching [AWS's object name format](https://docs.aws.amazon.com/firehose/latest/dev/s3-object-name.html):

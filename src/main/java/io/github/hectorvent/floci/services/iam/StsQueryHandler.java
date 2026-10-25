@@ -918,8 +918,7 @@ public class StsQueryHandler {
             String value = params.getFirst(name);
             if (value == null || value.isBlank()) {
                 return AwsQueryResponse.error("ValidationError",
-                        "1 validation error detected: Value null at '" + name
-                        + "' failed to satisfy constraint: Member must not be null",
+                        SmithyValidationErrors.message(List.of(SmithyValidationErrors.notNull(name))),
                         AwsNamespaces.STS, 400);
             }
         }

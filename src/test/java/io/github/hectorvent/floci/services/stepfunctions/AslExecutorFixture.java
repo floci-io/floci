@@ -21,11 +21,15 @@ import io.github.hectorvent.floci.services.scheduler.SchedulerController;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
+import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
+import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.vertx.mutiny.core.Vertx;
 import jakarta.enterprise.inject.Instance;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
@@ -37,16 +41,49 @@ import static org.mockito.Mockito.mock;
  * <p>Every other collaborator defaults to what the convenience constructors pass: a Mockito mock
  * for each integration, the system clock, a real sleeper, {@code System.nanoTime()} for deadlines,
  * no Wait cap override, AWS's 5-minute Express limit, and no RDS Data, Redshift Data, service
- * registry, Lambda task authorizer or EMR task invoker. A Lambda target resolver is built over the function store
- * unless a test supplies its own.
+ * registry, Lambda task authorizer, EMR or EMR Serverless task invoker. A Lambda target resolver is built over
+ * the function store unless a test supplies its own.
  */
 final class AslExecutorFixture {
+
+    private static final String ACCOUNT = "000000000000";
 
     private AslExecutorFixture() {
     }
 
     static Builder builder() {
         return new Builder();
+    }
+
+    /**
+     * Runs {@code definition} on {@code input} to its end, as the execution {@code <name>-execution} of
+     * the state machine {@code name} in {@code region}, and returns it; its events go to {@code history}.
+     */
+    static Execution runSync(AslExecutor executor, String region, String name, String definition, String input,
+                             List<HistoryEvent> history) {
+        StateMachine stateMachine = new StateMachine();
+        stateMachine.setName(name);
+        stateMachine.setStateMachineArn("arn:aws:states:%s:%s:stateMachine:%s".formatted(region, ACCOUNT, name));
+        stateMachine.setRoleArn("arn:aws:iam::%s:role/test-role".formatted(ACCOUNT));
+        stateMachine.setDefinition(definition);
+
+        Execution execution = new Execution();
+        execution.setName(name + "-execution");
+        execution.setExecutionArn("arn:aws:states:%s:%s:execution:%s:%s-execution"
+                .formatted(region, ACCOUNT, name, name));
+        execution.setStateMachineArn(stateMachine.getStateMachineArn());
+        execution.setInput(input);
+
+        executor.executeSync(stateMachine, execution, history, (updated, events) -> { });
+        return execution;
+    }
+
+    /** The execution a {@code .sync} wait reads to learn whether it was stopped, in {@code status}. */
+    static Execution execution(String executionArn, String status) {
+        Execution execution = new Execution();
+        execution.setExecutionArn(executionArn);
+        execution.setStatus(status);
+        return execution;
     }
 
     static final class Builder {
@@ -82,7 +119,9 @@ final class AslExecutorFixture {
         private LambdaTaskAuthorizer lambdaTaskAuthorizer;
         private Duration expressMaxExecutionTime;
         private LongSupplier nanoTime;
+        private AslExecutor.NestedWaiter nestedWaiter;
         private EmrTaskInvoker emrTaskInvoker;
+        private EmrServerlessTaskInvoker emrServerlessTaskInvoker;
 
         private Builder() {
         }
@@ -232,6 +271,11 @@ final class AslExecutorFixture {
             return this;
         }
 
+        Builder nestedWaiter(AslExecutor.NestedWaiter nestedWaiter) {
+            this.nestedWaiter = nestedWaiter;
+            return this;
+        }
+
         Builder nanoTime(LongSupplier nanoTime) {
             this.nanoTime = nanoTime;
             return this;
@@ -239,6 +283,11 @@ final class AslExecutorFixture {
 
         Builder emrTaskInvoker(EmrTaskInvoker emrTaskInvoker) {
             this.emrTaskInvoker = emrTaskInvoker;
+            return this;
+        }
+
+        Builder emrServerlessTaskInvoker(EmrServerlessTaskInvoker emrServerlessTaskInvoker) {
+            this.emrServerlessTaskInvoker = emrServerlessTaskInvoker;
             return this;
         }
 
@@ -251,7 +300,7 @@ final class AslExecutorFixture {
                     jsonataEvaluator != null ? jsonataEvaluator : new JsonataEvaluator(objectMapper),
                     sfnService, config, vertx, customResourceLiveness, clock, sleeper, maxWaitSeconds,
                     redshiftDataHandler, serviceRegistry, null, lambdaTaskAuthorizer, expressMaxExecutionTime,
-                    nanoTime, null, emrTaskInvoker);
+                    nanoTime, null, emrTaskInvoker, emrServerlessTaskInvoker, nestedWaiter);
         }
     }
 }

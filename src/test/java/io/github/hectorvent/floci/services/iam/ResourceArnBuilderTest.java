@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
@@ -126,6 +127,14 @@ class ResourceArnBuilderTest {
         Instance<SecretsManagerService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(secrets);
         return new ResourceArnBuilder(new ObjectMapper(), null, instance);
+    }
+
+    /** A builder reading {@code eks}, for an EKS route naming a cluster or what it holds. */
+    private static ResourceArnBuilder backedBy(EksService eks) {
+        @SuppressWarnings("unchecked")
+        Instance<EksService> instance = mock(Instance.class);
+        when(instance.get()).thenReturn(eks);
+        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, instance);
     }
 
     private static IamService storeHolding(String userName, String path, String arn) {
@@ -286,9 +295,11 @@ class ResourceArnBuilderTest {
     }
 
     /**
-     * A policy, MFA device, SAML provider or OIDC provider is named by an ARN the request already
-     * carries, so it is passed through. Rebuilding it from parts would only invent a second
-     * spelling of the resource the caller already named.
+     * A policy, MFA device, SAML provider, OIDC provider or role template is named by an ARN the
+     * request already carries, so it is passed through. Rebuilding it from parts would only invent
+     * a second spelling of the resource the caller already named, and a role template's ARN could
+     * not be rebuilt at all: it names the {@code aws} account rather than the caller's, and
+     * carries a major version after a colon.
      */
     @Test
     void iamPassesThroughAnArnTheRequestAlreadyCarries() {
@@ -308,6 +319,10 @@ class ResourceArnBuilderTest {
         assertEquals("arn:aws:iam::000000000000:user/bob",
                 resourceOf(builder, "Action=SimulatePrincipalPolicy"
                         + "&PolicySourceArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Auser%2Fbob"));
+        assertEquals("arn:aws:iam::aws:role-template/ec2.amazonaws.com/AmazonEC2RoleforSSM:1",
+                resourceOf(builder, "Action=GetRoleTemplateVersion"
+                        + "&TemplateArn=arn%3Aaws%3Aiam%3A%3Aaws%3Arole-template%2F"
+                        + "ec2.amazonaws.com%2FAmazonEC2RoleforSSM%3A1"));
     }
 
     /**
@@ -758,6 +773,65 @@ class ResourceArnBuilderTest {
         }
     }
 
+    // ── STS ──────────────────────────────────────────────────────────────────────
+
+    @Test
+    void stsAssumeRoleIsAuthorizedAgainstTheRoleItNames() {
+        setFormBody("Action=AssumeRole&Version=2011-06-15"
+                + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin&RoleSessionName=robin");
+        String arn = sts("sts:AssumeRole");
+        assertEquals("arn:aws:iam::729951873967:role/Admin", arn);
+    }
+
+    @Test
+    void stsAssumeRoleIgnoresARoleArnInTheUrlOfAFormPost() {
+        // The handler acts on the body's RoleArn, so authorization must check that one, never a
+        // decoy in the query string.
+        queryParams.add("RoleArn", "arn:aws:iam::729951873967:role/Allowed");
+        setFormBody("Action=AssumeRole&Version=2011-06-15"
+                + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin&RoleSessionName=robin");
+        String arn = sts("sts:AssumeRole");
+        assertEquals("arn:aws:iam::729951873967:role/Admin", arn);
+    }
+
+    @Test
+    void stsReadsRoleArnOnlyForAssumeRole() {
+        // GetFederationToken never acts on a role, so a RoleArn added to it must not let a policy
+        // scoped to that role allow it.
+        setFormBody("Action=GetFederationToken&Version=2011-06-15&Name=robin"
+                + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin");
+        assertEquals("*", sts("sts:GetFederationToken"));
+    }
+
+    @Test
+    void stsMalformedRoleArnIsAuthorizedAsNoRole() {
+        // Read as absent, so the request reaches the form reader, which refuses it as it does today.
+        setFormBody("Action=AssumeRole&Version=2011-06-15&RoleArn=arn%3Aaws%ZZ&RoleSessionName=robin");
+        assertEquals("*", sts("sts:AssumeRole"));
+    }
+
+    @Test
+    void stsRoleArnIsCheckedAsTheHandlerReadsIt() {
+        // The handler does not trim, so neither does the check.
+        setFormBody("Action=AssumeRole&Version=2011-06-15"
+                + "&RoleArn=+arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin&RoleSessionName=robin");
+        assertEquals(" arn:aws:iam::729951873967:role/Admin", sts("sts:AssumeRole"));
+    }
+
+    private String sts(String action) {
+        return builder.buildStsResources(action, ctx).getFirst();
+    }
+
+    @Test
+    void sqsBuildsArnFromFormBodyQueueUrl() {
+        // The handler acts on the body's QueueUrl, so a decoy in the query string must not be checked.
+        queryParams.add("QueueUrl", "http://localhost:4566/000000000000/allowed");
+        setFormBody("Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2Forders&MessageBody=x");
+        String arn = builder.build("sqs", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:sqs:us-east-1:000000000000:orders", arn);
+    }
+
+
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
 
     @Test
@@ -1094,6 +1168,14 @@ class ResourceArnBuilderTest {
     // ── SNS ─────────────────────────────────────────────────────────────────────
 
     @Test
+    void snsBuildsArnFromFormBodyTopicArn() {
+        queryParams.add("TopicArn", "arn:aws:sns:us-east-1:000000000000:allowed");
+        setFormBody("Action=Publish&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A000000000000%3Aalerts&Message=hi");
+        String arn = builder.build("sns", ctx, "us-east-1", "000000000000");
+        assertEquals("arn:aws:sns:us-east-1:000000000000:alerts", arn);
+    }
+
+    @Test
     void snsBuildsArnFromJsonTopicArn() {
         String topicArn = "arn:aws:sns:us-east-1:000000000000:alerts";
         setJsonBody("{\"TopicArn\":\"" + topicArn + "\"}");
@@ -1146,6 +1228,26 @@ class ResourceArnBuilderTest {
         assertEquals("arn:aws:s3:::my-bucket/folder/", arn);
     }
 
+    // ── The vendored table of request resources ─────────────────────────────────
+
+    /**
+     * A namespace with no branch here is checked on the resources the vendored table finds in its request for the
+     * operation it is dispatched as, and on {@code *} without one or for an operation of another namespace.
+     */
+    @Test
+    void aNamespaceWithNoBranchIsCheckedOnTheResourcesItsRequestNames() {
+        when(ctx.getMethod()).thenReturn("POST");
+        setJsonBody("{\"UserPoolId\":\"us-east-1_abc\"}");
+        assertEquals(List.of("arn:aws:cognito-idp:us-east-1:000000000000:userpool/us-east-1_abc"), builder.buildResources(
+                "cognito-idp", "cognito-idp:DescribeUserPool", ctx, "us-east-1", "000000000000", "aws"));
+        assertEquals(List.of("*"), builder.buildResources("cognito-idp", ctx, "us-east-1", "000000000000"));
+        assertEquals(List.of("*"), builder.buildResources("glue", "cognito-idp:DescribeUserPool", ctx, "us-east-1",
+                "000000000000", "aws"));
+        setJsonBody("{}");
+        assertEquals(List.of("*"), builder.buildResources("cognito-idp", "cognito-idp:DescribeUserPool", ctx,
+                "us-east-1", "000000000000", "aws"));
+    }
+
     // ── Lambda ──────────────────────────────────────────────────────────────────
 
     @Test
@@ -1153,6 +1255,24 @@ class ResourceArnBuilderTest {
         when(uriInfo.getPath()).thenReturn("/2015-03-31/functions/my-function/invocations");
         String arn = builder.build("lambda", ctx, "us-east-1", "000000000000");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function", arn);
+    }
+
+    /** CreateFunction is checked on the function its body names, in the caller's account and Region. */
+    @Test
+    void lambdaCreateFunctionIsCheckedOnTheFunctionItsBodyNames() {
+        when(uriInfo.getPath()).thenReturn("/2015-03-31/functions");
+        when(ctx.getMethod()).thenReturn("POST");
+        setJsonBody("{\"FunctionName\":\"my-function\",\"Runtime\":\"nodejs20.x\"}");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{\"FunctionName\":\"arn:aws:lambda:us-east-1:111122223333:function:my-function\"}");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{\"Runtime\":\"nodejs20.x\"}");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(ctx.getMethod()).thenReturn("GET");
+        setJsonBody("{\"FunctionName\":\"my-function\"}");
+        assertEquals("*", builder.build("lambda", ctx, "us-east-1", "000000000000"));
     }
 
     @Test
@@ -1177,6 +1297,18 @@ class ResourceArnBuilderTest {
         when(uriInfo.getPath()).thenReturn("/2015-03-31/functions/my-function/invocations");
         queryParams.putSingle("Qualifier", "1");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function:1",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void provisionedConcurrencyKeepsTheOwnerAndQualifierItConfigures() {
+        when(uriInfo.getPath()).thenReturn(
+                "/2019-09-30/functions/arn:aws:lambda:us-east-1:111122223333:function:example/provisioned-concurrency");
+        queryParams.putSingle("Qualifier", "live");
+        assertEquals("arn:aws:lambda:us-east-1:111122223333:function:example:live",
+                builder.build("lambda", ctx, "us-east-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/2019-09-30/functions/example/provisioned-concurrency");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:example:live",
                 builder.build("lambda", ctx, "us-east-1", "000000000000"));
     }
 
@@ -1357,6 +1489,37 @@ class ResourceArnBuilderTest {
         }
         when(uriInfo.getPath()).thenReturn("/2025-09-09/microvms/microvm-2");
         assertEquals("*", backed.build("lambda", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void dsqlRoutesResolveTheClusterTheTaggedArnOrNone() {
+        String cluster = "arn:aws:dsql:eu-west-1:000000000000:cluster/abcdefghijklmnopqrstuvwxyz";
+        for (String path : List.of("/cluster/abcdefghijklmnopqrstuvwxyz", "/cluster/abcdefghijklmnopqrstuvwxyz/policy",
+                "/clusters/abcdefghijklmnopqrstuvwxyz/vpc-endpoint-service-name", "/tags/" + cluster)) {
+            when(uriInfo.getPath()).thenReturn(path);
+            assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"), path);
+        }
+        // The same tagging is served at /tags, the ARN in the resourceArn query parameter or body field.
+        when(uriInfo.getPath()).thenReturn("/tags");
+        queryParams.putSingle("resourceArn", cluster);
+        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        queryParams.clear();
+        when(ctx.getMethod()).thenReturn("POST");
+        setJsonBody("{\"resourceArn\":\"" + cluster + "\",\"tags\":{}}");
+        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        when(ctx.getMethod()).thenReturn("GET");
+        // A stream route names the stream, or its cluster to create or list streams.
+        when(uriInfo.getPath()).thenReturn("/stream/abcdefghijklmnopqrstuvwxyz");
+        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/stream/abcdefghijklmnopqrstuvwxyz/s1");
+        assertEquals(List.of(cluster + "/stream/s1"), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        // CreateCluster and ListClusters are checked against every cluster, as DSQL checks them (measured).
+        when(uriInfo.getPath()).thenReturn("/cluster");
+        assertEquals(List.of("arn:aws:dsql:eu-west-1:000000000000:cluster/*"),
+                builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
+        when(uriInfo.getPath()).thenReturn("/cluster/abcdefghijklmnopqrstuvwxyz");
+        assertEquals(List.of("arn:aws-cn:dsql:polygondwanaland-west-1:000000000000:cluster/abcdefghijklmnopqrstuvwxyz"),
+                builder.buildResources("dsql", ctx, "polygondwanaland-west-1", "000000000000", "aws-cn"));
     }
 
     @Test
@@ -1585,6 +1748,109 @@ class ResourceArnBuilderTest {
                 + "function:my-function:1/durable-execution/run-1/0b1c");
         String arn = builder.build("lambda", ctx, "us-east-1", "000000000000");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function:1/durable-execution/run-1/0b1c", arn);
+    }
+
+    // ── EKS ──────────────────────────────────────────────────────────────────────
+
+    /** The cluster {@code held}, which EKS keeps in us-west-2 and finds by its name alone, and what it holds. */
+    private static final String HELD_CLUSTER = "arn:aws:eks:us-west-2:000000000000:cluster/held";
+    private static final String WORKER = "arn:aws:iam::000000000000:role/team/worker";
+
+    private static ResourceArnBuilder eksHolding() {
+        EksService eks = mock(EksService.class);
+        when(eks.findResourceArn(any(), any(), any())).thenReturn(Optional.empty());
+        when(eks.findResourceArn("held", null, null)).thenReturn(Optional.of(HELD_CLUSTER));
+        for (String[] held : new String[][] {
+            {"node-groups", "ng", "nodegroup/held/ng/1"}, {"node-groups", "a/b", "nodegroup/held/a/b/2"},
+            {"fargate-profiles", "fp", "fargateprofile/held/fp/3"}, {"addons", "vpc-cni", "addon/held/vpc-cni/4"},
+            {"updates", "u-1", "addon/held/vpc-cni/4"},
+            {"pod-identity-associations", "a-1", "podidentityassociation/held/a-1"},
+            {"access-entries", WORKER, "access-entry/held/role/000000000000/worker/5"},
+            {"access-entries", WORKER + "/access-policies", "access-entry/held/role/000000000000/access-policies/6"},
+        }) {
+            when(eks.findResourceArn("held", held[0], held[1]))
+                    .thenReturn(Optional.of("arn:aws:eks:us-west-2:000000000000:" + held[2]));
+        }
+        return backedBy(eks);
+    }
+
+    private String eksResource(ResourceArnBuilder eks, String method, String sent) {
+        when(ctx.getMethod()).thenReturn(method);
+        request(sent);
+        return eks.build("eks", ctx, "us-east-1", ACCOUNT);
+    }
+
+    @Test
+    void anEksClusterRouteActsOnTheClusterEksHoldsOrTheOneACreateMints() {
+        ResourceArnBuilder eks = eksHolding();
+        String minted = "arn:aws:eks:us-east-1:000000000000:cluster/";
+        assertEquals(HELD_CLUSTER, eksResource(eks, "GET", "/clusters/held"));
+        assertEquals(minted + "gone", eksResource(eks, "DELETE", "/clusters/gone"));
+        for (String route : List.of("/node-groups", "/addons", "/access-entries", "/pod-identity-associations",
+                "/update-config", "/updates", "/updates/u-1/cancel-update", "/insights/i-1",
+                "/certificate-authorities/ca-1/activate", "/identity-provider-configs/associate")) {
+            assertEquals(HELD_CLUSTER, eksResource(eks, "POST", "/clusters/held" + route), route);
+        }
+        assertEquals(HELD_CLUSTER, eksResource(eks, "DELETE", "/cluster-registrations/held"));
+
+        // A create is checked against the cluster its body names; listing clusters names none.
+        setJsonBody("{\"name\":\"fresh\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\"}");
+        assertEquals(minted + "fresh", eksResource(eks, "POST", "/clusters"));
+        assertEquals("*", eksResource(eks, "GET", "/clusters"));
+    }
+
+    @Test
+    void anEksRouteOnWhatAClusterHoldsActsOnTheArnEksHoldsItUnder() {
+        ResourceArnBuilder eks = eksHolding();
+        String held = "arn:aws:eks:us-west-2:000000000000:";
+        assertEquals(held + "nodegroup/held/ng/1", eksResource(eks, "GET", "/clusters/held/node-groups/ng"));
+        assertEquals(held + "nodegroup/held/ng/1",
+                eksResource(eks, "POST", "/clusters/held/node-groups/ng/update-version"));
+        // The router keeps an encoded / inside the name, and EKS looks the node group up by it.
+        assertEquals(held + "nodegroup/held/a/b/2", eksResource(eks, "GET", "/clusters/held/node-groups/a%2Fb"));
+        assertEquals(held + "fargateprofile/held/fp/3", eksResource(eks, "DELETE", "/clusters/held/fargate-profiles/fp"));
+        assertEquals(held + "addon/held/vpc-cni/4", eksResource(eks, "POST", "/clusters/held/addons/vpc-cni/update"));
+        assertEquals(held + "podidentityassociation/held/a-1",
+                eksResource(eks, "POST", "/clusters/held/pod-identity-associations/a-1"));
+        // An access entry's principal is the rest of the path, encoded or not.
+        assertEquals(held + "access-entry/held/role/000000000000/worker/5", eksResource(eks, "GET",
+                "/clusters/held/access-entries/arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Fteam%2Fworker"));
+        assertEquals(held + "access-entry/held/role/000000000000/worker/5",
+                eksResource(eks, "DELETE", "/clusters/held/access-entries/" + WORKER));
+        assertEquals(held + "access-entry/held/role/000000000000/access-policies/6",
+                eksResource(eks, "GET", "/clusters/held/access-entries/" + WORKER + "/access-policies"));
+        // What EKS does not hold names no resource, nor do what Floci keeps no id for.
+        assertEquals("*", eksResource(eks, "GET", "/clusters/held/node-groups/other"));
+        assertEquals("*", eksResource(eks, "GET", "/clusters/gone/addons/vpc-cni"));
+        assertEquals("*", eksResource(eks, "POST", "/clusters/held/identity-provider-configs/describe"));
+        assertEquals("*", eksResource(eks, "GET", "/clusters/held/capabilities/argocd"));
+    }
+
+    @Test
+    void anEksUpdateActsOnItsAddonAndATagOnTheCallersClusterOfThatName() {
+        ResourceArnBuilder eks = eksHolding();
+        // EKS returns an add-on's update whatever add-on the request names, if any, so it acts on its own add-on.
+        String addon = "arn:aws:eks:us-west-2:000000000000:addon/held/vpc-cni/4";
+        assertEquals(addon, eksResource(eks, "GET", "/clusters/held/updates/u-1"));
+        queryParams.putSingle("addonName", "coredns");
+        assertEquals(addon, eksResource(eks, "GET", "/clusters/held/updates/u-1"));
+        queryParams.clear();
+        assertEquals(HELD_CLUSTER, eksResource(eks, "GET", "/clusters/held/updates/u-2"));
+        assertEquals(HELD_CLUSTER, eksResource(eks, "POST", "/clusters/held/updates/u-1/cancel-update"));
+
+        // EKS tags the caller's cluster named after the ARN's last /, whatever account or Region it names.
+        assertEquals(HELD_CLUSTER, eksResource(eks, "POST", "/tags/arn:aws:eks:eu-west-1:111122223333:cluster/held"));
+        queryParams.putSingle("resourceArn", "arn:aws:eks:eu-west-1:111122223333:cluster/held");
+        assertEquals(HELD_CLUSTER, eksResource(eks, "DELETE", "/tags"));
+        queryParams.clear();
+        assertEquals("*", eksResource(eks, "GET", "/tags/no-slash"));
+
+        assertEquals("arn:aws:eks:us-east-1:000000000000:eks-anywhere-subscription/sub-1",
+                eksResource(eks, "GET", "/eks-anywhere-subscriptions/sub-1"));
+        for (String route : List.of("/addons/supported-versions", "/access-policies", "/cluster-versions",
+                "/cluster-registrations", "/eks-anywhere-subscriptions")) {
+            assertEquals("*", eksResource(eks, "GET", route), route);
+        }
     }
 
     /** Stubs the request path as sent and, decoded, as {@link UriInfo#getPath()} gives it. */

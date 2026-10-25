@@ -5,10 +5,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.model.Dashboard;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Alarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.AlarmMetricDataQuery;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.CompositeAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
@@ -58,6 +61,7 @@ public class CloudWatchMetricsJsonHandler {
             case "ListMetrics" -> handleListMetrics(request, region);
             case "GetMetricStatistics" -> handleGetMetricStatistics(request, region);
             case "PutMetricAlarm" -> handlePutMetricAlarm(request, region);
+            case "PutCompositeAlarm" -> handlePutCompositeAlarm(request, region);
             case "DescribeAlarms" -> handleDescribeAlarms(request, region);
             case "DeleteAlarms" -> handleDeleteAlarms(request, region);
             case "SetAlarmState" -> handleSetAlarmState(request, region);
@@ -157,8 +161,7 @@ public class CloudWatchMetricsJsonHandler {
 
     private Response handlePutMetricAlarm(JsonNode request, String region) {
         MetricAlarm alarm = new MetricAlarm();
-        alarm.setAlarmName(request.path("AlarmName").asText());
-        alarm.setAlarmDescription(request.path("AlarmDescription").asText(null));
+        parseAlarmFields(request, alarm);
         alarm.setMetricName(request.path("MetricName").asText(null));
         alarm.setNamespace(request.path("Namespace").asText(null));
         alarm.setStatistic(request.path("Statistic").asText(null));
@@ -176,8 +179,32 @@ public class CloudWatchMetricsJsonHandler {
         alarm.setThreshold(request.path("Threshold").asDouble(0));
         alarm.setComparisonOperator(request.path("ComparisonOperator").asText(null));
         alarm.setTreatMissingData(request.path("TreatMissingData").asText(null));
-        alarm.setActionsEnabled(request.path("ActionsEnabled").asBoolean(true));
         alarm.setDimensions(parseDimensionsJson(request.path("Dimensions")));
+
+        metricsService.putMetricAlarm(alarm, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutCompositeAlarm(JsonNode request, String region) {
+        rejectSuppressor(request);
+        CompositeAlarm alarm = new CompositeAlarm();
+        parseAlarmFields(request, alarm);
+        alarm.setAlarmRule(request.path("AlarmRule").asText(null));
+        metricsService.putCompositeAlarm(alarm, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private static void rejectSuppressor(JsonNode request) {
+        if (request.has("ActionsSuppressor") || request.has("ActionsSuppressorWaitPeriod")
+                || request.has("ActionsSuppressorExtensionPeriod")) {
+            throw new AwsException("ValidationError", "Composite action suppression is not supported", 400);
+        }
+    }
+
+    private void parseAlarmFields(JsonNode request, Alarm alarm) {
+        alarm.setAlarmName(request.path("AlarmName").asText());
+        alarm.setAlarmDescription(request.path("AlarmDescription").asText(null));
+        alarm.setActionsEnabled(request.path("ActionsEnabled").asBoolean(true));
 
         JsonNode alarmActions = request.path("AlarmActions");
         if (alarmActions.isArray()) {
@@ -199,8 +226,6 @@ public class CloudWatchMetricsJsonHandler {
             alarm.setTags(tags);
         }
 
-        metricsService.putMetricAlarm(alarm, region);
-        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleDescribeAlarms(JsonNode request, String region) {
@@ -211,21 +236,17 @@ public class CloudWatchMetricsJsonHandler {
         }
         String prefix = request.has("AlarmNamePrefix") ? request.path("AlarmNamePrefix").asText() : null;
 
-        List<MetricAlarm> alarms = metricsService.describeAlarms(alarmNames, prefix, region);
+        List<String> types = new ArrayList<>();
+        request.path("AlarmTypes").forEach(value -> types.add(value.asText()));
+        metricsService.validateAlarmTypes(types);
+        List<MetricAlarm> alarms = types.isEmpty() || types.contains("MetricAlarm")
+                ? metricsService.describeAlarms(alarmNames, prefix, region) : List.of();
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("MetricAlarms");
         for (MetricAlarm a : alarms) {
             ObjectNode node = arr.addObject();
-            node.put("AlarmName", a.getAlarmName());
-            if (a.getAlarmArn() != null) node.put("AlarmArn", a.getAlarmArn());
-            if (a.getAlarmDescription() != null) node.put("AlarmDescription", a.getAlarmDescription());
-            ArrayNode alarmActions = node.putArray("AlarmActions");
-            a.getAlarmActions().forEach(alarmActions::add);
-            ArrayNode okActions = node.putArray("OKActions");
-            a.getOkActions().forEach(okActions::add);
-            ArrayNode insufficientDataActions = node.putArray("InsufficientDataActions");
-            a.getInsufficientDataActions().forEach(insufficientDataActions::add);
+            describeAlarmFields(node, a);
             if (!a.getMetrics().isEmpty()) {
                 node.set("Metrics", objectMapper.valueToTree(a.getMetrics()));
             } else {
@@ -258,13 +279,46 @@ public class CloudWatchMetricsJsonHandler {
             node.put("Threshold", a.getThreshold());
             if (a.getComparisonOperator() != null) node.put("ComparisonOperator", a.getComparisonOperator());
             if (a.getTreatMissingData() != null) node.put("TreatMissingData", a.getTreatMissingData());
-            node.put("ActionsEnabled", a.isActionsEnabled());
-            if (a.getStateValue() != null) node.put("StateValue", a.getStateValue());
-            if (a.getStateReason() != null) node.put("StateReason", a.getStateReason());
-            if (a.getStateReasonData() != null) node.put("StateReasonData", a.getStateReasonData());
-            node.put("StateUpdatedTimestamp", a.getStateUpdatedTimestamp());
+
         }
+        ArrayNode composites = response.putArray("CompositeAlarms");
+        if (types.contains("CompositeAlarm")) {
+            for (CompositeAlarm alarm : metricsService.describeCompositeAlarms(alarmNames, prefix, region)) {
+                ObjectNode node = composites.addObject();
+                describeAlarmFields(node, alarm);
+                node.put("AlarmRule", alarm.getAlarmRule());
+            }
+        }
+        response.putArray("LogAlarms");
         return Response.ok(response).build();
+    }
+
+    private void describeAlarmFields(ObjectNode node, Alarm a) {
+        node.put("AlarmName", a.getAlarmName());
+        if (a.getAlarmArn() != null) {
+            node.put("AlarmArn", a.getAlarmArn());
+        }
+        if (a.getAlarmDescription() != null) {
+            node.put("AlarmDescription", a.getAlarmDescription());
+        }
+        ArrayNode alarmActions = node.putArray("AlarmActions");
+        a.getAlarmActions().forEach(alarmActions::add);
+        ArrayNode okActions = node.putArray("OKActions");
+        a.getOkActions().forEach(okActions::add);
+        ArrayNode insufficientDataActions = node.putArray("InsufficientDataActions");
+        a.getInsufficientDataActions().forEach(insufficientDataActions::add);
+        node.put("ActionsEnabled", a.isActionsEnabled());
+        if (a.getStateValue() != null) {
+            node.put("StateValue", a.getStateValue());
+        }
+        if (a.getStateReason() != null) {
+            node.put("StateReason", a.getStateReason());
+        }
+        if (a.getStateReasonData() != null) {
+            node.put("StateReasonData", a.getStateReasonData());
+        }
+        node.put("StateUpdatedTimestamp", a.getStateUpdatedTimestamp());
+        node.put("AlarmConfigurationUpdatedTimestamp", a.getAlarmConfigurationUpdatedTimestamp());
     }
 
     private Response handleDeleteAlarms(JsonNode request, String region) {

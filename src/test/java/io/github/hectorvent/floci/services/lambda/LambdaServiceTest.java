@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
+import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.LambdaUrlConfig;
@@ -19,6 +20,7 @@ import io.github.hectorvent.floci.services.s3.model.S3ObjectUpdatedEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayInputStream;
@@ -1641,6 +1643,49 @@ class LambdaServiceTest {
         assertEquals("ValidationException", error.getErrorCode());
     }
 
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void deletingQualifierWaitsForProvisionedConcurrencyLock(boolean alias, boolean qualifiedName) throws Exception {
+        String name = "qualifier-deletion-lock";
+        LambdaFunction latest = service.createFunction(REGION, baseRequest(name));
+        LambdaFunction version = service.publishVersion(REGION, name, null);
+        if (alias) {
+            service.createAlias(REGION, name, "live", version.getVersion(), null, null);
+        }
+        String reference = qualifiedName ? latest.getFunctionArn() + ":" + version.getVersion() : name;
+        AtomicReference<Thread> requester = new AtomicReference<>();
+        try (ExecutorService tasks = Executors.newSingleThreadExecutor()) {
+            Future<?> deletion;
+            synchronized (service.lockForConcurrencyOp(latest.getFunctionArn())) {
+                deletion = tasks.submit(() -> {
+                    requester.set(Thread.currentThread());
+                    if (alias) {
+                        service.deleteAlias(REGION, reference, "live");
+                    } else {
+                        service.deleteVersion(REGION, reference, version.getVersion());
+                    }
+                });
+                awaitBlockedOrDone(requester, deletion);
+                assertFalse(deletion.isDone());
+                if (alias) {
+                    assertEquals(version.getVersion(), service.getAlias(REGION, name, "live").getFunctionVersion());
+                } else {
+                    assertEquals(version.getVersion(), service.getFunction(REGION, name, version.getVersion()).getVersion());
+                }
+            }
+            deletion.get(5, TimeUnit.SECONDS);
+        }
+        AwsException missing = assertThrows(AwsException.class, () -> {
+            if (alias) {
+                service.getAlias(REGION, name, "live");
+            } else {
+                service.getFunction(REGION, name, version.getVersion());
+            }
+        });
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+        assertEquals("$LATEST", service.getFunction(REGION, name).getVersion());
+    }
+
     @Test
     void createFunctionUrlConfigRejectsUnknownAuthType() {
         AwsException error = assertThrows(AwsException.class,
@@ -2847,6 +2892,28 @@ class LambdaServiceTest {
         assertEquals("ValidationException", error.getErrorCode());
         assertEquals("1 validation error detected: Value 'v1' at 'functionVersion' failed to satisfy constraint: "
                 + "Member must satisfy regular expression pattern: (\\$LATEST(\\.PUBLISHED)?|[0-9]+)", error.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"$LATEST", "2"})
+    void updateAliasValidatesProvisionedCapacityBeforeMutatingItsStoredFields(String targetVersion) {
+        WarmPool warmPool = mock(WarmPool.class);
+        LambdaService guarded = s3BackedService(null, warmPool, new ZipExtractor());
+        LambdaFunction fn = guarded.createFunction(REGION, baseRequest("alias-capacity-fn"));
+        LambdaAlias alias = guarded.createAlias(REGION, fn.getFunctionName(), "live", "1", "original", null);
+        AwsException failure = new AwsException("InvalidParameterValueException",
+                "Provisioned Concurrency Configs cannot be applied to unpublished function versions.", 400);
+        doAnswer(invocation -> {
+            assertTrue(Thread.holdsLock(guarded.lockForConcurrencyOp(fn.getFunctionArn())));
+            throw failure;
+        }).when(warmPool).validateProvisionedAliasUpdate(fn, "live", targetVersion);
+
+        assertSame(failure, assertThrows(AwsException.class, () -> guarded.updateAlias(REGION,
+                fn.getFunctionName(), "live", targetVersion, "changed", Map.of("2", 0.1))));
+        assertSame(alias, guarded.getAlias(REGION, fn.getFunctionName(), "live"));
+        assertEquals("1", alias.getFunctionVersion());
+        assertEquals("original", alias.getDescription());
+        assertTrue(alias.getRoutingConfig() == null || alias.getRoutingConfig().isEmpty());
     }
 
     @Test

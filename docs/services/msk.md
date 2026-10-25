@@ -17,6 +17,9 @@ Floci emulates Amazon MSK by orchestrating **Redpanda** containers. This provide
 | `DescribeClusterV2` | Get cluster metadata and state using V2 API |
 | `DeleteCluster` | Stops and removes the Redpanda container |
 | `GetBootstrapBrokers` | Get the connection strings for the cluster |
+| `BatchAssociateScramSecret` | Associate secret SCRAM credential with cluster |
+| `ListScramSecrets` | List the secret ARNs associated with a cluster |
+| `BatchDisassociateScramSecret` | Remove secret SCRAM credential associated with cluster |
 | `CreateConfiguration` | Create a broker configuration (`server.properties`) |
 | `ListConfigurations` | List all configurations |
 | `DescribeConfiguration` | Get configuration metadata and latest revision |
@@ -37,6 +40,7 @@ Floci emulates Amazon MSK by orchestrating **Redpanda** containers. This provide
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` | Docker image for Redpanda (Kafka) containers |
 | `FLOCI_SERVICES_MSK_KAFKA_HOST_PORT_BASE` | `9300` | First host port a broker's Kafka listener can be published on |
 | `FLOCI_SERVICES_MSK_KAFKA_HOST_PORT_MAX` | `9399` | Last host port a broker's Kafka listener can be published on |
+| `FLOCI_SERVICES_MSK_SCRAM_RECONCILIATION_INTERVAL_MS` | `5000` | SCRAM secret reconciliation interval (ms) |
 | `FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME` | _(unset)_ | Floci in a container only: hostname the host listener advertises, and when set, `GetBootstrapBrokers` returns `<container-name>:9092,<hostname>:<host port>` instead of the Docker-network address |
 
 ## How it works
@@ -112,6 +116,36 @@ Cluster and configuration tags are managed through `/v1/tags/{resourceArn}`
 Configuration tags are reachable only through the tag endpoints, because AWS's
 `DescribeConfiguration` response has no tags member.
 
+### SCRAM Secrets Association 
+
+Manages credentials only: the broker does not enable SASL authentication or
+validate these users when clients connect. Clients can still connect without
+credentials. Authenticated SASL_SSL listeners is not implemented.
+
+`BatchAssociateScramSecret` accepts up to 10 Secrets Manager ARNs and creates kafka
+`SCRAM-SHA-512` users.
+Secrets must belong to the cluster's account, region and partition, use the `AmazonMSK_`
+name prefix and a customer-managed symmetric KMS key ID, not an `alias/...` reference.
+The secrets must contain JSON such as `{"username":"alice","password":"pw"}`.
+
+`ListScramSecrets` supports pagination. `BatchDisassociateScramSecret` removes up to
+10 associations. Item failures appear in
+`unprocessedScramSecrets`; reassociation and removal of an unassociated ARN return
+`InvalidSecretArn`.
+
+Floci schedules SCRAM reconciliation jobs every five seconds by default, measured as
+a delay after each scheduling sweep. Sweeps do not wait for broker operations to finish,
+and clusters with queued or running jobs are skipped. Set
+`FLOCI_SERVICES_MSK_SCRAM_RECONCILIATION_INTERVAL_MS` to change this delay in milliseconds.
+This is Floci's timing, not an AWS synchronization guarantee.
+
+When an associated secret is scheduled for deletion or permanently deleted, reconciliation
+revokes its broker user but retains the association in `ListScramSecrets`. Restoring a secret
+whose deletion was scheduled causes reconciliation to recreate its broker user using the
+current credentials, without requiring reassociation. Permanently deleted secrets cannot
+be restored; creating a secret with the same name produces a different ARN and requires
+a new association.
+
 ## Examples
 
 ```bash
@@ -131,6 +165,12 @@ aws kafka list-clusters --endpoint-url $AWS_ENDPOINT_URL
 # Get bootstrap brokers
 CLUSTER_ARN=$(aws kafka list-clusters --query 'ClusterInfoList[0].ClusterArn' --output text --endpoint-url $AWS_ENDPOINT_URL)
 aws kafka get-bootstrap-brokers --cluster-arn $CLUSTER_ARN --endpoint-url $AWS_ENDPOINT_URL
+
+# Associate an existing secret
+aws kafka batch-associate-scram-secret \
+  --cluster-arn "$CLUSTER_ARN" \
+  --secret-arn-list "arn:aws:secretsmanager:us-east-1:000000000000:secret:AmazonMSK_my-user" \
+  --endpoint-url $AWS_ENDPOINT_URL
 
 # Delete a cluster
 aws kafka delete-cluster --cluster-arn $CLUSTER_ARN --endpoint-url $AWS_ENDPOINT_URL

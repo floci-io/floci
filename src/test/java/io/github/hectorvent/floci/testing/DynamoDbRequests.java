@@ -7,6 +7,7 @@ import io.restassured.response.ValidatableResponse;
 import java.math.BigDecimal;
 
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public final class DynamoDbRequests {
 
@@ -27,5 +28,10 @@ public final class DynamoDbRequests {
 
     public static BigDecimal decimalAt(ValidatableResponse response, String pointer) throws Exception {
         return EXACT.readTree(response.extract().asString()).at(pointer).decimalValue();
+    }
+
+    public static void assertEpochMillisBetween(long before, BigDecimal epochSeconds, long after) {
+        long millis = epochSeconds.movePointRight(3).longValueExact();
+        assertTrue(before <= millis && millis <= after, epochSeconds + " is not between " + before + " and " + after);
     }
 }
