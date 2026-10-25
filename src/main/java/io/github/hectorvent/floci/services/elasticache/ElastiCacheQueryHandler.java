@@ -456,7 +456,8 @@ public class ElastiCacheQueryHandler {
                             params.getFirst("IpDiscovery"),
                             boolParam(params, "AtRestEncryptionEnabled"),
                             region,
-                            parseTags(params));
+                            parseTags(params),
+                            boolParam(params, "TransitEncryptionEnabled"));
             CacheCluster cluster = "memcached".equalsIgnoreCase(engine)
                     ? memcachedService.createCacheCluster(request)
                     : service.createCacheCluster(request);
@@ -1057,7 +1058,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             xml.elem("NumCacheNodes", (long) numCacheNodes)
                .elem("AutoMinorVersionUpgrade", true)
                .elem("AuthTokenEnabled", c.getAuthMode() == AuthMode.PASSWORD)
-               .elem("TransitEncryptionEnabled", c.getAuthMode() != null && c.getAuthMode() != AuthMode.NO_AUTH)
+               .elem("TransitEncryptionEnabled", c.isEncryptedInTransit())
                .elem("AtRestEncryptionEnabled", c.isAtRestEncryptionEnabled())
                .elem("SnapshotRetentionLimit", (long) c.getSnapshotRetentionLimit())
                .elem("SnapshotWindow", c.getSnapshotWindow() != null

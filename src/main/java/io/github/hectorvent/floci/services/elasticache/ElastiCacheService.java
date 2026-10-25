@@ -300,7 +300,8 @@ public class ElastiCacheService implements ResourceProvider {
         }
         String engine = engineFor(request);
         String engineVersion = request.engineVersion() != null ? request.engineVersion() : defaultEngineVersion(engine);
-        boolean transitEncrypted = Boolean.TRUE.equals(request.transitEncryptionEnabled()) || request.authMode() != AuthMode.NO_AUTH;
+        boolean transitEncrypted = Boolean.TRUE.equals(request.transitEncryptionEnabled())
+                || (request.authMode() != null && request.authMode() != AuthMode.NO_AUTH);
         synchronized (userGroupLock) {
             List<String> reserved = new ArrayList<>();
             for (String userGroupId : request.userGroupIds()) {
@@ -442,7 +443,16 @@ public class ElastiCacheService implements ResourceProvider {
             }
 
             synchronized (lockFor("rg:" + groupId)) {
-                groups.put(groupId, group);
+                // Re-verify under userGroupLock immediately before publishing to close race window (#4502)
+                synchronized (userGroupLock) {
+                    if (group.getUserGroupIds() != null) {
+                        for (String userGroupId : group.getUserGroupIds()) {
+                            ElastiCacheUserGroup userGroup = getUserGroup(userGroupId);
+                            requireAssociable(userGroup, group.isEncryptedInTransit(), group.getEngine(), group.getEngineVersion());
+                        }
+                    }
+                    groups.put(groupId, group);
+                }
                 if (handle != null) {
                     proxyManager.startProxy(groupId, authMode, proxyPort,
                             handle.getHost(), handle.getPort(),
@@ -543,7 +553,16 @@ public class ElastiCacheService implements ResourceProvider {
             group.setClusterNodes(nodes);
             applyCommonAttributes(group, request, resolvedSettings);
 
-            groups.put(groupId, group);
+            // Re-verify under userGroupLock immediately before publishing to close race window (#4502)
+            synchronized (userGroupLock) {
+                if (group.getUserGroupIds() != null) {
+                    for (String userGroupId : group.getUserGroupIds()) {
+                        ElastiCacheUserGroup userGroup = getUserGroup(userGroupId);
+                        requireAssociable(userGroup, group.isEncryptedInTransit(), group.getEngine(), group.getEngineVersion());
+                    }
+                }
+                groups.put(groupId, group);
+            }
             LOG.infov("Cluster-mode replication group {0} created, configuration endpoint={1}:{2}",
                     groupId, endpointHost, String.valueOf(configurationEndpoint.port()));
             return group;
@@ -1339,7 +1358,36 @@ public class ElastiCacheService implements ResourceProvider {
             String ipDiscovery,
             Boolean atRestEncryptionEnabled,
             String region,
-            Map<String, String> tags) {
+            Map<String, String> tags,
+            Boolean transitEncryptionEnabled) {
+
+        public CreateCacheClusterRequest(
+                String cacheClusterId,
+                String engine,
+                String engineVersion,
+                String cacheNodeType,
+                Integer numCacheNodes,
+                Integer port,
+                AuthMode authMode,
+                String authToken,
+                String cacheParameterGroupName,
+                String cacheSubnetGroupName,
+                Integer snapshotRetentionLimit,
+                String snapshotWindow,
+                String preferredMaintenanceWindow,
+                String preferredAvailabilityZone,
+                List<String> securityGroupIds,
+                String networkType,
+                String ipDiscovery,
+                Boolean atRestEncryptionEnabled,
+                String region,
+                Map<String, String> tags) {
+            this(cacheClusterId, engine, engineVersion, cacheNodeType, numCacheNodes, port,
+                    authMode, authToken, cacheParameterGroupName, cacheSubnetGroupName,
+                    snapshotRetentionLimit, snapshotWindow, preferredMaintenanceWindow,
+                    preferredAvailabilityZone, securityGroupIds, networkType, ipDiscovery,
+                    atRestEncryptionEnabled, region, tags, null);
+        }
     }
 
     public CacheCluster createCacheCluster(CreateCacheClusterRequest request) {
@@ -1569,6 +1617,7 @@ public class ElastiCacheService implements ResourceProvider {
         cluster.setIpDiscovery(request.ipDiscovery() != null && !request.ipDiscovery().isBlank()
                 ? request.ipDiscovery() : "ipv4");
         cluster.setAtRestEncryptionEnabled(Boolean.TRUE.equals(request.atRestEncryptionEnabled()));
+        cluster.setTransitEncryptionEnabled(request.transitEncryptionEnabled());
         if (request.securityGroupIds() != null && !request.securityGroupIds().isEmpty()) {
             cluster.setSecurityGroupIds(new ArrayList<>(request.securityGroupIds()));
         }
@@ -2235,6 +2284,16 @@ public class ElastiCacheService implements ResourceProvider {
                             }
                             requireIamEngineVersionCompatible(group.getEngine(), group.getEngineVersion());
                         }
+                    }
+                }
+                // Validate replication groups where user is directly associated (#4502)
+                for (ReplicationGroup group : groups.scan(k -> true)) {
+                    if (group.getAssociatedUserIds() != null && group.getAssociatedUserIds().contains(userId)) {
+                        if (!group.isEncryptedInTransit()) {
+                            throw new AwsException("InvalidParameterCombination",
+                                    "Transit encryption must be enabled to use IAM authentication.", 400);
+                        }
+                        requireIamEngineVersionCompatible(group.getEngine(), group.getEngineVersion());
                     }
                 }
             }
