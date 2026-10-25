@@ -47,6 +47,7 @@ class ElastiCacheQueryHandlerTest {
         memcachedService = mock(ElastiCacheMemcachedService.class);
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getRegion()).thenReturn("us-east-1");
+        when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         handler = new ElastiCacheQueryHandler(sigV4Validator, service, memcachedService, regionResolver,
                 mock(ElastiCacheServerlessQueryHandler.class));

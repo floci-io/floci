@@ -1947,9 +1947,9 @@ class ElastiCacheServiceTest {
                     List.of("default-pass"), "on ~* +@all", null);
             svc.createUserGroup("shared-ug", "redis", List.of("default-user-id"), "us-east-1");
             svc.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
-                    "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", null, null, null, null, null,
+                    "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0", null, null, null, null,
                     null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(),
-                    List.of("shared-ug"), null));
+                    List.of("shared-ug"), null, true));
         });
         accountA.start();
         assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "create never reached container start");
@@ -2774,8 +2774,9 @@ class ElastiCacheServiceTest {
     @Test
     void modifyReplicationGroupAssociatingUserGroupWithIamUsersRequiresTransitEncryption() {
         service.createReplicationGroup("grp-no-transit", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        service.createUser("default", "default", AuthMode.PASSWORD, List.of("pass"), "on ~* +@all", "redis");
         service.createUser("iam-member", "iam-member", AuthMode.IAM, List.of(), "on ~* +@all", "redis");
-        service.createUserGroup("iam-ug-notls", "redis", List.of("iam-member"), "us-east-1");
+        service.createUserGroup("iam-ug-notls", "redis", List.of("default", "iam-member"), "us-east-1");
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.modifyReplicationGroup("grp-no-transit", List.of("iam-ug-notls"), null));
@@ -2791,8 +2792,9 @@ class ElastiCacheServiceTest {
                 ReplicationGroupSettings.defaults(), Map.of(), null, null);
         service.createReplicationGroup(req);
 
+        service.createUser("default", "default", AuthMode.PASSWORD, List.of("pass"), "on ~* +@all", "redis");
         service.createUser("iam-redis-user", "iam-redis-user", AuthMode.IAM, List.of(), "on ~* +@all", "redis");
-        service.createUserGroup("iam-redis-ug", "redis", List.of("iam-redis-user"), "us-east-1");
+        service.createUserGroup("iam-redis-ug", "redis", List.of("default", "iam-redis-user"), "us-east-1");
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.modifyReplicationGroup("grp-redis-62-enc", List.of("iam-redis-ug"), null));
