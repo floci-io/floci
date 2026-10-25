@@ -825,6 +825,55 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     /**
+     * Closes 10-NATIVE-STATUS for npm: a plain {@code npm install} download of an Archived
+     * version's real tarball must 404 against the live Verdaccio sidecar, even though the tarball
+     * itself is still sitting there untouched. Its own package, not {@link #PACKAGE_NAME}, so
+     * archiving it can't disturb any other ordered test in this class.
+     */
+    @Test
+    @Order(22)
+    void archivingAVersionBlocksItsRealVerdaccioTarballDownloadWhileLeavingTheBytesInPlace() {
+        String packageName = "archive-download-pkg";
+        byte[] tarball = "archive download throwaway tarball".getBytes(StandardCharsets.UTF_8);
+        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
+                + "\",\"version\":\"1.0.0\",\"dist\":{\"tarball\":\"http://ignored/" + packageName + "-1.0.0.tgz\"}}},"
+                + "\"_attachments\":{\"" + packageName + "-1.0.0.tgz\":{\"content_type\":\"application/octet-stream\","
+                + "\"data\":\"" + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length
+                + "}}}";
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"targetStatus\":\"Archived\"}")
+                .post("/v1/package/versions/update_status?domain=" + DOMAIN + "&repository=" + REPO
+                        + "&format=npm&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions['1.0.0'].status", equalTo("Archived"));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName + "/-/" + packageName
+                        + "-1.0.0.tgz")
+                .then().statusCode(404);
+
+        // Proves the block above is this check's own override, not Verdaccio having genuinely
+        // lost the tarball: un-archiving must make the exact same bytes fetchable again, with
+        // nothing re-published in between.
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"targetStatus\":\"Published\"}")
+                .post("/v1/package/versions/update_status?domain=" + DOMAIN + "&repository=" + REPO
+                        + "&format=npm&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions['1.0.0'].status", equalTo("Published"));
+        byte[] fetchedAfterUnarchive = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName + "/-/" + packageName
+                        + "-1.0.0.tgz")
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertArrayEquals(tarball, fetchedAfterUnarchive);
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code VerdaccioSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container, not the repository-record

@@ -1995,17 +1995,13 @@ public class CodeArtifactService implements Resettable {
      * one status that still allows a normal download ("if the Unlisted package version is already
      * referenced in an npm package-lock.json file, it can still be downloaded and installed").
      *
-     * <p><b>Known gap, not fixed here (flagged by Qodo review on the PR that added {@code
-     * DisposePackageVersions}):</b> this only guards {@code GetPackageVersionAsset} itself. The
-     * native per-format data planes ({@code CodeArtifactMavenController}'s GAV path, {@code
-     * CodeArtifactNpmDataPlane}'s tarball route, {@code CodeArtifactPypiController}'s raw
-     * filename-only download route, {@code CodeArtifactNuGetController}'s content route) proxy
-     * straight to each sidecar and never consult this override at all, for any purpose, so a
-     * plain {@code pip install}/{@code npm install}/{@code mvn} fetch against an Archived version
-     * can still download it. Fixing this means threading status awareness into four independently
-     * shaped native protocols (pypi's own download route does not even carry a version in its
-     * URL, only a filename, unlike the other three), a feature-family-sized gap closer to Package
-     * Groups than a quick patch, tracked in the private design memo, not silently dropped.
+     * <p>The native per-format data planes ({@code CodeArtifactMavenController}'s GAV path,
+     * {@code CodeArtifactNpmDataPlane}'s tarball route, {@code CodeArtifactPypiController}'s raw
+     * filename-only download route, {@code CodeArtifactNuGetController}'s content route) each
+     * call this same check too, via {@link #requireContainerBackedVersionDownloadable}, before
+     * proxying a GET straight to their own sidecar: see that method's own javadoc for why only
+     * {@code Archived} needs an active block there (a {@code Disposed} version's native download
+     * already 404s against the sidecar directly, since its bytes are genuinely gone).
      */
     private static void requireAssetDownloadable(String status, String version) {
         if ("Archived".equals(status) || "Disposed".equals(status)) {
@@ -2174,6 +2170,37 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
+     * The download-side counterpart to {@link #requireContainerBackedVersionNotArchivedOrDisposed}
+     * above: blocks a native per-format download route (Maven's GAV path, npm's tarball route,
+     * nuget's content route, pypi's filename route) from serving an {@code Archived} version's
+     * bytes, the same way {@link #getContainerBackedPackageVersionAsset} already blocks it for
+     * {@code GetPackageVersionAsset} itself, via this exact same {@link #requireAssetDownloadable}.
+     * {@code Disposed} needs no real check here: {@link #deleteContainerBackedVersionAssets}
+     * already deletes the sidecar's own bytes, so a disposed version's native download already
+     * 404s against the sidecar directly, with nothing left here to block, but this still covers
+     * it anyway, so a caller never has to reason about which of the two statuses this does or
+     * doesn't close.
+     *
+     * <p>Unlike {@link #requireContainerBackedVersionNotArchivedOrDisposed}, this takes an
+     * already-resolved {@code owner} and {@code repoId} rather than a raw {@code domainOwner}:
+     * every native controller has already resolved both, {@code owner} from its own token scope,
+     * {@code repoId} from its own {@link #ensureFormatContainerId} call, before it ever reaches
+     * this check, so re-resolving either here would only repeat work the caller already paid for.
+     *
+     * <p>Not {@code synchronized}, unlike that counterpart: nothing here writes, so there is no
+     * race to close, the same reasoning that already leaves {@link
+     * #getContainerBackedPackageVersionAsset}'s own call to {@link
+     * #currentContainerBackedVersionStatus} unsynchronized.
+     */
+    public void requireContainerBackedVersionDownloadable(String owner, String region, String domain,
+            String repository, String format, String namespace, String packageName, String version,
+            String repoId) {
+        PackageVersionStatusOverride state = currentContainerBackedVersionStatus(owner, region, domain, repository,
+                format, namespace, packageName, version, repoId);
+        requireAssetDownloadable(state.status(), version);
+    }
+
+    /**
      * Raised by Greptile's review of this same PR: a native publish's own check, real sidecar
      * write, and override clear are three separate calls (necessarily, since the real write sits
      * in between and this class's own lock cannot be held across it), so a concurrent {@link
@@ -2263,8 +2290,15 @@ public class CodeArtifactService implements Resettable {
      * then looked up individually in {@link #containerBackedPackageVersionStatusOverrides} itself.
      * Empty for a package nothing has ever called {@link #updatePackageVersionsStatus} or {@link
      * #disposePackageVersions} on, which is every container-backed package before this existed.
+     *
+     * <p>Public (not just this class's own internal callers) for the same reason {@link
+     * #containerBackedOverriddenVersionStatusesByRepository} already is: raised by Greptile's
+     * review, a real npm tarball GET names a package directly (unlike pypi's bare filename), so
+     * {@code CodeArtifactNpmDataPlane}'s own download-side guard can check this cheaply, in
+     * memory, before ever paying for a live Verdaccio packument fetch to resolve which version
+     * (if any) a requested filename actually belongs to.
      */
-    private Map<String, PackageVersionStatusOverride> containerBackedOverridesForPackage(String owner, String region,
+    public Map<String, PackageVersionStatusOverride> containerBackedOverridesForPackage(String owner, String region,
             String domain, String repository, String format, String namespace, String packageName) {
         String accountingName = accountingPackageName(format, packageName);
         Set<String> versions = containerBackedOverriddenVersionsByPackage.get(ownerScopedKey(owner,

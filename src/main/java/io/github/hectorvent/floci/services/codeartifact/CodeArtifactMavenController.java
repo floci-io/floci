@@ -159,8 +159,11 @@ public class CodeArtifactMavenController {
     @Produces(MediaType.WILDCARD)
     public Response fetch(@Context HttpHeaders headers, @PathParam("domain") String domain,
                            @PathParam("repository") String repository, @PathParam("gav") String gav) {
-        String repoId = requireScope(headers, domain, repository).repoId();
-        return reposilite.fetchArtifact(repoId, gav)
+        MavenRequestScope scope = requireScope(headers, domain, repository);
+        if (!isDownloadable(scope, domain, repository, gav)) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return reposilite.fetchArtifact(scope.repoId(), gav)
                 .map(this::toResponse)
                 .orElseGet(() -> Response.status(Response.Status.NOT_FOUND).build());
     }
@@ -168,10 +171,32 @@ public class CodeArtifactMavenController {
     @HEAD
     public Response head(@Context HttpHeaders headers, @PathParam("domain") String domain,
                           @PathParam("repository") String repository, @PathParam("gav") String gav) {
-        String repoId = requireScope(headers, domain, repository).repoId();
-        return reposilite.artifactExists(repoId, gav)
+        MavenRequestScope scope = requireScope(headers, domain, repository);
+        if (!isDownloadable(scope, domain, repository, gav)) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return reposilite.artifactExists(scope.repoId(), gav)
                 ? Response.ok().build()
                 : Response.status(Response.Status.NOT_FOUND).build();
+    }
+
+    /**
+     * {@code true} unless {@code gav} names an exact version this service knows is {@code
+     * Archived}: {@link #parseNamespaceAndPackageName}'s own version element is {@code null} for a
+     * bare {@code maven-metadata.xml} path (no specific version to block), which this treats the
+     * same as "not a well-formed, versioned GAV at all": both fall through to Reposilite
+     * unchecked, exactly as {@code deploy} above already does for the identical case.
+     */
+    private boolean isDownloadable(MavenRequestScope scope, String domain, String repository, String gav) {
+        return parseNamespaceAndPackageName(gav).filter(c -> c[2] != null).map(c -> {
+            try {
+                service.requireContainerBackedVersionDownloadable(scope.owner(), scope.region(), domain, repository,
+                        "maven", c[0], c[1], c[2], scope.repoId());
+                return true;
+            } catch (AwsException e) {
+                return false;
+            }
+        }).orElse(true);
     }
 
     private Response toResponse(FetchedArtifact artifact) {

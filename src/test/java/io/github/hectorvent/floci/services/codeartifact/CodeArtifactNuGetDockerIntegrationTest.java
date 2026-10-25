@@ -514,6 +514,53 @@ class CodeArtifactNuGetDockerIntegrationTest {
                 + packageId.toLowerCase(Locale.ROOT) + " among " + names);
     }
 
+    /**
+     * Closes 10-NATIVE-STATUS for nuget: a plain {@code dotnet restore}/{@code nuget install}
+     * download of an Archived version's real {@code .nupkg} must 404 against the live BaGetter
+     * sidecar, even though the file itself is still sitting there untouched. Its own package, not
+     * {@link #PACKAGE_ID}, so archiving it can't disturb any other ordered test in this class.
+     */
+    @Test
+    @Order(17)
+    void archivingAVersionBlocksItsRealBagetterContentDownloadWhileLeavingTheBytesInPlace() {
+        String packageId = "Archive.Download.Package";
+        String lowerId = packageId.toLowerCase(Locale.ROOT);
+        byte[] nupkg = buildNupkg(packageId, VERSION, "Archive download throwaway.", null, null);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(pushBody("boundary123", nupkg))
+                .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
+                .then().statusCode(201);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"" + VERSION + "\"],\"targetStatus\":\"Archived\"}")
+                .post("/v1/package/versions/update_status?domain=" + DOMAIN + "&repository=" + REPO
+                        + "&format=nuget&package=" + packageId)
+                .then().statusCode(200)
+                .body("successfulVersions['" + VERSION + "'].status", equalTo("Archived"));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/v3/package/" + lowerId + "/" + VERSION + "/"
+                        + lowerId + "." + VERSION + ".nupkg")
+                .then().statusCode(404);
+
+        // Proves the block above is this check's own override, not BaGetter having genuinely
+        // lost the file: un-archiving must make the exact same bytes fetchable again, with
+        // nothing re-pushed in between.
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"" + VERSION + "\"],\"targetStatus\":\"Published\"}")
+                .post("/v1/package/versions/update_status?domain=" + DOMAIN + "&repository=" + REPO
+                        + "&format=nuget&package=" + packageId)
+                .then().statusCode(200)
+                .body("successfulVersions['" + VERSION + "'].status", equalTo("Published"));
+        byte[] fetchedAfterUnarchive = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/v3/package/" + lowerId + "/" + VERSION + "/"
+                        + lowerId + "." + VERSION + ".nupkg")
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertArrayEquals(nupkg, fetchedAfterUnarchive);
+    }
+
     private static long describeDomainAssetSizeBytes() {
         return given().header("Authorization", AUTH)
                 .get("/v1/domain?domain=" + DOMAIN)

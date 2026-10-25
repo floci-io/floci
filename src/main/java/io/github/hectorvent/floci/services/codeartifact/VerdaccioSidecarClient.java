@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 
@@ -361,6 +362,33 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         String tarballUrl = versionNode.path("dist").path("tarball").asText("");
         String tarballFilename = tarballUrl.substring(tarballUrl.lastIndexOf('/') + 1);
         return tarballFilename.isEmpty() ? null : tarballFilename;
+    }
+
+    /**
+     * The exact version whose tarball Verdaccio's own packument records {@code filename} under,
+     * found by checking every version's own {@link #tarballFilenameFor} rather than assuming
+     * {@code filename} embeds its version in the {@code <packageName>-<version>.tgz} shape this
+     * emulator's own publish path always writes: nothing in the real npm publish protocol
+     * requires a client-chosen {@code dist.tarball} name to follow that convention, so {@code
+     * CodeArtifactNpmDataPlane}'s own download-side Archived guard resolves the real coordinate
+     * here instead of guessing from the filename's own text. Empty when the package doesn't
+     * exist, or no version's own tarball matches.
+     */
+    public Optional<String> versionForTarballFilename(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName, String filename) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        JsonNode document = fetchPackageDocument(baseUrl, namespace, packageName).orElse(null);
+        if (document == null) {
+            return Optional.empty();
+        }
+        Iterator<String> versions = document.path("versions").fieldNames();
+        while (versions.hasNext()) {
+            String version = versions.next();
+            if (filename.equals(tarballFilenameFor(document, version))) {
+                return Optional.of(version);
+            }
+        }
+        return Optional.empty();
     }
 
     /**
