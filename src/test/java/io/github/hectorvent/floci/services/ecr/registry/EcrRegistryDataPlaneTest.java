@@ -488,6 +488,7 @@ class EcrRegistryDataPlaneTest {
     void aWriteResetDuringTheTagCheckNeverReachesTheRegistryAndFreesTheTag() throws Exception {
         AtomicReference<HttpServerRequest> heldCheck = new AtomicReference<>();
         CountDownLatch checkArrived = new CountDownLatch(1);
+        CountDownLatch tagReleased = new CountDownLatch(1);
         AtomicInteger manifestWrites = new AtomicInteger();
         AtomicReference<String> manifestBody = new AtomicReference<>();
         HttpServer registry = vertx.createHttpServer()
@@ -515,7 +516,7 @@ class EcrRegistryDataPlaneTest {
         HttpServer dataPlane = null;
         HttpClient client = null;
         try {
-            dataPlane = dataPlane(registry, true);
+            dataPlane = dataPlane(registry, true, tagReleased);
             client = vertx.createHttpClient(new HttpClientOptions()
                     .setProtocolVersion(HttpVersion.HTTP_2)
                     .setHttp2ClearTextUpgrade(false));
@@ -532,9 +533,8 @@ class EcrRegistryDataPlaneTest {
             assertTrue(checkArrived.await(5, TimeUnit.SECONDS), "the data plane checks the tag first");
 
             write.reset();
-            // A PING answered after the reset means the data plane has read the reset first.
-            write.connection().ping(Buffer.buffer("12345678"))
-                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertTrue(tagReleased.await(2, TimeUnit.SECONDS),
+                    "the reset releases the tag while its registry check is still blocked");
             heldCheck.get().response().setStatusCode(404).end();
 
             assertEquals(201, putManifest(dataPlane.actualPort()).statusCode());
@@ -557,6 +557,10 @@ class EcrRegistryDataPlaneTest {
      * us-east-1 is stored as {@code legacy/platform-api}, with immutable tags when asked.
      */
     private HttpServer dataPlane(HttpServer registry, boolean immutableTags) throws Exception {
+        return dataPlane(registry, immutableTags, null);
+    }
+
+    private HttpServer dataPlane(HttpServer registry, boolean immutableTags, CountDownLatch tagReleased) throws Exception {
         EcrRegistryManager registryManager = Mockito.mock(EcrRegistryManager.class);
         EcrService ecrService = Mockito.mock(EcrService.class);
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
@@ -569,7 +573,13 @@ class EcrRegistryDataPlaneTest {
         // The tag lock lives in EcrService, so the mock holds a real one.
         Set<String> heldTags = ConcurrentHashMap.newKeySet();
         when(ecrService.claimImmutableTag(anyString())).thenAnswer(call -> heldTags.add(call.getArgument(0)));
-        Mockito.doAnswer(call -> heldTags.remove(call.getArgument(0)))
+        Mockito.doAnswer(call -> {
+            boolean removed = heldTags.remove(call.getArgument(0));
+            if (removed && tagReleased != null) {
+                tagReleased.countDown();
+            }
+            return null;
+        })
                 .when(ecrService).releaseImmutableTag(anyString());
         when(ecrService.registryRepositoryName("platform/api", "000000000000", "us-east-1"))
                 .thenReturn("legacy/platform-api");

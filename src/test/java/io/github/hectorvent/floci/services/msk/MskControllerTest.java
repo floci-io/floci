@@ -25,6 +25,7 @@ import static org.mockito.Mockito.when;
 class MskControllerTest {
 
     private MskService mskService;
+    private MskScramSecretsService mskScramSecretsService;
     private MskController controller;
 
     // A configuration exactly as the pre-revision-history schema persisted it - the one case
@@ -45,7 +46,8 @@ class MskControllerTest {
     @BeforeEach
     void setUp() {
         mskService = Mockito.mock(MskService.class);
-        controller = new MskController(mskService);
+        mskScramSecretsService = Mockito.mock(MskScramSecretsService.class);
+        controller = new MskController(mskService, mskScramSecretsService);
     }
 
     private static MskConfiguration legacyConfiguration() throws Exception {

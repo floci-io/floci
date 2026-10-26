@@ -25,6 +25,9 @@ class DynamoDbBackupIntegrationTest {
     private static final String OTHER_REGION_AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260215/eu-west-2/dynamodb/aws4_request, "
             + "SignedHeaders=host, Signature=abc";
+    private static final String OTHER_PARTITION_AUTH =
+            "AWS4-HMAC-SHA256 Credential=AKID/20260215/cn-north-1/dynamodb/aws4_request, "
+            + "SignedHeaders=host, Signature=abc";
     private static final String OTHER_ACCOUNT_AUTH =
             "AWS4-HMAC-SHA256 Credential=000000000001/20260215/us-east-1/dynamodb/aws4_request, "
             + "SignedHeaders=host, Signature=abc";
@@ -151,6 +154,55 @@ class DynamoDbBackupIntegrationTest {
         ddb("DeleteBackup", "{}")
                 .statusCode(400)
                 .body("message", equalTo("Invalid Backup ARN"));
+    }
+
+    @Test
+    void backupArnTableNameAndPartitionAreChecked() {
+        String backup = "/backup/01700000000000-abcdef12";
+        for (String table : List.of("tt", "t".repeat(256))) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + TABLE_ARN_PREFIX + table + backup + "\"}")
+                    .statusCode(400)
+                    .body("message", equalTo("Invalid Backup ARN"));
+        }
+        for (String arn : List.of("arn:aws-cn:dynamodb:us-east-1:000000000000:table/BackupIT-none" + backup,
+                "arn:aws:dynamodb:cn-north-1:000000000000:table/BackupIT-none" + backup)) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                    .statusCode(400)
+                    .body("message", equalTo("Invalid Request: BackupArn is not valid"));
+        }
+        for (String arn : List.of(TABLE_ARN_PREFIX + "ttt" + backup, TABLE_ARN_PREFIX + "t".repeat(255) + backup,
+                "arn:aws-cn:dynamodb:cn-north-1:000000000000:table/BackupIT-none" + backup)) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                    .statusCode(400)
+                    .body("__type", containsString("BackupNotFoundException"));
+        }
+    }
+
+    @Test
+    void backupArnOfAnotherAccountIsDeniedOnceItSplitsIntoFields() {
+        String id = "01700000000000-abcdef12";
+        String other = "arn:aws:dynamodb:us-east-1:123456789012:";
+        for (String arn : List.of(other + "table/BackupIT-none/backup/xy", other + "table/BackupIT-none",
+                "arn:aws:s3:nowhere-1:123456789012:table/BackupIT-none/backup/1700000000000-abcdef12",
+                "arn:aws:dynamodb:us-east-1::table/BackupIT-none/backup/" + id)) {
+            for (String action : List.of("DescribeBackup", "DeleteBackup")) {
+                ddb(action, "{\"BackupArn\": \"" + arn + "\"}")
+                        .statusCode(400)
+                        .body("__type", containsString("AccessDeniedException"))
+                        .body("message", equalTo("Access is denied"));
+            }
+            ddb("RestoreTableFromBackup", "{\"BackupArn\": \"" + arn + "\", \"TargetTableName\": \"a b\"}")
+                    .statusCode(400)
+                    .body("__type", containsString("AccessDeniedException"));
+        }
+        for (String arn : List.of("arn:aws:dynamodb:us-east-1:123456789012", other,
+                "arn::dynamodb:us-east-1:123456789012:table/BackupIT-none/backup/" + id,
+                "arn:aws::us-east-1:123456789012:table/BackupIT-none/backup/" + id,
+                "ARN:aws:dynamodb:us-east-1:123456789012:table/BackupIT-none/backup/" + id)) {
+            ddb("DescribeBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                    .statusCode(400)
+                    .body("message", equalTo("Invalid Backup ARN"));
+        }
     }
 
     @Test
@@ -291,6 +343,46 @@ class DynamoDbBackupIntegrationTest {
                 .statusCode(400)
                 .body("message", equalTo(after.formatted("TimeRangeLowerBound")));
         listBackupsBetween("100000000000", "-0.001")
+                .statusCode(400)
+                .body("message", equalTo("One or more parameter values were invalid: "
+                        + "Time range lower bound must be less than or equal to upper bound"));
+    }
+
+    @Test
+    void listBackupsChecksTheExclusiveStartBackupArn() {
+        String table = "BackupIT-start";
+        String backup = "/backup/01700000000000-abcdef12";
+        String start = TABLE_ARN_PREFIX + table + backup;
+        String supplied = "Invalid Request: The supplied ExclusiveStartBackupArn ";
+
+        listBackupsFrom(table, TABLE_ARN_PREFIX + "tt" + backup)
+                .statusCode(400)
+                .body("message", equalTo("Invalid Backup ARN"));
+        listBackupsFrom(table, TABLE_ARN_PREFIX + table + "/backup/1700000000000-abcdef12")
+                .statusCode(400)
+                .body("message", equalTo(supplied + "is not a valid backup arn"));
+        listBackupsFrom(table, start.replace("000000000000", ""))
+                .statusCode(400)
+                .body("message", equalTo(supplied + "is not a valid backup arn"));
+        listBackupsFrom(table, start.replace("us-east-1:000000000000", "eu-west-2:123456789012"))
+                .statusCode(400)
+                .body("message", equalTo(supplied + "does not match the region"));
+        listBackupsFrom(table, start.replace("000000000000", "123456789012"))
+                .statusCode(400)
+                .body("message", equalTo(supplied + "does not match the account"));
+        listBackupsFrom(table, TABLE_ARN_PREFIX + "BackupIT-other" + backup)
+                .statusCode(400)
+                .body("message", equalTo(supplied + "does not match the table name predicate"));
+        ddb("ListBackups", "{\"ExclusiveStartBackupArn\": \"" + TABLE_ARN_PREFIX + "BackupIT-other" + backup + "\"}")
+                .statusCode(200);
+
+        String reversedRange = "\"TimeRangeLowerBound\": 2, \"TimeRangeUpperBound\": 1";
+        ddb("ListBackups", "{\"ExclusiveStartBackupArn\": \"" + TABLE_ARN_PREFIX + "tt" + backup + "\", "
+                + reversedRange + "}")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Backup ARN"));
+        ddb("ListBackups", "{\"ExclusiveStartBackupArn\": \"" + start.replace("000000000000", "123456789012")
+                + "\", " + reversedRange + "}")
                 .statusCode(400)
                 .body("message", equalTo("One or more parameter values were invalid: "
                         + "Time range lower bound must be less than or equal to upper bound"));
@@ -461,6 +553,80 @@ class DynamoDbBackupIntegrationTest {
                         + "failed to satisfy constraint: Member must satisfy enum value set: "
                         + "[PROVISIONED, PAY_PER_REQUEST]; Value 'a b' at 'targetTableName' failed to satisfy "
                         + "constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+"));
+    }
+
+    @Test
+    void restoreTableFromBackupChecksTheBackupIdAfterTheRequest() {
+        String arn = TABLE_ARN_PREFIX + "BackupIT-none/backup/1700000000000-abcdef12";
+        ddb("RestoreTableFromBackup", "{\"BackupArn\": \"" + arn + "\"}")
+                .statusCode(400)
+                .body("message", equalTo("The parameter 'TableName' is required but was not present in the request"));
+        ddb("RestoreTableFromBackup", "{\"BackupArn\": \"" + arn + "\", \"TargetTableName\": \"BackupIT-never\"}")
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: BackupArn is not valid"));
+    }
+
+    @Test
+    void restoreAcrossRegionsNeedsAnSseOverride() {
+        String table = "BackupIT-cross-region";
+        createPlainTable(table);
+        putItem(table, "k1");
+        String backupArn = createBackup(table, "cross-region");
+        String sse = ", \"SSESpecificationOverride\": {\"Enabled\": true, \"SSEType\": \"KMS\"}";
+        String missing = TABLE_ARN_PREFIX + table + "/backup/01700000000000-abcdef12";
+        String badId = TABLE_ARN_PREFIX + table + "/backup/1700000000000-abcdef12";
+
+        for (String request : List.of(restoreRequest(backupArn, ""), restoreRequest(missing, ""),
+                restoreRequest(badId, ""), restoreRequest(backupArn, ", \"SSESpecificationOverride\": null"))) {
+            signedWith(OTHER_REGION_AUTH, "RestoreTableFromBackup", request)
+                    .statusCode(400)
+                    .body("message", equalTo(
+                            "Invalid Request: sseSpecificationOverride must be provided for cross-region restores"));
+        }
+        signedWith(OTHER_REGION_AUTH, "RestoreTableFromBackup", restoreRequest(badId, sse))
+                .statusCode(400)
+                .body("message", equalTo("Invalid Request: BackupArn is not valid"));
+        signedWith(OTHER_REGION_AUTH, "RestoreTableFromBackup", restoreRequest(missing, sse))
+                .statusCode(400)
+                .body("__type", containsString("BackupNotFoundException"));
+
+        signedWith(OTHER_REGION_AUTH, "RestoreTableFromBackup", """
+                {"BackupArn": "%s", "TargetTableName": "BackupIT-cross-region-copy"%s}
+                """.formatted(backupArn, sse))
+                .statusCode(200)
+                .body("TableDescription.TableArn",
+                        equalTo("arn:aws:dynamodb:eu-west-2:000000000000:table/BackupIT-cross-region-copy"))
+                .body("TableDescription.RestoreSummary.SourceBackupArn", equalTo(backupArn))
+                .body("TableDescription.RestoreSummary.SourceTableArn", equalTo(TABLE_ARN_PREFIX + table))
+                .body("TableDescription.SSEDescription.KMSMasterKeyArn", startsWith("arn:aws:kms:eu-west-2:"));
+        signedWith(OTHER_REGION_AUTH, "Scan", "{\"TableName\": \"BackupIT-cross-region-copy\"}")
+                .statusCode(200)
+                .body("Items.pk.S", contains("k1"));
+    }
+
+    @Test
+    void restoreOfABackupInAnotherPartitionFails() {
+        String table = "BackupIT-other-partition";
+        signedWith(OTHER_PARTITION_AUTH, "CreateTable", plainTableBody(table)).statusCode(200);
+        String backupArn = signedWith(OTHER_PARTITION_AUTH, "CreateBackup",
+                "{\"TableName\": \"" + table + "\", \"BackupName\": \"other-partition\"}")
+                .statusCode(200)
+                .extract().path("BackupDetails.BackupArn");
+        String target = "BackupIT-other-partition-target";
+        createPlainTable(target);
+        String sse = "\"SSESpecificationOverride\": {\"Enabled\": true}";
+
+        ddb("RestoreTableFromBackup", restoreRequest(backupArn, ""))
+                .statusCode(400)
+                .body("message", equalTo(
+                        "Invalid Request: sseSpecificationOverride must be provided for cross-region restores"));
+        restore(backupArn, target, sse)
+                .statusCode(400)
+                .body("__type", containsString("TableAlreadyExistsException"));
+        ddb("RestoreTableFromBackup", restoreRequest(backupArn, ", " + sse))
+                .statusCode(500)
+                .body("__type", containsString("InternalServerError"))
+                .body("message", equalTo("Internal server error"));
     }
 
     @Test
@@ -765,14 +931,18 @@ class DynamoDbBackupIntegrationTest {
     }
 
     private void createPlainTable(String table) {
-        ddb("CreateTable", """
+        ddb("CreateTable", plainTableBody(table)).statusCode(200);
+    }
+
+    private static String plainTableBody(String table) {
+        return """
                 {
                     "TableName": "%s",
                     "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
                     "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
                     "ProvisionedThroughput": {"ReadCapacityUnits": 1, "WriteCapacityUnits": 1}
                 }
-                """.formatted(table)).statusCode(200);
+                """.formatted(table);
     }
 
     private void putItem(String table, String pk) {
@@ -799,9 +969,28 @@ class DynamoDbBackupIntegrationTest {
                 """.formatted(backupArn, target, overrides));
     }
 
+    private static String restoreRequest(String backupArn, String overrides) {
+        return "{\"BackupArn\": \"" + backupArn + "\", \"TargetTableName\": \"BackupIT-never\"" + overrides + "}";
+    }
+
+    private static ValidatableResponse signedWith(String authorization, String action, String body) {
+        return given().header("Authorization", authorization)
+                .header("X-Amz-Target", "DynamoDB_20120810." + action)
+                .contentType(CONTENT_TYPE)
+                .body(body)
+                .when().post("/")
+                .then();
+    }
+
     private static ValidatableResponse listBackupsBetween(String lowerBound, String upperBound) {
         return ddb("ListBackups", """
                 {"TimeRangeLowerBound": %s, "TimeRangeUpperBound": %s}
                 """.formatted(lowerBound, upperBound));
+    }
+
+    private static ValidatableResponse listBackupsFrom(String tableName, String exclusiveStartBackupArn) {
+        return ddb("ListBackups", """
+                {"TableName": "%s", "ExclusiveStartBackupArn": "%s"}
+                """.formatted(tableName, exclusiveStartBackupArn));
     }
 }

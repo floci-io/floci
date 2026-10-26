@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.AwsCanonicalUserId;
 import org.jboss.logging.Logger;
 
 final class S3AclPublicAccessEvaluator {
@@ -55,14 +56,25 @@ final class S3AclPublicAccessEvaluator {
         }
     }
 
-    static boolean aclGrantsNonOwner(String acl, String ownerId) {
+    /**
+     * Whether an ACL grants anyone other than the owner account: every grant must name the
+     * owner, whose canonical user ID is what generated ACLs carry and whose account ID is
+     * accepted for ACLs written before Floci derived one. An ACL with no grants names nobody,
+     * so ownership enforcement rejects it too.
+     */
+    static boolean aclGrantsNonOwner(String acl, String ownerAccount) {
         if (acl == null || acl.isBlank()) {
             return false;
         }
         try {
             S3AclPolicy policy = S3AclPolicy.parse(acl);
-            return policy.grants().isEmpty() || policy.grants().stream()
-                    .anyMatch(grant -> !grant.grantee().isCanonicalUser(ownerId));
+            if (policy.grants().isEmpty()) {
+                return true;
+            }
+            String canonicalId = AwsCanonicalUserId.forAccount(ownerAccount);
+            return policy.grants().stream()
+                    .anyMatch(grant -> !grant.grantee().isCanonicalUser(canonicalId)
+                            && !grant.grantee().isCanonicalUser(ownerAccount));
         } catch (S3AclPolicy.AclParseException e) {
             LOG.debugv(e, "Failed to parse S3 ACL for ownership enforcement");
             return true;

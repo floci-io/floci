@@ -49,10 +49,11 @@ class SesV2RequestShapesTest {
     }
 
     @Test
-    void mapMemberReadsLikeAStructure() {
+    void mapMemberReadsLikeAStructureButExpectsAMap() {
         assertAccepted("ListTenantResources", "{\"Filter\":{\"RESOURCE_TYPE\":\"x\"}}");
         assertRejected("ListTenantResources", "{\"Filter\":[]}", LIST);
-        assertRejected("ListTenantResources", "{\"Filter\":\"x\"}", "Expected null");
+        assertRejected("ListTenantResources", "{\"Filter\":\"x\"}", "Expected map or null");
+        assertRejected("ListTenantResources", "{\"Filter\":1}", "Expected map or null");
         assertRejected("ListTenantResources", "{\"Filter\":{\"RESOURCE_TYPE\":1}}",
                 "NUMBER_VALUE can not be converted to a String");
     }

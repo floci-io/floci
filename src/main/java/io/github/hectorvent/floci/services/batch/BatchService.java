@@ -893,7 +893,7 @@ public class BatchService {
             return listArrayChildren(arrayJobId, request);
         }
         if (multiNodeJobId != null) {
-            return listMultiNodeJobNodes(multiNodeJobId);
+            return listMultiNodeJobNodes(multiNodeJobId, request);
         }
 
         BatchJobQueue queue = resolveJobQueue(jobQueueRef);
@@ -959,18 +959,26 @@ public class BatchService {
         return out;
     }
 
-    // No pagination: realistic node counts are small, so every node is always returned.
-    private ObjectNode listMultiNodeJobNodes(String jobId) {
+    private ObjectNode listMultiNodeJobNodes(String jobId, JsonNode request) {
+        int maxResults = request.hasNonNull("maxResults")
+                ? Math.max(1, Math.min(DEFAULT_MAX_RESULTS, request.path("maxResults").asInt()))
+                : DEFAULT_MAX_RESULTS;
+        int offset = parseNextToken(textOrNull(request, "nextToken"));
         ArrayNode summaries = objectMapper.createArrayNode();
+        ObjectNode out = objectMapper.createObjectNode();
+        out.set("jobSummaryList", summaries);
         getJob(jobId).ifPresent(job -> {
             if (job.getNodeProperties() != null) {
-                for (BatchNodeExecution execution : job.getNodeExecutions()) {
-                    summaries.add(nodeJobSummary(job, execution));
+                List<BatchNodeExecution> executions = job.getNodeExecutions();
+                int end = (int) Math.min(executions.size(), (long) offset + maxResults);
+                for (int index = offset; index < end; index++) {
+                    summaries.add(nodeJobSummary(job, executions.get(index)));
+                }
+                if (end < executions.size()) {
+                    out.put("nextToken", String.valueOf(end));
                 }
             }
         });
-        ObjectNode out = objectMapper.createObjectNode();
-        out.set("jobSummaryList", summaries);
         return out;
     }
 

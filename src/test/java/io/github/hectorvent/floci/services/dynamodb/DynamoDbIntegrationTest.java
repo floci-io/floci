@@ -5,18 +5,22 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.zip.CRC32;
 
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.assertEpochMillisBetween;
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.decimalAt;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -5875,6 +5879,45 @@ given()
             .statusCode(200)
             .body("Table.GlobalSecondaryIndexes.size()", equalTo(1))
             .body("Table.BillingModeSummary.BillingMode", equalTo("PAY_PER_REQUEST"));
+
+        deleteTable(tableName);
+    }
+
+    @Test
+    void tableTimesHaveMilliseconds() throws Exception {
+        String tableName = "CreationMillisTable";
+        long before = System.currentTimeMillis();
+        BigDecimal created = decimalAt(given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200), "/TableDescription/CreationDateTime");
+        long after = System.currentTimeMillis();
+        assertEpochMillisBetween(before, created, after);
+
+        ValidatableResponse described = given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "%s"}
+                """.formatted(tableName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        assertEquals(0, created.compareTo(decimalAt(described, "/Table/CreationDateTime")));
+        assertEquals(0, created.compareTo(
+                decimalAt(described, "/Table/BillingModeSummary/LastUpdateToPayPerRequestDateTime")));
 
         deleteTable(tableName);
     }

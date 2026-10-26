@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambdaweb;
 
 import com.github.dockerjava.api.DockerClient;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.EnforcementFixtures.UserCredentials;
@@ -53,6 +54,9 @@ class LambdaWebIamAuthIntegrationTest {
     S3Service s3Service;
 
     @Inject
+    IamService iamService;
+
+    @Inject
     LambdaWebEnvironmentManager environments;
 
     @Inject
@@ -65,7 +69,8 @@ class LambdaWebIamAuthIntegrationTest {
     @BeforeEach
     void createFunction() throws IOException {
         functionName = "iam-auth-" + Long.toString(System.nanoTime(), 36);
-        s3Service.createBucket(BUCKET, "us-east-1");
+        LambdaWebRoles.trustLambda(iamService, "arn:aws:iam::000000000000:role/web");
+        LambdaWebCodeBuckets.create(s3Service, BUCKET);
         s3Service.putObject(BUCKET, functionName + ".zip", zip(), "application/zip", Map.of());
         int port = baseUri.getPort();
         String name = functionName;

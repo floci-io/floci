@@ -279,7 +279,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         DynamoDbStreamReader.RecordsPage page;
         try {
             page = streamReader.readAfter(stream, shardId, lastSeq,
-                    Math.min(bisectLimit(esm, persistedKey), esm.getBatchSize()));
+                    Math.min(StreamBatchFailures.bisectLimit(esm, bisectLimits, persistedKey), esm.getBatchSize()));
         } catch (AwsException e) {
             if (!TRIMMED_DATA_ACCESS_EXCEPTION.equals(e.getErrorCode())) {
                 throw e;
@@ -296,7 +296,8 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                             + "trim horizon; records between were dropped from the stream",
                     esm.getUuid(), lastSeq);
             page = streamReader.readAfter(stream, shardId, null, Math.min(esm.getBatchSize(),
-                    bisectLimit(esm, StreamBatchFailures.batchStateKey(esm.getUuid(), shardId, null))));
+                    StreamBatchFailures.bisectLimit(esm, bisectLimits,
+                            StreamBatchFailures.batchStateKey(esm.getUuid(), shardId, null))));
         }
         List<DynamoDbStreamReader.Record> records = page.records();
 
@@ -350,7 +351,10 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         String eventJson = buildDynamoDbEvent(matched, esm);
         InvokeResult invokeResult;
         try {
-            invokeResult = executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse);
+            String qualifier = LambdaTargetResolver.mappingQualifier(esm);
+            invokeResult = qualifier == null
+                    ? executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse)
+                    : executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse, 0, qualifier);
         } catch (AwsException e) {
             if ("TooManyRequestsException".equals(e.getErrorCode())) {
                 LOG.infov("DynamoDB Streams ESM {0}: function {1} throttled, shard iterator not advanced",
@@ -417,13 +421,12 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                 clearBatchState(batchKey);
                 dispose(esm, shardId, persistedKey, new PendingFailure(matched, invokeResult,
                         currentRetries, StreamBatchFailures.MAXIMUM_RECORD_AGE_EXCEEDED, newestFetchedSeq));
-            } else if (invokeResult.getFunctionError() != null
-                    && Boolean.TRUE.equals(esm.getBisectBatchOnFunctionError()) && matched.size() > 1) {
+            } else if (StreamBatchFailures.splitsOnFunctionError(esm, invokeResult, matched.size())) {
                 // ponytail: the halved limit is keyed by checkpoint, so once a good half advances the
                 // rest is refetched at full batch size and split again. One window converges on the
                 // poison record in O(log n) invocations, a busy stream in O(log^2 n) worst case;
                 // carrying the right half's end sequence forward would match AWS exactly.
-                int limit = (records.size() + 1) / 2;
+                int limit = StreamBatchFailures.splitBatchSize(records.size());
                 bisectLimits.put(batchKey, limit);
                 LOG.infov("DynamoDB Streams ESM {0}: function error on {1} record(s), bisecting to {2}",
                         esm.getUuid(), records.size(), limit);
@@ -466,12 +469,6 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         retryCounts.remove(key);
         retryNotBefore.remove(key);
         bisectLimits.remove(key);
-    }
-
-    private int bisectLimit(EventSourceMapping esm, String key) {
-        return Boolean.TRUE.equals(esm.getBisectBatchOnFunctionError())
-                ? bisectLimits.getOrDefault(key, Integer.MAX_VALUE)
-                : Integer.MAX_VALUE;
     }
 
     private static String finishedShardKey(String uuid, String shardId) {

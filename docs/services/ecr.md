@@ -17,7 +17,7 @@
 | `DescribeRepositories` | List repositories or fetch by name |
 | `DeleteRepository` | Delete a repository (with `force=true` semantics for non-empty repos) |
 | `GetAuthorizationToken` | Returns a docker-login token + proxy endpoint |
-| `ListImages` | Enumerate tags and digests in a repository |
+| `ListImages` | Enumerate paginated tags and digests in a repository |
 | `DescribeImages` | Image metadata: digest, size, push timestamp, manifest media type |
 | `BatchGetImage` | Fetch image manifests, honoring `acceptedMediaTypes` |
 | `BatchDeleteImage` | Delete images by tag or digest |
@@ -36,6 +36,11 @@
 | `PutRegistryPolicy` / `GetRegistryPolicy` / `DeleteRegistryPolicy` | Registry policy round-trip (stored, not enforced) |
 | `PutReplicationConfiguration` / `DescribeRegistry` | Store the registry's replication rules and return them with the registry ID (stored, not acted on) |
 | `PutRegistryScanningConfiguration` / `GetRegistryScanningConfiguration` | Store the registry's scan type and scanning rules (stored, not acted on) |
+
+`ListImages` accepts `maxResults` from 1 to 1000 (default 100) and returns `nextToken`
+when another page remains. Tokens are scoped to the region, registry, and repository;
+local pages use stable tag order. Listing still enumerates tagged images and ignores
+the optional `filter` fields.
 
 ### Admin Endpoints
 
@@ -64,7 +69,7 @@
   - Concurrent writes to the policy, replication and scanning configuration, as Terraform makes, each keep their setting.
   - `GetRegistryPolicy` and `DeleteRegistryPolicy` answer `RegistryPolicyNotFoundException` when no policy is set. `PutRegistryPolicy` refuses text that is not a JSON object.
   - An empty `rules` list in `PutReplicationConfiguration` clears the configuration. `DescribeRegistry` returns `{"rules": []}` until rules are set.
-  - The scanning configuration is `BASIC` with no rules until one is put. `CONTINUOUS_SCAN` is refused with `BASIC`, since AWS offers it only with enhanced scanning. `BatchGetRepositoryScanningConfiguration` still reports each repository's own `scanOnPush`.
+  - The scanning configuration is `BASIC` with no rules until one is put. `CONTINUOUS_SCAN` is refused with `BASIC`, since AWS offers it only with enhanced scanning. `BatchGetRepositoryScanningConfiguration` still reports each repository's own `scanOnPush`. Missing repository names appear in `failures` with `REPOSITORY_NOT_FOUND`, alongside configurations for the names that exist.
 - **Manifest format negotiation.** `BatchGetImage` forwards the caller's `acceptedMediaTypes` as the upstream `Accept` header. Modern OCI manifests (`application/vnd.oci.image.manifest.v1+json`) and Docker v2 schema 2 are both supported.
 - **Cross-account / cross-region isolation.** Internally the registry namespaces repositories as `<account>/<region>/<repoName>`, so the same repository name in different accounts or regions cannot collide.
 - **Reconcile on first start.** When the registry container starts, Floci queries `GET /v2/_catalog` and recreates `Repository` metadata entries for any namespaces present in the registry but missing from local storage. This means image bytes are never orphaned across restarts.

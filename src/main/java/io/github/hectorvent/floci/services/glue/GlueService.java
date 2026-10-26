@@ -64,6 +64,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -88,7 +89,12 @@ public class GlueService {
             "StringColumnStatisticsData",
             List.of("MaximumLength", "AverageLength", "NumberOfNulls", "NumberOfDistinctValues"),
             "BinaryColumnStatisticsData",
-            List.of("MaximumLength", "AverageLength", "NumberOfNulls"));
+            List.of("MaximumLength", "AverageLength", "NumberOfNulls"),
+            "LongColumnStatisticsData", List.of("NumberOfNulls", "NumberOfDistinctValues"),
+            "DoubleColumnStatisticsData", List.of("NumberOfNulls", "NumberOfDistinctValues"),
+            "DecimalColumnStatisticsData", List.of("NumberOfNulls", "NumberOfDistinctValues"),
+            "DateColumnStatisticsData", List.of("NumberOfNulls", "NumberOfDistinctValues"),
+            "BooleanColumnStatisticsData", List.of("NumberOfTrues", "NumberOfFalses", "NumberOfNulls"));
     private static final Pattern COMPARISON_EXPRESSION = Pattern.compile(
             "\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(=|<>|<=|>=|<|>)\\s*('?[^']*'?|[^\\s]+)\\s*",
             Pattern.CASE_INSENSITIVE);
@@ -313,6 +319,14 @@ public class GlueService {
     public List<SecurityConfiguration> getSecurityConfigurations(String region) {
         String prefix = region + ":";
         return securityConfigurationStore.scan(key -> key.startsWith(prefix));
+    }
+
+    public Page<SecurityConfiguration> getSecurityConfigurations(String region, Integer maxResults, String nextToken) {
+        return paginate(() -> {
+            List<SecurityConfiguration> configurations = new ArrayList<>(getSecurityConfigurations(region));
+            configurations.sort(Comparator.comparing(SecurityConfiguration::getName));
+            return configurations;
+        }, maxResults, nextToken, 200);
     }
 
     private static String securityConfigurationKey(String region, String name) {
@@ -1310,7 +1324,7 @@ public class GlueService {
     }
 
     /**
-     * Glue reads back the numeric string and binary statistics a writer left out as 0, and clients such as Trino
+     * Glue reads back the required numeric statistics a writer left out as 0, and clients such as Trino
      * unbox them without a null check, so every statistic read back carries all of them, whatever the stored
      * record holds.
      */
@@ -2238,16 +2252,14 @@ public class GlueService {
     }
 
     public Page<String> listWorkflows(Integer maxResults, String nextToken) {
-        if (maxResults != null && (maxResults < 1 || maxResults > MAX_WORKFLOWS_PAGE_SIZE)) {
-            throw new AwsException("InvalidInputException",
-                    "MaxResults must be between 1 and " + MAX_WORKFLOWS_PAGE_SIZE, 400);
-        }
-        List<String> names = new ArrayList<>();
-        for (Workflow workflow : workflowStore.scan(k -> true)) {
-            names.add(workflow.getName());
-        }
-        names.sort(Comparator.naturalOrder());
-        return paginate(names, maxResults, nextToken);
+        return paginate(() -> {
+            List<String> names = new ArrayList<>();
+            for (Workflow workflow : workflowStore.scan(k -> true)) {
+                names.add(workflow.getName());
+            }
+            names.sort(Comparator.naturalOrder());
+            return names;
+        }, maxResults, nextToken, MAX_WORKFLOWS_PAGE_SIZE);
     }
 
     public BatchGetWorkflowsResult batchGetWorkflows(List<String> names) {
@@ -2360,11 +2372,7 @@ public class GlueService {
      * all triggers are returned when none can.
      */
     public Page<Trigger> getTriggers(String dependentJobName, Integer maxResults, String nextToken) {
-        if (maxResults != null && (maxResults < 1 || maxResults > MAX_TRIGGERS_PAGE_SIZE)) {
-            throw new AwsException("InvalidInputException",
-                    "MaxResults must be between 1 and " + MAX_TRIGGERS_PAGE_SIZE, 400);
-        }
-        return paginate(triggersStarting(dependentJobName), maxResults, nextToken);
+        return paginate(() -> triggersStarting(dependentJobName), maxResults, nextToken, MAX_TRIGGERS_PAGE_SIZE);
     }
 
     public Page<String> listTriggers(String dependentJobName, Integer maxResults, String nextToken,
@@ -3006,9 +3014,14 @@ public class GlueService {
     public record Page<T>(List<T> items, String nextToken) {}
 
     <T> Page<T> paginate(List<T> all, Integer maxResults, String nextToken) {
-        if (maxResults != null && (maxResults < 1 || maxResults > 1000)) {
-            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and 1000", 400);
+        return paginate(() -> all, maxResults, nextToken, 1000);
+    }
+
+    private <T> Page<T> paginate(Supplier<List<T>> items, Integer maxResults, String nextToken, int maximum) {
+        if (maxResults != null && (maxResults < 1 || maxResults > maximum)) {
+            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and " + maximum, 400);
         }
+        List<T> all = items.get();
         int limit = maxResults == null ? 100 : maxResults;
         int start = 0;
         if (nextToken != null && !nextToken.isBlank()) {

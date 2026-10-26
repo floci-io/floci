@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
+import io.github.hectorvent.floci.testing.MainSources;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -43,8 +45,7 @@ class CfnSchemaCoverageTest {
     private static final Path GAPS =
             Path.of("src/test/resources/cloudformation/getatt-attribute-gaps.tsv");
     private static final Path SCHEMA_DIR = Path.of("local/aws/cfn-resource-schemas/us-east-1");
-    private static final Path PROVISIONERS = Path.of(
-            "src/main/java/io/github/hectorvent/floci/services/cloudformation/provisioners");
+    private static final Path PROVISIONERS = MainSources.packageDir(CfnResourceProvisioner.class);
 
     private static final Pattern PUT_ATTRIBUTE =
             Pattern.compile("getAttributes\\(\\)\\.put\\(\\s*\"([^\"]+)\"");

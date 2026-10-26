@@ -646,22 +646,33 @@ class ServiceSpecificCredentialIntegrationTest {
      * The id's other published constraint is a length of 20 to 128. A short id satisfies
      * {@code [\w]+} and still fails, and one that breaks both constraints is reported as two
      * validation errors rather than one, which is what the counted prefix is for.
+     *
+     * <p>Each message names the one bound the value broke. Every recorded IAM length violation
+     * reads that way, and a short id told about a 128-character ceiling would be refused for a
+     * constraint it did not break.
      */
     @Test
     void anIdOutsideItsPublishedLengthIsAValidationError() {
         String userName = user();
-        create(userName, CODECOMMIT);
+        String credentialId = create(userName, CODECOMMIT);
 
-        for (String id : List.of("tooshort", "W".repeat(129))) {
-            iam("DeleteServiceSpecificCredential")
-                .formParam("UserName", userName)
-                .formParam("ServiceSpecificCredentialId", id)
-            .when().post("/").then().statusCode(400)
-                .body(containsString("1 validation error detected"))
-                .body(containsString("Member must have length less than or equal to 128 and "
-                        + "greater than or equal to 20"))
-                .body(not(containsString("NoSuchEntity")));
-        }
+        iam("DeleteServiceSpecificCredential")
+            .formParam("UserName", userName)
+            .formParam("ServiceSpecificCredentialId", "tooshort")
+        .when().post("/").then().statusCode(400)
+            .body(containsString("1 validation error detected"))
+            .body(containsString("Member must have length greater than or equal to 20"))
+            .body(not(containsString("less than or equal to 128")))
+            .body(not(containsString("NoSuchEntity")));
+
+        iam("DeleteServiceSpecificCredential")
+            .formParam("UserName", userName)
+            .formParam("ServiceSpecificCredentialId", "W".repeat(129))
+        .when().post("/").then().statusCode(400)
+            .body(containsString("1 validation error detected"))
+            .body(containsString("Member must have length less than or equal to 128"))
+            .body(not(containsString("greater than or equal to 20")))
+            .body(not(containsString("NoSuchEntity")));
 
         // Short and outside the pattern at once: both constraints are reported.
         iam("DeleteServiceSpecificCredential")
@@ -679,6 +690,12 @@ class ServiceSpecificCredentialIntegrationTest {
             .formParam("ServiceSpecificCredentialId", "A".repeat(20))
         .when().post("/").then().statusCode(404)
             .body(containsString("NoSuchEntity"));
+
+        // The refusals deleted nothing. The validation runs ahead of the delete it precedes, so
+        // the credential created above is still the user's.
+        iam("ListServiceSpecificCredentials").formParam("UserName", userName)
+        .when().post("/").then().statusCode(200)
+            .body(containsString(credentialId));
     }
 
     @Test

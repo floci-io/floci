@@ -40,6 +40,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.awaitility.Awaitility.await;
@@ -233,6 +234,171 @@ class CognitoSignUpTriggerReentrancyTest {
     }
 
     @Test
+    void overlappingCustomMessageDoesNotBypassAdminContactVerification() throws Exception {
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "overlapping-admin-updates",
+                "AutoVerifiedAttributes", List.of("phone_number"),
+                "UserAttributeUpdateSettings", Map.of(
+                        "AttributesRequireVerificationBeforeUpdate", List.of("phone_number")),
+                "LambdaConfig", Map.of("CustomMessage", FUNCTION)), "us-east-1");
+        service.adminCreateUser(pool.getId(), "alice", Map.of(
+                "phone_number", PHONE, "phone_number_verified", "true"), "TempPass1!", "SUPPRESS");
+        CountDownLatch firstMessageEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstMessage = new CountDownLatch(1);
+        AtomicInteger invocations = new AtomicInteger();
+        when(lambdaService.invoke(anyString(), eq(FUNCTION), any(byte[].class),
+                eq(InvocationType.RequestResponse))).thenAnswer(invocation -> {
+                    if (invocations.incrementAndGet() == 1) {
+                        firstMessageEntered.countDown();
+                        assertTrue(releaseFirstMessage.await(5, TimeUnit.SECONDS));
+                    }
+                    return response(Map.of());
+                });
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> first = executor.submit(() -> service.adminUpdateUserAttributes(
+                    pool.getId(), "alice", Map.of("phone_number", "+12025550124")));
+            assertTrue(firstMessageEntered.await(5, TimeUnit.SECONDS));
+
+            service.adminUpdateUserAttributes(pool.getId(), "alice",
+                    Map.of("phone_number", "+12025550125"));
+            CognitoUser updated = service.adminGetUser(pool.getId(), "alice");
+            assertEquals(PHONE, updated.getAttributes().get("phone_number"));
+            assertEquals("true", updated.getAttributes().get("phone_number_verified"));
+            assertEquals("+12025550125", updated.getPendingAttributes().get("phone_number"));
+
+            releaseFirstMessage.countDown();
+            first.get(5, TimeUnit.SECONDS);
+        } finally {
+            releaseFirstMessage.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void customMessageCallbackDoesNotReissueAnUnchangedContact(boolean writesCurrentContact) throws Exception {
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "same-contact-callback",
+                "AutoVerifiedAttributes", List.of("phone_number"),
+                "UserAttributeUpdateSettings", Map.of(
+                        "AttributesRequireVerificationBeforeUpdate", List.of("phone_number")),
+                "LambdaConfig", Map.of("CustomMessage", FUNCTION)), "us-east-1");
+        service.adminCreateUser(pool.getId(), "alice", Map.of(
+                "phone_number", PHONE, "phone_number_verified", "true"), "TempPass1!", "SUPPRESS");
+        String replacement = "+12025550124";
+        AtomicInteger invocations = new AtomicInteger();
+        when(lambdaService.invoke(anyString(), eq(FUNCTION), any(byte[].class),
+                eq(InvocationType.RequestResponse))).thenAnswer(invocation -> {
+                    if (invocations.incrementAndGet() == 1) {
+                        service.adminUpdateUserAttributes(pool.getId(), "alice",
+                                Map.of("phone_number", writesCurrentContact ? PHONE : replacement));
+                    }
+                    return response(Map.of());
+                });
+
+        service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("phone_number", replacement));
+
+        assertEquals(1, invocations.get());
+        assertEquals(1, sns.getSentMessages().size());
+        assertEquals(replacement, service.adminGetUser(pool.getId(), "alice")
+                .getPendingAttributes().get("phone_number"));
+    }
+
+    @Test
+    void failedOlderSendDoesNotDeleteNewerAttributeCode() throws Exception {
+        SnsService selectiveSms = mock(SnsService.class);
+        AtomicReference<String> newerCode = new AtomicReference<>();
+        String firstPhone = "+12025550124";
+        String secondPhone = "+12025550125";
+        when(selectiveSms.publish(any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    if (firstPhone.equals(invocation.getArgument(2))) {
+                        throw new IllegalStateException("first SMS unavailable");
+                    }
+                    newerCode.set(((String) invocation.getArgument(3)).replaceAll("\\D", ""));
+                    return "sent";
+                });
+        service = serviceWithSns(selectiveSms);
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "overlapping-code-cleanup",
+                "AutoVerifiedAttributes", List.of("phone_number"),
+                "UserAttributeUpdateSettings", Map.of(
+                        "AttributesRequireVerificationBeforeUpdate", List.of("phone_number")),
+                "LambdaConfig", Map.of("CustomMessage", FUNCTION)), "us-east-1");
+        service.adminCreateUser(pool.getId(), "alice", Map.of(
+                "phone_number", PHONE, "phone_number_verified", "true"), "TempPass1!", "SUPPRESS");
+        CountDownLatch firstMessageEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstMessage = new CountDownLatch(1);
+        AtomicInteger invocations = new AtomicInteger();
+        when(lambdaService.invoke(anyString(), eq(FUNCTION), any(byte[].class),
+                eq(InvocationType.RequestResponse))).thenAnswer(invocation -> {
+                    if (invocations.incrementAndGet() == 1) {
+                        firstMessageEntered.countDown();
+                        assertTrue(releaseFirstMessage.await(5, TimeUnit.SECONDS));
+                    }
+                    return response(Map.of());
+                });
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> first = executor.submit(() -> service.adminUpdateUserAttributes(
+                    pool.getId(), "alice", Map.of("phone_number", firstPhone)));
+            assertTrue(firstMessageEntered.await(5, TimeUnit.SECONDS));
+            service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("phone_number", secondPhone));
+            assertNotNull(newerCode.get());
+            releaseFirstMessage.countDown();
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> first.get(5, TimeUnit.SECONDS));
+            assertEquals("CodeDeliveryFailureException", ((AwsException) failure.getCause()).getErrorCode());
+            codes.consume(pool.getId(), "alice", VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION,
+                    newerCode.get());
+        } finally {
+            releaseFirstMessage.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void failedAttributeDeliveryCanBeRetriedWithTheSameContact() {
+        SnsService selectiveSms = mock(SnsService.class);
+        AtomicInteger attempts = new AtomicInteger();
+        AtomicReference<String> deliveredCode = new AtomicReference<>();
+        when(selectiveSms.publish(any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    if (attempts.incrementAndGet() == 1) {
+                        throw new IllegalStateException("SMS unavailable");
+                    }
+                    deliveredCode.set(((String) invocation.getArgument(3)).replaceAll("\\D", ""));
+                    return "sent";
+                });
+        service = serviceWithSns(selectiveSms);
+        UserPool pool = service.createUserPool(Map.of(
+                "PoolName", "retry-attribute-code",
+                "AutoVerifiedAttributes", List.of("phone_number"),
+                "UserAttributeUpdateSettings", Map.of(
+                        "AttributesRequireVerificationBeforeUpdate", List.of("phone_number"))), "us-east-1");
+        service.adminCreateUser(pool.getId(), "alice", Map.of(
+                "phone_number", PHONE, "phone_number_verified", "true"), "TempPass1!", "SUPPRESS");
+        String replacement = "+12025550124";
+
+        AwsException firstFailure = assertThrows(AwsException.class,
+                () -> service.adminUpdateUserAttributes(pool.getId(), "alice",
+                        Map.of("phone_number", replacement)));
+        assertEquals("CodeDeliveryFailureException", firstFailure.getErrorCode());
+
+        service.adminUpdateUserAttributes(pool.getId(), "alice", Map.of("phone_number", replacement));
+
+        assertEquals(2, attempts.get());
+        assertNotNull(deliveredCode.get());
+        codes.consume(pool.getId(), "alice", VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION,
+                deliveredCode.get());
+    }
+
+    @Test
     void preSignUpRejectsSameUsernameAdminCreationWithoutBlockingTheTrigger() throws Exception {
         UserPool pool = pool(Map.of("PreSignUp", FUNCTION));
         UserPoolClient client = client(pool);
@@ -291,6 +457,11 @@ class CognitoSignUpTriggerReentrancyTest {
         AtomicReference<Throwable> callbackFailure = new AtomicReference<>();
         when(lambdaService.invoke(anyString(), eq(FUNCTION), any(byte[].class),
                 eq(InvocationType.RequestResponse))).thenAnswer(invocation -> {
+                    JsonNode event = MAPPER.readTree((byte[]) invocation.getArgument(2));
+                    if (!"CustomMessage_SignUp".equals(event.path("triggerSource").asText())) {
+                        assertEquals("CustomMessage_UpdateUserAttribute", event.path("triggerSource").asText());
+                        return response(Map.of());
+                    }
                     callback(() -> {
                         if (deletePhone) {
                             service.adminDeleteUserAttributes(pool.getId(), "alice", List.of("phone_number"));
@@ -305,8 +476,9 @@ class CognitoSignUpTriggerReentrancyTest {
         CognitoUser result = service.signUp(client.getClientId(), "alice", "Perm1234!", Map.of("phone_number", PHONE), Map.of(), Map.of());
 
         assertNull(callbackFailure.get());
-        assertEquals(1, sns.getSentMessages().size());
-        assertEquals(PHONE, sns.getSentMessages().getFirst().getPhoneNumber());
+        assertEquals(deletePhone ? 1 : 2, sns.getSentMessages().size());
+        assertEquals(1, sns.getSentMessages().stream()
+                .filter(message -> PHONE.equals(message.getPhoneNumber())).count());
         assertEquals(Map.of("AttributeName", "phone_number", "DeliveryMedium", "SMS", "Destination", "+*******0123"),
                 service.signUpCodeDeliveryDetails(result));
     }

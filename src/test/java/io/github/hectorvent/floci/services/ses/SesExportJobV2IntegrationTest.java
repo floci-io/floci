@@ -403,7 +403,8 @@ class SesExportJobV2IntegrationTest {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"PageSize\": \"ten\"}")
         .when().post("/v2/email/list-export-jobs").then().statusCode(400)
-                .body("__type", equalTo("SerializationException"));
+                .body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("STRING_VALUE can not be converted to an Integer"));
         // The body is deserialized before any member is validated, so a mistyped member wins.
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"JobStatus\": \"BOGUS\", \"PageSize\": \"ten\"}")
@@ -527,7 +528,8 @@ class SesExportJobV2IntegrationTest {
 
         // A MaxResults of the wrong type is a deserialization error, not a value out of range.
         insightsWith("\"MaxResults\": \"100\",")
-                .then().statusCode(400).body("__type", equalTo("SerializationException"));
+                .then().statusCode(400).body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("STRING_VALUE can not be converted to an Integer"));
     }
 
     @Test
@@ -549,6 +551,17 @@ class SesExportJobV2IntegrationTest {
                 .then().statusCode(200);
     }
 
+    @Test
+    @Order(19)
+    void createExportJob_keepsAFractionalMaxResultsAsTheIntItWasCheckedAs() {
+        String jobId = insightsWith("\"MaxResults\": 1.5,").then().statusCode(200).extract().path("JobId");
+
+        given().header("Authorization", AUTH)
+        .when().get("/v2/email/export-jobs/" + jobId)
+        .then().statusCode(200)
+                .body("ExportDataSource.MessageInsightsDataSource.MaxResults", equalTo(1));
+    }
+
     /** A message-insights export request carrying the given extra members. */
     private static Response insightsWith(String members) {
         return create("""
@@ -559,7 +572,7 @@ class SesExportJobV2IntegrationTest {
     }
 
     @Test
-    @Order(19)
+    @Order(20)
     void cleanUpVdmAndIdentity() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"DISABLED\"}}")

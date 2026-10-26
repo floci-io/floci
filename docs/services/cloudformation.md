@@ -188,8 +188,8 @@ cross-resource references.
 | Aurora DSQL | `Cluster` |
 | ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored), `ServerlessCache` (GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form) |
 | Redshift | `Cluster` (single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported), `ClusterParameterGroup`, `ClusterSubnetGroup`, `ClusterSecurityGroup` (accepted; no EC2-Classic security group model) |
-| Redshift Serverless | `Namespace` (ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form), `Workgroup` (starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form) |
-| EC2 | `VPC` (deleted on stack teardown; a VPC with dependents outside the stack, including anything still holding a network interface in its subnets (an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone interface, an interface endpoint), fails the delete with `DependencyViolation`, as on AWS), `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog` |
+| Redshift Serverless | `Namespace` (Managed admin credentials use Secrets Manager; GetAtt uses the dotted Namespace.* form), `Workgroup` (starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form) |
+| EC2 | `VPC` (deleted on stack teardown; a VPC with dependents outside the stack, including anything still holding a network interface in its subnets (an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone interface, an interface endpoint), fails the delete with `DependencyViolation`, as on AWS), `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog`, `PrefixList` (updated in place; an update that changes `AddressFamily`, or `MaxEntries` together with `Entries`, fails) |
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook`, `ScalingPolicy` |
 | Application Auto Scaling | `ScalableTarget` (`ScheduledActions` are accepted and not run; Floci has no scheduled scaling), `ScalingPolicy` |
@@ -211,10 +211,10 @@ cross-resource references.
 | GuardDuty | `MalwareProtectionPlan` (management plane only: no scan runs, so the plan stays ACTIVE; Ref returns the plan id; a BucketName change is rejected) |
 | Pipes | `Pipe` |
 | Kinesis | `Stream` |
-| Kinesis Data Firehose | `DeliveryStream` |
+| Kinesis Data Firehose | `DeliveryStream` (`DeliveryStreamName`, `Tags` and, from an S3 destination, `BucketARN`, `RoleARN`, `Prefix`, `ErrorOutputPrefix`, `CompressionFormat`, `BufferingHints`, `CloudWatchLoggingOptions` and `ProcessingConfiguration` are applied; other properties are ignored, and a destination member the template drops on update keeps its stored value, as on AWS) |
 | IoT Core | `Authorizer`, `DomainConfiguration` (`ServerCertificates` resolves to a JSON string), `Policy` (deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached), `Thing`, `TopicRule` |
 | CloudFront | `CachePolicy`, `Distribution`, `Function` (`KeyValueStoreAssociations` is ignored), `KeyGroup`, `OriginAccessControl`, `OriginRequestPolicy`, `PublicKey`, `ResponseHeadersPolicy` |
-| CloudWatch | `Alarm`, `Dashboard` |
+| CloudWatch | `Alarm`, `CompositeAlarm`, `Dashboard`. Composite alarms have backing definitions with name Ref and Arn GetAtt, rollback, and replacement cleanup. Composite actions are stored only; suppression properties are rejected. |
 | CloudWatch Logs | `LogGroup`, `LogStream`, `MetricFilter` |
 | WAFv2 | `IPSet`, `LoggingConfiguration`, `WebACL`, `WebACLAssociation` |
 | Config | `ConfigRule` |
@@ -449,7 +449,14 @@ hash covers every property floci gives the function, its code's parameter refere
 above, plus its `SnapStart`; those properties differ from the ones SAM generates, so these ids are
 floci's own rather than SAM's. An `AutoPublishCodeSha256` that is a string, or a `Ref` to a
 parameter holding one, replaces the hash with its first ten characters, under
-`AutoPublishAliasAllProperties` too; an empty value leaves the hash in place. `Globals` can set
+`AutoPublishAliasAllProperties` too; an empty value leaves the hash in place. As in SAM, a given
+`AutoPublishCodeSha256` is also appended to the function's `Description`, after a space, so the
+version a new value names publishes even when nothing else changed. The description's parameter
+references are resolved first, one that is another intrinsic function is joined with the value by
+`Fn::Join`, and a function without a description gets the value alone. An empty
+`AutoPublishCodeSha256` appends nothing, but SAM checks the property as written, so a `Ref` to a
+parameter holding an empty value still appends it: a description then ends in a space, and a
+function without one gets an empty `Description`. `Globals` can set
 `AutoPublishAliasAllProperties` and `VersionDeletionPolicy`, but as in SAM not
 `AutoPublishCodeSha256`, which fails the transform there. floci does not honour a resource's
 `IgnoreGlobals`, so no function can opt out of a `VersionDeletionPolicy` in `Globals` with it: one
@@ -462,8 +469,6 @@ configuration changed since its last version. Otherwise the new version resource
 version and the alias stays where it is, as when an update changes only one of these:
 
 - A change to `SnapStart`: floci does not give the function `SnapStart`.
-- A new `AutoPublishCodeSha256` alone: on AWS this publishes, because SAM appends it to the
-  function's `Description`, but floci's transform sets no `Description` on the function.
 - Under `AutoPublishAliasAllProperties`, a change to `Tags` or `ReservedConcurrentExecutions`
   only: AWS fails that update with
   `A version for this Lambda function exists ( N ). Modify the function to create a new version.`,
@@ -641,6 +646,13 @@ when it starts with `{` and ends with `}`, and `Template format error: YAML not 
 L, column C)` otherwise, at the position where the parser stopped. A body that reads as a scalar or
 a list is `Template format error: unsupported structure.`
 
+## Attribute types
+
+`AWS::EC2::PrefixList` `Version` remains numeric when used as another resource's property.
+Numeric attributes are rejected in string outputs and `Fn::Join`, `Fn::Sub`,
+`Fn::Split`, and `Fn::Base64`, including selected `Fn::If` and `Fn::Select` values.
+Literal numbers and Number-parameter references retain their existing string coercion.
+
 ## Null values
 
 As on AWS, a template holding a `null` anywhere (JSON `null`, YAML `~` or a key with no value) is
@@ -760,12 +772,26 @@ always lists both stages, matching AWS.
 adds the corresponding security schemes and operation requirements. API Gateway imports
 these as `authorizationType: AWS_IAM` and `apiKeyRequired: true`: invocation requires both
 a valid SigV4 signature and an enabled API key associated with the invoked stage when both
-controls are selected. Existing inline requirements and their scheme definitions are
+controls are selected. Existing operation requirements and their scheme definitions are
 preserved. Defaults are selected by the SAM names `AWS_IAM` and `api_key`; an existing
 scheme with another name does not suppress either default.
+As in SAM, the defaults are added to each operation's own `security`, inside each branch of
+an `Fn::If` written around a path or an operation, skipping an `AWS::NoValue` branch. A
+nested `Fn::If` around an operation is left as written, without the defaults, as SAM leaves
+it.
+Root-level `security` stays in the document as written and is not copied into operations,
+and an `Auth` that selects no default, such as `ApiKeyRequired: false` alone, leaves the
+document unchanged. floci's REST importer still applies root-level `security` to an
+operation that has none of its own, which API Gateway does not. As in SAM, any non-empty
+`Auth`, even one that selects no default, needs a Swagger or OpenAPI 3 `DefinitionBody`
+whose `paths` entries, and the branches of an `Fn::If` around one, are objects, so a body or
+a `paths` map written as an `Fn::If` is rejected.
 
-Other `Auth` properties, custom default authorizers, external definitions, unresolved or
-malformed security requirements, and method override markers are rejected. Existing
+Other `Auth` properties, custom default authorizers and external definitions are rejected.
+When a default applies, so are unresolved or malformed security requirements, method
+override markers, a nested `Fn::If` around a path item, a body or security
+scheme map written as an intrinsic function, an `AWS_IAM` or `api_key` scheme that contains
+one, and a body that declares both `swagger` and `openapi`. Existing
 custom schemes remain subject to API Gateway's importer and invocation support; preserving
 them does not implement another authentication protocol. The importer rejects multiple
 authorizer or IAM requirements, including a defined custom authorizer alongside the

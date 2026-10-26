@@ -18,7 +18,10 @@ import software.amazon.awssdk.services.elasticache.model.CreateUserResponse;
 import software.amazon.awssdk.services.elasticache.model.DeleteReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteUserGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteUserRequest;
+import software.amazon.awssdk.services.elasticache.model.DescribeCacheClustersRequest;
+import software.amazon.awssdk.services.elasticache.model.DescribeCacheClustersResponse;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsRequest;
+import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsResponse;
 import software.amazon.awssdk.services.elasticache.model.DescribeUserGroupsRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeUserGroupsResponse;
 import software.amazon.awssdk.services.elasticache.model.DescribeUsersRequest;
@@ -31,10 +34,13 @@ import software.amazon.awssdk.services.elasticache.model.ModifyReplicationGroupR
 import software.amazon.awssdk.services.elasticache.model.ModifyUserRequest;
 import software.amazon.awssdk.services.elasticache.model.ModifyUserResponse;
 import software.amazon.awssdk.services.elasticache.model.ReplicationGroup;
+import software.amazon.awssdk.services.elasticache.model.SecurityGroupMembership;
 import software.amazon.awssdk.services.elasticache.model.UserAlreadyExistsException;
 import software.amazon.awssdk.services.elasticache.model.UserGroupNotFoundException;
 import software.amazon.awssdk.services.elasticache.model.UserNotFoundException;
 
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -408,6 +414,32 @@ class ElastiCacheTest {
 
     @Test
     @Order(14)
+    void modifyReplicationGroupSecurityGroupsAreEchoedByMemberClusters() {
+        requireGroup();
+
+        elasticache.modifyReplicationGroup(ModifyReplicationGroupRequest.builder()
+                .replicationGroupId(groupId)
+                .securityGroupIds("sg-compat-1", "sg-compat-2")
+                .build());
+
+        DescribeReplicationGroupsResponse described = elasticache.describeReplicationGroups(
+                DescribeReplicationGroupsRequest.builder()
+                .replicationGroupId(groupId)
+                .build());
+        assertThat(described.replicationGroups().get(0).memberClusters()).hasSize(1);
+
+        DescribeCacheClustersResponse clusters = elasticache.describeCacheClusters(DescribeCacheClustersRequest.builder()
+                .cacheClusterId(described.replicationGroups().get(0).memberClusters().get(0))
+                .build());
+        assertThat(clusters.cacheClusters().get(0).securityGroups())
+                .extracting(SecurityGroupMembership::securityGroupId)
+                .containsExactly("sg-compat-1", "sg-compat-2");
+        assertThat(clusters.cacheClusters().get(0).securityGroups())
+                .allSatisfy(membership -> assertThat(membership.status()).isEqualTo("active"));
+    }
+
+    @Test
+    @Order(15)
     void deleteReplicationGroupReleasesPortForReuse() {
         requireGroup();
 
@@ -447,9 +479,15 @@ class ElastiCacheTest {
         Assumptions.assumeTrue(userCreated && userId != null, "User must exist from earlier ordered test");
     }
 
-    private static Socket openSocket(int port) throws IOException {
-        Socket socket = new Socket(TestFixtures.proxyHost(), port);
+    /** The group has an auth token, so it is encrypted in transit and its endpoint takes TLS only. */
+    private static Socket openSocket(int port) throws Exception {
+        SSLSocket socket = (SSLSocket) TestFixtures.flociCaTrust().getSocketFactory()
+                .createSocket(TestFixtures.proxyHost(), port);
+        SSLParameters parameters = socket.getSSLParameters();
+        parameters.setEndpointIdentificationAlgorithm("HTTPS");
+        socket.setSSLParameters(parameters);
         socket.setSoTimeout(5000);
+        socket.startHandshake();
         return socket;
     }
 

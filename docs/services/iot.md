@@ -13,7 +13,7 @@ Supported MVP 1 behavior:
 - Policy basics: `CreatePolicy`, `GetPolicy`, `ListPolicies`, `DeletePolicy`, policy version lifecycle, `AttachPolicy`, `DetachPolicy`, `ListAttachedPolicies`, and `ListTargetsForPolicy`.
 - Thing principal basics: `AttachThingPrincipal`, `DetachThingPrincipal`, `ListThingPrincipals`, `ListPrincipalThings`, and the paginated `ListThingPrincipalsV2` and `ListPrincipalThingsV2`. Exclusive attachment is not modelled, so the V2 lists report every attachment as `NON_EXCLUSIVE_THING`, and a `thingPrincipalType` filter of `EXCLUSIVE_THING` returns none.
 - Tags for things, certificates, policies, and topic rules.
-- IoT Data retained messages: retained `Publish`, `GetRetainedMessage`, and paginated `ListRetainedMessages`.
+- IoT Data retained messages: retained `Publish`, `GetRetainedMessage`, and paginated `ListRetainedMessages`. Both read actions report `lastModifiedTime` as integer epoch milliseconds, as required by the IoT Data API.
 - Shadow null-delete and version-conflict behavior for HTTP and shared service paths.
 - Topic rule duplicate/delete/replace semantics, plus `republish`, `sqs`, `sns`, `s3`, `dynamoDBv2`, `kinesis`, `lambda`, `firehose`, and `cloudwatchLogs` action dispatch.
 

@@ -89,6 +89,27 @@ public class StreamBatchFailures {
         return maximum != null && maximum > 0 && nowMillis - oldestArrival.toEpochMilli() >= maximum * 1_000L;
     }
 
+    /**
+     * With {@code BisectBatchOnFunctionError}, a batch that failed with a function error is split while
+     * it holds more than one record. Splitting does not consume the retry quota.
+     */
+    static boolean splitsOnFunctionError(EventSourceMapping esm, InvokeResult invokeResult, int records) {
+        return invokeResult.getFunctionError() != null
+                && Boolean.TRUE.equals(esm.getBisectBatchOnFunctionError()) && records > 1;
+    }
+
+    /** A split batch is refetched at its first half, rounded up. */
+    static int splitBatchSize(int fetched) {
+        return (fetched + 1) / 2;
+    }
+
+    /** The most records to fetch after the checkpoint {@code key}: its split size, while bisecting. */
+    static int bisectLimit(EventSourceMapping esm, Map<String, Integer> splitSizes, String key) {
+        return Boolean.TRUE.equals(esm.getBisectBatchOnFunctionError())
+                ? splitSizes.getOrDefault(key, Integer.MAX_VALUE)
+                : Integer.MAX_VALUE;
+    }
+
     /** The retry state of a failing batch is keyed by the checkpoint it is read after. */
     static String batchStateKey(String esmUuid, String shardId, String checkpoint) {
         return esmUuid + ":" + shardId + ":" + (checkpoint == null ? "TRIM_HORIZON" : checkpoint);

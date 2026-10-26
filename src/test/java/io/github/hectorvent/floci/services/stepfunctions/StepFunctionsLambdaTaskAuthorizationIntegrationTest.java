@@ -28,6 +28,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -72,6 +73,8 @@ class StepFunctionsLambdaTaskAuthorizationIntegrationTest {
     @BeforeEach
     void stubExecutor() {
         when(executor.invoke(any(), any(), any()))
+                .thenReturn(new InvokeResult(200, null, "{\"ok\":true}".getBytes(StandardCharsets.UTF_8), null, "req"));
+        when(executor.invoke(any(), any(), any(), eq(0), eq("live")))
                 .thenReturn(new InvokeResult(200, null, "{\"ok\":true}".getBytes(StandardCharsets.UTF_8), null, "req"));
     }
 
@@ -136,9 +139,33 @@ class StepFunctionsLambdaTaskAuthorizationIntegrationTest {
         addPermission(functionArn, "live", Map.of("Principal", SFN_ACCOUNT));
 
         runTask(roleArn, functionArn + ":live").body("status", equalTo("SUCCEEDED"));
+        verify(executor).invoke(argThat(isFunction(functionArn + ":1")), any(), any(), eq(0), eq("live"));
         runTask(roleArn, functionArn)
                 .body("status", equalTo("FAILED"))
                 .body("error", equalTo("Lambda.AccessDeniedException"));
+    }
+
+    @Test
+    void anExplicitAliasParameterUsesTheAliasGrantAndInvocationQualifier() {
+        String roleArn = createRole("sfn-exec-" + suffix(), INVOKE_ANYTHING);
+        String name = "worker-" + suffix();
+        String functionArn = createFunction(FUNCTION_ACCOUNT, name);
+        publishVersionAndAlias(name, "live");
+        addPermission(functionArn, "live", Map.of("Principal", SFN_ACCOUNT));
+
+        run(roleArn, "explicit-alias-" + suffix(), """
+                {"StartAt":"Call","States":{"Call":{"Type":"Task",
+                  "Resource":"arn:aws:states:::lambda:invoke",
+                  "Parameters":{"FunctionName":"%s","Qualifier.$":"$.alias","Payload":{}},
+                  "End":true}}}""".formatted(functionArn), "{\"alias\":\"live\"}")
+                .body("status", equalTo("SUCCEEDED"))
+                .body("output", containsString("\"ExecutedVersion\":\"1\""));
+
+        verify(executor).invoke(argThat(isFunction(functionArn + ":1")), any(), any(), eq(0), eq("live"));
+        runTask(roleArn, functionArn)
+                .body("status", equalTo("FAILED"))
+                .body("error", equalTo("Lambda.AccessDeniedException"));
+        verify(executor, never()).invoke(argThat(isFunction(functionArn)), any(), any());
     }
 
     @Test

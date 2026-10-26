@@ -48,7 +48,8 @@ public class EcrJsonHandler {
     private static final Set<String> MODEL_CHECKED = Set.of(
             "PutRegistryPolicy", "GetRegistryPolicy", "DeleteRegistryPolicy",
             "PutReplicationConfiguration", "DescribeRegistry",
-            "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration");
+            "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration",
+            "BatchGetRepositoryScanningConfiguration");
 
     public Response handle(String action, JsonNode request, String region) {
         if (MODEL_CHECKED.contains(action)) {
@@ -226,20 +227,13 @@ public class EcrJsonHandler {
     }
 
     private Response handleBatchGetRepositoryScanningConfiguration(JsonNode request, String region) {
-        // Scanning configuration is not modeled. Resolve names via describeRepositories
-        // and synthesize a wire-accurate RepositoryScanningConfiguration per repo:
-        // scanFrequency derived from scanOnPush (AWS enum: SCAN_ON_PUSH|CONTINUOUS_SCAN|
-        // MANUAL), with empty appliedScanFilters. Note: real AWS reports unknown repos
-        // in the `failures` array; here describeRepositories throws
-        // RepositoryNotFoundException, failing the whole batch instead.
         List<String> names = parseStringList(request.path("repositoryNames"));
-        String registryId = request.path("registryId").asText(null);
-
-        List<Repository> repos = service.describeRepositories(names, registryId, region);
+        EcrService.BatchScanningConfigurationResult result =
+                service.batchGetRepositoryScanningConfiguration(names, null, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode configs = objectMapper.createArrayNode();
-        for (Repository r : repos) {
+        for (Repository r : result.repositories()) {
             ObjectNode cfg = objectMapper.createObjectNode();
             cfg.put("repositoryArn", r.getRepositoryArn());
             cfg.put("repositoryName", r.getRepositoryName());
@@ -249,7 +243,15 @@ public class EcrJsonHandler {
             configs.add(cfg);
         }
         response.set("scanningConfigurations", configs);
-        response.set("failures", objectMapper.createArrayNode());
+        ArrayNode failures = objectMapper.createArrayNode();
+        for (EcrService.ScanningConfigurationFailure failure : result.failures()) {
+            ObjectNode entry = objectMapper.createObjectNode();
+            entry.put("repositoryName", failure.repositoryName());
+            entry.put("failureCode", failure.failureCode());
+            entry.put("failureReason", failure.failureReason());
+            failures.add(entry);
+        }
+        response.set("failures", failures);
         return Response.ok(response).build();
     }
 
@@ -314,14 +316,27 @@ public class EcrJsonHandler {
     private Response handleListImages(JsonNode request, String region) {
         String repo = request.path("repositoryName").asText(null);
         String registryId = request.path("registryId").asText(null);
-        List<ImageIdentifier> ids = service.listImages(repo, registryId, region);
+        JsonNode limit = request.get("maxResults");
+        if (limit != null && !limit.isNull() && (!limit.isIntegralNumber() || !limit.canConvertToInt())) {
+            throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 1000", 400);
+        }
+        JsonNode token = request.get("nextToken");
+        if (token != null && !token.isNull() && !token.isTextual()) {
+            throw new AwsException("InvalidParameterException", "Invalid nextToken", 400);
+        }
+        Integer maxResults = request.hasNonNull("maxResults") ? limit.asInt() : null;
+        PaginatedResult<ImageIdentifier> page = service.listImages(repo, registryId, region,
+                maxResults, request.path("nextToken").asText(null));
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        for (ImageIdentifier id : ids) {
+        for (ImageIdentifier id : page.items()) {
             arr.add(buildImageIdentifier(id));
         }
         response.set("imageIds", arr);
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 

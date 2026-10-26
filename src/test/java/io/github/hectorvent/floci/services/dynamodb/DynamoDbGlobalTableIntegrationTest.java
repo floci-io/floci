@@ -6,6 +6,10 @@ import io.restassured.parsing.Parser;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
+
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.assertEpochMillisBetween;
+import static io.github.hectorvent.floci.testing.DynamoDbRequests.decimalAt;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -69,6 +73,19 @@ class DynamoDbGlobalTableIntegrationTest {
         call("ListGlobalTables", "{}")
             .then().statusCode(200)
             .body("GlobalTables.GlobalTableName", hasItem(name));
+    }
+
+    @Test
+    void creationDateTimeHasMilliseconds() throws Exception {
+        String name = "gt-created-" + Long.toString(System.nanoTime(), 36);
+        long before = System.currentTimeMillis();
+        createTable(name, true, "NEW_AND_OLD_IMAGES");
+
+        BigDecimal created = decimalAt(call("CreateGlobalTable", "{\"GlobalTableName\":\"" + name + "\","
+                + "\"ReplicationGroup\":[{\"RegionName\":\"eu-west-1\"}]}")
+            .then().statusCode(200), "/GlobalTableDescription/CreationDateTime");
+        long after = System.currentTimeMillis();
+        assertEpochMillisBetween(before, created, after);
     }
 
     @Test

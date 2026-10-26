@@ -123,12 +123,17 @@ Floci serves every AWS partition, not only the commercial one, so a literal that
 prints correctly in `us-east-1`. `make partition-check` (CI: Partition Literals) inventories
 `src/main/java` for `arn:aws:` prefixes, `amazonaws.com` hosts, Route 53 hosted-zone ids,
 hand-rolled `arn:aws[a-z-]*:` regexes, `Arn.of(...)` calls with a blank region and comparisons
-with the literal `"aws"` against `tools/partition/baseline.tsv`, per file. The baseline is empty, so any new one fails.
+with the literal `"aws"` against `tools/partition/baseline.tsv`, per file. It also inventories
+ARNs handled by hand: `"arn:" + ...` concatenation (`arn-concat`, except a pattern built from
+`PARTITION_REGEX`), `startsWith("arn:")` checks (`arn-probe`) and `split(":")` on a value named
+`*arn*`/`*Arn*` (`arn-split`). Those three still have baselined sites, which only shrink; every
+other category's baseline is empty, so any new one fails.
 A literal in a new file fails, growth in an existing file fails, and a drop fails until you
 run `make partition-baseline` and commit the smaller baseline.
 
 - Mint ARNs through `AwsArnUtils.Arn.of(...)` / `RegionResolver.buildArn(...)`, recognise
-  them with `AwsArnUtils.isArn` / `PARTITION_REGEX`, and derive hosts from the region's
+  them with `AwsArnUtils.isArn` / `PARTITION_REGEX`, read their fields with
+  `AwsArnUtils.parse(...)`, and derive hosts from the region's
   DNS suffix (`AwsRegions.dnsSuffixFor`).
 - A regionless ARN (IAM, STS, CloudFront, Organizations, an S3 bucket) never goes through
   `Arn.of(service, "", ...)`, which silently means `aws`: use `RegionResolver.buildGlobalArn`
@@ -309,7 +314,8 @@ When adding functionality:
    value, while strict SDKs (Go, Java) reject the whole response. `javap -c` on the SDK
    model class shows the traits on each `SdkField`
 9. Add `<Svc>ServiceTest` and `<Svc>IntegrationTest`
-10. If the service mints ARNs or AWS hosts (`buildArn`, `Arn.of`, `new AwsArnUtils.Arn`, `dnsSuffixFor`, `AwsEndpoints`),
+10. If the service mints ARNs or AWS hosts (`buildArn`, `Arn.of`, `new AwsArnUtils.Arn`, `dnsSuffixFor`, `AwsEndpoints`,
+   or a `"arn:" + ...` concatenation),
    add a case to `PartitionCrossServiceSmokeIntegrationTest` and its `COVERED_PACKAGES`, or a row
    with a reason to `src/test/resources/partition/smoke-exemptions.tsv`;
    `PartitionSmokeInventoryTest` fails until one of the two exists

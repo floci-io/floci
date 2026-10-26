@@ -4,8 +4,10 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
@@ -24,6 +26,7 @@ class GuardedMessageQueue {
     private final StorageBackend<String, List<Message>> messageStore;
     private final String storageKey;
     private final String receiptHandleSecret;
+    private final SqsQueueActivity activity = new SqsQueueActivity();
     private volatile boolean closed;
 
     @FunctionalInterface
@@ -298,6 +301,42 @@ class GuardedMessageQueue {
             }
             return new MessageCounts(visible, inFlight, delayed);
         }
+    }
+
+    record Gauges(MessageCounts counts, long ageOfOldestMessageSeconds, long groupsWithInflightMessages) {
+        boolean isEmpty() {
+            return counts.visible() + counts.inFlight() + counts.delayed() == 0;
+        }
+    }
+
+    /**
+     * The queue contents AWS/SQS reports each minute. The age is that of the oldest message by the
+     * time its retention started, so a message moved to a FIFO dead-letter queue or by a move task
+     * counts from the move.
+     */
+    Gauges gauges(Instant now) {
+        try (Guard _ = hold()) {
+            Instant oldest = null;
+            Set<String> groupsInFlight = new HashSet<>();
+            for (Message m : messages) {
+                if (!m.isVisible() && m.getReceiptHandle() != null && m.getMessageGroupId() != null) {
+                    groupsInFlight.add(m.getMessageGroupId());
+                }
+                // ponytail: AWS also leaves out a standard-queue message received 3+ times in this queue;
+                // that needs a per-queue receive count, since a redriven message keeps its total.
+                Instant enqueued = m.getRetentionStartTimestamp() != null
+                        ? m.getRetentionStartTimestamp() : m.getSentTimestamp();
+                if (enqueued != null && (oldest == null || enqueued.isBefore(oldest))) {
+                    oldest = enqueued;
+                }
+            }
+            long age = oldest == null ? 0 : Math.max(0, Duration.between(oldest, now).toSeconds());
+            return new Gauges(messageCounts(), age, groupsInFlight.size());
+        }
+    }
+
+    SqsQueueActivity activity() {
+        return activity;
     }
 
     List<Message> peekAll() {

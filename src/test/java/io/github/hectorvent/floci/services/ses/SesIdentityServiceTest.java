@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.Tag;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -12,6 +13,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mockito;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -27,6 +29,7 @@ import java.util.stream.Stream;
 import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -205,12 +208,6 @@ class SesIdentityServiceTest {
         assertEquals("AlreadyExistsException", e.getErrorCode());
     }
 
-    /** Any parked state counts as contending, so a switch to e.g. ReentrantLock stays green. */
-    private static boolean isParked(Thread.State state) {
-        return state == Thread.State.BLOCKED || state == Thread.State.WAITING
-                || state == Thread.State.TIMED_WAITING;
-    }
-
     /** Counts put calls so the single-write guarantee is asserted, not inferred. */
     private static final class CountingStorage extends InMemoryStorage<String, Identity> {
         final AtomicInteger puts = new AtomicInteger();
@@ -272,14 +269,9 @@ class SesIdentityServiceTest {
             second.start();
             // The second create must park on the creation lock before the first is released; a
             // TERMINATED second thread means it completed without contending, i.e. the lock is gone.
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while (!isParked(second.getState())) {
-                assertTrue(second.getState() != Thread.State.TERMINATED,
-                        "second create finished without blocking on the creation lock");
-                assertTrue(System.nanoTime() < deadline,
-                        "second create never blocked on the creation lock");
-                Thread.onSpinWait();
-            }
+            assertNotEquals(Thread.State.TERMINATED, ThreadStates.awaitState(second, ThreadStates.PARKED_OR_DONE,
+                    Duration.ofSeconds(5), "second create"),
+                    "second create finished without blocking on the creation lock");
         } finally {
             proceed.countDown();
         }
@@ -319,16 +311,11 @@ class SesIdentityServiceTest {
         try {
             assertTrue(insideLock.await(5, TimeUnit.SECONDS), "create never entered the lock");
             verifier.start();
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             // The v1 verify path takes the same creation lock, so it must park here rather than
             // overwrite the in-flight create with a bare identity (the lost-update it used to allow).
-            while (!isParked(verifier.getState())) {
-                assertTrue(verifier.getState() != Thread.State.TERMINATED,
-                        "verify finished without contending on the creation lock");
-                assertTrue(System.nanoTime() < deadline,
-                        "verify never blocked on the creation lock");
-                Thread.onSpinWait();
-            }
+            assertNotEquals(Thread.State.TERMINATED, ThreadStates.awaitState(verifier, ThreadStates.PARKED_OR_DONE,
+                    Duration.ofSeconds(5), "verify"),
+                    "verify finished without contending on the creation lock");
         } finally {
             proceed.countDown();
         }

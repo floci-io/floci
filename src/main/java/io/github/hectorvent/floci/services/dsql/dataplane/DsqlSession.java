@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dsql.dataplane;
 
+import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.dsql.DsqlIdentifiers;
 
@@ -11,9 +12,11 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.StandardConstants;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PushbackInputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.time.Duration;
@@ -51,6 +54,9 @@ final class DsqlSession {
     private static final int MAX_DATABASE_MESSAGE = 64 * 1024 * 1024;
     private static final String INVALID_STARTUP_LENGTH = "invalid length of startup packet";
     private static final String INVALID_MESSAGE_LENGTH = "invalid message length";
+    // DSQL's (measured): picked whenever a client offers it, and the one a client starting TLS at
+    // once, with no SSLRequest, must offer.
+    private static final String ALPN_POSTGRESQL = "postgresql";
     private static final String SERIALIZATION_FAILURE = "40001";
     private static final String QUERY_CANCELED = "57014";
     private static final String ACCESS_DENIED = "unable to accept connection, access denied";
@@ -106,28 +112,37 @@ final class DsqlSession {
     void serve() throws IOException {
         socket.setTcpNoDelay(true);
         socket.setSoTimeout(endpoint.handshakeTimeoutMillis());
-        InputStream rawIn = socket.getInputStream();
+        PushbackInputStream rawIn = new PushbackInputStream(socket.getInputStream(), 1);
         OutputStream rawOut = socket.getOutputStream();
-        PostgresWire.Startup first = readPlaintextPacket(rawIn);
-        if (first.code() == PostgresWire.CANCEL_REQUEST) {
-            endpoint.forwardCancel(first.body());
-            return;
-        }
-        if (first.code() == PostgresWire.GSSENC_REQUEST) {
-            rawOut.write('N');
+        int firstByte = rawIn.read();
+        boolean direct = firstByte == TlsProxyServer.TLS_HANDSHAKE;
+        if (!direct) {
+            if (firstByte >= 0) {
+                rawIn.unread(firstByte);
+            }
+            PostgresWire.Startup first = readPlaintextPacket(rawIn);
+            if (first.code() == PostgresWire.CANCEL_REQUEST) {
+                endpoint.forwardCancel(first.body());
+                return;
+            }
+            if (first.code() == PostgresWire.GSSENC_REQUEST) {
+                rawOut.write('N');
+                rawOut.flush();
+                first = readPlaintextPacket(rawIn);
+            }
+            if (first.code() != PostgresWire.SSL_REQUEST) {
+                refuse(rawOut, "08P01",
+                        "unable to accept connection, SSL is mandatory. AWS Authentication is required.", null);
+                return;
+            }
+            rawOut.write('S');
             rawOut.flush();
-            first = readPlaintextPacket(rawIn);
         }
-        if (first.code() != PostgresWire.SSL_REQUEST) {
-            refuse(rawOut, "08P01", "unable to accept connection, SSL is mandatory. AWS Authentication is required.",
-                    null);
-            return;
-        }
-        rawOut.write('S');
-        rawOut.flush();
 
         String[] serverName = new String[1];
-        SSLSocket tls = (SSLSocket) endpoint.sslContext().getSocketFactory().createSocket(socket, null, true);
+        // A direct connection's first byte, read to tell it apart, is handed back to the TLS handshake.
+        InputStream consumed = direct ? new ByteArrayInputStream(new byte[] {TlsProxyServer.TLS_HANDSHAKE}) : null;
+        SSLSocket tls = (SSLSocket) endpoint.sslContext().getSocketFactory().createSocket(socket, consumed, true);
         SSLParameters parameters = tls.getSSLParameters();
         parameters.setSNIMatchers(List.of(new SNIMatcher(StandardConstants.SNI_HOST_NAME) {
             @Override
@@ -140,7 +155,15 @@ final class DsqlSession {
         }));
         tls.setSSLParameters(parameters);
         tls.setUseClientMode(false);
+        tls.setHandshakeApplicationProtocolSelector((handshaking, offered) ->
+                offered.contains(ALPN_POSTGRESQL) ? ALPN_POSTGRESQL : "");
         tls.startHandshake();
+        if (direct && !ALPN_POSTGRESQL.equals(tls.getApplicationProtocol())) {
+            // DSQL completes a direct handshake without postgresql as its protocol, then closes the
+            // connection without a word (measured).
+            tls.close();
+            return;
+        }
 
         InputStream in = new BufferedInputStream(tls.getInputStream());
         OutputStream out = new BufferedOutputStream(tls.getOutputStream());
@@ -183,7 +206,8 @@ final class DsqlSession {
             return;
         }
         String token = PostgresWire.cString(password.body(), 0).value();
-        DsqlEndpoint.Admission admission = endpoint.admit(token, user, serverName[0]);
+        DsqlEndpoint.Admission admission = endpoint.admit(token, user, serverName[0],
+                socket.getInetAddress().getHostAddress());
         if (!admission.allowed()) {
             refuse(out, admission.state(), ACCESS_DENIED, admission.hint());
             return;

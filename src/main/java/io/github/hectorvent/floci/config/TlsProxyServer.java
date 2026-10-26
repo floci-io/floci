@@ -56,7 +56,7 @@ public class TlsProxyServer {
     private static final Logger LOG = Logger.getLogger(TlsProxyServer.class);
 
     /** TLS record content type for Handshake (ClientHello). */
-    private static final byte TLS_HANDSHAKE = 0x16;
+    public static final byte TLS_HANDSHAKE = 0x16;
 
     private static final int HTTP_BACKEND_PORT = TlsConfigSource.HTTP_INTERNAL_PORT;
     private static final int HTTPS_BACKEND_PORT = TlsConfigSource.HTTPS_INTERNAL_PORT;

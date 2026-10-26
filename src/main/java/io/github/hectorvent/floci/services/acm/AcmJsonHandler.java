@@ -98,7 +98,7 @@ public class AcmJsonHandler {
         if (domainName == null || domainName.isBlank()) {
             return Response.status(400)
                 .entity(new AwsErrorResponse("ValidationException",
-                    "Value null at 'domainName' failed to satisfy constraint: Member must not be null"))
+                    SmithyValidationErrors.notNull("domainName")))
                 .build();
         }
         JsonNode sanNode = request.path("SubjectAlternativeNames");

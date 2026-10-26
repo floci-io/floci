@@ -1,7 +1,8 @@
 package com.floci.test;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
-import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 import software.amazon.awssdk.services.dynamodb.waiters.DynamoDbWaiter;
@@ -12,6 +13,7 @@ import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -117,7 +119,7 @@ class DynamoDbExportTest {
         assertThat(desc.tableArn()).isEqualTo(tableArn);
         assertThat(desc.s3Bucket()).isEqualTo(BUCKET_NAME);
         assertThat(desc.exportFormat()).isEqualTo(ExportFormat.DYNAMODB_JSON);
-        assertThat(desc.exportType()).isEqualTo(ExportType.FULL_EXPORT);
+        assertThat(desc.exportType()).isNull();
 
         exportArn = desc.exportArn();
     }
@@ -176,30 +178,18 @@ class DynamoDbExportTest {
     void s3Objects_manifestAndDataExist() throws Exception {
         assertThat(exportArn).isNotNull();
 
-        DescribeExportResponse descResp = ddb.describeExport(
-                DescribeExportRequest.builder().exportArn(exportArn).build());
-        String manifestSummaryKey = descResp.exportDescription().exportManifest();
-        assertThat(manifestSummaryKey).isNotBlank();
-
-        // Verify manifest-summary.json exists
-        ResponseBytes<GetObjectResponse> manifestSummary = s3.getObjectAsBytes(
-                GetObjectRequest.builder().bucket(BUCKET_NAME).key(manifestSummaryKey).build());
-        assertThat(manifestSummary.asByteArray().length).isGreaterThan(0);
-
+        ExportFiles files = readExportFiles(exportArn);
+        assertThat(files.manifestSummary().get("outputFormat").asText()).isEqualTo("DYNAMODB_JSON");
         String exportId = exportArn.substring(exportArn.lastIndexOf('/') + 1);
-        String manifestFilesKey = "exports/AWSDynamoDB/" + exportId + "/manifest-files.json";
+        assertThat(files.manifestSummary().get("manifestFilesS3Key").asText())
+                .isEqualTo("exports/AWSDynamoDB/" + exportId + "/manifest-files.json");
 
-        ResponseBytes<GetObjectResponse> manifestFiles = s3.getObjectAsBytes(
-                GetObjectRequest.builder().bucket(BUCKET_NAME).key(manifestFilesKey).build());
-        String dataKey = new String(manifestFiles.asByteArray(), StandardCharsets.UTF_8).trim();
+        String dataKey = files.dataFileEntry().get("dataFileS3Key").asText();
         assertThat(dataKey).endsWith(".json.gz");
+        HeadObjectResponse head = s3.headObject(HeadObjectRequest.builder().bucket(BUCKET_NAME).key(dataKey).build());
+        assertThat(head.eTag()).isEqualTo("\"" + files.dataFileEntry().get("etag").asText() + "\"").endsWith("-1\"");
 
-        // Download and decompress the data file
-        ResponseBytes<GetObjectResponse> dataFile = s3.getObjectAsBytes(
-                GetObjectRequest.builder().bucket(BUCKET_NAME).key(dataKey).build());
-
-        String ndjson = decompressGzip(dataFile.asByteArray());
-        String[] lines = ndjson.split("\n");
+        String[] lines = files.data().split("\n");
         assertThat(lines).hasSize(3);
 
         for (String line : lines) {
@@ -218,7 +208,7 @@ class DynamoDbExportTest {
                         .exportType(ExportType.INCREMENTAL_EXPORT)
                         .build()))
                 .isInstanceOf(software.amazon.awssdk.services.dynamodb.model.DynamoDbException.class)
-                .hasMessageContaining("not supported");
+                .hasMessageContaining("Incremental Export Specification expected when export type is set as Incremental Export");
     }
 
     @Test
@@ -269,6 +259,70 @@ class DynamoDbExportTest {
                 .build()))
                 .isInstanceOf(InvalidExportTimeException.class)
                 .hasMessageContaining("Export Time is invalid");
+    }
+
+    @Test
+    @Order(10)
+    void exportTableToPointInTime_ionFormat_writesIonLines() throws Exception {
+        ExportDescription desc = ddb.exportTableToPointInTime(ExportTableToPointInTimeRequest.builder()
+                .tableArn(tableArn)
+                .s3Bucket(BUCKET_NAME)
+                .s3Prefix("exports-ion")
+                .exportFormat(ExportFormat.ION)
+                .build()).exportDescription();
+        assertThat(desc.exportFormat()).isEqualTo(ExportFormat.ION);
+
+        try (DynamoDbWaiter waiter = DynamoDbWaiter.builder().client(ddb).build()) {
+            waiter.waitUntilExportCompleted(r -> r.exportArn(desc.exportArn()));
+        }
+        ExportFiles files = readExportFiles(desc.exportArn());
+        assertThat(files.manifestSummary().get("outputFormat").asText()).isEqualTo("ION");
+        assertThat(files.dataFileEntry().get("dataFileS3Key").asText()).endsWith(".ion.gz");
+        assertThat(files.data().split("\n")).hasSize(4)
+                .allSatisfy(line -> assertThat(line).startsWith("$ion_1_0 {Item:{").endsWith("}}"))
+                .anySatisfy(line -> assertThat(line).contains("pk:\"user-3\"", "sk:\"order-003\"", "total:15d1"));
+    }
+
+    @Test
+    @Order(11)
+    void exportTableToPointInTime_incrementalUnder15Minutes_throwsInvalidExportTimeException() throws InterruptedException {
+        Instant created = ddb.describeTable(r -> r.tableName(TABLE_NAME)).table().creationDateTime();
+        Instant from = created.truncatedTo(ChronoUnit.SECONDS);
+        Instant to = from.plusSeconds(1);
+        TestFixtures.await(() -> Instant.now().isAfter(to), TABLE_NAME, "one-second export period elapsed",
+                Duration.ofSeconds(5).toNanos(), 25);
+
+        assertThatThrownBy(() -> ddb.exportTableToPointInTime(ExportTableToPointInTimeRequest.builder()
+                .tableArn(tableArn)
+                .s3Bucket(BUCKET_NAME)
+                .exportType(ExportType.INCREMENTAL_EXPORT)
+                .incrementalExportSpecification(IncrementalExportSpecification.builder()
+                        .exportFromTime(from)
+                        .exportToTime(to)
+                        .exportViewType(ExportViewType.NEW_IMAGE)
+                        .build())
+                .build()))
+                .isInstanceOf(InvalidExportTimeException.class)
+                .hasMessageContaining("Difference between export period from time and export period to time is less than 15 minutes");
+    }
+
+    /** The manifests and the data of an export that wrote one data file. */
+    private record ExportFiles(JsonNode manifestSummary, JsonNode dataFileEntry, String data) {}
+
+    private ExportFiles readExportFiles(String arn) throws Exception {
+        JsonNode manifestSummary = readJson(ddb.describeExport(DescribeExportRequest.builder().exportArn(arn).build())
+                .exportDescription().exportManifest());
+        JsonNode dataFileEntry = readJson(manifestSummary.get("manifestFilesS3Key").asText());
+        String data = decompressGzip(getObject(dataFileEntry.get("dataFileS3Key").asText()));
+        return new ExportFiles(manifestSummary, dataFileEntry, data);
+    }
+
+    private JsonNode readJson(String key) throws Exception {
+        return new ObjectMapper().readTree(getObject(key));
+    }
+
+    private byte[] getObject(String key) {
+        return s3.getObjectAsBytes(GetObjectRequest.builder().bucket(BUCKET_NAME).key(key).build()).asByteArray();
     }
 
     private String decompressGzip(byte[] data) throws Exception {

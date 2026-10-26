@@ -61,10 +61,13 @@ class TargetDispatcherTest {
         dispatcher = new TargetDispatcher(invoker, sqsService, BASE_URL, clock, null);
     }
 
-    @Test
-    void transientRefusalIsRetriedAfterBackoffUntilAccepted() {
+    @ParameterizedTest
+    @ValueSource(ints = {429, 503})
+    void transientRefusalIsRetriedAfterBackoffUntilAccepted(int httpStatus) {
         when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION))
-                .thenThrow(unavailable())
+                .thenThrow(httpStatus == 429
+                        ? new AwsException("ThrottlingException", "Request limit reached.", 429)
+                        : unavailable())
                 .thenReturn(null);
         Target target = sqsTarget(null, DLQ_ARN);
 

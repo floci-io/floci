@@ -136,7 +136,7 @@ public class TagDispatcher {
         if (tagNode == null || tagNode.isNull()) {
             if (handler.strictTagValidation()) {
                 throw SmithyValidationErrors.validationException(
-                        "Value null at '" + key + "' failed to satisfy constraint: Member must not be null");
+                        SmithyValidationErrors.notNull(key));
             }
             return tags;
         }
@@ -190,7 +190,7 @@ public class TagDispatcher {
         if (handler.strictTagValidation() && !handler.allowEmptyTagKeys()
                 && (values == null || values.isEmpty())) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at '" + paramName + "' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(paramName));
         }
         return (values == null) ? List.of() : List.copyOf(values);
     }

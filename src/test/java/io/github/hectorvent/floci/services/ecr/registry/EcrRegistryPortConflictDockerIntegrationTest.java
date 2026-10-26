@@ -109,6 +109,7 @@ class EcrRegistryPortConflictDockerIntegrationTest {
         // Empty host-persistent-path selects a named volume, which memory mode removes on shutdown.
         when(config.storage().hostPersistentPath()).thenReturn("");
         when(config.storage().mode()).thenReturn("memory");
+        when(config.services().ecr().enabled()).thenReturn(true);
         when(config.services().ecr().registryContainerName()).thenReturn("ecr-registry");
         when(config.services().ecr().registryImage()).thenReturn(TestImages.REGISTRY);
         when(config.services().ecr().registryBasePort()).thenReturn(basePort);

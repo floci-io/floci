@@ -10,7 +10,7 @@ import java.util.Arrays;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-/** Code packages for tests that create Web Function revisions. */
+/** Code packages for tests that deploy function code, Web Function revisions among them. */
 public final class LambdaWebZips {
 
     private LambdaWebZips() {

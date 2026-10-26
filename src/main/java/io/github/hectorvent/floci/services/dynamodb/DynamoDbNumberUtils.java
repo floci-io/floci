@@ -139,9 +139,9 @@ final class DynamoDbNumberUtils {
     }
 
     /**
-     * Recursively normalizes all N-type number attribute values in the given item.
-     * Returns a new ObjectNode with normalized values. Input must be a DynamoDB item
-     * where attribute values are DynamoDB typed values (e.g. {S: "x"}, {N: "42"}).
+     * Recursively normalizes all N-type number attribute values in the given item and
+     * puts set members in DynamoDB's order. Returns a new ObjectNode. Input must be a
+     * DynamoDB item where attribute values are DynamoDB typed values (e.g. {S: "x"}, {N: "42"}).
      */
     static ObjectNode normalizeNumbersInItem(JsonNode item) {
         if (item == null || !item.isObject()) return (ObjectNode) item;
@@ -177,7 +177,14 @@ final class DynamoDbNumberUtils {
             for (JsonNode elem : attr.get("NS")) {
                 ns.add(validateAndNormalize(elem.asText()));
             }
-            result.set("NS", ns);
+            result.set("NS", DynamoDbSetOrder.sorted("NS", ns));
+            return result;
+        }
+
+        if (attr.has("SS") || attr.has("BS")) {
+            String setType = attr.has("SS") ? "SS" : "BS";
+            ObjectNode result = JsonNodeFactory.instance.objectNode();
+            result.set(setType, DynamoDbSetOrder.sorted(setType, attr.get(setType)));
             return result;
         }
 

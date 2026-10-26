@@ -41,6 +41,17 @@ class ServiceCatalogRoutingIntegrationTest {
     }
 
     @Test
+    void consoleCloudWatchTargetIsJsonOnly() {
+        ServiceCatalog.TargetMatch match = catalog.matchTarget("CloudWatchVersion20130116.ListMetrics")
+                .orElseThrow();
+
+        assertEquals("monitoring", match.descriptor().externalKey());
+        assertEquals("ListMetrics", match.action());
+        assertTrue(match.jsonOnly());
+        assertTrue(catalog.byCborSdkServiceId("CloudWatchVersion20130116").isEmpty());
+    }
+
+    @Test
     void rpcV2ServiceNamesDeriveFromTargetPrefixes() {
         // The smithy-rpc-v2 path segment is the service shape name == target prefix
         // without the trailing dot (what the AWS SDKs actually send on the wire).

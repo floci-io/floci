@@ -156,6 +156,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 oidcService, accessEntries, null, null);
     }
 
+    /** Called at boot so this lazily created bean runs {@link #init()}, which restarts persisted clusters. */
+    public void restorePersistedRuntime() {
+        int persistedClusters = allClusterEntries().size();
+        if (persistedClusters > 0) {
+            LOG.infov("Found {0} persisted EKS cluster record(s)", persistedClusters);
+        }
+    }
+
     @PostConstruct
     public void init() {
         backfillOidcIdentities();
@@ -389,6 +397,12 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     void deleteClusterForAccount(String accountId, String clusterName) {
+        synchronized (capacityLock(accountId, clusterName)) {
+            deleteClusterForAccountHoldingCapacity(accountId, clusterName);
+        }
+    }
+
+    private void deleteClusterForAccountHoldingCapacity(String accountId, String clusterName) {
         Cluster cluster = (storage instanceof AccountAwareStorageBackend<Cluster> aware)
                 ? aware.getForAccount(accountId, clusterName).orElse(null)
                 : storage.get(clusterName).orElse(null);
@@ -734,6 +748,37 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 ? aware.getForAccount(accountId, name) : storage.get(name);
     }
 
+    /**
+     * The ARN of what an EKS route names in the caller's account, looked up as its handler looks it up: the
+     * cluster {@code clusterName} when {@code collection} is null, or else the node group, Fargate profile,
+     * add-on, access entry or Pod Identity association {@code name} in that cluster, by the route's
+     * collection segment, or for the update {@code name} the add-on it was made to. Empty when there is none,
+     * or the handler would refuse the lookup.
+     */
+    public Optional<String> findResourceArn(String clusterName, String collection, String name) {
+        Optional<Cluster> cluster = storage.get(clusterName);
+        if (cluster.isEmpty() || collection == null) {
+            return cluster.map(Cluster::getArn);
+        }
+        try {
+            return Optional.ofNullable(switch (collection) {
+                case "node-groups" -> describeNodeGroup(clusterName, name).getNodegroupArn();
+                case "fargate-profiles" -> describeFargateProfile(clusterName, name).getFargateProfileArn();
+                case "addons" -> addons.describe(cluster.get(), name).addonArn();
+                case "access-entries" -> accessEntries.describe(cluster.get(), name).accessEntryArn();
+                case "pod-identity-associations" -> podIdentityAssociations.describe(cluster.get(), name).associationArn();
+                case "updates" -> {
+                    String addon = addons.updateAddonName(cluster.get(), name);
+                    yield addon == null ? null : addons.describe(cluster.get(), addon).addonArn();
+                }
+                default -> null;
+            });
+        } catch (AwsException expected) {
+            // The handler answers this lookup with the same error, so the route names no resource to act on.
+            return Optional.empty();
+        }
+    }
+
     public Cluster describeCluster(String name) {
         Cluster cluster = storage.get(name)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -814,15 +859,24 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     public Cluster deleteCluster(String name) {
-        Cluster cluster = storage.get(name)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "No cluster found for name: " + name, 404));
-        if (cluster.getAccountId() == null) {
-            cluster.setAccountId(regionResolver.getAccountId());
+        // A first node group replacing the node holds this lock while the swap runs; deleting
+        // meanwhile would find no container to stop and have its cluster written back. Read the
+        // cluster only once the lock is held: a delete that waited may find it gone.
+        synchronized (capacityLock(regionResolver.getAccountId(), name)) {
+            Cluster cluster = storage.get(name)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "No cluster found for name: " + name, 404));
+            if (cluster.getAccountId() == null) {
+                cluster.setAccountId(regionResolver.getAccountId());
+            }
+            return deleteClusterHoldingCapacity(name, cluster);
         }
+    }
 
+    private Cluster deleteClusterHoldingCapacity(String name, Cluster cluster) {
         // One delete at a time per cluster, so a delete that fails cannot restore the status or
-        // state of a cluster another delete is tearing down.
+        // state of a cluster another delete is tearing down. Deletes from other threads already
+        // wait on the capacity lock; this refuses one nested on the same thread.
         if (!clustersBeingDeleted.add(cluster)) {
             throw new AwsException("ResourceInUseException",
                     "Cluster is already being deleted: " + name, 409);
@@ -944,8 +998,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         nodeGroup.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
 
         String capacityKey = accountId + "/" + clusterName;
-        Object capacityLock = nodeGroupCapacityLocks.computeIfAbsent(capacityKey,
-                ignored -> new Object());
+        Object capacityLock = capacityLock(accountId, clusterName);
         boolean hasUserData = launchTemplateData != null && launchTemplateData.getUserData() != null
                 && !launchTemplateData.getUserData().isBlank();
         Cluster currentCluster;
@@ -1133,9 +1186,13 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 .collect(Collectors.toList());
     }
 
+    /** Serializes node group capacity changes and cluster deletion; taken before clustersBeingDeleted. */
+    private Object capacityLock(String accountId, String clusterName) {
+        return nodeGroupCapacityLocks.computeIfAbsent(accountId + "/" + clusterName, ignored -> new Object());
+    }
+
     public Nodegroup deleteNodeGroup(String clusterName, String nodegroupName) {
-        Object capacityLock = nodeGroupCapacityLocks.computeIfAbsent(
-                regionResolver.getAccountId() + "/" + clusterName, ignored -> new Object());
+        Object capacityLock = capacityLock(regionResolver.getAccountId(), clusterName);
         synchronized (capacityLock) {
             Nodegroup nodeGroup = describeNodeGroup(clusterName, nodegroupName);
             nodeGroup.setStatus(NodegroupStatus.DELETING);

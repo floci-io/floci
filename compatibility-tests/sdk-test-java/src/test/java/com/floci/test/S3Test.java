@@ -5,6 +5,7 @@ import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.BucketLocationConstraint;
 import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
@@ -21,10 +22,14 @@ import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectTaggingRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
+import software.amazon.awssdk.services.s3.model.GetBucketAclRequest;
+import software.amazon.awssdk.services.s3.model.GetBucketAclResponse;
 import software.amazon.awssdk.services.s3.model.GetBucketLocationRequest;
 import software.amazon.awssdk.services.s3.model.GetBucketLocationResponse;
 import software.amazon.awssdk.services.s3.model.GetBucketTaggingRequest;
 import software.amazon.awssdk.services.s3.model.GetBucketTaggingResponse;
+import software.amazon.awssdk.services.s3.model.GetObjectAclRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectAclResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectTaggingRequest;
@@ -36,14 +41,18 @@ import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListBucketsResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.ListPartsRequest;
+import software.amazon.awssdk.services.s3.model.ListPartsResponse;
 import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
+import software.amazon.awssdk.services.s3.model.Permission;
 import software.amazon.awssdk.services.s3.model.PutBucketTaggingRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectTaggingRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.Tagging;
+import software.amazon.awssdk.services.s3.model.Type;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 
 import java.io.ByteArrayOutputStream;
@@ -612,6 +621,56 @@ class S3Test {
         }
     }
 
+    @Test
+    @Order(35)
+    void ownerAndGranteesAreTheAccountsCanonicalUserId() {
+        // S3 identifies the owner of buckets and objects, and CanonicalUser ACL grantees, by the
+        // account's 64-hex canonical user ID, the same value in ListBuckets, both ACLs and the
+        // multipart listing. The value itself is opaque on AWS, so the SDK test pins the form
+        // and the cross-response identity, not a specific derivation.
+        String bucket = TestFixtures.uniqueName("canonical-owner-bucket");
+        String key = "owned.txt";
+        String multipartKey = "owned.bin";
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+        try {
+            String ownerId = s3.listBuckets().owner().id();
+            assertThat(ownerId).matches("[0-9a-f]{64}");
+
+            GetBucketAclResponse bucketAcl = s3.getBucketAcl(
+                    GetBucketAclRequest.builder().bucket(bucket).build());
+            assertThat(bucketAcl.owner().id()).isEqualTo(ownerId);
+            assertThat(bucketAcl.grants()).singleElement().satisfies(grant -> {
+                assertThat(grant.grantee().id()).isEqualTo(ownerId);
+                assertThat(grant.grantee().type()).isEqualTo(Type.CANONICAL_USER);
+                assertThat(grant.permission()).isEqualTo(Permission.FULL_CONTROL);
+            });
+
+            s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key).build(),
+                    RequestBody.fromString(CONTENT));
+            GetObjectAclResponse objectAcl = s3.getObjectAcl(
+                    GetObjectAclRequest.builder().bucket(bucket).key(key).build());
+            assertThat(objectAcl.owner().id()).isEqualTo(ownerId);
+            assertThat(objectAcl.grants()).singleElement().satisfies(grant -> {
+                assertThat(grant.grantee().id()).isEqualTo(ownerId);
+                assertThat(grant.grantee().type()).isEqualTo(Type.CANONICAL_USER);
+                assertThat(grant.permission()).isEqualTo(Permission.FULL_CONTROL);
+            });
+
+            String uploadId = s3.createMultipartUpload(CreateMultipartUploadRequest.builder()
+                    .bucket(bucket).key(multipartKey).build()).uploadId();
+            s3.uploadPart(UploadPartRequest.builder().bucket(bucket).key(multipartKey)
+                    .uploadId(uploadId).partNumber(1).build(), RequestBody.fromString("part"));
+            ListPartsResponse parts = s3.listParts(ListPartsRequest.builder()
+                    .bucket(bucket).key(multipartKey).uploadId(uploadId).build());
+            assertThat(parts.initiator().id()).isEqualTo(ownerId);
+            assertThat(parts.owner().id()).isEqualTo(ownerId);
+            s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                    .bucket(bucket).key(multipartKey).uploadId(uploadId).build());
+        } finally {
+            deleteObjectAndBucketQuietly(bucket, key);
+        }
+    }
+
     private void assertInlineTaggingHeaderRejected(String rawTaggingHeader, int expectedStatus, String expectedErrorCode) {
         String bucket = TestFixtures.uniqueName("inline-tag-reject");
         String key = "rejected.txt";
@@ -630,12 +689,20 @@ class S3Test {
                         assertThat(s3e.awsErrorDetails().errorCode()).isEqualTo(expectedErrorCode);
                     });
         } finally {
-            try {
-                s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
-            } catch (Exception ignored) {}
-            try {
-                s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
-            } catch (Exception ignored) {}
+            deleteObjectAndBucketQuietly(bucket, key);
+        }
+    }
+
+    private void deleteObjectAndBucketQuietly(String bucket, String key) {
+        try {
+            s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+        } catch (Exception ignored) {
+            // cleanup only: an already-deleted object must not mask the assertion
+        }
+        try {
+            s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+        } catch (Exception ignored) {
+            // cleanup only: an already-emptied bucket must not mask the assertion
         }
     }
 }

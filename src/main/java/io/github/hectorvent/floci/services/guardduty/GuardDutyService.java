@@ -618,7 +618,7 @@ public class GuardDutyService {
             return null;
         }
         try {
-            String decoded = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+            String decoded = Base64Url.decode(token);
             if (decoded.startsWith(PLAN_TOKEN_PREFIX) && decoded.length() > PLAN_TOKEN_PREFIX.length()) {
                 return decoded.substring(PLAN_TOKEN_PREFIX.length());
             }
@@ -1074,7 +1074,7 @@ public class GuardDutyService {
             return 0;
         }
         try {
-            String decoded = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+            String decoded = Base64Url.decode(token);
             if (!decoded.startsWith(TOKEN_PREFIX)) {
                 throw badRequest("nextToken is invalid.");
             }

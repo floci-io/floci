@@ -51,7 +51,7 @@ public final class AwsArnUtils {
 
         @Override
         public String toString() {
-            return "arn:" + partition + ":" + service + ":" + region + ":" + accountId + ":" + resource;
+            return "arn:" + partition + ":" + service + ":" + region + ":" + accountId + ":" + resource; // partition-literal: the one ARN formatter
         }
     }
 
@@ -65,7 +65,7 @@ public final class AwsArnUtils {
         if (arn == null || arn.isBlank()) {
             throw new IllegalArgumentException("ARN must not be null or blank");
         }
-        String[] parts = arn.split(":", 6);
+        String[] parts = arn.split(":", 6); // partition-literal: the one ARN parser
         if (parts.length < 6 || !"arn".equals(parts[0])) {
             throw new IllegalArgumentException("Invalid ARN: " + arn);
         }

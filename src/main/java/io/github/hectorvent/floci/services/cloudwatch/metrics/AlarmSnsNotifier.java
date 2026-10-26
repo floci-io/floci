@@ -13,6 +13,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -33,9 +34,11 @@ public class AlarmSnsNotifier {
         this.objectMapper = objectMapper;
     }
 
-    public void notifyTransition(MetricAlarm alarm, String oldState) {
+    record Notification(String topicArn, String message, String subject, String region) {}
+
+    List<Notification> prepareTransition(MetricAlarm alarm, String oldState) {
         if (!alarm.isActionsEnabled() || alarm.getStateValue().equals(oldState)) {
-            return;
+            return List.of();
         }
         List<String> actions = switch (alarm.getStateValue()) {
             case "ALARM" -> alarm.getAlarmActions();
@@ -44,8 +47,9 @@ public class AlarmSnsNotifier {
             default -> List.of();
         };
         if (actions == null) {
-            return;
+            return List.of();
         }
+        List<Notification> notifications = new ArrayList<>();
         for (String action : actions) {
             if (!AwsArnUtils.isArnFor(action, "sns")) {
                 continue;
@@ -56,10 +60,23 @@ public class AlarmSnsNotifier {
                 if (subject.length() > 100) {
                     subject = subject.substring(0, 100);
                 }
-                snsService.publish(action, null, message(alarm, oldState), subject, topic.region());
+                notifications.add(new Notification(action, message(alarm, oldState), subject, topic.region()));
             } catch (Exception e) {
                 LOG.warnv(e, "Unable to publish alarm {0} state {1} to SNS action {2}",
                         alarm.getAlarmName(), alarm.getStateValue(), action);
+            }
+        }
+        return notifications;
+    }
+
+    void publish(List<Notification> notifications) {
+        for (Notification notification : notifications) {
+            try {
+                snsService.publish(notification.topicArn(), null, notification.message(),
+                        notification.subject(), notification.region());
+            } catch (Exception error) {
+                LOG.warnv(error, "Unable to publish alarm transition {0} to SNS action {1}",
+                        notification.subject(), notification.topicArn());
             }
         }
     }

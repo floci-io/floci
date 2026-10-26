@@ -68,7 +68,7 @@ class RedshiftArchiveRetryTest {
         when(builder.newContainer(anyString())).thenReturn(mock(ContainerBuilder.Builder.class, RETURNS_SELF));
         ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
         when(lifecycle.getDockerClient()).thenReturn(docker);
-        when(lifecycle.createAndStart(any())).thenReturn(
+        when(lifecycle.createAndStartEphemeral(any())).thenReturn(
                 new ContainerInfo(CONTAINER, Map.of(5432, new EndpointInfo("localhost", 5432))));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().redshift().imageVersion()).thenReturn("postgres:16-alpine");

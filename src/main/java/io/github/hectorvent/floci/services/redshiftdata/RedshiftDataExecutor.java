@@ -14,12 +14,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 @ApplicationScoped
 class RedshiftDataExecutor implements AutoCloseable {
@@ -65,8 +68,9 @@ class RedshiftDataExecutor implements AutoCloseable {
     }
 
     /**
-     * Admits a statement. {@code admit} runs under the reset read lock, so a reset cannot slip
-     * between persisting the statement and registering its execution. {@code onFailure} runs when
+     * Reserves queue capacity before {@code admit} writes any state. The worker waits for admission
+     * to succeed. {@code admit} runs under the reset read lock, so reset cannot split admission.
+     * {@code onFailure} runs when
      * the worker dies with an unexpected exception, so the statement can still reach a terminal state.
      */
     RedshiftDataExecution submit(String account, String region, String id, Runnable admit,
@@ -79,7 +83,25 @@ class RedshiftDataExecutor implements AutoCloseable {
             }
             String key = account + ":" + id;
             RedshiftDataExecution execution = new RedshiftDataExecution(generation);
+            CountDownLatch ready = new CountDownLatch(1);
+            AtomicBoolean admitted = new AtomicBoolean();
+            AtomicBoolean claimed = new AtomicBoolean();
             Runnable task = () -> {
+                if (closed && ready.getCount() != 0) {
+                    return;
+                }
+                try {
+                    ready.await();
+                } catch (InterruptedException expected) {
+                    // The admitting thread completes a pending reservation after shutdown interrupts its worker.
+                    Thread.currentThread().interrupt();
+                    if (ready.getCount() != 0) {
+                        return;
+                    }
+                }
+                if (!admitted.get() || !claimed.compareAndSet(false, true)) {
+                    return;
+                }
                 try {
                     RequestScopes.runAs(account, region, () -> work.accept(execution));
                 } catch (RuntimeException failure) {
@@ -93,7 +115,6 @@ class RedshiftDataExecutor implements AutoCloseable {
                 }
             };
             execution.task(task);
-            admit.run();
             synchronized (this) {
                 executions.put(key, execution);
             }
@@ -105,7 +126,40 @@ class RedshiftDataExecutor implements AutoCloseable {
                 }
                 throw new AwsException("ActiveStatementsExceededException", "Too many active statements", 400);
             }
+            try {
+                admit.run();
+                admitted.set(true);
+            } catch (RuntimeException | Error failure) {
+                workers.remove(task);
+                synchronized (this) {
+                    executions.remove(key, execution);
+                }
+                execution.completed();
+                throw failure;
+            } finally {
+                boolean finishAfterShutdown;
+                synchronized (this) {
+                    finishAfterShutdown = closed && admitted.get();
+                    if (finishAfterShutdown) {
+                        execution.requestCancellation();
+                    }
+                    ready.countDown();
+                }
+                if (finishAfterShutdown) {
+                    Thread.startVirtualThread(task);
+                }
+            }
             return execution;
+        } finally {
+            resetLock.readLock().unlock();
+        }
+    }
+
+    /** Keeps receipt lookup, admission and rejected-admission cleanup in one reset generation. */
+    <T> T admitting(Supplier<T> admission) {
+        resetLock.readLock().lock();
+        try {
+            return admission.get();
         } finally {
             resetLock.readLock().unlock();
         }
@@ -119,6 +173,10 @@ class RedshiftDataExecutor implements AutoCloseable {
         } catch (RuntimeException secondary) {
             LOG.errorv(secondary, "Unable to mark statement {0} in account {1} failed after a worker error", id, account);
         }
+    }
+
+    synchronized RedshiftDataExecution execution(String account, String id) {
+        return executions.get(account + ":" + id);
     }
 
     boolean cancel(String account, String id) {
@@ -173,12 +231,12 @@ class RedshiftDataExecutor implements AutoCloseable {
     }
 
     void clear(Runnable clearStorage) {
-        List<RedshiftDataExecution> active;
+        List<RedshiftDataExecution> active = new ArrayList<>();
         resetLock.writeLock().lock();
         try {
             generation++;
             synchronized (this) {
-                active = new ArrayList<>(executions.values());
+                active.addAll(executions.values());
                 executions.clear();
             }
             for (RedshiftDataExecution execution : active) {
@@ -187,13 +245,13 @@ class RedshiftDataExecutor implements AutoCloseable {
             clearStorage.run();
         } finally {
             resetLock.writeLock().unlock();
-        }
-        for (RedshiftDataExecution execution : active) {
-            if (execution.requestCancellation()) {
-                Thread.startVirtualThread(execution::signalCancellation);
-            }
-            if (workers.remove(execution.task())) {
-                execution.completed();
+            for (RedshiftDataExecution execution : active) {
+                if (execution.requestCancellation()) {
+                    Thread.startVirtualThread(execution::signalCancellation);
+                }
+                if (workers.remove(execution.task())) {
+                    execution.completed();
+                }
             }
         }
     }

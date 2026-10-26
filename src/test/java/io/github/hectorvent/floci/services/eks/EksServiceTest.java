@@ -42,6 +42,7 @@ import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.Provider;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -50,15 +51,19 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -560,6 +565,9 @@ class EksServiceTest {
         EksService service = serviceWithCluster(cluster, clusterManager, false);
         AwsException[] overlapping = new AwsException[1];
         doAnswer(firstDelete -> {
+            // Nested on the same thread, so the reentrant capacity lock lets it through and the
+            // clustersBeingDeleted check refuses it. Another thread waits instead; see
+            // aSecondDeleteWaitsAndFindsTheClusterGone.
             overlapping[0] = assertThrows(AwsException.class, () -> service.deleteCluster("running-cluster"));
             return null;
         }).when(clusterManager).stopCluster(cluster);
@@ -1056,6 +1064,106 @@ class EksServiceTest {
         assertThrows(AwsException.class, () -> service.describeCluster("deleted-node"));
     }
 
+    @Test
+    void deleteIssuedDuringTheFirstNodeGroupSwapWaitsAndThenDeletesCleanly() throws Exception {
+        EksClusterManager clusterManager = capacitySwapManager(true);
+        EksService service = newService(clusterManager, false);
+        activeClusterWithRunningNode(service, "deleted-during-swap");
+        List<String> stoppedContainers = new CopyOnWriteArrayList<>();
+        doAnswer(invocation -> {
+            stoppedContainers.add(String.valueOf(invocation.<Cluster>getArgument(0).getContainerId()));
+            return null;
+        }).when(clusterManager).stopCluster(any());
+        AtomicReference<Throwable> deleteError = new AtomicReference<>();
+        AtomicReference<Thread.State> deleterDuringSwap = new AtomicReference<>();
+        Thread deleter = deleteThread(service, "deleted-during-swap", deleteError);
+        when(clusterManager.restartForNodeCapacity(any(), anyString())).thenAnswer(invocation -> {
+            // As replaceClusterContainer does: no container while the replacement starts.
+            Cluster swapping = invocation.getArgument(0);
+            swapping.setContainerId(null);
+            deleter.start();
+            deleterDuringSwap.set(awaitBlockedOrTerminated(deleter, "the delete during the swap"));
+            swapping.setContainerId("replacement-container");
+            return true;
+        });
+
+        Nodegroup group = service.createNodeGroup("deleted-during-swap", nodeGroupRequest("first"));
+        deleter.join(5000);
+
+        assertEquals(Thread.State.BLOCKED, deleterDuringSwap.get());
+        assertFalse(deleter.isAlive());
+        assertNull(deleteError.get());
+        assertEquals(NodegroupStatus.ACTIVE, group.getStatus());
+        assertTrue(createdStorage("eks-clusters.json").get("deleted-during-swap").isEmpty());
+        assertEquals(List.of("replacement-container"), stoppedContainers);
+    }
+
+    @Test
+    void aSecondDeleteWaitsAndFindsTheClusterGone() throws Exception {
+        EksClusterManager clusterManager = capacitySwapManager(true);
+        EksService service = newService(clusterManager, false);
+        activeClusterWithRunningNode(service, "deleted-twice");
+        CountDownLatch firstStopping = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            firstStopping.countDown();
+            assertTrue(releaseFirst.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(clusterManager).stopCluster(any());
+        AtomicReference<Throwable> firstError = new AtomicReference<>();
+        AtomicReference<Throwable> secondError = new AtomicReference<>();
+        Thread first = deleteThread(service, "deleted-twice", firstError);
+        Thread second = deleteThread(service, "deleted-twice", secondError);
+
+        first.start();
+        assertTrue(firstStopping.await(5, TimeUnit.SECONDS));
+        second.start();
+        Thread.State secondWhileFirstRuns = awaitBlockedOrTerminated(second, "the second delete");
+        releaseFirst.countDown();
+        first.join(5000);
+        second.join(5000);
+
+        assertEquals(Thread.State.BLOCKED, secondWhileFirstRuns);
+        assertFalse(first.isAlive());
+        assertFalse(second.isAlive());
+        assertNull(firstError.get());
+        assertTrue(secondError.get() instanceof AwsException e
+                && "ResourceNotFoundException".equals(e.getErrorCode()), String.valueOf(secondError.get()));
+        verify(clusterManager, times(1)).stopCluster(any());
+        assertTrue(createdStorage("eks-clusters.json").get("deleted-twice").isEmpty());
+    }
+
+    /** An unstarted thread that deletes {@code name} and keeps what it threw in {@code error}. */
+    private static Thread deleteThread(EksService service, String name, AtomicReference<Throwable> error) {
+        return Thread.ofPlatform().unstarted(() -> {
+            try {
+                service.deleteCluster(name);
+            } catch (Throwable e) {
+                error.set(e);
+            }
+        });
+    }
+
+    // BLOCKED on any monitor counts; the assertions after it show the wait was on the capacity lock.
+    private static Thread.State awaitBlockedOrTerminated(Thread thread, String what) {
+        return ThreadStates.awaitState(thread, EnumSet.of(Thread.State.BLOCKED, Thread.State.TERMINATED),
+                Duration.ofSeconds(5), what);
+    }
+
+    @Test
+    void firstNodeGroupSwapOnALiveClusterStoresBoth() {
+        EksClusterManager clusterManager = capacitySwapManager(true);
+        EksService service = newService(clusterManager, false);
+        activeClusterWithRunningNode(service, "kept-during-swap");
+
+        Nodegroup group = service.createNodeGroup("kept-during-swap", nodeGroupRequest("first"));
+
+        assertEquals(NodegroupStatus.ACTIVE, group.getStatus());
+        Cluster stored = (Cluster) createdStorage("eks-clusters.json").get("kept-during-swap").orElseThrow();
+        assertTrue(stored.isFinalizePending());
+        assertTrue(createdStorage("eks-nodegroups.json").get("kept-during-swap/first").isPresent());
+    }
+
     private static Cluster activeClusterWithRunningNode(EksService service, String name) {
         CreateClusterRequest request = new CreateClusterRequest();
         request.setName(name);
@@ -1316,12 +1424,21 @@ class EksServiceTest {
         assertEquals(404, delete.getHttpStatus());
     }
 
+    private final Map<String, AccountAwareStorageBackend<?>> createdStorages = new HashMap<>();
+
+    @SuppressWarnings("unchecked")
+    private <V> AccountAwareStorageBackend<V> createdStorage(String fileName) {
+        return (AccountAwareStorageBackend<V>) createdStorages.get(fileName);
+    }
+
     private EksService newService(EksClusterManager clusterManager, boolean mock) {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return AccountAwareStorageBackend.inMemory("000000000000");
+                AccountAwareStorageBackend<V> backend = AccountAwareStorageBackend.inMemory("000000000000");
+                createdStorages.put(fileName, backend);
+                return backend;
             }
         };
         return new EksService(storageFactory, testConfig(mock),

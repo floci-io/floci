@@ -40,6 +40,7 @@ class LambdaWebIamAuthTest {
     private static final String ACCOUNT = "111111111111";
     private static final String OTHER_ACCOUNT = "222222222222";
     private static final String HOST = "abcdefghijklmnop.001.lambda-web.us-east-1.localhost:4566";
+    private static final String WEST_HOST = "abcdefghijklmnop.001.lambda-web.us-west-2.localhost:4566";
     private static final String FUNCTION_ARN = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":web-function/app";
     private static final String ENDPOINT_ARN = FUNCTION_ARN + "/endpoint/prod";
     private static final String USER_KEY = "AKIAUSERKEY000000001";
@@ -126,6 +127,12 @@ class LambdaWebIamAuthTest {
     }
 
     @Test
+    void aRegionalDomainOfAnotherRegionTakesOnlyASignatureForThatRegion() {
+        assertTrue(allows(signer().region("us-west-2").sign("GET", WEST_HOST, "/"), WEST_HOST, "us-west-2"));
+        assertFalse(allows(signer().sign("GET", WEST_HOST, "/"), WEST_HOST, "us-west-2"));
+    }
+
+    @Test
     void theSigningTimeMustBeWithinFiveMinutes() {
         Instant now = Instant.now();
         assertTrue(allows(signer().signedAt(now.minus(Duration.ofMinutes(4))).sign("GET", HOST, "/")));
@@ -202,6 +209,19 @@ class LambdaWebIamAuthTest {
     }
 
     @Test
+    void underEnforcementTheRequestedRegionIsTheRegionOfTheDomain() {
+        enforceFor(ACCOUNT);
+        LambdaWebRequestSigner.Signed west = signer().credentials(USER_KEY, USER_SECRET, null).region("us-west-2")
+                .sign("GET", WEST_HOST, "/");
+        function.policy = denyRequestedRegion("us-west-2");
+        assertTrue(allowsUserWith(allow(ENDPOINT_ARN, "")));
+        assertFalse(allows(west, WEST_HOST, "us-west-2"));
+        function.policy = denyRequestedRegion("us-east-1");
+        assertFalse(allowsUserWith(allow(ENDPOINT_ARN, "")));
+        assertTrue(allows(west, WEST_HOST, "us-west-2"));
+    }
+
+    @Test
     void underEnforcementTheResourcePolicyAllowsWithinTheAccountAndItsDenyWins() {
         enforceFor(ACCOUNT);
         function.policy = resourcePolicy("Allow", ACCOUNT);
@@ -260,10 +280,27 @@ class LambdaWebIamAuthTest {
         assertFalse(allowsCloudFront(iamAuth.cloudFrontSignature(DISTRIBUTION_ARN)));
     }
 
+    @Test
+    void underEnforcementCloudFrontRequestsTheRegionThatServes() {
+        when(config.services().iam().enforcementEnabled()).thenReturn(true);
+        Map<String, String> signature = iamAuth.cloudFrontSignature(DISTRIBUTION_ARN);
+        String allow = cloudFrontStatement("Allow", "aws:SourceArn", DISTRIBUTION_ARN);
+        function.policy = cloudFrontPolicy(allow, cloudFrontStatement("Deny", "aws:RequestedRegion", "us-west-2"));
+        assertTrue(allowsCloudFront(signature));
+        assertFalse(allowsCloudFront(signature, WEST_HOST, "us-west-2"));
+        function.policy = cloudFrontPolicy(allow, cloudFrontStatement("Deny", "aws:RequestedRegion", "us-east-1"));
+        assertFalse(allowsCloudFront(signature));
+        assertTrue(allowsCloudFront(signature, WEST_HOST, "us-west-2"));
+    }
+
     private boolean allowsCloudFront(Map<String, String> signature) {
-        MultiMap headers = MultiMap.caseInsensitiveMultiMap().add("Host", HOST).addAll(signature);
+        return allowsCloudFront(signature, HOST, "us-east-1");
+    }
+
+    private boolean allowsCloudFront(Map<String, String> signature, String host, String servingRegion) {
+        MultiMap headers = MultiMap.caseInsensitiveMultiMap().add("Host", host).addAll(signature);
         return iamAuth.allows(new Inbound("POST", "/", null, headers, MultiMap.caseInsensitiveMultiMap()),
-                new WebFunctionTarget(ACCOUNT, "us-east-1", function, endpoint));
+                new WebFunctionTarget(ACCOUNT, "us-east-1", function, endpoint, servingRegion));
     }
 
     private static String cloudFrontPolicy(String... statements) {
@@ -301,6 +338,13 @@ class LambdaWebIamAuthTest {
                 .formatted(effect, callerAccount, ENDPOINT_ARN);
     }
 
+    private static String denyRequestedRegion(String region) {
+        return """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*",
+                 "Action":"lambda:InvokeWebFunctionEndpoint","Resource":"%s",
+                 "Condition":{"StringEquals":{"aws:RequestedRegion":"%s"}}}]}""".formatted(ENDPOINT_ARN, region);
+    }
+
     private static String allow(String resource, String condition) {
         return """
                 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"lambda:InvokeWebFunctionEndpoint",
@@ -312,11 +356,15 @@ class LambdaWebIamAuthTest {
     }
 
     private boolean allows(LambdaWebRequestSigner.Signed signed) {
+        return allows(signed, HOST, "us-east-1");
+    }
+
+    private boolean allows(LambdaWebRequestSigner.Signed signed, String host, String servingRegion) {
         String pathAndQuery = signed.pathAndQuery();
         int question = pathAndQuery.indexOf('?');
         String path = question < 0 ? pathAndQuery : pathAndQuery.substring(0, question);
         String query = question < 0 ? null : pathAndQuery.substring(question + 1);
-        MultiMap headers = MultiMap.caseInsensitiveMultiMap().add("Host", HOST);
+        MultiMap headers = MultiMap.caseInsensitiveMultiMap().add("Host", host);
         signed.headers().forEach(headers::add);
         MultiMap params = MultiMap.caseInsensitiveMultiMap();
         try {
@@ -325,6 +373,6 @@ class LambdaWebIamAuthTest {
             // The data plane keeps going with no parameters when the query does not decode.
         }
         return iamAuth.allows(new Inbound(signed.method(), path, query, headers, params),
-                new WebFunctionTarget(ACCOUNT, "us-east-1", function, endpoint));
+                new WebFunctionTarget(ACCOUNT, "us-east-1", function, endpoint, servingRegion));
     }
 }

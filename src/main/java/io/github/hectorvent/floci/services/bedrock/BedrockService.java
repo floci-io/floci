@@ -385,6 +385,7 @@ public class BedrockService {
         }
         String guardrailId = resolveGuardrailId(resourceArn);
         return guardrails.get(storageKey(region, guardrailId, DRAFT_VERSION))
+                .filter(guardrail -> !resourceArn.startsWith("arn:") || resourceArn.equals(guardrail.getGuardrailArn()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource " + resourceArn + " does not exist.", 404));
     }

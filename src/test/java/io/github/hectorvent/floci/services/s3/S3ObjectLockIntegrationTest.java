@@ -572,6 +572,80 @@ class S3ObjectLockIntegrationTest {
             .body(containsString("<Code>NoSuchObjectLockConfiguration</Code>"));
     }
 
+    // --- versioning on a bucket with Object Lock ---
+
+    @Test
+    @Order(30)
+    void versioningCannotBeSuspendedOnABucketWithObjectLock() {
+        given()
+            .body(versioning("Suspended"))
+        .when()
+            .put("/" + LOCK_BUCKET + "?versioning")
+        .then()
+            .statusCode(409)
+            .body(containsString("<Code>InvalidBucketState</Code>"))
+            .body(containsString("<Message>An Object Lock configuration is present on this bucket, "
+                    + "so the versioning state cannot be changed.</Message>"));
+        assertVersioning(LOCK_BUCKET, "Enabled");
+
+        given().body(versioning("Enabled")).when().put("/" + LOCK_BUCKET + "?versioning").then().statusCode(200);
+        assertVersioning(LOCK_BUCKET, "Enabled");
+    }
+
+    @Test
+    @Order(31)
+    void objectLockConfigurationNeedsVersioningEnabled() {
+        String bucket = "object-lock-needs-versioning";
+        given().when().put("/" + bucket).then().statusCode(200);
+        assertObjectLockConfigurationRefused(bucket);
+
+        given().body(versioning("Suspended")).when().put("/" + bucket + "?versioning").then().statusCode(200);
+        assertObjectLockConfigurationRefused(bucket);
+
+        given().body(versioning("Enabled")).when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given()
+            .body("<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>")
+        .when()
+            .put("/" + bucket + "?object-lock")
+        .then()
+            .statusCode(200);
+        given().body(versioning("Suspended")).when().put("/" + bucket + "?versioning").then().statusCode(409)
+            .body(containsString("<Code>InvalidBucketState</Code>"));
+        assertVersioning(bucket, "Enabled");
+    }
+
+    private static String versioning(String status) {
+        return "<VersioningConfiguration><Status>" + status + "</Status></VersioningConfiguration>";
+    }
+
+    private static void assertVersioning(String bucket, String status) {
+        given()
+        .when()
+            .get("/" + bucket + "?versioning")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Status>" + status + "</Status>"));
+    }
+
+    /** S3 was recorded refusing this on a bucket whose versioning is unset and on one where it is suspended. */
+    private static void assertObjectLockConfigurationRefused(String bucket) {
+        given()
+            .body("<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>")
+        .when()
+            .put("/" + bucket + "?object-lock")
+        .then()
+            .statusCode(409)
+            .body(containsString("<Code>InvalidBucketState</Code>"))
+            .body("Error.Message", equalTo(
+                    "Versioning must be 'Enabled' on the bucket to apply a Object Lock configuration"));
+        given()
+        .when()
+            .get("/" + bucket + "?object-lock")
+        .then()
+            .statusCode(404)
+            .body(containsString("ObjectLockConfigurationNotFoundError"));
+    }
+
     /** A PutObject, a CopyObject of {@code copySource} or a CreateMultipartUpload of {@code path}. */
     private static Response createObject(String operation, String path, String copySource,
                                          RequestSpecification request) {

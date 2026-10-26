@@ -64,7 +64,8 @@ class Ec2RunInstancesPublicIpParamTest {
                 nullable(String.class), anyList(), nullable(String.class), nullable(String.class),
                 nullable(Boolean.class), nullable(String.class), anyInt(), nullable(String.class),
                 nullable(LaunchTemplateData.MetadataOptions.class), nullable(String.class), nullable(String.class), eq(false),
-                nullable(String.class), nullable(String.class), nullable(List.class), eq(false), nullable(String.class)))
+                nullable(String.class), nullable(String.class), nullable(List.class), eq(false), nullable(String.class),
+                nullable(LaunchTemplateData.CapacityReservationSpecification.class)))
                 .thenReturn(new Reservation());
 
         Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
@@ -79,7 +80,8 @@ class Ec2RunInstancesPublicIpParamTest {
                 nullable(String.class), anyList(), nullable(String.class), nullable(String.class),
                 associatePublicIp.capture(), nullable(String.class), anyInt(), nullable(String.class),
                 nullable(LaunchTemplateData.MetadataOptions.class), nullable(String.class), nullable(String.class), eq(false),
-                nullable(String.class), nullable(String.class), nullable(List.class), eq(false), nullable(String.class));
+                nullable(String.class), nullable(String.class), nullable(List.class), eq(false), nullable(String.class),
+                nullable(LaunchTemplateData.CapacityReservationSpecification.class));
         if (expected == null) {
             assertNull(associatePublicIp.getValue(),
                     "an absent override must stay null so the subnet default decides");

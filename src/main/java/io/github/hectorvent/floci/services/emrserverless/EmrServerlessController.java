@@ -11,9 +11,11 @@ import io.github.hectorvent.floci.services.emrserverless.model.DeleteApplication
 import io.github.hectorvent.floci.services.emrserverless.model.GetApplicationResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.GetJobRunResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.JobRun;
+import io.github.hectorvent.floci.services.emrserverless.model.JobRunAttemptSummary;
 import io.github.hectorvent.floci.services.emrserverless.model.JobRunSummary;
 import io.github.hectorvent.floci.services.emrserverless.model.ListApplicationsRequest;
 import io.github.hectorvent.floci.services.emrserverless.model.ListApplicationsResponse;
+import io.github.hectorvent.floci.services.emrserverless.model.ListJobRunAttemptsResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.ListJobRunsResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.StartApplicationResponse;
 import io.github.hectorvent.floci.services.emrserverless.model.StartJobRunRequest;
@@ -160,9 +162,25 @@ public class EmrServerlessController {
     @GET
     @Path("/{applicationId}/jobruns/{jobRunId}")
     public GetJobRunResponse getJobRun(@PathParam("applicationId") String applicationId,
-                                       @PathParam("jobRunId") String jobRunId) {
+                                       @PathParam("jobRunId") String jobRunId,
+                                       @QueryParam("attempt") String attempt) {
         GetJobRunResponse response = new GetJobRunResponse();
-        response.setJobRun(jobRuns.getJobRun(applicationId, jobRunId));
+        response.setJobRun(jobRuns.getJobRun(applicationId, jobRunId,
+                EmrServerlessJobRunService.parseAttempt(attempt)));
+        return response;
+    }
+
+    @GET
+    @Path("/{applicationId}/jobruns/{jobRunId}/attempts")
+    public ListJobRunAttemptsResponse listJobRunAttempts(@PathParam("applicationId") String applicationId,
+                                                         @PathParam("jobRunId") String jobRunId,
+                                                         @QueryParam("maxResults") String maxResults,
+                                                         @QueryParam("nextToken") String nextToken) {
+        PaginatedResult<JobRunAttemptSummary> page = jobRuns.listJobRunAttempts(applicationId, jobRunId,
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken);
+        ListJobRunAttemptsResponse response = new ListJobRunAttemptsResponse();
+        response.setJobRunAttempts(page.items());
+        response.setNextToken(page.nextToken());
         return response;
     }
 

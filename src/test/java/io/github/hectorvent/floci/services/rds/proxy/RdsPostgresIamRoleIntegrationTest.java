@@ -24,6 +24,8 @@ import java.util.Map;
 import java.util.Properties;
 
 import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
+import static io.github.hectorvent.floci.testing.RdsRequests.createPostgresInstance;
+import static io.github.hectorvent.floci.testing.RdsRequests.deleteInstance;
 import static io.github.hectorvent.floci.testing.RdsRequests.rds;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
@@ -49,8 +51,8 @@ class RdsPostgresIamRoleIntegrationTest {
         String role = id + "-policy";
         List<Runnable> cleanup = new ArrayList<>();
         try {
-            int databasePort = create(id);
-            cleanup.add(0, () -> delete(id));
+            int databasePort = createPostgresInstance(id, MASTER, PASSWORD, true);
+            cleanup.add(0, () -> deleteInstance(id));
             asMaster(databasePort, "CREATE ROLE app_user LOGIN PASSWORD '" + APP_PASSWORD + "'");
             String vpc = ec2("CreateVpc", "test", "us-east-1").formParam("CidrBlock", "10.97.0.0/16")
                     .post("/").then().statusCode(200).extract().xmlPath().getString("CreateVpcResponse.vpc.vpcId");
@@ -126,7 +128,7 @@ class RdsPostgresIamRoleIntegrationTest {
     void iamLoginRequiresMembershipAndTheRolesOwnLoginAttribute() throws Exception {
         String id = uniqueId();
         try {
-            int port = create(id);
+            int port = createPostgresInstance(id, MASTER, PASSWORD, true);
             asMaster(port, "CREATE ROLE app_user LOGIN PASSWORD '" + APP_PASSWORD + "'");
             Properties token = token(port, "app_user");
             refused(port, token);
@@ -139,7 +141,7 @@ class RdsPostgresIamRoleIntegrationTest {
             asMaster(port, "ALTER ROLE app_user LOGIN");
             assertUser(port, token, "app_user");
         } finally {
-            delete(id);
+            deleteInstance(id);
         }
     }
 
@@ -147,7 +149,7 @@ class RdsPostgresIamRoleIntegrationTest {
     void iamMembershipTakesPrecedenceOverAnApplicationPassword() throws Exception {
         String id = uniqueId();
         try {
-            int port = create(id);
+            int port = createPostgresInstance(id, MASTER, PASSWORD, true);
             asMaster(port, "CREATE ROLE app_user LOGIN PASSWORD '" + APP_PASSWORD + "'");
             Properties password = login("app_user", APP_PASSWORD);
             assertUser(port, password, "app_user");
@@ -163,7 +165,7 @@ class RdsPostgresIamRoleIntegrationTest {
             asMaster(port, "REVOKE rds_iam FROM app_user");
             assertUser(port, password, "app_user");
         } finally {
-            delete(id);
+            deleteInstance(id);
         }
     }
 
@@ -171,7 +173,7 @@ class RdsPostgresIamRoleIntegrationTest {
     void theMasterNeedsAnActualGrantAndThenUsesIamInsteadOfItsPassword() throws Exception {
         String id = uniqueId();
         try {
-            int port = create(id);
+            int port = createPostgresInstance(id, MASTER, PASSWORD, true);
             Properties iam = token(port, MASTER);
             refused(port, iam);
             try (Connection admin = connect(port, login(MASTER, PASSWORD));
@@ -184,7 +186,7 @@ class RdsPostgresIamRoleIntegrationTest {
             }
             assertUser(port, login(MASTER, PASSWORD), MASTER);
         } finally {
-            delete(id);
+            deleteInstance(id);
         }
     }
 
@@ -192,7 +194,7 @@ class RdsPostgresIamRoleIntegrationTest {
     void indirectMembershipWorksWithoutPrivilegeInheritance() throws Exception {
         String id = uniqueId();
         try {
-            int port = create(id);
+            int port = createPostgresInstance(id, MASTER, PASSWORD, true);
             asMaster(port, "CREATE ROLE iam_group NOLOGIN", "GRANT rds_iam TO iam_group",
                     "CREATE ROLE app_user LOGIN NOINHERIT PASSWORD '" + APP_PASSWORD + "'",
                     "GRANT iam_group TO app_user");
@@ -203,7 +205,7 @@ class RdsPostgresIamRoleIntegrationTest {
             refused(port, iam);
             assertUser(port, login("app_user", APP_PASSWORD), "app_user");
         } finally {
-            delete(id);
+            deleteInstance(id);
         }
     }
 
@@ -212,7 +214,7 @@ class RdsPostgresIamRoleIntegrationTest {
         String id = uniqueId();
         String name = "café\"reader";
         try {
-            int port = create(id);
+            int port = createPostgresInstance(id, MASTER, PASSWORD, true);
             asMaster(port, "CREATE ROLE \"café\"\"reader\" LOGIN PASSWORD '" + APP_PASSWORD + "'",
                     "GRANT rds_iam TO \"café\"\"reader\"", "CREATE SCHEMA shadow",
                     "CREATE TABLE shadow.pg_roles (oid oid, rolname name, rolcanlogin boolean)",
@@ -229,7 +231,7 @@ class RdsPostgresIamRoleIntegrationTest {
             iam.setProperty("allowEncodingChanges", "true");
             assertUser(port, iam, name);
         } finally {
-            delete(id);
+            deleteInstance(id);
         }
     }
 
@@ -285,19 +287,5 @@ class RdsPostgresIamRoleIntegrationTest {
 
     private static String uniqueId() {
         return "iam-role-" + Long.toString(System.nanoTime(), 36);
-    }
-
-    private static int create(String id) {
-        return rds("CreateDBInstance").formParam("DBInstanceIdentifier", id).formParam("Engine", "postgres")
-                .formParam("MasterUsername", MASTER).formParam("MasterUserPassword", PASSWORD)
-                .formParam("DBName", "appdb").formParam("AllocatedStorage", 20)
-                .formParam("DBInstanceClass", "db.t3.micro").formParam("EnableIAMDatabaseAuthentication", true)
-                .post("/").then().statusCode(200).extract().xmlPath()
-                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
-    }
-
-    private static void delete(String id) {
-        rds("DeleteDBInstance").formParam("DBInstanceIdentifier", id).formParam("SkipFinalSnapshot", true)
-                .post("/").then().statusCode(200);
     }
 }

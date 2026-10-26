@@ -4,7 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 public class ElastiCacheUser {
@@ -20,6 +22,7 @@ public class ElastiCacheUser {
     private Instant createdAt;
     // Minted once in the region of the CreateUser request; null for users persisted before it was stored.
     private String arn;
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     public ElastiCacheUser() {}
 
@@ -62,6 +65,11 @@ public class ElastiCacheUser {
 
     public String getArn() { return arn; }
     public void setArn(String arn) { this.arn = arn; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
+    }
 
     @JsonIgnore
     public boolean isEnabled() {

@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
-import io.github.hectorvent.floci.services.redshift.RedshiftQueryHandler;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -11,9 +11,11 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -21,7 +23,14 @@ import java.util.regex.Pattern;
  * The IAM user guide: "To pass a role (and its permissions) to an AWS service, a user must have
  * permissions to pass the role to the service." AWS's Service Reference names, for each operation
  * that passes one, the service the role goes to, which the check offers as {@code iam:PassedToService};
- * where the request carries the role differs per operation and is listed here.
+ * where the request carries the role differs per operation.
+ *
+ * <p>Most operations name their roles in plain request members, which {@link PassedRoleMembers} reads
+ * from a table generated from the Service Reference and botocore's models. A member that takes a role
+ * by name is read as the role IAM holds under that name, or else the one the name gives in the
+ * request's account, and a role the Service Reference passes to no named service is checked with no
+ * {@code iam:PassedToService}. The operations below are read here instead, since their roles are not
+ * such a member.
  *
  * <p>An EC2 request names an instance profile rather than a role, and passes the roles the profile
  * holds. Launching from a launch template passes nothing here: the EC2 user guide warns that a user
@@ -54,6 +63,17 @@ import java.util.regex.Pattern;
  * you must grant your user permission to pass the role to Amazon ECS"), task roles to
  * {@code ecs-tasks.amazonaws.com}.
  *
+ * <p>An EKS request passes the cluster's {@code roleArn}, a node group's {@code nodeRole}, a Fargate
+ * profile's {@code podExecutionRoleArn}, and an add-on's service account role and the role of each Pod
+ * Identity association it makes, to {@code eks.amazonaws.com}. A Pod Identity association passes its
+ * {@code roleArn} to {@code pods.eks.amazonaws.com}: the EKS user guide has "The IAM principal that is
+ * creating the association must have iam:PassRole." Its target role is not passed but assumed with the
+ * association's role: "Pod Identity then automatically performs two role assumptions in sequence: first
+ * assuming the EKS Pod Identity role, then using those credentials to assume the Target IAM Role." An
+ * access entry passes its principal to {@code ec2.amazonaws.com} for the node types alone: "If you create
+ * an access entry with type EC2_LINUX or EC2_WINDOWS, the IAM principal creating the access entry must
+ * have the iam:PassRole permission."
+ *
  * <p>A CloudFormation stack's service role is checked where a request names it, and not on later
  * operations that reuse it: CloudFormation "uses this role even if the users don't have permission
  * to pass it". A self-managed StackSet that names no administration role passes the default one:
@@ -70,6 +90,28 @@ import java.util.regex.Pattern;
  * default, which Floci keeps whether or not the namespace's roles hold it. Redshift takes a role only
  * under the ARN IAM holds it under, path included, so the ARN as the request names it is the role it
  * passes.
+ *
+ * <p>An RDS request passes to {@code rds.amazonaws.com} every role it names for the instance or cluster:
+ * the role it adds or removes, a proxy's role, an export task's role, the Enhanced Monitoring role (the
+ * RDS user guide: "The user that enables Enhanced Monitoring must be granted the PassRole permission."),
+ * the directory role it names by name, a cluster's associated roles, and the role an option takes in its
+ * {@code IAM_ROLE_ARN} setting, as SQL Server's backup and audit options do. A DMS endpoint passes to
+ * {@code dms.amazonaws.com} its service access role and the roles its settings name for each engine, and
+ * a replication instance the role its Kerberos settings name.
+ *
+ * <p>An SNS topic's delivery status roles are attributes, which "are used to give Amazon SNS write access
+ * to use CloudWatch Logs on your behalf": {@code <ENDPOINT>SuccessFeedbackRoleArn} and
+ * {@code <ENDPOINT>FailureFeedbackRoleArn} for each kind of endpoint. So are a platform application's
+ * {@code SuccessFeedbackRoleArn} and {@code FailureFeedbackRoleArn}, a Firehose subscription's
+ * {@code SubscriptionRoleArn} and the SMS {@code DeliveryStatusIAMRole}; all go to {@code sns.amazonaws.com}.
+ * A CloudWatch Logs subscription filter policy names its role in its document: "To perform a
+ * PutAccountPolicy subscription filter operation for any destination except a Lambda function, you must
+ * also have the iam:PassRole permission."
+ *
+ * <p>A Service Catalog launch constraint names its launch role in its parameters document, by
+ * {@code RoleArn} or by {@code LocalRoleName}, which names the role without its path, so it is checked on
+ * the ARN IAM holds the role under. An SWF decision that starts a workflow execution names its Lambda role
+ * in the attributes its {@code decisionType} names.
  */
 final class PassedRoles {
 
@@ -90,11 +132,73 @@ final class PassedRoles {
     private static final String EVENTS = ServicePrincipals.of("events");
     private static final String SCHEDULER = ServicePrincipals.of("scheduler");
     private static final String PIPES = ServicePrincipals.of("pipes");
+    private static final String EKS = ServicePrincipals.of("eks");
+    private static final String EKS_PODS = ServicePrincipals.of("pods.eks");
     private static final String CLOUDFORMATION = ServicePrincipals.of("cloudformation");
     private static final String AUTOSCALING = ServicePrincipals.of("autoscaling");
     private static final String APPLICATION_AUTOSCALING = ServicePrincipals.of("application-autoscaling");
     private static final String REDSHIFT = ServicePrincipals.of("redshift");
     private static final String REDSHIFT_SERVERLESS = ServicePrincipals.of("redshift-serverless");
+    private static final String RDS = ServicePrincipals.of("rds");
+    private static final String DMS = ServicePrincipals.of("dms");
+    private static final String SNS = ServicePrincipals.of("sns");
+    private static final String LOGS = ServicePrincipals.of("logs");
+    private static final String SERVICE_CATALOG = ServicePrincipals.of("servicecatalog");
+    private static final String SWF = ServicePrincipals.of("swf");
+
+    /** The topic attributes that name a delivery status role, a success and a failure one per kind of endpoint. */
+    private static final Set<String> SNS_TOPIC_ROLES = Set.of(
+            "ApplicationSuccessFeedbackRoleArn", "ApplicationFailureFeedbackRoleArn",
+            "FirehoseSuccessFeedbackRoleArn", "FirehoseFailureFeedbackRoleArn",
+            "HTTPSuccessFeedbackRoleArn", "HTTPFailureFeedbackRoleArn",
+            "LambdaSuccessFeedbackRoleArn", "LambdaFailureFeedbackRoleArn",
+            "SQSSuccessFeedbackRoleArn", "SQSFailureFeedbackRoleArn");
+    private static final Set<String> SNS_SUBSCRIPTION_ROLES = Set.of("SubscriptionRoleArn");
+    private static final Set<String> SNS_PLATFORM_ROLES = Set.of("SuccessFeedbackRoleArn", "FailureFeedbackRoleArn");
+    private static final Set<String> SNS_SMS_ROLES = Set.of("DeliveryStatusIAMRole");
+    private static final String SUBSCRIPTION_FILTER_POLICY = "SUBSCRIPTION_FILTER_POLICY";
+    private static final String LAUNCH_CONSTRAINT = "LAUNCH";
+    /** The SWF decisions that start a workflow execution, and the member each carries its attributes in. */
+    private static final Map<String, String> SWF_EXECUTION_DECISIONS = Map.of(
+            "ContinueAsNewWorkflowExecution", "continueAsNewWorkflowExecutionDecisionAttributes",
+            "StartChildWorkflowExecution", "startChildWorkflowExecutionDecisionAttributes");
+
+    /** The RDS operations whose request takes a {@code MonitoringRoleArn}. */
+    private static final Set<String> RDS_MONITORING_ROLE = Set.of("rds:CreateDBCluster", "rds:CreateDBInstance",
+            "rds:CreateDBInstanceReadReplica", "rds:ModifyDBCluster", "rds:ModifyDBInstance",
+            "rds:RestoreDBClusterFromSnapshot", "rds:RestoreDBClusterToPointInTime");
+    /** The RDS operations whose request takes a cluster's {@code AssociatedRoles}. */
+    private static final Set<String> RDS_ASSOCIATED_ROLES = Set.of("rds:CreateDBCluster",
+            "rds:RestoreDBClusterFromSnapshot", "rds:RestoreDBClusterToPointInTime");
+    /** An associated role's ARN, in either list form the RDS handler reads, at any index. */
+    private static final Pattern ASSOCIATED_ROLE =
+            Pattern.compile("AssociatedRoles\\.(DBClusterAssociatedRole|member)\\.\\d+\\.RoleArn");
+    /** The option setting SQL Server's backup and audit options take their role in. */
+    private static final String OPTION_ROLE_SETTING = "IAM_ROLE_ARN";
+    private static final String DMS_SERVICE_ACCESS_ROLE = "ServiceAccessRoleArn";
+    private static final String DMS_SECRETS_ROLE = "SecretsManagerAccessRoleArn";
+    /**
+     * The role members of each DMS endpoint settings structure, as the DMS model gives them. Every structure
+     * here is one the DMS handler stores; the others ({@code KafkaSettings}, {@code RedisSettings},
+     * {@code TimestreamSettings}) name no role.
+     */
+    private static final Map<String, List<String>> DMS_SETTINGS_ROLES = Map.ofEntries(
+            Map.entry("DynamoDbSettings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("S3Settings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("DmsTransferSettings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("KinesisSettings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("ElasticsearchSettings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("NeptuneSettings", List.of(DMS_SERVICE_ACCESS_ROLE)),
+            Map.entry("RedshiftSettings", List.of(DMS_SERVICE_ACCESS_ROLE, DMS_SECRETS_ROLE)),
+            Map.entry("PostgreSQLSettings", List.of(DMS_SERVICE_ACCESS_ROLE, DMS_SECRETS_ROLE)),
+            Map.entry("MySQLSettings", List.of(DMS_SERVICE_ACCESS_ROLE, DMS_SECRETS_ROLE)),
+            Map.entry("MongoDbSettings", List.of(DMS_SECRETS_ROLE)),
+            Map.entry("OracleSettings", List.of(DMS_SECRETS_ROLE, "SecretsManagerOracleAsmAccessRoleArn")),
+            Map.entry("SybaseSettings", List.of(DMS_SECRETS_ROLE)),
+            Map.entry("MicrosoftSQLServerSettings", List.of(DMS_SECRETS_ROLE)),
+            Map.entry("IBMDb2Settings", List.of(DMS_SECRETS_ROLE)),
+            Map.entry("DocDbSettings", List.of(DMS_SECRETS_ROLE)),
+            Map.entry("GcpMySQLSettings", List.of(DMS_SECRETS_ROLE)));
 
     private static final String STACK_SET_ADMINISTRATION_ROLE = "AWSCloudFormationStackSetAdministrationRole";
     private static final String SERVICE_MANAGED = "SERVICE_MANAGED";
@@ -102,7 +206,7 @@ final class PassedRoles {
     private static final String DEFAULT_AUTOSCALING_ROLE =
             ":role/aws-service-role/" + AUTOSCALING + "/AWSServiceRoleForAutoScaling";
 
-    /** A role a request passes, and the service principal it is passed to. */
+    /** A role a request passes, and the service principal it is passed to; null when AWS names none. */
     record PassedRole(String roleArn, String passedToService) {
     }
 
@@ -139,6 +243,9 @@ final class PassedRoles {
 
         /** The ARN, path included, of the role IAM holds under {@code roleName}; empty when it holds none. */
         Optional<String> heldRoleArn(String roleName);
+
+        /** The type of the Service Catalog constraint {@code constraintId}; empty when there is none. */
+        Optional<String> serviceCatalogConstraintType(String constraintId);
     }
 
     private PassedRoles() {
@@ -146,6 +253,15 @@ final class PassedRoles {
 
     /** The roles a request for {@code action} passes; empty when the operation passes none or the request names none. */
     static List<PassedRole> of(String action, ContainerRequestContext ctx, Lookups lookups) {
+        List<PassedRole> byHand = byHand(action, ctx, lookups);
+        return byHand != null ? byHand : fromTable(PassedRoleMembers.of(action), ctx, lookups);
+    }
+
+    /**
+     * The roles a request for {@code action} passes, for an operation read here rather than from the table;
+     * null for any other.
+     */
+    static List<PassedRole> byHand(String action, ContainerRequestContext ctx, Lookups lookups) {
         return switch (action) {
             case "lambda:CreateFunction", "lambda:UpdateFunctionConfiguration" -> fromJson(ctx, LAMBDA, "Role");
             case "lambda:CreateWebFunction" ->
@@ -170,6 +286,13 @@ final class PassedRoles {
             case "events:PutTargets" -> fromJson(ctx, EVENTS, "Targets", "[]", "RoleArn");
             case "scheduler:CreateSchedule", "scheduler:UpdateSchedule" -> fromJson(ctx, SCHEDULER, "Target", "RoleArn");
             case "pipes:CreatePipe", "pipes:UpdatePipe" -> fromJson(ctx, PIPES, "RoleArn");
+            case "eks:CreateCluster" -> fromJson(ctx, EKS, "roleArn");
+            case "eks:CreateNodegroup" -> fromJson(ctx, EKS, "nodeRole");
+            case "eks:CreateFargateProfile" -> fromJson(ctx, EKS, "podExecutionRoleArn");
+            case "eks:CreateAddon", "eks:UpdateAddon" -> eksAddonRoles(jsonBody(ctx));
+            case "eks:CreatePodIdentityAssociation", "eks:UpdatePodIdentityAssociation" ->
+                    fromJson(ctx, EKS_PODS, "roleArn");
+            case "eks:CreateAccessEntry" -> eksNodeAccessEntry(jsonBody(ctx));
             case "lambda:CreateMicrovmImage", "lambda:UpdateMicrovmImage" -> fromJson(ctx, LAMBDA, "buildRoleArn");
             case "lambda:RunMicrovm" -> fromJson(ctx, LAMBDA, "executionRoleArn");
             case "lambda:CreateNetworkConnector", "lambda:UpdateNetworkConnector" -> fromJson(ctx, LAMBDA, "OperatorRole");
@@ -189,8 +312,221 @@ final class PassedRoles {
             case "redshift-serverless:CreateNamespace", "redshift-serverless:UpdateNamespace" -> namespaceRoles(ctx);
             case "redshift-serverless:CreateScheduledAction", "redshift-serverless:UpdateScheduledAction" ->
                     fromJson(ctx, REDSHIFT_SERVERLESS, "roleArn");
-            default -> List.of();
+            case "rds:AddRoleToDBCluster", "rds:AddRoleToDBInstance", "rds:RemoveRoleFromDBCluster",
+                 "rds:RemoveRoleFromDBInstance", "rds:CreateDBProxy", "rds:ModifyDBProxy" ->
+                    fromForm(ctx, RDS, "RoleArn");
+            case "rds:StartExportTask" -> fromForm(ctx, RDS, "IamRoleArn");
+            case "rds:CreateDBInstance", "rds:CreateDBInstanceReadReplica", "rds:ModifyDBInstance",
+                 "rds:RestoreDBInstanceFromDBSnapshot", "rds:RestoreDBInstanceToPointInTime", "rds:CreateDBCluster",
+                 "rds:ModifyDBCluster", "rds:RestoreDBClusterFromSnapshot", "rds:RestoreDBClusterToPointInTime" ->
+                    rdsDatabaseRoles(action, ctx, lookups);
+            case "rds:ModifyOptionGroup" -> optionGroupRoles(ctx);
+            case "dms:CreateEndpoint", "dms:ModifyEndpoint" -> dmsEndpointRoles(jsonBody(ctx));
+            case "dms:CreateReplicationInstance", "dms:ModifyReplicationInstance" ->
+                    fromJson(ctx, DMS, "KerberosAuthenticationSettings", "KeyCacheSecretIamArn");
+            case "sns:CreateTopic" -> snsAttributeRoles(ctx, "Attributes", SNS_TOPIC_ROLES);
+            case "sns:SetTopicAttributes" -> snsAttributeRole(ctx, SNS_TOPIC_ROLES);
+            case "sns:Subscribe" -> snsAttributeRoles(ctx, "Attributes", SNS_SUBSCRIPTION_ROLES);
+            case "sns:SetSubscriptionAttributes" -> snsAttributeRole(ctx, SNS_SUBSCRIPTION_ROLES);
+            case "sns:CreatePlatformApplication", "sns:SetPlatformApplicationAttributes" ->
+                    snsAttributeRoles(ctx, "Attributes", SNS_PLATFORM_ROLES);
+            case "sns:SetSMSAttributes" -> snsAttributeRoles(ctx, "attributes", SNS_SMS_ROLES);
+            case "logs:PutAccountPolicy" -> subscriptionFilterPolicyRole(jsonBody(ctx));
+            case "servicecatalog:CreateConstraint" -> launchConstraintRoles(jsonBody(ctx), lookups, false);
+            case "servicecatalog:UpdateConstraint" -> launchConstraintRoles(jsonBody(ctx), lookups, true);
+            case "swf:RespondDecisionTaskCompleted" -> swfDecisionRoles(jsonBody(ctx));
+            default -> null;
         };
+    }
+
+    /**
+     * The roles a request names in the members the table gives for its operation: from its form parameters
+     * when it comes in the Query protocol, and from its JSON or CBOR body otherwise.
+     */
+    private static List<PassedRole> fromTable(List<PassedRoleMembers.Member> members, ContainerRequestContext ctx,
+                                              Lookups lookups) {
+        if (members == null) {
+            return List.of();
+        }
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        JsonNode body = form.isEmpty() ? jsonBody(ctx) : null;
+        List<PassedRole> passed = new ArrayList<>();
+        for (PassedRoleMembers.Member member : members) {
+            List<String> roles = new ArrayList<>();
+            if (!form.isEmpty()) {
+                if (member.queryKeys() != null) {
+                    form.forEach((key, value) -> {
+                        if (member.queryKeys().matcher(key).matches()) {
+                            roles.add(value);
+                        }
+                    });
+                }
+            } else {
+                collect(body, member.steps(), 0, roles);
+            }
+            passed.addAll(passed(member.byName() ? heldOrNamedRoles(roles, lookups) : roles,
+                    member.passedTo() == null ? null : ServicePrincipals.of(member.passedTo())));
+        }
+        return passed;
+    }
+
+    private static void collect(JsonNode node, List<PassedRoleMembers.Step> steps, int index, List<String> found) {
+        if (node == null) {
+            return;
+        }
+        if (index == steps.size()) {
+            if (node.isTextual()) {
+                found.add(node.asText());
+            }
+            return;
+        }
+        PassedRoleMembers.Step step = steps.get(index);
+        JsonNode value = node.get(step.name());
+        switch (step.into()) {
+            case NONE -> collect(value, steps, index + 1, found);
+            case KEY -> collect(value == null ? null : value.get(step.key()), steps, index + 1, found);
+            case LIST, MAP -> {
+                if (value != null && (step.into() == PassedRoleMembers.Into.LIST ? value.isArray() : value.isObject())) {
+                    for (JsonNode element : value) {
+                        collect(element, steps, index + 1, found);
+                    }
+                }
+            }
+        }
+    }
+
+    /** Roles given by ARN or by name: a name is the role IAM holds under it, or else the one it gives. */
+    private static List<String> heldOrNamedRoles(List<String> roles, Lookups lookups) {
+        List<String> arns = new ArrayList<>();
+        for (String role : roles) {
+            if (!role.isBlank()) {
+                arns.add(role.startsWith("arn:") ? role
+                        : lookups.heldRoleArn(role).orElseGet(() -> lookups.roleArn(role)));
+            }
+        }
+        return arns;
+    }
+
+    /**
+     * The roles among an SNS request's attributes {@code map}, read as the SNS handlers read the map: from a
+     * form, each {@code map.entry.N} from 1 up to the first with no key, the last value of a key named twice;
+     * from a JSON body, the {@code map} object.
+     */
+    private static List<PassedRole> snsAttributeRoles(ContainerRequestContext ctx, String map, Set<String> roleAttributes) {
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        Map<String, String> attributes = new LinkedHashMap<>();
+        if (!form.isEmpty()) {
+            for (int i = 1; form.get(map + ".entry." + i + ".key") != null; i++) {
+                attributes.put(form.get(map + ".entry." + i + ".key"), form.get(map + ".entry." + i + ".value"));
+            }
+        } else {
+            JsonNode body = jsonBody(ctx);
+            JsonNode values = body == null ? null : body.get(map);
+            if (values != null && values.isObject()) {
+                values.properties().forEach(entry -> attributes.put(entry.getKey(), entry.getValue().asText(null)));
+            }
+        }
+        List<String> roles = new ArrayList<>();
+        attributes.forEach((name, value) -> {
+            if (roleAttributes.contains(name)) {
+                roles.add(value);
+            }
+        });
+        return passed(roles, SNS);
+    }
+
+    /**
+     * The role an SNS {@code AttributeValue} names, when its {@code AttributeName} is one that names a role; a
+     * request with no value names none, and is left to SNS to answer.
+     */
+    private static List<PassedRole> snsAttributeRole(ContainerRequestContext ctx, Set<String> roleAttributes) {
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        String name;
+        String value;
+        if (!form.isEmpty()) {
+            name = form.get("AttributeName");
+            value = form.get("AttributeValue");
+        } else {
+            JsonNode body = jsonBody(ctx);
+            name = body == null ? null : body.path("AttributeName").asText(null);
+            value = body == null ? null : body.path("AttributeValue").asText(null);
+        }
+        if (name == null || value == null || !roleAttributes.contains(name)) {
+            return List.of();
+        }
+        return passed(List.of(value), SNS);
+    }
+
+    /** The role a CloudWatch Logs subscription filter policy's document names; another policy names none. */
+    private static List<PassedRole> subscriptionFilterPolicyRole(JsonNode body) {
+        if (body == null || !SUBSCRIPTION_FILTER_POLICY.equals(body.path("policyType").asText(null))) {
+            return List.of();
+        }
+        return passed(values(embeddedJson(body.get("policyDocument")), "RoleArn"), LOGS);
+    }
+
+    /**
+     * The launch role a Service Catalog launch constraint names in its {@code Parameters}, a JSON document,
+     * by {@code RoleArn} or by {@code LocalRoleName}, which names the role of that name in the caller's
+     * account without its path. A constraint of another type names no launch role. An update is read by
+     * the type Floci keeps for the constraint, since its request names none. The type is matched in any
+     * case, since Floci keeps it as given.
+     */
+    private static List<PassedRole> launchConstraintRoles(JsonNode body, Lookups lookups, boolean update) {
+        JsonNode parameters = body == null ? null : embeddedJson(body.get("Parameters"));
+        if (parameters == null) {
+            return List.of();
+        }
+        String type;
+        if (update) {
+            String id = blankToNull(body.path("Id").asText(null));
+            type = id == null ? null : lookups.serviceCatalogConstraintType(id).orElse(null);
+        } else {
+            type = body.path("Type").asText(null);
+        }
+        if (!LAUNCH_CONSTRAINT.equalsIgnoreCase(type)) {
+            return List.of();
+        }
+        List<String> roles = new ArrayList<>(values(parameters, "RoleArn"));
+        for (String name : values(parameters, "LocalRoleName")) {
+            if (!name.isBlank()) {
+                roles.add(lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name)));
+            }
+        }
+        return passed(roles, SERVICE_CATALOG);
+    }
+
+    /**
+     * The roles of the decisions that start a workflow execution, each read from the attributes its
+     * {@code decisionType} names, as the SWF handler reads a decision.
+     */
+    private static List<PassedRole> swfDecisionRoles(JsonNode body) {
+        JsonNode decisions = body == null ? null : body.get("decisions");
+        if (decisions == null || !decisions.isArray()) {
+            return List.of();
+        }
+        List<String> roles = new ArrayList<>();
+        for (JsonNode decision : decisions) {
+            String attributes = SWF_EXECUTION_DECISIONS.get(decision.path("decisionType").asText(""));
+            if (attributes != null) {
+                roles.addAll(values(decision, attributes, "lambdaRole"));
+            }
+        }
+        return passed(roles, SWF);
+    }
+
+    /** The JSON document a string member holds; null when the member holds no JSON. */
+    private static JsonNode embeddedJson(JsonNode member) {
+        if (member == null || !member.isTextual()) {
+            return null;
+        }
+        try {
+            return MAPPER.readTree(member.asText());
+        } catch (JsonProcessingException e) {
+            // A document that is not JSON has no member to name a role in.
+            LOG.debugv(e, "Embedded document is not JSON, so it passes no role");
+            return null;
+        }
     }
 
     /**
@@ -255,6 +591,20 @@ final class PassedRoles {
             }
         }
         return passed(arns, service);
+    }
+
+    /** An EKS add-on's service account role and the role of each Pod Identity association it makes. */
+    private static List<PassedRole> eksAddonRoles(JsonNode body) {
+        List<String> roles = new ArrayList<>(values(body, "serviceAccountRoleArn"));
+        roles.addAll(values(body, "podIdentityAssociations", "[]", "roleArn"));
+        return passed(roles, EKS);
+    }
+
+    /** An EKS access entry's principal, when its type is one whose nodes run as that role. */
+    private static List<PassedRole> eksNodeAccessEntry(JsonNode body) {
+        List<String> type = values(body, "type");
+        return type.contains("EC2_LINUX") || type.contains("EC2_WINDOWS")
+                ? passed(values(body, "principalArn"), EC2) : List.of();
     }
 
     /**
@@ -372,12 +722,15 @@ final class PassedRoles {
         }
     }
 
-    /** The roles a Redshift request lists under {@code list}, every numbered member the Redshift handler reads. */
+    /**
+     * The roles a Redshift request lists under {@code list}, every member the Redshift handler reads: the
+     * list's shape names them {@code IamRoleArn}.
+     */
     private static List<PassedRole> redshiftRoles(ContainerRequestContext ctx, String list) {
-        String member = RedshiftQueryHandler.memberKeyRegex(list);
+        Pattern member = AwsQueryLists.memberKeys(list, "IamRoleArn");
         List<String> roles = new ArrayList<>();
         IamConditionContextResolver.formParameters(ctx).forEach((key, value) -> {
-            if (key.matches(member)) {
+            if (member.matcher(key).matches()) {
                 roles.add(value);
             }
         });
@@ -394,6 +747,72 @@ final class PassedRoles {
             }
         }
         return passed(roles, REDSHIFT_SERVERLESS);
+    }
+
+    /**
+     * The roles an RDS instance or cluster request names: the directory role {@code DomainIAMRoleName}
+     * names without its path, which is checked on the ARN IAM holds it under as
+     * {@link #instanceProfileRole} checks a role name; and the {@code MonitoringRoleArn} and the
+     * {@code AssociatedRoles} where the operation takes them, every associated role at any index, as the RDS
+     * handler reads them.
+     */
+    private static List<PassedRole> rdsDatabaseRoles(String action, ContainerRequestContext ctx, Lookups lookups) {
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        List<String> roles = new ArrayList<>();
+        String directoryRole = blankToNull(form.get("DomainIAMRoleName"));
+        if (directoryRole != null) {
+            roles.add(lookups.heldRoleArn(directoryRole).orElseGet(() -> lookups.roleArn(directoryRole)));
+        }
+        if (RDS_MONITORING_ROLE.contains(action)) {
+            roles.add(form.get("MonitoringRoleArn"));
+        }
+        if (RDS_ASSOCIATED_ROLES.contains(action)) {
+            form.forEach((key, value) -> {
+                if (ASSOCIATED_ROLE.matcher(key).matches()) {
+                    roles.add(value);
+                }
+            });
+        }
+        return passed(roles, RDS);
+    }
+
+    /**
+     * The role each option of a ModifyOptionGroup request takes in its {@code IAM_ROLE_ARN} setting, read
+     * as the RDS handler reads {@code OptionsToInclude}: in either list form, each option from 1 up to the
+     * first with no {@code OptionName}, each setting up to the first with no {@code Name}, and of an option
+     * naming the setting twice the last.
+     */
+    private static List<PassedRole> optionGroupRoles(ContainerRequestContext ctx) {
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        List<String> roles = new ArrayList<>();
+        for (String options : List.of("OptionsToInclude.OptionConfiguration.", "OptionsToInclude.member.")) {
+            for (int option = 1; form.get(options + option + ".OptionName") != null; option++) {
+                String role = null;
+                for (String settings : List.of(".OptionSettings.OptionSetting.", ".OptionSettings.member.")) {
+                    String setting = options + option + settings;
+                    for (int index = 1; form.get(setting + index + ".Name") != null; index++) {
+                        if (OPTION_ROLE_SETTING.equals(form.get(setting + index + ".Name"))) {
+                            role = form.get(setting + index + ".Value");
+                        }
+                    }
+                }
+                roles.add(role);
+            }
+        }
+        return passed(roles, RDS);
+    }
+
+    /** A DMS endpoint's service access role, and the role members of each engine's settings structure it sets. */
+    private static List<PassedRole> dmsEndpointRoles(JsonNode body) {
+        List<String> roles = new ArrayList<>(values(body, DMS_SERVICE_ACCESS_ROLE));
+        if (body != null) {
+            for (Map.Entry<String, JsonNode> member : body.properties()) {
+                for (String role : DMS_SETTINGS_ROLES.getOrDefault(member.getKey(), List.of())) {
+                    roles.addAll(values(member.getValue(), role));
+                }
+            }
+        }
+        return passed(roles, DMS);
     }
 
     private static List<PassedRole> fromJson(ContainerRequestContext ctx, String service, String... path) {
@@ -469,7 +888,7 @@ final class PassedRoles {
      * A gzip-encoded body is decompressed first, as {@code AwsJsonCborController} decompresses it before
      * running the request.
      */
-    private static JsonNode jsonBody(ContainerRequestContext ctx) {
+    static JsonNode jsonBody(ContainerRequestContext ctx) {
         if (ctx.getProperty(IamConditionContextResolver.BUFFERED_JSON_BODY) instanceof JsonNode cached) {
             return cached;
         }

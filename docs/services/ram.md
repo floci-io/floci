@@ -23,6 +23,7 @@ below for what's simplified.
 | `UpdateResourceShare` | Renames a share and/or toggles `allowExternalPrincipals` (`POST /updateresourceshare`) |
 | `AssociateResourceShare` | Adds resource ARNs and/or principals to an existing share (`POST /associateresourceshare`) |
 | `DisassociateResourceShare` | Removes resource ARNs and/or principals from a share (`POST /disassociateresourceshare`) |
+| `GetResourceShareAssociations` | Lists active resource or principal associations for shares owned by the caller, with entity, share ARN, status, and pagination filters (`POST /getresourceshareassociations`) |
 | `ListPrincipals` | Lists principals associated with visible shares (`POST /listprincipals`) |
 | `ListResourceSharePermissions` | Lists the permissions associated with a share: one default AWS managed permission (`AWSRAMDefaultPermission<Type>`, `AWS_MANAGED`) per distinct resource type in the share; unknown share ARN is `UnknownResourceException` (`POST /listresourcesharepermissions`) |
 | `TagResource` | Adds/overwrites tags on a resource share (`POST /tagresource`) |
@@ -92,8 +93,10 @@ aws --endpoint-url http://localhost:4566 ram accept-resource-share-invitation \
   unimplemented operation falls through to S3's `/{bucket}` route and comes back as an S3
   `NoSuchBucket` XML body where the SDK expects JSON, not a modeled `UnknownOperationException`.
   If a client reports an XML parse error against a RAM call, that is the cause, not credentials.
-  `GetResourceShareAssociations` is the one most likely to be hit: Terraform's
-  `aws_ram_resource_association` and `aws_ram_principal_association` read it on every refresh.
+- `GetResourceShareAssociations` reports current `ASSOCIATED` resource and principal entries
+  for caller-owned shares. There are no persisted per-association transitions or source entries,
+  so `SOURCE` and other status filters return an empty page. Association creation and update
+  times use the containing share's times; `external` is always false.
 - `AssociateResourceShare`/`DisassociateResourceShare` responses synthesize one
   `resourceShareAssociation` row per requested ARN/principal rather than tracking real
   per-association status transitions (e.g. no `ASSOCIATING`/`DISASSOCIATING` intermediate

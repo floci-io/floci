@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import io.github.hectorvent.floci.testing.PartitionMatrix;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -38,8 +39,10 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -113,6 +116,67 @@ class EventBridgeServiceTest {
         service.createEventBus("my-bus", null, null, REGION);
         assertThrows(AwsException.class, () ->
                 service.createEventBus("my-bus", null, null, REGION));
+    }
+
+    @Test
+    void tagResourceRejectsArnFromAnotherAccount() {
+        EventBus bus = service.createEventBus("owned-bus", null, null, REGION);
+        String foreignAccountArn = bus.getArn().replace(":000000000000:", ":111111111111:");
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.tagResource(foreignAccountArn, Map.of("env", "test"), REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertTrue(service.listTagsForResource(bus.getArn(), REGION).isEmpty());
+    }
+
+    @Test
+    void tagResourceRejectsArnFromAnotherRegion() {
+        EventBus bus = service.createEventBus("owned-bus", null, null, REGION);
+        String foreignRegionArn = bus.getArn().replace(":us-east-1:", ":eu-west-1:");
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.tagResource(foreignRegionArn, Map.of("env", "test"), REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertTrue(service.listTagsForResource(bus.getArn(), REGION).isEmpty());
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void tagResourceAcceptsResourceArnFromRequestedPartition(PartitionMatrix.PartitionCase partitionCase) {
+        String region = partitionCase.region();
+        EventBus bus = service.createEventBus("partition-bus", null, null, region);
+
+        service.tagResource(bus.getArn(), Map.of("env", "test"), region);
+
+        assertEquals(Map.of("env", "test"), service.listTagsForResource(bus.getArn(), region));
+        PartitionMatrix.assertArnIn(partitionCase, bus.getArn());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "event-bus/missing", "event-bus/", "rule/missing", "archive/missing", "replay/missing"
+    })
+    void listTagsForResourceRejectsMissingOrUnsupportedResources(String resource) {
+        String arn = "arn:aws:events:us-east-1:000000000000:" + resource;
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.listTagsForResource(arn, REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+    }
+
+    @Test
+    void listTagsForResourceRejectsArnFromAnotherAccount() {
+        EventBus bus = service.createEventBus("owned-bus", null, null, REGION);
+        service.tagResource(bus.getArn(), Map.of("env", "test"), REGION);
+        String foreignAccountArn = bus.getArn().replace(":000000000000:", ":111111111111:");
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.listTagsForResource(foreignAccountArn, REGION));
+
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
     }
 
     @Test
@@ -242,6 +306,18 @@ class EventBridgeServiceTest {
                 .getEventSourceArn());
         assertEquals(custom, service.createArchive("on-custom", custom, null, null, 0, REGION)
                 .getEventSourceArn());
+    }
+
+    @Test
+    void archiveLengthBoundsCountSupplementaryCharactersOnce() {
+        String scalar = "\uD83D\uDE00";
+        String pattern = "{\"detail\":[\"" + scalar.repeat(4081) + "\"]}";
+        assertDoesNotThrow(() -> service.createArchive(
+                "unicode-archive", DEFAULT_BUS, scalar.repeat(512), pattern, 0, REGION));
+        assertThrows(AwsException.class, () -> service.createArchive(
+                "long-description", DEFAULT_BUS, scalar.repeat(513), null, 0, REGION));
+        assertThrows(AwsException.class, () -> service.createArchive(
+                "long-pattern", DEFAULT_BUS, null, pattern + " ", 0, REGION));
     }
 
     /** The messages AWS returns; the account is checked before the region. */
@@ -699,15 +775,24 @@ class EventBridgeServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {1, 1600})
-    void putTargetsAcceptsRoleArnAtModelLengthBounds(int length) {
+    @ValueSource(ints = {38, 1600})
+    void putTargetsAcceptsWellFormedRoleArnWithinModelLengthBounds(int length) {
         service.putRule("role-rule", null, "{}", null, RuleState.ENABLED, null, null, null, REGION);
         Target target = new Target("workflow", "arn:aws:states:us-east-1:000000000000:stateMachine:example", null, null);
-        target.setRoleArn("r".repeat(length));
+        String prefix = "arn:aws:iam::000000000000:role/";
+        target.setRoleArn(prefix + "r".repeat(length - prefix.length()));
 
         service.putTargets("role-rule", null, List.of(target), REGION);
 
         assertEquals(target.getRoleArn(), service.listTargetsByRule("role-rule", null, REGION).getFirst().getRoleArn());
+    }
+
+    @Test
+    void putTargetsRejectsRoleArnThatOnlySatisfiesTheMinimumLength() {
+        Target target = new Target("workflow", "arn:aws:states:us-east-1:000000000000:stateMachine:example", null, null);
+        target.setRoleArn("r");
+
+        assertPutTargetsValidation("Parameter r is not valid. Reason: Provided Arn is not in correct format.", target);
     }
 
     @Test
@@ -795,6 +880,57 @@ class EventBridgeServiceTest {
         service.putEvents(List.of(Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), REGION);
 
         verify(dispatcherMock).dispatch(eq(rule.getArn()), eq(target), anyString(), eq(REGION), any());
+    }
+
+    @Test
+    void publishServiceEventSendsTheEventToTheRegionsDefaultBus() throws Exception {
+        Rule rule = service.putRule("emr", null, "{\"source\":[\"aws.emr\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("emr", null, List.of(target), REGION);
+
+        service.publishServiceEvent("aws.emr", "EMR Cluster State Change", "{\"state\":\"WAITING\"}", null, REGION);
+
+        ArgumentCaptor<String> eventJson = ArgumentCaptor.forClass(String.class);
+        verify(dispatcherMock).dispatch(eq(rule.getArn()), eq(target), eventJson.capture(), eq(REGION), any());
+        JsonNode event = OBJECT_MAPPER.readTree(eventJson.getValue());
+        assertEquals("aws.emr", event.path("source").asText());
+        assertEquals("EMR Cluster State Change", event.path("detail-type").asText());
+        assertEquals(REGION, event.path("region").asText());
+        assertEquals(0, event.path("resources").size());
+        assertEquals("WAITING", event.path("detail").path("state").asText());
+    }
+
+    @Test
+    void publishServiceEventLeavesAnEntryTheBusRejectsUndelivered() {
+        service.putRule("emr", null, "{\"source\":[\"aws.emr\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+        service.putTargets("emr", null,
+                List.of(new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null)), REGION);
+
+        assertDoesNotThrow(() -> service.publishServiceEvent("aws.emr", "EMR Cluster State Change", "not json",
+                null, REGION));
+
+        verify(dispatcherMock, never()).dispatch(anyString(), any(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void publishServiceEventPassesOverACallEventBridgeRefuses() {
+        EventBridgeService refusing = spy(service);
+        doThrow(new AwsException("InternalException", "unavailable", 500))
+                .when(refusing).putEvents(anyList(), eq(REGION));
+
+        assertDoesNotThrow(() -> refusing.publishServiceEvent("aws.emr", "EMR Cluster State Change", "{}", null,
+                REGION));
+    }
+
+    @Test
+    void publishServiceEventPassesOverAnyOtherFailure() {
+        EventBridgeService faulty = spy(service);
+        doThrow(new IllegalStateException("broken")).when(faulty).putEvents(anyList(), eq(REGION));
+
+        assertDoesNotThrow(() -> faulty.publishServiceEvent("aws.emr", "EMR Cluster State Change", "{}", null,
+                REGION));
     }
 
     private void assertPutTargetsValidation(String expectedMessage, Target... targets) {

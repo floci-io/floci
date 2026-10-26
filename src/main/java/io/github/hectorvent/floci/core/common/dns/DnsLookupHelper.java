@@ -205,7 +205,11 @@ public class DnsLookupHelper {
         return List.of();
     }
 
-    private static String normalizeTarget(String s) {
+    /**
+     * A DNS name without surrounding whitespace and without its final dot, keeping its case. A
+     * null name reads as empty.
+     */
+    public static String normalizeTarget(String s) {
         if (s == null) {
             return "";
         }

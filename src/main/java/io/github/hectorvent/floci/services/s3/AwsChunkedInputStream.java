@@ -17,13 +17,16 @@ import java.util.Locale;
  * checked. Only the trailing checksum named up front is kept, so the caller can compare it once
  * the body has been read; any other {@code x-amz-checksum-*} line is recorded as undeclared and
  * every other trailer line is discarded. A body that breaks the framing or ends early fails with
- * S3's {@code IncompleteBody}.
+ * S3's {@code IncompleteBody}, and one whose chunk other than the last is under 8 KiB fails with
+ * S3's {@code InvalidChunkSizeError}.
  */
 final class AwsChunkedInputStream extends InputStream {
 
     // A chunk header or trailer line is a size, a signature and a few separators; anything longer
     // is not framing.
     private static final int MAX_LINE_LENGTH = 8192;
+    // S3 requires every chunk but the last to carry at least this much data.
+    private static final int MIN_CHUNK_SIZE = 8192;
     private static final String CHECKSUM_PREFIX = "x-amz-checksum-";
 
     private final InputStream in;
@@ -32,6 +35,7 @@ final class AwsChunkedInputStream extends InputStream {
     private ChecksumAlgorithm undeclaredTrailer;
     private boolean undeclaredChecksum;
     private long remainingInChunk;
+    private long previousChunkSize;
     private boolean finished;
 
     AwsChunkedInputStream(InputStream in) {
@@ -114,6 +118,11 @@ final class AwsChunkedInputStream extends InputStream {
             throw incompleteBody();
         }
         if (size > 0) {
+            // Another data chunk follows, so the previous one was not the last.
+            if (previousChunkSize > 0 && previousChunkSize < MIN_CHUNK_SIZE) {
+                throw invalidChunkSize();
+            }
+            previousChunkSize = size;
             remainingInChunk = size;
             return true;
         }
@@ -176,5 +185,10 @@ final class AwsChunkedInputStream extends InputStream {
     static AwsException incompleteBody() {
         return new AwsException("IncompleteBody",
                 "You did not provide the number of bytes specified by the Content-Length HTTP header.", 400);
+    }
+
+    private static AwsException invalidChunkSize() {
+        return new AwsException("InvalidChunkSizeError",
+                "Only the last chunk is allowed to have a size less than " + MIN_CHUNK_SIZE + " bytes", 403);
     }
 }

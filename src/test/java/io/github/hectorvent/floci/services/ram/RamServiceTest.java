@@ -2,12 +2,14 @@ package io.github.hectorvent.floci.services.ram;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.Organization;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
+import io.github.hectorvent.floci.services.ram.model.ResourceShareAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import org.junit.jupiter.api.BeforeEach;
@@ -70,11 +72,96 @@ class RamServiceTest {
         assertTrue(service.listResources(ACCEPTER, "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
         assertTrue(service.listPrincipals(ACCEPTER, "OTHER-ACCOUNTS", List.of(), "us-east-1").isEmpty());
         assertTrue(service.listResources(OWNER, "SELF", List.of(), "us-east-1").isEmpty());
+        assertTrue(associations(OWNER, "us-east-1", "RESOURCE", null,
+                List.of(share.getResourceShareArn()), null, null, null, null).items().isEmpty());
 
         // The share itself remains readable with DELETED status.
         List<ResourceShare> own = service.getResourceShares(OWNER, "SELF", "us-east-1");
         assertEquals(1, own.size());
         assertEquals("DELETED", own.get(0).getStatus());
+    }
+
+    @Test
+    void getResourceShareAssociationsFiltersOwnedResourcesAndPrincipals() {
+        ResourceShare share = service.createResourceShare("associations", List.of(OU_ARN),
+                List.of(TGW_ARN), false, "us-east-1", OWNER);
+        service.createResourceShare("other-region", List.of(OU_ARN), List.of(TGW_ARN),
+                false, "eu-west-1", OWNER);
+        service.createResourceShare("other-owner", List.of(OWNER), List.of(TGW_ARN),
+                false, "us-east-1", ACCEPTER);
+
+        PaginatedResult<ResourceShareAssociation> resources = associations(
+                OWNER, "us-east-1", "RESOURCE", null, List.of(), TGW_ARN, null, null, null);
+        assertEquals(1, resources.items().size());
+        assertEquals(share.getResourceShareArn(), resources.items().getFirst().resourceShareArn());
+        assertEquals(TGW_ARN, resources.items().getFirst().associatedEntity());
+        assertEquals(share.getCreationTime(), resources.items().getFirst().creationTime());
+        assertNull(resources.nextToken());
+
+        assertEquals(1, associations(OWNER, "us-east-1", "PRINCIPAL", null,
+                List.of(share.getResourceShareArn()), null, OU_ARN, null, null).items().size());
+        assertTrue(associations(ACCEPTER, "us-east-1", "RESOURCE", null,
+                List.of(share.getResourceShareArn()), TGW_ARN, null, null, null).items().isEmpty());
+        assertTrue(associations(OWNER, "eu-west-1", "RESOURCE", null,
+                List.of(share.getResourceShareArn()), TGW_ARN, null, null, null).items().isEmpty());
+        assertTrue(associations(OWNER, "us-east-1", "RESOURCE", "DISASSOCIATED",
+                List.of(), null, null, null, null).items().isEmpty());
+        assertTrue(associations(OWNER, "us-east-1", "SOURCE", null,
+                List.of(), null, null, null, null).items().isEmpty());
+
+        service.disassociateResourceShare(share.getResourceShareArn(), List.of(TGW_ARN), List.of(),
+                OWNER, "us-east-1");
+        assertTrue(associations(OWNER, "us-east-1", "RESOURCE", null,
+                List.of(share.getResourceShareArn()), null, null, null, null).items().isEmpty());
+    }
+
+    @Test
+    void getResourceShareAssociationsPagesWithoutLeakingFiltersAcrossTokens() {
+        ResourceShare share = service.createResourceShare("many-associations", List.of(OU_ARN),
+                List.of(TGW_ARN, TGW_ARN + "2"), false, "us-east-1", OWNER);
+        PaginatedResult<ResourceShareAssociation> first = associations(OWNER, "us-east-1", "RESOURCE",
+                null, List.of(share.getResourceShareArn()), null, null, 1, null);
+        assertEquals(1, first.items().size());
+        assertNotNull(first.nextToken());
+        PaginatedResult<ResourceShareAssociation> second = associations(OWNER, "us-east-1", "RESOURCE",
+                null, List.of(share.getResourceShareArn()), null, null, 1, first.nextToken());
+        assertEquals(1, second.items().size());
+        assertNotEquals(first.items().getFirst().associatedEntity(), second.items().getFirst().associatedEntity());
+        assertNull(second.nextToken());
+
+        AwsException mismatched = assertThrows(AwsException.class, () -> associations(
+                OWNER, "us-east-1", "PRINCIPAL", null, List.of(share.getResourceShareArn()),
+                null, null, 1, first.nextToken()));
+        assertEquals("InvalidNextTokenException", mismatched.getErrorCode());
+        AwsException malformed = assertThrows(AwsException.class, () -> associations(
+                OWNER, "us-east-1", "RESOURCE", null, List.of(share.getResourceShareArn()),
+                null, null, 1, "not-a-token"));
+        assertEquals("InvalidNextTokenException", malformed.getErrorCode());
+    }
+
+    @Test
+    void getResourceShareAssociationsRejectsInvalidInput() {
+        assertInvalidParameter(() -> associations(OWNER, "us-east-1", null, null,
+                List.of(), null, null, null, null));
+        assertInvalidParameter(() -> associations(OWNER, "us-east-1", "RESOURCE", null,
+                List.of(), null, OWNER, null, null));
+        assertInvalidParameter(() -> associations(OWNER, "us-east-1", "PRINCIPAL", null,
+                List.of(), TGW_ARN, null, null, null));
+        assertInvalidParameter(() -> associations(OWNER, "us-east-1", "RESOURCE", null,
+                List.of(), null, null, 0, null));
+        assertInvalidParameter(() -> associations(OWNER, "us-east-1", "RESOURCE", null,
+                List.of(), null, null, 501, null));
+        AwsException malformedArn = assertThrows(AwsException.class, () -> associations(
+                OWNER, "us-east-1", "RESOURCE", null, List.of("not-an-arn"),
+                null, null, null, null));
+        assertEquals("MalformedArnException", malformedArn.getErrorCode());
+    }
+
+    private PaginatedResult<ResourceShareAssociation> associations(String caller, String region, String type,
+            String status, List<String> shareArns, String resourceArn, String principal,
+            Integer maxResults, String nextToken) {
+        return service.getResourceShareAssociations(caller, region, type, status, shareArns,
+                resourceArn, principal, maxResults, nextToken);
     }
 
     @Test

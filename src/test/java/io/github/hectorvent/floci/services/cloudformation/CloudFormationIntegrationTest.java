@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
@@ -6687,6 +6688,204 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body("authorizationType", equalTo("CUSTOM"))
             .body("authorizerId", equalTo(secondAuth));
+    }
+
+    @Test
+    void createStack_snsTopicWithInlineSubscriptions() {
+        String topicArn = "arn:aws:sns:us-east-1:000000000000:cfn-inline-subs-topic";
+        String template = """
+            {
+              "Resources": {
+                "MyQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {"QueueName": "cfn-inline-subs-queue"}
+                },
+                "MyTopic": {
+                  "Type": "AWS::SNS::Topic",
+                  "Properties": {
+                    "TopicName": "cfn-inline-subs-topic",
+                    "Subscription": [
+                      {"Protocol": "sqs", "Endpoint": {"Fn::GetAtt": ["MyQueue", "Arn"]}},
+                      {"Protocol": "email", "Endpoint": "alerts@example.com"}
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-inline-subs-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String subscriptions = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListSubscriptionsByTopic")
+            .formParam("TopicArn", topicArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("arn:aws:sqs:us-east-1:000000000000:cfn-inline-subs-queue"))
+            .body(containsString("alerts@example.com"))
+            .extract().asString();
+        String sqsArn = new XmlPath(subscriptions)
+                .getString("**.find { it.Protocol == 'sqs' }.SubscriptionArn");
+        String emailArn = new XmlPath(subscriptions)
+                .getString("**.find { it.Protocol == 'email' }.SubscriptionArn");
+        assertTrue(sqsArn.startsWith(topicArn + ":"), sqsArn);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetSubscriptionAttributes")
+            .formParam("SubscriptionArn", emailArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("**.find { it.key == 'PendingConfirmation' }.value", equalTo("true"));
+    }
+
+    @Test
+    void createStack_snsTopicResolvesConditionalInlineSubscriptions() {
+        String topicArn = "arn:aws:sns:us-east-1:000000000000:cfn-conditional-subs-topic";
+        String template = """
+            {
+              "Conditions": {"Include": {"Fn::Equals": ["yes", "yes"]}},
+              "Resources": {
+                "MyTopic": {
+                  "Type": "AWS::SNS::Topic",
+                  "Properties": {
+                    "TopicName": "cfn-conditional-subs-topic",
+                    "Subscription": {"Fn::If": ["Include", [
+                      {"Protocol": "email", "Endpoint": "selected@example.com"},
+                      {"Fn::If": ["Include", {"Ref": "AWS::NoValue"},
+                        {"Protocol": "email", "Endpoint": "omitted@example.com"}]}
+                    ], {"Ref": "AWS::NoValue"}]}
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-conditional-subs-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListSubscriptionsByTopic")
+            .formParam("TopicArn", topicArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("selected@example.com"))
+            .body(not(containsString("omitted@example.com")));
+    }
+
+    @Test
+    void updateStack_snsTopicRemovesOnlyDroppedInlineSubscriptions() {
+        String topicArn = "arn:aws:sns:us-east-1:000000000000:cfn-update-inline-subs-topic";
+        String initialTemplate = """
+            {"Resources":{"MyTopic":{"Type":"AWS::SNS::Topic","Properties":{
+              "TopicName":"cfn-update-inline-subs-topic",
+              "Subscription":[{"Protocol":"email","Endpoint":"inline@example.com"}]}}}}
+            """;
+        String updatedTemplate = """
+            {"Resources":{"MyTopic":{"Type":"AWS::SNS::Topic","Properties":{
+              "TopicName":"cfn-update-inline-subs-topic"}}}}
+            """;
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-update-inline-subs-stack")
+            .formParam("TemplateBody", initialTemplate)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", topicArn)
+            .formParam("Protocol", "email")
+            .formParam("Endpoint", "manual@example.com")
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", "cfn-update-inline-subs-stack")
+            .formParam("TemplateBody", updatedTemplate)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListSubscriptionsByTopic")
+            .formParam("TopicArn", topicArn)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("manual@example.com"))
+            .body(not(containsString("inline@example.com")));
+    }
+
+    @Test
+    void createStack_snsTopicSubscribesSameStackLambda() {
+        String functionName = "cfn-inline-subs-lambda";
+        String functionArn = "arn:aws:lambda:us-east-1:000000000000:function:" + functionName;
+        String topicArn = "arn:aws:sns:us-east-1:000000000000:cfn-lambda-inline-subs-topic";
+        String template = """
+            {
+              "Resources": {
+                "Fn": {"Type":"AWS::Lambda::Function","Properties":{
+                  "FunctionName":"%s","Runtime":"python3.12","Handler":"index.handler",
+                  "Role":"arn:aws:iam::000000000000:role/cfn-test-lambda-role",
+                  "Code":{"ZipFile":"def handler(e, c): return 'ok'"}}},
+                "Topic": {"Type":"AWS::SNS::Topic","Properties":{
+                  "TopicName":"cfn-lambda-inline-subs-topic",
+                  "Subscription":[{"Protocol":"lambda","Endpoint":{"Fn::GetAtt":["Fn","Arn"]}}]}},
+                "Perm": {"Type":"AWS::Lambda::Permission","Properties":{
+                  "FunctionName":{"Ref":"Fn"},"Action":"lambda:InvokeFunction",
+                  "Principal":"sns.amazonaws.com","SourceArn":{"Ref":"Topic"}}}
+              }
+            }
+            """.formatted(functionName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-lambda-inline-subs-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-lambda-inline-subs-stack")
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        String lambdaSubscriptionArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListSubscriptionsByTopic")
+            .formParam("TopicArn", topicArn)
+        .when().post("/").then().statusCode(200)
+            .body(containsString(functionArn))
+            .extract().xmlPath().getString("**.find { it.Protocol == 'lambda' }.SubscriptionArn");
+        assertTrue(lambdaSubscriptionArn.startsWith(topicArn + ":"), lambdaSubscriptionArn);
+        given()
+            .when().get("/2015-03-31/functions/" + functionName + "/policy")
+            .then().statusCode(200)
+            .body(containsString("sns.amazonaws.com"))
+            .body(containsString(topicArn));
     }
 
     @Test

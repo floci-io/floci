@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftZeroEtlWriter;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
@@ -25,7 +26,9 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,7 +42,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -433,27 +435,14 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
 
     /** Observes the thread park in a timed wait, or end, instead of sleeping to hope for either. */
     private static Thread.State awaitTimedWaitingOrTerminated(Thread thread) {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        Thread.State state = thread.getState();
-        while (state != Thread.State.TIMED_WAITING && state != Thread.State.TERMINATED) {
-            if (System.nanoTime() > deadline) {
-                fail("the thread neither parked in a timed wait nor ended");
-            }
-            Thread.onSpinWait();
-            state = thread.getState();
-        }
-        return state;
+        return ThreadStates.awaitState(thread, EnumSet.of(Thread.State.TIMED_WAITING, Thread.State.TERMINATED),
+                Duration.ofSeconds(10), "the thread");
     }
 
     /** Observes the reset thread park on the poll's lock instead of sleeping to hope for it. */
     private static void awaitWaiting(Thread thread) {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (thread.getState() != Thread.State.WAITING) {
-            if (System.nanoTime() > deadline) {
-                fail("beforeReset() returned or never waited while a write was in progress");
-            }
-            Thread.onSpinWait();
-        }
+        ThreadStates.awaitState(thread, EnumSet.of(Thread.State.WAITING), Duration.ofSeconds(10),
+                "beforeReset(), while a write was in progress,");
     }
 
     private static Integration streamingIntegration() {

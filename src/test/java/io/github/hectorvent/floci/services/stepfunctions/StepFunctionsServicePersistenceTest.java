@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
@@ -38,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -173,7 +175,8 @@ class StepFunctionsServicePersistenceTest {
             List<HistoryEvent> actualHistory = afterRestart.getExecutionHistory(started.getExecutionArn());
             aborted.setTimestamp(actualHistory.getLast().getTimestamp());
             assertHistoryEquals(expectedHistory, actualHistory);
-            assertFalse(afterRestart.sendTaskSuccess(taskToken, "{\"done\":true}"));
+            assertEquals("InvalidToken", assertThrows(AwsException.class,
+                    () -> afterRestart.sendTaskSuccess(taskToken, "{\"done\":true}")).getErrorCode());
         } finally {
             beforeRestart.abortAbandonedExecutions();
             beforeRestart.clear();

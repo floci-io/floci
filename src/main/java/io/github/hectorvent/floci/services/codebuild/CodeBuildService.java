@@ -264,8 +264,9 @@ public class CodeBuildService {
         if (sortBy == null && sortOrder == null) {
             return listProjects(region);
         }
-        return listProjectRecords(region, sortBy, sortOrder).stream()
-                .map(Project::getName)
+        return projectSortKeys(region).stream()
+                .sorted(listComparator(sortBy, sortOrder))
+                .map(ListSortKey::name)
                 .toList();
     }
 
@@ -277,94 +278,19 @@ public class CodeBuildService {
             }
         }
 
-        List<Project> projects = listProjectRecords(region, sortBy, sortOrder);
-        int start = 0;
-        if (nextToken != null) {
-            Project anchor = decodeListProjectsToken(nextToken, region, sortBy, sortOrder);
-            Comparator<Project> comparator = projectComparator(sortBy, sortOrder);
-            while (start < projects.size() && comparator.compare(projects.get(start), anchor) <= 0) {
-                start++;
-            }
-        }
-
-        int end = Math.min(start + LIST_PROJECTS_PAGE_SIZE, projects.size());
-        List<String> names = projects.subList(start, end).stream().map(Project::getName).toList();
-        String resultToken = end < projects.size()
-                ? encodeListProjectsToken(projects.get(end - 1), region, sortBy, sortOrder)
-                : null;
-        return new ProjectPage(names, resultToken);
-    }
-
-    private Project decodeListProjectsToken(String token, String region, String sortBy, String sortOrder) {
-        if (token.isEmpty()) {
-            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
-        }
-        JsonNode cursor;
-        try {
-            cursor = PAGE_TOKEN_MAPPER.readTree(Base64.getUrlDecoder().decode(token));
-        } catch (IllegalArgumentException | IOException e) {
-            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
-        }
-        JsonNode lastName = cursor == null ? null : cursor.path("lastName");
-        JsonNode sortValue = cursor == null ? null : cursor.path("sortValue");
-        if (cursor == null || !"ListProjects".equals(cursor.path("action").asText(null))
-                || !region.equals(cursor.path("region").asText(null))
-                || !cursor.has("sortBy") || !Objects.equals(sortBy, cursor.path("sortBy").asText(null))
-                || !cursor.has("sortOrder") || !Objects.equals(sortOrder, cursor.path("sortOrder").asText(null))
-                || !lastName.isTextual() || lastName.asText().isEmpty()
-                || (sortBy == null || "NAME".equals(sortBy)) && !sortValue.isNull()
-                || !sortValue.isNull() && !sortValue.isNumber()) {
-            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
-        }
-        Double value = sortValue.isNull() ? null : sortValue.asDouble();
-        if (value != null && !Double.isFinite(value)) {
-            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
-        }
-        Project anchor = new Project();
-        anchor.setName(lastName.asText());
-        anchor.setCreated(value);
-        anchor.setLastModified(value);
-        return anchor;
-    }
-
-    private String encodeListProjectsToken(Project last, String region, String sortBy, String sortOrder) {
-        Double value = switch (sortBy == null ? "NAME" : sortBy) {
-            case "CREATED_TIME" -> last.getCreated();
-            case "LAST_MODIFIED_TIME" -> last.getLastModified();
-            default -> null;
-        };
-        ObjectNode cursor = PAGE_TOKEN_MAPPER.createObjectNode();
-        cursor.put("action", "ListProjects");
-        cursor.put("region", region);
-        cursor.put("sortBy", sortBy);
-        cursor.put("sortOrder", sortOrder);
-        cursor.put("lastName", last.getName());
-        cursor.put("sortValue", value);
-        return Base64Url.encode(cursor.toString());
+        SortedListPage page = paginateList(projectSortKeys(region), region, sortBy, sortOrder,
+                LIST_PROJECTS_PAGE_SIZE, nextToken, "ListProjects", null);
+        return new ProjectPage(page.keys().stream().map(ListSortKey::name).toList(), page.nextToken());
     }
 
     public record ProjectPage(List<String> projects, String nextToken) {
     }
 
-    private List<Project> listProjectRecords(String region, String sortBy, String sortOrder) {
+    private List<ListSortKey> projectSortKeys(String region) {
         return projectsFor(region).values().stream()
-                .sorted(projectComparator(sortBy, sortOrder))
+                .map(project -> new ListSortKey(project.getCreated(), project.getLastModified(),
+                        project.getName(), project.getName()))
                 .toList();
-    }
-
-    private Comparator<Project> projectComparator(String sortBy, String sortOrder) {
-        Comparator<Project> comparator = switch (sortBy == null ? "NAME" : sortBy) {
-            case "NAME" -> Comparator.comparing(Project::getName);
-            case "CREATED_TIME" -> Comparator.comparing(Project::getCreated,
-                    Comparator.nullsFirst(Comparator.naturalOrder()));
-            case "LAST_MODIFIED_TIME" -> Comparator.comparing(Project::getLastModified,
-                    Comparator.nullsFirst(Comparator.naturalOrder()));
-            default -> throw new AwsException("InvalidInputException", "Invalid sortBy: " + sortBy, 400);
-        };
-        if (isDescendingSortOrder(sortOrder, false)) {
-            comparator = comparator.reversed();
-        }
-        return comparator.thenComparing(Project::getName);
     }
 
     // ---- Report Groups ----
@@ -435,6 +361,117 @@ public class CodeBuildService {
 
     public List<String> listReportGroups(String region) {
         return new ArrayList<>(reportGroupsFor(region).keySet());
+    }
+
+    public ReportGroupPage listReportGroupsPage(String region, String sortBy, String sortOrder,
+                                                int maxResults, String nextToken) {
+        if (maxResults < 1 || maxResults > 100) {
+            throw new AwsException("InvalidInputException", "maxResults must be between 1 and 100", 400);
+        }
+        String criterion = sortBy == null ? "NAME" : sortBy;
+        String order = sortOrder == null ? "ASCENDING" : sortOrder;
+        List<ListSortKey> keys = reportGroupsFor(region).values().stream()
+                .map(group -> new ListSortKey(group.getCreated(), group.getLastModified(),
+                        group.getName(), group.getArn()))
+                .toList();
+        SortedListPage page = paginateList(keys, region, criterion, order, maxResults, nextToken,
+                "ListReportGroups", "lastArn");
+        return new ReportGroupPage(page.keys().stream().map(ListSortKey::id).toList(), page.nextToken());
+    }
+
+    private SortedListPage paginateList(List<ListSortKey> keys, String region, String sortBy,
+                                         String sortOrder, int pageSize, String nextToken,
+                                         String action, String idField) {
+        Comparator<ListSortKey> comparator = listComparator(sortBy, sortOrder);
+        List<ListSortKey> sorted = keys.stream().sorted(comparator).toList();
+        int start = 0;
+        if (nextToken != null) {
+            ListSortKey anchor = decodeListToken(nextToken, region, sortBy, sortOrder, action, idField);
+            while (start < sorted.size() && comparator.compare(sorted.get(start), anchor) <= 0) {
+                start++;
+            }
+        }
+        int end = Math.min(start + pageSize, sorted.size());
+        List<ListSortKey> page = sorted.subList(start, end);
+        String token = end < sorted.size()
+                ? encodeListToken(page.getLast(), region, sortBy, sortOrder, action, idField) : null;
+        return new SortedListPage(page, token);
+    }
+
+    private Comparator<ListSortKey> listComparator(String sortBy, String sortOrder) {
+        Comparator<ListSortKey> comparator = switch (sortBy == null ? "NAME" : sortBy) {
+            case "NAME" -> Comparator.comparing(ListSortKey::name);
+            case "CREATED_TIME" -> Comparator.comparing(ListSortKey::created,
+                    Comparator.nullsFirst(Comparator.naturalOrder()));
+            case "LAST_MODIFIED_TIME" -> Comparator.comparing(ListSortKey::lastModified,
+                    Comparator.nullsFirst(Comparator.naturalOrder()));
+            default -> throw new AwsException("InvalidInputException", "Invalid sortBy: " + sortBy, 400);
+        };
+        if (isDescendingSortOrder(sortOrder, false)) {
+            comparator = comparator.reversed();
+        }
+        return comparator.thenComparing(ListSortKey::name).thenComparing(ListSortKey::id);
+    }
+
+    private ListSortKey decodeListToken(String token, String region, String sortBy,
+                                        String sortOrder, String action, String idField) {
+        if (token.isEmpty()) {
+            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+        }
+        JsonNode cursor;
+        try {
+            cursor = PAGE_TOKEN_MAPPER.readTree(Base64.getUrlDecoder().decode(token));
+        } catch (IllegalArgumentException | IOException e) {
+            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+        }
+        JsonNode lastName = cursor == null ? null : cursor.path("lastName");
+        JsonNode sortValue = cursor == null ? null : cursor.path("sortValue");
+        JsonNode lastId = cursor == null || idField == null ? null : cursor.path(idField);
+        if (cursor == null || !action.equals(cursor.path("action").asText(null))
+                || !region.equals(cursor.path("region").asText(null))
+                || !cursor.has("sortBy") || !Objects.equals(sortBy, cursor.path("sortBy").asText(null))
+                || !cursor.has("sortOrder") || !Objects.equals(sortOrder, cursor.path("sortOrder").asText(null))
+                || !lastName.isTextual() || lastName.asText().isEmpty()
+                || idField != null && (!lastId.isTextual() || lastId.asText().isEmpty())
+                || (sortBy == null || "NAME".equals(sortBy)) && !sortValue.isNull()
+                || !sortValue.isNull() && !sortValue.isNumber()) {
+            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+        }
+        Double value = sortValue.isNull() ? null : sortValue.asDouble();
+        if (value != null && !Double.isFinite(value)) {
+            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+        }
+        String name = lastName.asText();
+        return new ListSortKey(value, value, name, idField == null ? name : lastId.asText());
+    }
+
+    private String encodeListToken(ListSortKey last, String region, String sortBy,
+                                    String sortOrder, String action, String idField) {
+        Double value = switch (sortBy == null ? "NAME" : sortBy) {
+            case "CREATED_TIME" -> last.created();
+            case "LAST_MODIFIED_TIME" -> last.lastModified();
+            default -> null;
+        };
+        ObjectNode cursor = PAGE_TOKEN_MAPPER.createObjectNode();
+        cursor.put("action", action);
+        cursor.put("region", region);
+        cursor.put("sortBy", sortBy);
+        cursor.put("sortOrder", sortOrder);
+        if (idField != null) {
+            cursor.put(idField, last.id());
+        }
+        cursor.put("lastName", last.name());
+        cursor.put("sortValue", value);
+        return Base64Url.encode(cursor.toString());
+    }
+
+    public record ReportGroupPage(List<String> reportGroups, String nextToken) {
+    }
+
+    private record ListSortKey(Double created, Double lastModified, String name, String id) {
+    }
+
+    private record SortedListPage(List<ListSortKey> keys, String nextToken) {
     }
 
     // ---- Source Credentials ----

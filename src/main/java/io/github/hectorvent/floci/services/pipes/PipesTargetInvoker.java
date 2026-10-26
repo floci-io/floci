@@ -19,6 +19,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -31,7 +32,8 @@ import java.util.stream.Collectors;
 public class PipesTargetInvoker {
 
     private static final Logger LOG = Logger.getLogger(PipesTargetInvoker.class);
-    private static final Pattern TEMPLATE_PLACEHOLDER = Pattern.compile("<(\\$[^>]+)>");
+    private static final Pattern TEMPLATE_PLACEHOLDER =
+            Pattern.compile("<(\\$[^>]+|aws\\.pipes\\.event\\.ingestion-time)>");
     private static final Pattern ARRAY_INDEX = Pattern.compile("^(.+?)\\[(\\d+)]$");
 
     private final LambdaService lambdaService;
@@ -217,14 +219,48 @@ public class PipesTargetInvoker {
 
     String applyInputTemplate(String template, String payload) {
         Matcher m = TEMPLATE_PLACEHOLDER.matcher(template);
+        String ingestionTime = objectMapper.valueToTree(Instant.now().toString()).toString();
         StringBuilder sb = new StringBuilder();
         while (m.find()) {
             String jsonPath = m.group(1);
-            String value = extractJsonPath(jsonPath, payload);
-            m.appendReplacement(sb, Matcher.quoteReplacement(value != null ? value : ""));
+            boolean quoted = isInsideJsonString(template, m.start());
+            String value = "aws.pipes.event.ingestion-time".equals(jsonPath)
+                    ? ingestionTime
+                    : extractJsonPath(jsonPath, payload);
+            if (value == null) {
+                value = quoted ? "" : objectMapper.valueToTree("").toString();
+            } else if (quoted && value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+                // A JSON string placeholder already has quotes from extractJsonPath. The
+                // surrounding template quotes must remain the only pair of quotes.
+                try {
+                    String text = objectMapper.readTree(value).asText();
+                    value = objectMapper.writeValueAsString(text);
+                    value = value.substring(1, value.length() - 1);
+                } catch (JsonProcessingException ignored) {
+                    // Keep the extracted representation when it is not a JSON string.
+                }
+            }
+            m.appendReplacement(sb, Matcher.quoteReplacement(value));
         }
         m.appendTail(sb);
         return sb.toString();
+    }
+
+    private static boolean isInsideJsonString(String template, int position) {
+        boolean quoted = false;
+        boolean escaped = false;
+        for (int i = 0; i < position; i++) {
+            char c = template.charAt(i);
+            if (c == '\\' && !escaped) {
+                escaped = true;
+                continue;
+            }
+            if (c == '"' && !escaped) {
+                quoted = !quoted;
+            }
+            escaped = false;
+        }
+        return quoted;
     }
 
     String extractJsonPath(String jsonPath, String json) {
@@ -250,11 +286,17 @@ public class PipesTargetInvoker {
             }
 
             JsonNode current = objectMapper.readTree(json);
+            String previousSegment = null;
+            boolean sourceFieldDecoded = false;
             for (String segment : segments) {
-                // AWS Pipes auto-parses string fields containing valid JSON
-                if (current.isTextual()) {
+                // AWS Pipes parses an encoded source body when traversing into it.
+                if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
                     try {
-                        current = objectMapper.readTree(current.asText());
+                        JsonNode decoded = objectMapper.readTree(current.asText());
+                        if (decoded != null && (decoded.isObject() || decoded.isArray())) {
+                            current = decoded;
+                        }
+                        sourceFieldDecoded = true;
                     } catch (Exception ignored) {
                         return null;
                     }
@@ -267,6 +309,20 @@ public class PipesTargetInvoker {
                 if (current.isMissingNode() || current.isNull()) {
                     return null;
                 }
+                previousSegment = segment;
+            }
+            if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
+                // SQS bodies commonly contain a JSON document as a string. Pipes input
+                // transformation resolves that document when the body itself is selected.
+                try {
+                    JsonNode decoded = objectMapper.readTree(current.asText());
+                    sourceFieldDecoded = true;
+                    if (decoded != null && (decoded.isObject() || decoded.isArray())) {
+                        return decoded.toString();
+                    }
+                } catch (JsonProcessingException ignored) {
+                    // Keep ordinary textual fields as JSON strings.
+                }
             }
             if (current.isValueNode()) {
                 return objectMapper.writeValueAsString(current);
@@ -276,6 +332,11 @@ public class PipesTargetInvoker {
             LOG.warnv("Failed to extract JSONPath {0}: {1}", jsonPath, e.getMessage());
             return null;
         }
+    }
+
+    private static boolean isEncodedSourceField(String segment) {
+        return "body".equals(segment) || "data".equals(segment)
+                || "key".equals(segment) || "value".equals(segment);
     }
 
     private static String extractRegionFromArn(String arn, String defaultRegion) {

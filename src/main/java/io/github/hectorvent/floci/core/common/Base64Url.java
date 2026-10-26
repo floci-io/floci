@@ -17,4 +17,13 @@ public final class Base64Url {
     public static String encode(String text) {
         return encode(text.getBytes(StandardCharsets.UTF_8));
     }
+
+    /**
+     * Decodes {@code text}, padded or not, as UTF-8.
+     *
+     * @throws IllegalArgumentException if {@code text} is not base64url
+     */
+    public static String decode(String text) {
+        return new String(Base64.getUrlDecoder().decode(text), StandardCharsets.UTF_8);
+    }
 }

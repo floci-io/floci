@@ -23,7 +23,6 @@ import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -188,7 +187,7 @@ public class IotFleetIndexingService {
         String nextToken = text(request.path("nextToken"), "nextToken");
         List<String> errors = new ArrayList<>();
         if (queryString == null) {
-            errors.add("Value null at 'queryString' failed to satisfy constraint: Member must not be null");
+            errors.add(SmithyValidationErrors.notNull("queryString"));
         } else if (queryString.isEmpty()) {
             errors.add("Value '' at 'queryString' failed to satisfy constraint: "
                     + "Member must have length greater than or equal to 1");
@@ -267,7 +266,7 @@ public class IotFleetIndexingService {
         }
         Matcher token;
         try {
-            token = PAGE_TOKEN.matcher(new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8));
+            token = PAGE_TOKEN.matcher(Base64Url.decode(nextToken));
         } catch (IllegalArgumentException e) {
             throw invalid("Invalid nextToken");
         }
@@ -468,8 +467,7 @@ public class IotFleetIndexingService {
         String value = text(node.path(member), prefix + "." + member);
         if (value == null) {
             if (required) {
-                errors.add("Value null at '" + prefix + "." + member
-                        + "' failed to satisfy constraint: Member must not be null");
+                errors.add(SmithyValidationErrors.notNull(prefix + "." + member));
             }
             return "OFF";
         }

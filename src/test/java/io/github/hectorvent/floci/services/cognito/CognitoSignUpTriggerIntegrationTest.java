@@ -68,7 +68,15 @@ class CognitoSignUpTriggerIntegrationTest {
                         Future<?> callback = null;
                         try {
                             JsonNode event = MAPPER.readTree((byte[]) invocation.getArgument(2));
-                            assertEquals("CustomMessage_SignUp", event.path("triggerSource").asText());
+                            if (!"CustomMessage_SignUp".equals(event.path("triggerSource").asText())) {
+                                assertEquals("CustomMessage_UpdateUserAttribute",
+                                        event.path("triggerSource").asText());
+                                assertEquals("CLIENT_ID_NOT_APPLICABLE",
+                                        event.path("callerContext").path("clientId").asText());
+                                assertEquals("admin", event.path("request").path("clientMetadata")
+                                        .path("source").asText());
+                                return response(Map.of());
+                            }
                             assertEquals(username, event.path("userName").asText());
                             assertEquals(email, event.path("request").path("userAttributes").path("email").asText());
                             callback = callbackExecutor.submit(() -> {
@@ -77,7 +85,8 @@ class CognitoSignUpTriggerIntegrationTest {
                                 cognitoAction("AdminConfirmSignUp", userRequest).then().statusCode(200);
                                 cognitoAction("AdminUpdateUserAttributes", MAPPER.writeValueAsString(Map.of(
                                         "UserPoolId", poolId, "Username", username, "UserAttributes",
-                                        List.of(Map.of("Name", "email", "Value", changedEmail)))))
+                                        List.of(Map.of("Name", "email", "Value", changedEmail)),
+                                        "ClientMetadata", Map.of("source", "admin"))))
                                         .then().statusCode(200);
                                 return null;
                             });
@@ -104,7 +113,8 @@ class CognitoSignUpTriggerIntegrationTest {
             cognitoAction("AdminGetUser", MAPPER.writeValueAsString(Map.of("UserPoolId", poolId,
                     "Username", username))).then().statusCode(200).body("UserStatus", equalTo("CONFIRMED"));
             assertEquals(1, SesMailbox.messagesTo(email).size(), "signup must send to the captured email address");
-            assertTrue(SesMailbox.messagesTo(changedEmail).isEmpty(), "the callback's new email must not receive the code");
+            assertEquals(1, SesMailbox.messagesTo(changedEmail).size(),
+                    "the admin update must send the new email its verification code");
             assertTrue(signUp.path("UserConfirmed").asBoolean(),
                     "SignUp must report confirmation completed by its synchronous CustomMessage callback");
         } finally {

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.testing.MainSources;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -49,7 +50,7 @@ class AwsQueryActionRoutingParityTest {
         }
     }
 
-    private static final String HANDLERS_ROOT = "src/main/java/io/github/hectorvent/floci/services/";
+    private static final String HANDLERS_ROOT = MainSources.BASE_DIR.resolve("services") + "/";
 
     /**
      * Every Query handler in the tree, with the service its actions must reach.

@@ -25,6 +25,11 @@ public class JobRunSummary {
     private String stateDetails;
     private String releaseLabel;
     private String type;
+    private Integer attempt;
+    @JsonFormat(shape = JsonFormat.Shape.NUMBER)
+    private Instant attemptCreatedAt;
+    @JsonFormat(shape = JsonFormat.Shape.NUMBER)
+    private Instant attemptUpdatedAt;
 
     public String getApplicationId() { return applicationId; }
     public void setApplicationId(String applicationId) { this.applicationId = applicationId; }
@@ -52,4 +57,10 @@ public class JobRunSummary {
     public void setReleaseLabel(String releaseLabel) { this.releaseLabel = releaseLabel; }
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
+    public Integer getAttempt() { return attempt; }
+    public void setAttempt(Integer attempt) { this.attempt = attempt; }
+    public Instant getAttemptCreatedAt() { return attemptCreatedAt; }
+    public void setAttemptCreatedAt(Instant attemptCreatedAt) { this.attemptCreatedAt = attemptCreatedAt; }
+    public Instant getAttemptUpdatedAt() { return attemptUpdatedAt; }
+    public void setAttemptUpdatedAt(Instant attemptUpdatedAt) { this.attemptUpdatedAt = attemptUpdatedAt; }
 }

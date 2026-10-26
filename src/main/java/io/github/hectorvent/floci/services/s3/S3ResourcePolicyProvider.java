@@ -36,6 +36,16 @@ public class S3ResourcePolicyProvider implements ResourcePolicyProvider {
     }
 
     @Override
+    public List<ResourcePolicy> getResourcePolicies(String credentialScope, String action, String resourceArn) {
+        List<ResourcePolicy> policies = getResourcePolicies(credentialScope, resourceArn);
+        if ("s3:CreateBucket".equals(action) && !policies.isEmpty()
+                && !s3Service.ownsBucket(extractBucketName(resourceArn))) {
+            return List.of();
+        }
+        return policies;
+    }
+
+    @Override
     public String resolveResourceArn(String credentialScope, String resourceArn) {
         if (!"s3".equalsIgnoreCase(credentialScope) || resourceArn == null) {
             return resourceArn;

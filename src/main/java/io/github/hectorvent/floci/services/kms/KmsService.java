@@ -601,10 +601,7 @@ public class KmsService implements ResourceProvider {
 
         // Token-based retirement: scan all grants in the region for matching token
         if (hasToken) {
-            String prefix = region + "::";
-            KmsGrant found = grantStore.scan(k -> k.startsWith(prefix)).stream()
-                    .filter(g -> grantToken.equals(g.getGrantToken()))
-                    .findFirst()
+            KmsGrant found = findGrantByToken(grantToken, region)
                     .orElseThrow(() -> new AwsException("NotFoundException",
                             "Grant not found for the given grant token", 400));
 
@@ -1668,6 +1665,10 @@ public class KmsService implements ResourceProvider {
 
     public record GenerateMacResult(byte[] mac, String keyArn) {}
 
+    /** A data key pair: PKCS#8 private key, its ciphertext under the KMS key, and the X.509 public key. */
+    public record DataKeyPair(byte[] privateKeyPlaintext, byte[] privateKeyCiphertextBlob, byte[] publicKey,
+                              String keyArn, String keyPairSpec) {}
+
     public record VerifyMacResult(String keyArn) {}
 
     /**
@@ -2002,8 +2003,7 @@ public class KmsService implements ResourceProvider {
     private static void validateEnumMember(String member, String value, List<String> allowed) {
         if (value == null) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at '" + member + "' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(member));
         }
         if (!allowed.contains(value)) {
             throw SmithyValidationErrors.validationException(
@@ -2132,6 +2132,40 @@ public class KmsService implements ResourceProvider {
         return result;
     }
 
+    public DataKeyPair generateDataKeyPair(String keyId, String keyPairSpec, Map<String, String> encryptionContext,
+                                           String region) {
+        return generateDataKeyPair(keyId, keyPairSpec, encryptionContext, region, "GenerateDataKeyPair");
+    }
+
+    DataKeyPair generateDataKeyPairWithoutPlaintext(String keyId, String keyPairSpec,
+                                                    Map<String, String> encryptionContext, String region) {
+        DataKeyPair pair = generateDataKeyPair(keyId, keyPairSpec, encryptionContext, region,
+                "GenerateDataKeyPairWithoutPlaintext");
+        return new DataKeyPair(null, pair.privateKeyCiphertextBlob(), pair.publicKey(), pair.keyArn(),
+                pair.keyPairSpec());
+    }
+
+    // The pair is generated with the same code that creates asymmetric KMS keys of that spec, but is
+    // never stored: only its private key, encrypted under the symmetric KMS key, leaves this method.
+    private DataKeyPair generateDataKeyPair(String keyId, String keyPairSpec, Map<String, String> encryptionContext,
+                                            String region, String operation) {
+        KmsKey key = resolveKey(keyId, region);
+        validateKeyUsage(key, KmsKeyUsage.ENCRYPT_DECRYPT, operation);
+        validateKeyIsUsableForCryptoOperations(key);
+        if (KmsKeySpec.SYMMETRIC_DEFAULT != key.getKeySpec()) {
+            throw new AwsException("InvalidKeyUsageException", "You cannot generate a data key pair with an asymmetric CMK", 400);
+        }
+
+        KmsKey pair = new KmsKey();
+        pair.setKeySpec(KmsKeySpec.valueOf(keyPairSpec));
+        generateKeyMaterial(pair, region);
+        byte[] privateKey = Base64.getDecoder().decode(pair.getPrivateKeyEncoded());
+        byte[] publicKey = Base64.getDecoder().decode(pair.getPublicKeyEncoded());
+
+        EncryptResult encrypted = encrypt(keyId, privateKey, encryptionContext, null, region, operation);
+        return new DataKeyPair(privateKey, encrypted.ciphertext(), publicKey, encrypted.keyArn(), keyPairSpec);
+    }
+
     // ──────────────────────────── Tags ────────────────────────────
 
     public void tagResource(String keyId, Map<String, String> tags, String region) {
@@ -2154,6 +2188,72 @@ public class KmsService implements ResourceProvider {
     // ──────────────────────────── Helpers ────────────────────────────
 
     private KmsKey resolveKey(String keyIdOrArn, String region) {
+        String keyId = resolveStoredKeyId(keyIdOrArn, region);
+        KmsKey key = keyStore.get(region + "::" + keyId)
+                .orElseThrow(() -> keyNotFound(keyIdOrArn, keyId, region));
+        key = expireImportedKeyMaterialIfDue(key, region);
+        key = ensureBackingKeyMaterial(key, region);
+        return key;
+    }
+
+    /**
+     * The stored ARN of the key a request names by its id, an alias name, an alias ARN or a key
+     * ARN, or empty when the account holds no such key in the region. The enforcement filter reads
+     * this rather than {@link #resolveKey}: an operation naming no key the account holds answers
+     * its own {@code NotFoundException} whether a policy allows it or not, so the check keeps its
+     * permissive fallback instead of refusing the request before the handler can.
+     */
+    public Optional<String> findKeyArn(String keyIdOrArn, String region) {
+        if (keyIdOrArn == null || keyIdOrArn.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            return keyStore.get(region + "::" + resolveStoredKeyId(keyIdOrArn, region))
+                    .map(KmsKey::getArn)
+                    .filter(arn -> !arn.isBlank());
+        } catch (AwsException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The stored ARN of the key the grant a retirement or a revocation acts on belongs to: the
+     * grant its {@code GrantToken} names when the request carries one, and otherwise the grant
+     * its {@code GrantId} names, or empty when the account holds no such grant in the region.
+     * The enforcement filter reads this rather than {@link #retireGrant} and
+     * {@link #revokeGrant}: a request naming no grant the account holds answers its own
+     * {@code NotFoundException} whether a policy allows it or not, so the check keeps its
+     * permissive fallback instead of refusing the request before the handler can. The token wins
+     * over the id exactly as {@link #retireGrant} resolves the grant it deletes.
+     */
+    public Optional<String> findGrantKeyArn(String grantToken, String grantId, String region) {
+        if (grantToken != null && !grantToken.isBlank()) {
+            return findGrantByToken(grantToken, region)
+                    .map(KmsGrant::getKeyArn)
+                    .filter(arn -> !arn.isBlank());
+        }
+        if (grantId == null || grantId.isBlank()) {
+            return Optional.empty();
+        }
+        return grantStore.get(region + "::" + grantId)
+                .map(KmsGrant::getKeyArn)
+                .filter(arn -> !arn.isBlank());
+    }
+
+    /** The grant a token names in a region, from the same scan the token-based retirement uses. */
+    private Optional<KmsGrant> findGrantByToken(String grantToken, String region) {
+        String prefix = region + "::";
+        return grantStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(grant -> grantToken.equals(grant.getGrantToken()))
+                .findFirst();
+    }
+
+    /**
+     * The stored key id a request's identifier names, resolving an alias name or an alias ARN to
+     * the key it points at and a key ARN to its trailing id, and refusing an ARN from another
+     * region as the crypto paths refuse it.
+     */
+    private String resolveStoredKeyId(String keyIdOrArn, String region) {
         if (referencesReservedAlias(keyIdOrArn)) {
             ensureAwsManagedKeys(region);
         }
@@ -2184,14 +2284,7 @@ public class KmsService implements ResourceProvider {
                     .map(KmsAlias::getTargetKeyId)
                     .orElseThrow(() -> aliasNotFound(keyIdOrArn, region));
         }
-
-        // Key id
-        String keyId = id;
-        KmsKey key = keyStore.get(region + "::" + id)
-                .orElseThrow(() -> keyNotFound(keyIdOrArn, keyId, region));
-        key = expireImportedKeyMaterialIfDue(key, region);
-        key = ensureBackingKeyMaterial(key, region);
-        return key;
+        return id;
     }
 
     private AwsException aliasNotFound(String aliasName, String region) {

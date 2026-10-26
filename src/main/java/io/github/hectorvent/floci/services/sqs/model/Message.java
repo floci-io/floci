@@ -52,10 +52,8 @@ public class Message {
     // move task. A standard DLQ keeps the original enqueue time.
     private Instant retentionStartTimestamp;
 
-    // Transient fields for visibility timeout tracking
-    @JsonIgnore
+    // Persist absolute delivery deadlines and the active receipt with the message.
     private String receiptHandle;
-    @JsonIgnore
     private Instant visibleAt;
 
     public Message() {

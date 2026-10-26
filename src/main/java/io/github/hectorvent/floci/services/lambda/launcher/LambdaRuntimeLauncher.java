@@ -12,6 +12,14 @@ public interface LambdaRuntimeLauncher {
 
     ContainerHandle launch(LambdaFunction fn);
 
+    default boolean supportsProvisionedConcurrency() {
+        return false;
+    }
+
+    default ContainerHandle launchProvisioned(LambdaFunction fn) {
+        throw new UnsupportedOperationException("Provisioned concurrency is not supported by this Lambda executor");
+    }
+
     void stop(ContainerHandle handle);
 
     boolean isAlive(ContainerHandle handle);

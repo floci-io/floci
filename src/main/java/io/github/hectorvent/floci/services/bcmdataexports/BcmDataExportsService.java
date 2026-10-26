@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.bcmdataexports;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.S3DestinationValidation;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
@@ -24,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -43,6 +46,7 @@ import java.util.regex.Pattern;
 public class BcmDataExportsService {
 
     private static final Logger LOG = Logger.getLogger(BcmDataExportsService.class);
+    private static final int MAX_PAGE_SIZE = 300;
 
     private static final Pattern EXPORT_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_-]+");
     private static final Set<String> ALLOWED_FREQUENCY = Set.of("SYNCHRONOUS");
@@ -112,9 +116,10 @@ public class BcmDataExportsService {
                         "Export " + exportArn + " not found.", 400));
     }
 
-    /** {@code ListExports} — returns every export owned by the calling account. */
-    public List<Export> listExports() {
-        return new ArrayList<>(exportStore.scan(key -> true));
+    /** Returns one account-scoped page for {@code ListExports}. */
+    public PaginatedResult<Export> listExports(Integer maxResults, String nextToken) {
+        return paginate(exportStore.scan(key -> true), Export::getExportArn, maxResults, nextToken,
+                "ListExports:" + regionResolver.getAccountId());
     }
 
     /**
@@ -186,15 +191,29 @@ public class BcmDataExportsService {
         return existing;
     }
 
-    /** {@code ListExecutions} — returns every recorded execution for the export. */
-    public List<ExportExecution> listExecutions(String exportArn) {
+    /** Returns one page of recorded executions for the export. */
+    public PaginatedResult<ExportExecution> listExecutions(String exportArn, Integer maxResults, String nextToken) {
         requireNonEmpty(exportArn, "ExportArn");
         if (exportStore.get(exportKey(exportArn)).isEmpty()) {
             throw new AwsException("ResourceNotFoundException",
                     "Export " + exportArn + " not found.", 400);
         }
         String prefix = exportArn + "::";
-        return new ArrayList<>(executionStore.scan(key -> key.startsWith(prefix)));
+        return paginate(executionStore.scan(key -> key.startsWith(prefix)), ExportExecution::getExecutionId,
+                maxResults, nextToken, "ListExecutions:" + regionResolver.getAccountId() + ":" + exportArn);
+    }
+
+    private static <T> PaginatedResult<T> paginate(List<T> items, Function<T, String> cursorOf,
+                                                 Integer maxResults, String nextToken, String namespace) {
+        int limit = maxResults != null ? maxResults : MAX_PAGE_SIZE;
+        if (limit < 1 || limit > MAX_PAGE_SIZE) {
+            throw new AwsException("ValidationException", "MaxResults must be between 1 and 300.", 400);
+        }
+        if (nextToken != null && nextToken.length() > 8192) {
+            throw new AwsException("ValidationException", "NextToken must not exceed 8192 characters.", 400);
+        }
+        return Pagination.paginate(items, cursorOf, limit, nextToken, namespace,
+                token -> new AwsException("ValidationException", "Invalid NextToken.", 400));
     }
 
     /** {@code GetExecution} — returns one execution record. */

@@ -70,9 +70,14 @@ class SesV2JsonTest {
 
     @Test
     void requireJsonObject_rejectsNullAndNonObjects() {
-        assertEquals("Request body must be a JSON object.", assertAws("BadRequestException", 400,
+        assertNull(assertAws("SerializationException", 400,
                 () -> SesV2Json.requireJsonObject(null)).getMessage());
-        assertAws("BadRequestException", 400, () -> SesV2Json.requireJsonObject(json("[]")));
+        assertEquals("Start of list found where not expected", assertAws("SerializationException", 400,
+                () -> SesV2Json.requireJsonObject(json("[]"))).getMessage());
+        for (String body : List.of("\"x\"", "1", "true", "null")) {
+            assertNull(assertAws("SerializationException", 400,
+                    () -> SesV2Json.requireJsonObject(json(body))).getMessage(), body);
+        }
         SesV2Json.requireJsonObject(json("{}"));
     }
 
@@ -111,14 +116,18 @@ class SesV2JsonTest {
     }
 
     @Test
-    void readOptionBody_blankIsEmptyObject_badShapesAre400() {
+    void readOptionBody_onlyEmptyIsEmptyObject_unreadableBodiesAreSerializationExceptions() {
         assertTrue(SesV2Json.readOptionBody(MAPPER, null).isObject());
-        assertTrue(SesV2Json.readOptionBody(MAPPER, "  ").isObject());
+        assertTrue(SesV2Json.readOptionBody(MAPPER, "").isObject());
+        assertTrue(SesV2Json.readOptionBody(MAPPER, " {} \n").isObject());
         assertEquals("REQUIRE", SesV2Json.readOptionBody(MAPPER, "{\"HttpsPolicy\":\"REQUIRE\"}")
                 .path("HttpsPolicy").asText());
-        assertEquals("Request body must be a JSON object.", assertAws("BadRequestException", 400,
+        assertEquals("Start of list found where not expected", assertAws("SerializationException", 400,
                 () -> SesV2Json.readOptionBody(MAPPER, "[1]")).getMessage());
-        assertAws("BadRequestException", 400, () -> SesV2Json.readOptionBody(MAPPER, "{not json"));
+        for (String body : List.of("null", "  ", "{not json", "{", "{\"a\":}", "{} x", "{}{}")) {
+            assertNull(assertAws("SerializationException", 400,
+                    () -> SesV2Json.readOptionBody(MAPPER, body)).getMessage(), body);
+        }
     }
 
     @Test
@@ -172,9 +181,9 @@ class SesV2JsonTest {
         assertNull(SesV2Json.stringMapMemberOrAbsent(node, "missing"));
         assertEquals("Start of list found where not expected", assertAws("SerializationException", 400,
                 () -> SesV2Json.stringMapMemberOrAbsent(node, "a")).getMessage());
-        assertEquals("Expected null", assertAws("SerializationException", 400,
+        assertEquals("Expected map or null", assertAws("SerializationException", 400,
                 () -> SesV2Json.stringMapMemberOrAbsent(node, "s")).getMessage());
-        assertEquals("Expected null", assertAws("SerializationException", 400,
+        assertEquals("Expected map or null", assertAws("SerializationException", 400,
                 () -> SesV2Json.stringMapMemberOrAbsent(node, "i")).getMessage());
     }
 
@@ -228,14 +237,29 @@ class SesV2JsonTest {
     }
 
     @Test
-    void intMemberOrAbsent_rejectsNonIntegralAndOutOfRange() {
-        JsonNode node = json("{\"i\":5,\"f\":1.5,\"big\":1099511627776,\"s\":\"5\",\"z\":null}");
+    void intMemberOrAbsent_truncatesAFractionAndSaturatesOutOfRange() {
+        JsonNode node = json("{\"i\":5,\"f\":1.5,\"big\":4294967296,\"neg\":-4294967296,\"z\":null}");
         assertEquals(5, SesV2Json.intMemberOrAbsent(node, "i"));
+        assertEquals(1, SesV2Json.intMemberOrAbsent(node, "f"));
+        assertEquals(Integer.MAX_VALUE, SesV2Json.intMemberOrAbsent(node, "big"));
+        assertEquals(Integer.MIN_VALUE, SesV2Json.intMemberOrAbsent(node, "neg"));
         assertNull(SesV2Json.intMemberOrAbsent(node, "z"));
         assertNull(SesV2Json.intMemberOrAbsent(node, "missing"));
-        assertAws("SerializationException", 400, () -> SesV2Json.intMemberOrAbsent(node, "f"));
-        assertAws("SerializationException", 400, () -> SesV2Json.intMemberOrAbsent(node, "big"));
-        assertAws("SerializationException", 400, () -> SesV2Json.intMemberOrAbsent(node, "s"));
+    }
+
+    @Test
+    void intMemberOrAbsent_namesTheWrongJsonType() {
+        JsonNode node = json("{\"s\":\"5\",\"t\":true,\"f\":false,\"o\":{},\"a\":[]}");
+        assertEquals("STRING_VALUE can not be converted to an Integer", assertAws("SerializationException", 400,
+                () -> SesV2Json.intMemberOrAbsent(node, "s")).getMessage());
+        assertEquals("TRUE_VALUE can not be converted to an Integer", assertAws("SerializationException", 400,
+                () -> SesV2Json.intMemberOrAbsent(node, "t")).getMessage());
+        assertEquals("FALSE_VALUE can not be converted to an Integer", assertAws("SerializationException", 400,
+                () -> SesV2Json.intMemberOrAbsent(node, "f")).getMessage());
+        assertEquals("Start of structure or map found where not expected.", assertAws("SerializationException",
+                400, () -> SesV2Json.intMemberOrAbsent(node, "o")).getMessage());
+        assertEquals("Start of list found where not expected", assertAws("SerializationException", 400,
+                () -> SesV2Json.intMemberOrAbsent(node, "a")).getMessage());
     }
 
     @Test

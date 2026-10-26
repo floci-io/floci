@@ -17,6 +17,7 @@ public class Snapshot {
     private String sqlDump;
     private String snapshotArn;
     private Instant snapshotCreateTime;
+    private Integer manualSnapshotRetentionPeriod;
 
     public Snapshot() {}
 
@@ -107,6 +108,14 @@ public class Snapshot {
 
     public void setSnapshotCreateTime(Instant snapshotCreateTime) {
         this.snapshotCreateTime = snapshotCreateTime;
+    }
+
+    public Integer getManualSnapshotRetentionPeriod() {
+        return manualSnapshotRetentionPeriod == null ? -1 : manualSnapshotRetentionPeriod;
+    }
+
+    public void setManualSnapshotRetentionPeriod(Integer manualSnapshotRetentionPeriod) {
+        this.manualSnapshotRetentionPeriod = manualSnapshotRetentionPeriod;
     }
 
     private Map<String, String> tags = new LinkedHashMap<>();

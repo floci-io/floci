@@ -692,6 +692,22 @@ class DockerClientProducerTest {
         assertEquals(300, DockerClientProducer.validateApiTimeoutSeconds(300));
     }
 
+    // Catches: a zero pull timeout, which would give up on every pull at once.
+    @ParameterizedTest
+    @ValueSource(ints = {0, -1})
+    void validateImagePullTimeoutSeconds_belowOne_throwsNamingTheSetting(int seconds) {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> DockerClientProducer.validateImagePullTimeoutSeconds(seconds));
+
+        assertThat(e.getMessage(), containsString("floci.docker.image-pull-timeout-seconds"));
+    }
+
+    @Test
+    void validateImagePullTimeoutSeconds_positive_returnsItUnchanged() {
+        assertEquals(1, DockerClientProducer.validateImagePullTimeoutSeconds(1));
+        assertEquals(1800, DockerClientProducer.validateImagePullTimeoutSeconds(1800));
+    }
+
     /**
      * The pool size comes from {@code floci.docker.max-connections}. A followed log stream holds
      * its connection until the container exits, and this fake daemon never answers, so with a

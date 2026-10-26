@@ -409,14 +409,14 @@ class DynamoDbStreamsEventSourcePollerTest {
     void versionQualifiedMappingInvokesThatVersion() {
         stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
         LambdaFunction version1 = stubVersion("1");
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), eq(0), eq("1")))
                 .thenReturn(new InvokeResult());
         EventSourceMapping esm = filterEsm();
         esm.setFunctionArn("arn:aws:lambda:us-east-1:" + ACCOUNT_ID + ":function:fn:1");
 
         pollerWith(mock(EsmStore.class)).pollAndInvoke(esm);
 
-        verify(executorService, timeout(2000)).invoke(eq(version1), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(eq(version1), any(byte[].class), eq(InvocationType.RequestResponse), eq(0), eq("1"));
     }
 
     @Test
@@ -428,14 +428,14 @@ class DynamoDbStreamsEventSourcePollerTest {
         alias.setFunctionName("fn");
         alias.setFunctionVersion("2");
         when(aliasStore.getForAccount(ACCOUNT_ID, "us-east-1", "fn", "live")).thenReturn(Optional.of(alias));
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), eq(0), eq("live")))
                 .thenReturn(new InvokeResult());
         EventSourceMapping esm = filterEsm();
         esm.setFunctionArn("arn:aws:lambda:us-east-1:" + ACCOUNT_ID + ":function:fn:live");
 
         pollerWith(mock(EsmStore.class)).pollAndInvoke(esm);
 
-        verify(executorService, timeout(2000)).invoke(eq(version2), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(eq(version2), any(byte[].class), eq(InvocationType.RequestResponse), eq(0), eq("live"));
     }
 
     private LambdaFunction stubVersion(String version) {

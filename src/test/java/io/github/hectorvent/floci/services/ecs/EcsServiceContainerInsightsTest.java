@@ -1,11 +1,7 @@
 package io.github.hectorvent.floci.services.ecs;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService.Datapoint;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
@@ -14,6 +10,7 @@ import io.github.hectorvent.floci.services.ecs.exec.EcsExecSessionRegistry;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -22,9 +19,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -58,7 +53,7 @@ class EcsServiceContainerInsightsTest {
 
     @BeforeEach
     void setUp() {
-        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        InMemoryStorageFactory storage = new InMemoryStorageFactory("000000000000");
         RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
         metrics = spy(new CloudWatchMetricsService(storage, regionResolver));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
@@ -175,22 +170,5 @@ class EcsServiceContainerInsightsTest {
         return metrics.getMetricStatistics(NAMESPACE, metricName,
                 List.of(new Dimension("ServiceName", "web"), new Dimension("ClusterName", "insights")),
                 MINUTE.minusSeconds(600), MINUTE.plusSeconds(600), 60, List.of("Maximum"), null, REGION);
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
-
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                    String fileName,
-                                                    TypeReference<Map<String, V>> typeReference) {
-            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName,
-                    ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
-        }
     }
 }

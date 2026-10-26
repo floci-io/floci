@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.services.kms.KmsService;
+import io.github.hectorvent.floci.testing.MainSources;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -18,12 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class SecurityMaterialRandomnessTest {
 
-    private static final Path IAM_SERVICE =
-            Path.of("src/main/java/io/github/hectorvent/floci/services/iam/IamService.java");
-    private static final Path STS_HANDLER =
-            Path.of("src/main/java/io/github/hectorvent/floci/services/iam/StsQueryHandler.java");
-    private static final Path KMS_SERVICE =
-            Path.of("src/main/java/io/github/hectorvent/floci/services/kms/KmsService.java");
+    private static final Path IAM_SERVICE = MainSources.sourceFile(IamService.class);
+    private static final Path STS_HANDLER = MainSources.sourceFile(StsQueryHandler.class);
+    private static final Path KMS_SERVICE = MainSources.sourceFile(KmsService.class);
     private static final Pattern RANDOM_SECRET_DECLARATION =
             Pattern.compile("private\\s+String\\s+randomSecret\\s*\\(int\\s+length\\)");
 

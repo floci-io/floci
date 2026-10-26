@@ -116,12 +116,13 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v2SendBulkEmail_malformedEntryRecipient_failsOnlyThatEntry() {
+        verifySender();
         given()
             .contentType("application/json")
             .header("Authorization", AUTH)
             .body("""
                 {
-                    "FromEmailAddress": "sender@example.com",
+                    "FromEmailAddress": "%2$s",
                     "DefaultContent": {"Template": {
                         "TemplateContent": {"Subject": "s", "Text": "b"},
                         "TemplateData": "{}"}},
@@ -131,7 +132,7 @@ class SesSendAddressSyntaxIntegrationTest {
                         {"Destination": {"ToAddresses": ["%1$s"], "CcAddresses": ["やまだ@example.com"]}}
                     ]
                 }
-                """.formatted(TO))
+                """.formatted(TO, VERIFIED_SENDER))
         .when()
             .post("/v2/email/outbound-bulk-emails")
         .then()
@@ -146,6 +147,7 @@ class SesSendAddressSyntaxIntegrationTest {
 
     @Test
     void v1SendBulkTemplatedEmail_malformedEntryRecipient_failsOnlyThatEntry() {
+        verifySender();
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
@@ -162,7 +164,7 @@ class SesSendAddressSyntaxIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH)
             .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", "sender@example.com")
+            .formParam("Source", VERIFIED_SENDER)
             .formParam("Template", "address-syntax-bulk")
             .formParam("DefaultTemplateData", "{}")
             .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "success@")

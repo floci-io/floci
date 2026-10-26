@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
@@ -540,8 +542,9 @@ class Route53CfnProvisionerTest {
         assertEquals(List.of("CREATE", "DELETE"), actions);
     }
 
-    @Test
-    void anUpdateThatOnlyAddsTheTrailingDotKeepsTheRecord() {
+    @ParameterizedTest
+    @ValueSource(strings = {"www.example.com.", "WWW.EXAMPLE.COM."})
+    void anUpdateThatOnlyChangesNameIdentityKeepsTheRecord(String recordName) {
         Route53Service service = mock(Route53Service.class);
         ResourceRecordSet stored = new ResourceRecordSet();
         stored.setName("www.example.com.");
@@ -550,7 +553,7 @@ class Route53CfnProvisionerTest {
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode()
                 .put("HostedZoneId", "Z1")
-                .put("Name", "www.example.com.")
+                .put("Name", recordName)
                 .put("Type", "A");
         ProvisionContext context = new ProvisionContext(recordEngine(), "us-east-1", "623666680275",
                 "dns-stack", "www.example.com");

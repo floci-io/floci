@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.MetricFilter;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.MetricTransformation;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
@@ -56,7 +57,8 @@ class PublicationTestSupport {
         when(resolver.getAccountId()).thenAnswer(call -> account.get());
         metricStore = new AccountAwareStorageBackend<>(sink, contexts, ACCOUNT);
         filters = new AccountAwareStorageBackend<>(new InMemoryStorage<>(), contexts, ACCOUNT);
-        doReturn(metricStore).when(factory).create(eq("cloudwatchmetrics"), eq("cwmetrics.json"), any());
+        doReturn(metricStore).when(factory).create(eq("cloudwatchmetrics"), eq("cwmetrics.json"), any(),
+                eq(WriteProfile.APPEND_HEAVY));
         doReturn(AccountAwareStorageBackend.inMemory(ACCOUNT)).when(factory)
                 .create(eq("cloudwatchmetrics"), eq("cwalarms.json"), any());
         metrics = new CloudWatchMetricsService(factory, resolver);

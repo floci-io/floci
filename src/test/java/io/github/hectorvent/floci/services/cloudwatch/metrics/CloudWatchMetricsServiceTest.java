@@ -9,9 +9,14 @@ import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -29,6 +34,116 @@ class CloudWatchMetricsServiceTest {
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000")
         );
+    }
+
+    @Test
+    void metricDefinitionUpdatePreservesStateAndTags() {
+        MetricAlarm original = new MetricAlarm();
+        original.setAlarmName("updated");
+        original.setTags(new HashMap<>(Map.of("team", "original")));
+        service.putMetricAlarm(original, REGION);
+        service.setAlarmState("updated", "ALARM", "manual", "{}", REGION);
+        service.tagResource(original.getAlarmArn(), Map.of("owner", "retained"), REGION);
+        service.untagResource(original.getAlarmArn(), List.of("team"), REGION);
+        MetricAlarm replacement = new MetricAlarm();
+        replacement.setAlarmName("updated");
+        replacement.setThreshold(42.0);
+        replacement.setTags(new HashMap<>(Map.of("ignored", "update")));
+        service.putMetricAlarm(replacement, REGION);
+        MetricAlarm result = service.describeAlarms(List.of("updated"), null, REGION).getFirst();
+        assertEquals("ALARM", result.getStateValue());
+        assertEquals("manual", result.getStateReason());
+        assertEquals("{}", result.getStateReasonData());
+        assertEquals(original.getStateUpdatedTimestamp(), result.getStateUpdatedTimestamp());
+        assertEquals(42.0, result.getThreshold());
+        assertEquals(Map.of("owner", "retained"), result.getTags());
+        assertNotSame(original.getTags(), result.getTags());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"", "alarm", "UNKNOWN"})
+    void invalidManualStatePreservesAlarm(String value) {
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("manual");
+        service.putMetricAlarm(alarm, REGION);
+        service.setAlarmState("manual", "OK", "preserved", "{}", REGION);
+        long timestamp = alarm.getStateUpdatedTimestamp();
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.setAlarmState("manual", value, "rejected", "changed", REGION));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(value == null
+                ? "1 validation error detected: Value null at 'stateValue' failed to satisfy constraint: Member must not be null"
+                : "1 validation error detected: Value '" + value + "' at 'stateValue' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: [OK, ALARM, INSUFFICIENT_DATA]", error.getMessage());
+        assertEquals("OK", alarm.getStateValue());
+        assertEquals("preserved", alarm.getStateReason());
+        assertEquals("{}", alarm.getStateReasonData());
+        assertEquals(timestamp, alarm.getStateUpdatedTimestamp());
+    }
+
+    @Test
+    void missingManualStateReasonPreservesAlarm() {
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("reason-required");
+        service.putMetricAlarm(alarm, REGION);
+        service.setAlarmState(alarm.getAlarmName(), "OK", "preserved", "{}", REGION);
+        long timestamp = alarm.getStateUpdatedTimestamp();
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.setAlarmState(alarm.getAlarmName(), "ALARM", null, "changed", REGION));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("1 validation error detected: Value null at 'stateReason' failed to satisfy constraint: "
+                + "Member must not be null", error.getMessage());
+        MetricAlarm stored = service.describeAlarms(List.of(alarm.getAlarmName()), null, REGION).getFirst();
+        assertEquals("OK", stored.getStateValue());
+        assertEquals("preserved", stored.getStateReason());
+        assertEquals("{}", stored.getStateReasonData());
+        assertEquals(timestamp, stored.getStateUpdatedTimestamp());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "manual reason"})
+    void suppliedManualStateReasonIsPreserved(String reason) {
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("reason-supplied");
+        service.putMetricAlarm(alarm, REGION);
+        service.setAlarmState(alarm.getAlarmName(), "ALARM", reason, null, REGION);
+        assertEquals("ALARM", alarm.getStateValue());
+        assertEquals(reason, alarm.getStateReason());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void manualReasonLengthLimitsPreserveRejectedState(boolean data) {
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName("reason-length");
+        service.putMetricAlarm(alarm, REGION);
+        int maximum = data ? 4000 : 1023;
+        String path = data ? "stateReasonData" : "stateReason";
+        for (String unit : List.of("x", " ", "\uD83D\uDE00")) {
+            String boundary = unit.repeat(maximum);
+            service.setAlarmState("reason-length", "OK", data ? "accepted" : boundary,
+                    data ? boundary : "{}", REGION);
+            long timestamp = alarm.getStateUpdatedTimestamp();
+            String rejected = boundary + unit;
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.setAlarmState("reason-length", "ALARM", data ? "rejected" : rejected,
+                            data ? rejected : "changed", REGION));
+            assertEquals("ValidationError", error.getErrorCode());
+            assertEquals("1 validation error detected: Value '" + rejected + "' at '" + path
+                    + "' failed to satisfy constraint: Member must have length less than or equal to " + maximum,
+                    error.getMessage());
+            assertEquals("OK", alarm.getStateValue());
+            assertEquals(data ? "accepted" : boundary, alarm.getStateReason());
+            assertEquals(data ? boundary : "{}", alarm.getStateReasonData());
+            assertEquals(timestamp, alarm.getStateUpdatedTimestamp());
+        }
+        service.setAlarmState("reason-length", "OK", "", "", REGION);
+        assertEquals("", alarm.getStateReason());
+        assertEquals("", alarm.getStateReasonData());
+        service.setAlarmState("reason-length", "OK", " ", null, REGION);
+        assertEquals(" ", alarm.getStateReason());
+        assertNull(alarm.getStateReasonData());
     }
 
     private MetricDatum datum(String name, double value) {

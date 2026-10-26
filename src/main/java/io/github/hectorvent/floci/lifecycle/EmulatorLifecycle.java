@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentialsServer;
+import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheMemcachedService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
@@ -56,6 +57,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 @ApplicationScoped
 public class EmulatorLifecycle {
@@ -115,8 +117,11 @@ public class EmulatorLifecycle {
     private final DurableExecutionService durableExecutionService;
     private final Instance<ContainerTeardown> containerTeardowns;
     private final PersistentPathValidator persistentPathValidator;
+    private final EksService eksService;
     private final DynamoDbRuntime dynamoDbRuntime;
     private final RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer;
+    // Set on the boot thread, read by the async HttpServerStart observer.
+    private volatile CompletableFuture<Void> metadataServerStarted = CompletableFuture.completedFuture(null);
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
@@ -157,7 +162,8 @@ public class EmulatorLifecycle {
                              Instance<ContainerTeardown> containerTeardowns,
                              PersistentPathValidator persistentPathValidator,
                              DynamoDbRuntime dynamoDbRuntime,
-                             RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer) {
+                             RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer,
+                             EksService eksService) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -196,6 +202,7 @@ public class EmulatorLifecycle {
         this.durableExecutionService = durableExecutionService;
         this.containerTeardowns = containerTeardowns;
         this.persistentPathValidator = persistentPathValidator;
+        this.eksService = eksService;
         this.dynamoDbRuntime = dynamoDbRuntime;
         this.redshiftZeroEtlConsumer = redshiftZeroEtlConsumer;
     }
@@ -279,7 +286,7 @@ public class EmulatorLifecycle {
         }
 
         if (isMetadataServerNeeded()) {
-            ec2MetadataServer.start().exceptionally(ex -> {
+            metadataServerStarted = ec2MetadataServer.start().exceptionally(ex -> {
                 LOG.warnv("EC2 IMDS server failed to start: {0}", ex.getMessage());
                 return null;
             });
@@ -310,6 +317,7 @@ public class EmulatorLifecycle {
         boolean hasStart = initializationHooksRunner.hasHooks(InitializationHook.START);
         boolean hasReady = initializationHooksRunner.hasHooks(InitializationHook.READY);
         if (!hasStart && !hasReady) {
+            restoreEksClusters();
             return;
         }
         try {
@@ -322,6 +330,7 @@ public class EmulatorLifecycle {
             }
             initLifecycleState.markReadyCompleted();
             logReady();
+            restoreEksClusters();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.error("Startup hook execution interrupted — shutting down", e);
@@ -329,6 +338,25 @@ public class EmulatorLifecycle {
         } catch (Exception e) {
             LOG.error("Startup hook execution failed — shutting down", e);
             Quarkus.asyncExit();
+        }
+    }
+
+    /**
+     * Creating EksService restarts persisted clusters; without this call that waited for the first EKS request.
+     * It runs once Floci's HTTP port and IMDS server listen, because a recreated cluster's Pod Identity and IMDS
+     * relays probe them before they route pod traffic there, and after the start and ready hooks, which it
+     * could otherwise hold up for as long as the clusters take to start.
+     */
+    private void restoreEksClusters() {
+        if (!config.services().eks().enabled() || config.services().eks().mock()) {
+            return;
+        }
+        try {
+            metadataServerStarted.join();
+            eksService.restorePersistedRuntime();
+        } catch (RuntimeException e) {
+            // EKS requests retry the bean's creation, as before; the rest of the emulator still starts.
+            LOG.error("Failed to restore persisted EKS clusters at startup", e);
         }
     }
 
@@ -370,8 +398,9 @@ public class EmulatorLifecycle {
         // SIGTERM grace window and trigger SIGKILL; if the flush ran last it would be skipped and
         // in-memory (hybrid) data would be lost on an otherwise-graceful shutdown. shutdownAll()
         // still runs at the end to stop the flush schedulers and capture any shutdown-time writes.
-        // DynamoDB stream consumers stop first, so the flush holds their final checkpoints.
+        // Stream consumers stop first, so the flush holds their final checkpoints.
         runCleanup("DynamoDB Streams poller", dynamodbStreamsPoller::shutdown);
+        runCleanup("Kinesis poller", kinesisPoller::shutdown);
         runCleanup("Redshift zero-ETL consumer", redshiftZeroEtlConsumer::shutdown);
         runCleanup("storage flush", storageFactory::flushAll);
         runCleanup("EC2 metadata server", () -> {

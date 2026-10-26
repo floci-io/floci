@@ -18,10 +18,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -246,7 +244,7 @@ public class EksPodIdentityAssociationService {
         String after = "";
         if (nextToken != null && !nextToken.isBlank()) {
             try {
-                String decoded = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+                String decoded = Base64Url.decode(nextToken);
                 if (!decoded.startsWith(prefix + "\n")) {
                     throw invalid("nextToken does not belong to this cluster");
                 }
@@ -319,24 +317,24 @@ public class EksPodIdentityAssociationService {
      * accepts the same role ARNs through {@link IamService#roleArnMatches}.
      */
     private void validateRoleArn(String roleArn, String fieldName) {
-        String[] arn = roleArn.split(":", 6);
-        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].matches(AwsArnUtils.PARTITION_REGEX)
-                || !"iam".equals(arn[2]) || !arn[3].isEmpty() || !arn[4].matches("[0-9]{12}")
-                || !arn[5].startsWith("role/") || arn[5].startsWith("role/aws-service-role/")
+        AwsArnUtils.Arn arn = AwsArnUtils.isArn(roleArn) ? AwsArnUtils.parse(roleArn) : null;
+        if (arn == null || !arn.partition().matches(AwsArnUtils.PARTITION_REGEX)
+                || !"iam".equals(arn.service()) || !arn.region().isEmpty() || !arn.accountId().matches("[0-9]{12}")
+                || !arn.resource().startsWith("role/") || arn.resource().startsWith("role/aws-service-role/")
                 || roleArn.endsWith("/")) {
             throw invalid(fieldName + " must identify an IAM role");
         }
         String roleName = roleArn.substring(roleArn.lastIndexOf('/') + 1);
-        iam.findRole(arn[4], roleName)
+        iam.findRole(arn.accountId(), roleName)
                 .filter(role -> IamService.roleArnMatches(roleArn, role))
                 .orElseThrow(() -> invalid("IAM role does not exist"));
     }
 
     private static void validateTargetRoleArn(String targetRoleArn) {
-        String[] arn = targetRoleArn.split(":", 6);
-        if (arn.length != 6 || !"arn".equals(arn[0]) || !arn[1].matches(AwsArnUtils.PARTITION_REGEX)
-                || !"iam".equals(arn[2]) || !arn[3].isEmpty() || !arn[4].matches("[0-9]{12}")
-                || !arn[5].startsWith("role/") || targetRoleArn.endsWith("/")) {
+        AwsArnUtils.Arn arn = AwsArnUtils.isArn(targetRoleArn) ? AwsArnUtils.parse(targetRoleArn) : null;
+        if (arn == null || !arn.partition().matches(AwsArnUtils.PARTITION_REGEX)
+                || !"iam".equals(arn.service()) || !arn.region().isEmpty() || !arn.accountId().matches("[0-9]{12}")
+                || !arn.resource().startsWith("role/") || targetRoleArn.endsWith("/")) {
             throw invalid("targetRoleArn must identify an IAM role");
         }
     }

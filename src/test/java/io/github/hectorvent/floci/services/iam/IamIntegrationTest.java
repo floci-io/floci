@@ -555,6 +555,47 @@ class IamIntegrationTest {
                     contains("aws:CurrentTime", "aws:username"));
     }
 
+    /**
+     * {@code PolicySourceArn} is {@code arnType}, min 20, and the simulator used to resolve the
+     * entity out of whatever followed the last slash, so a value far too short to be an ARN
+     * simulated against a user named after its tail. IAM answers that minimum with a
+     * {@code ValidationError} naming the length, which is what both principal readers answer now.
+     *
+     * <p>A value that clears 20 characters and still parses as no ARN is deliberately untouched:
+     * the member publishes no pattern and nothing records what AWS answers for one.
+     */
+    @Test
+    @Order(88)
+    void aPolicySourceArnUnderItsDeclaredLengthIsAValidationError() {
+        String expected = "1 validation error detected: Value at 'policySourceArn' failed to "
+                + "satisfy constraint: Member must have length greater than or equal to 20";
+
+        given()
+            .formParam("Action", "SimulatePrincipalPolicy")
+            .formParam("PolicySourceArn", ":user/bob")
+            .formParam("ActionNames.member.1", "s3:GetObject")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(expected));
+
+        given()
+            .formParam("Action", "GetContextKeysForPrincipalPolicy")
+            .formParam("PolicySourceArn", ":role/admin")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(expected));
+    }
+
     @Test
     @Order(41)
     void getContextKeysForPrincipalPolicyMergesAttachedAndExtraPolicies() {

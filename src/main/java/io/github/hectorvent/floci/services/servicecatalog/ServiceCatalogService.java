@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.CreateAccountStatus;
 import io.github.hectorvent.floci.services.organizations.model.OrganizationAccount;
@@ -22,7 +23,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 @ApplicationScoped
-public class ServiceCatalogService {
+public class ServiceCatalogService implements PassedRoleLookup {
 
     static final String CONTROL_TOWER_PORTFOLIO_ID = "port-flocicontrol1";
     static final String CONTROL_TOWER_PORTFOLIO_NAME = "AWS Control Tower Account Factory Portfolio";
@@ -996,6 +997,12 @@ public class ServiceCatalogService {
             throw new AwsException("InvalidParametersException", "Id is required", 400);
         }
         return require(associationStore, id, "constraint").deepCopy();
+    }
+
+    /** The constraint's type, which says whether an update of its parameters sets a launch role. */
+    @Override
+    public Optional<String> serviceCatalogConstraintType(String constraintId) {
+        return associationStore.get(constraintId).map(constraint -> constraint.path("Type").asText(""));
     }
 
     public ObjectNode describeProvisionedProduct(String id, String name) {

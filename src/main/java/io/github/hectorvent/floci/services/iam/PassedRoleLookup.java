@@ -7,8 +7,9 @@ import java.util.Optional;
  * Looks up what a stored resource holds that the {@code iam:PassRole} check of a request needs, for
  * the operations that pass a role the request does not name itself: an ECS task started from a task
  * definition runs with the definition's roles, a self-managed StackSet that names no
- * administration role uses the default one, and an Auto Scaling group launches its instances with
- * the instance profile of its launch template, or of the instance its launch configuration was made from.
+ * administration role uses the default one, an Auto Scaling group launches its instances with
+ * the instance profile of its launch template, or of the instance its launch configuration was made from,
+ * and a Service Catalog constraint update names no type, which says whether it sets a launch role.
  *
  * <p>Implemented by the services that own those resources, each answering for its own and leaving
  * the default for the rest; consumed lazily by {@code IamEnforcementFilter} via
@@ -59,6 +60,11 @@ public interface PassedRoleLookup {
      */
     default Optional<String> instanceRefreshInstanceProfile(String groupName, String templateId, String templateName,
                                                             String version, String region) {
+        return Optional.empty();
+    }
+
+    /** The type of the Service Catalog constraint {@code constraintId}; empty when there is none. */
+    default Optional<String> serviceCatalogConstraintType(String constraintId) {
         return Optional.empty();
     }
 }

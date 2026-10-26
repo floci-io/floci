@@ -125,6 +125,7 @@ class EcrRegistryManagerTest {
         when(ecr.registryMaxPort()).thenReturn(MAX_PORT);
         when(ecr.dockerNetwork()).thenReturn(Optional.empty());
         when(ecr.preferLocalImages()).thenReturn(true);
+        when(ecr.enabled()).thenReturn(true);
 
         manager = new EcrRegistryManager(containerBuilder, lifecycleManager, logStreamer,
                 containerDetector, currentContainerNetworkResolver, portAllocator, config, regionResolver);
@@ -214,6 +215,37 @@ class EcrRegistryManagerTest {
             assertFalse(manager.tryEnsureStarted(), "attempt " + attempt + " should report unavailable");
         }
         assertFalse(manager.isStarted());
+    }
+
+    @Test
+    void tryEnsureStarted_ecrDisabled_reportsUnavailableWithoutCreatingTheContainer() {
+        when(ecr.enabled()).thenReturn(false);
+
+        assertFalse(manager.tryEnsureStarted());
+
+        assertFalse(manager.isStarted());
+        verify(lifecycleManager, never()).findByName(anyString());
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void ensureStarted_ecrDisabled_refusesWithoutCreatingTheContainer() {
+        when(ecr.enabled()).thenReturn(false);
+
+        assertThrows(IllegalStateException.class, () -> manager.ensureStarted());
+
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void rewriteImageUri_ecrDisabled_returnsAwsEcrUriUnchangedWithoutStartingRegistry() {
+        when(ecr.enabled()).thenReturn(false);
+
+        String rewritten = manager.rewriteImageUri(AWS_ECR_IMAGE);
+
+        assertEquals(AWS_ECR_IMAGE, rewritten);
+        verify(lifecycleManager, never()).findByName(anyString());
+        verify(lifecycleManager, never()).createAndStart(any());
     }
 
     @Test

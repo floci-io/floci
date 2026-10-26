@@ -170,13 +170,21 @@ import software.amazon.awssdk.services.wafv2.Wafv2Client;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.KeyStore;
 import java.security.SecureRandom;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -386,6 +394,28 @@ public final class TestFixtures {
      */
     public static String proxyHost() {
         return ENDPOINT.getHost();
+    }
+
+    /**
+     * A TLS context that trusts only the CA Floci serves at {@code /_floci/ca.pem}, for a client
+     * that verifies an endpoint Floci signs, such as a DSQL cluster or an encrypted cache.
+     */
+    public static SSLContext flociCaTrust() throws IOException, InterruptedException, GeneralSecurityException {
+        HttpResponse<String> ca = emulatorHttpClient().send(
+                HttpRequest.newBuilder(ENDPOINT.resolve("/_floci/ca.pem")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        KeyStore trusted = KeyStore.getInstance(KeyStore.getDefaultType());
+        trusted.load(null, null);
+        int index = 0;
+        for (Certificate certificate : CertificateFactory.getInstance("X.509").generateCertificates(
+                new ByteArrayInputStream(ca.body().getBytes(StandardCharsets.US_ASCII)))) {
+            trusted.setCertificateEntry("floci-" + index++, certificate);
+        }
+        TrustManagerFactory trust = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        trust.init(trusted);
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, trust.getTrustManagers(), null);
+        return context;
     }
 
     // ============================================

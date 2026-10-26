@@ -11,12 +11,15 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnShapes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -30,6 +33,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchivedEvent;
 import io.github.hectorvent.floci.services.eventbridge.model.Connection;
 import io.github.hectorvent.floci.services.eventbridge.model.ConnectionState;
+import io.github.hectorvent.floci.services.eventbridge.model.EcsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
 import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
@@ -57,7 +61,7 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class EventBridgeService implements ResourceProvider {
+public class EventBridgeService implements ResourceProvider, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(EventBridgeService.class);
     private static final int MAX_LIST_LIMIT = 100;
@@ -461,6 +465,12 @@ public class EventBridgeService implements ResourceProvider {
                         "Rule not found: " + ruleName, 400));
         List<Target> existing = new ArrayList<>(targetStore.get(key).orElse(new ArrayList<>()));
         for (Target newTarget : newTargets) {
+            EcsParameters ecs = newTarget.getEcsParameters();
+            if (ecs != null) {
+                ecs.setTaskCount(ecs.getTaskCount() == null ? 1 : ecs.getTaskCount());
+                ecs.setEnableECSManagedTags(ecs.getEnableECSManagedTags() == null ? false : ecs.getEnableECSManagedTags());
+                ecs.setEnableExecuteCommand(ecs.getEnableExecuteCommand() == null ? false : ecs.getEnableExecuteCommand());
+            }
             if (newTarget.getRoleArn() == null && isCrossAccountEventBus(newTarget.getArn(), rule)) {
                 existing.stream()
                         .filter(t -> t.getId().equals(newTarget.getId()) && newTarget.getArn().equals(t.getArn()))
@@ -490,10 +500,15 @@ public class EventBridgeService implements ResourceProvider {
             Integer attempts = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumRetryAttempts() : null;
             Integer age = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumEventAgeInSeconds() : null;
             String arn = target.getDeadLetterConfig() != null ? target.getDeadLetterConfig().arn() : null;
+            Integer taskCount = target.getEcsParameters() != null ? target.getEcsParameters().getTaskCount() : null;
             String field = null;
             Object value = null;
             String constraint = null;
-            if (attempts != null && (attempts < 0 || attempts > 185)) {
+            if (taskCount != null && taskCount < 1) {
+                field = "ecsParameters.taskCount";
+                value = taskCount;
+                constraint = "value greater than or equal to 1";
+            } else if (attempts != null && (attempts < 0 || attempts > 185)) {
                 field = "retryPolicy.maximumRetryAttempts";
                 value = attempts;
                 constraint = attempts < 0 ? "value greater than or equal to 0" : "value less than or equal to 185";
@@ -517,7 +532,27 @@ public class EventBridgeService implements ResourceProvider {
                         + "' at 'targets." + (i + 1) + ".member." + field
                         + "' failed to satisfy constraint: Member must have " + constraint);
             }
+            validateTargetArn(target.getRoleArn(), "iam");
+            validateTargetArn(arn, "sqs");
         }
+    }
+
+    private static void validateTargetArn(String arn, String service) {
+        if (arn == null) {
+            return;
+        }
+        if (AwsArnUtils.isArnFor(arn, service)) {
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            boolean resourceValid = "iam".equals(service)
+                    ? AwsArnShapes.isIamRole(parsed) && !parsed.resource().endsWith("/")
+                    : !parsed.region().isBlank() && AwsArnShapes.isSqsQueueName(parsed.resource());
+            if (AwsPartitions.find(parsed.partition()).isPresent()
+                    && parsed.accountId().matches("[0-9]{12}") && resourceValid) {
+                return;
+            }
+        }
+        throw new AwsException("ValidationException",
+                "Parameter " + arn + " is not valid. Reason: Provided Arn is not in correct format.", 400);
     }
 
     public record RemoveTargetsResult(int successfulCount, int failedCount) {}
@@ -550,29 +585,52 @@ public class EventBridgeService implements ResourceProvider {
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
+        validateTagResourceArn(resourceArn, region);
         String resource = AwsArnUtils.parse(resourceArn).resource();
         if (resource.startsWith("event-bus/")) {
             String busName = resource.substring("event-bus/".length());
-            String key = busKey(region, busName);
-            return busStore.get(key)
-                    .map(EventBus::getTags)
-                    .orElse(Map.of());
+            if (busName.isBlank()) {
+                throw new AwsException("ResourceNotFoundException", "Resource not found: " + resourceArn, 400);
+            }
+            return describeEventBus(busName, region).getTags();
         }
         if (resource.startsWith("rule/")) {
             RuleRef ref = parseRuleResource(resource);
             String key = ruleKey(region, ref.busName(), ref.ruleName());
             return ruleStore.get(key)
                     .map(Rule::getTags)
-                    .orElse(Map.of());
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Resource not found: " + resourceArn, 400));
         }
         if (resource.startsWith("archive/")) {
             String archiveName = resource.substring("archive/".length());
             String key = archiveKey(region, archiveName);
             return archiveStore.get(key)
                     .map(Archive::getTags)
-                    .orElse(Map.of());
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Archive not found: " + archiveName, 400));
         }
-        return Map.of();
+        throw new AwsException("ResourceNotFoundException", "Resource not found: " + resourceArn, 400);
+    }
+
+    /** EventBridge tag operations only address resources in the caller's account and Region. */
+    private void validateTagResourceArn(String resourceArn, String region) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceArn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Resource not found: " + resourceArn, 400);
+        }
+        if (!"events".equals(arn.service())
+                || arn.partition().isBlank()
+                || AwsArnUtils.isForeignPartition(arn, regionResolver.partitionForRegion(region))
+                || !region.equals(arn.region())
+                || arn.accountId().isBlank()
+                || AwsArnUtils.isForeignAccount(arn, regionResolver.getAccountId())) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Resource not found: " + resourceArn, 400);
+        }
     }
 
     /** Resolves the bus and rule name from a {@code rule/...} ARN resource segment. */
@@ -590,6 +648,7 @@ public class EventBridgeService implements ResourceProvider {
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags, String region) {
+        validateTagResourceArn(resourceArn, region);
         String resource = AwsArnUtils.parse(resourceArn).resource();
         if (resource.startsWith("archive/")) {
             String archiveName = resource.substring("archive/".length());
@@ -628,6 +687,7 @@ public class EventBridgeService implements ResourceProvider {
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
+        validateTagResourceArn(resourceArn, region);
         String resource = AwsArnUtils.parse(resourceArn).resource();
         if (resource.startsWith("archive/")) {
             String archiveName = resource.substring("archive/".length());
@@ -811,6 +871,26 @@ public class EventBridgeService implements ResourceProvider {
         entry.put("Detail", detail);
         entry.put("Resources", resources);
         return entry;
+    }
+
+    /**
+     * Publishes one event an AWS service sends on its own behalf to {@code region}'s default bus, in the
+     * caller's account. Best effort, as the change it reports has already happened and its caller must
+     * not see it fail: an entry the bus rejects, or any failure publishing it, is logged and goes no
+     * further.
+     */
+    public void publishServiceEvent(String source, String detailType, String detail, String resourceArn,
+                                    String region) {
+        try {
+            PutEventsResult result = putEvents(List.of(serviceEventEntry(source, detailType, detail, resourceArn)),
+                    region);
+            if (result.failedCount() > 0) {
+                LOG.warnv("EventBridge rejected the {0} {1} event in {2}: {3}", source, detailType, region,
+                        result.entries());
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "EventBridge could not publish the {0} {1} event in {2}", source, detailType, region);
+        }
     }
 
     public PutEventsResult putEvents(List<Map<String, Object>> entries, String region) {
@@ -1359,13 +1439,15 @@ public class EventBridgeService implements ResourceProvider {
             violations.add("Value '" + retentionDays + "' at 'retentionDays' failed to satisfy constraint: "
                     + "Member must have value greater than or equal to 0");
         }
-        if (description != null && description.length() > 512) {
-            violations.add("Value '" + description + "' at 'description' failed to satisfy constraint: "
-                    + "Member must have length less than or equal to 512");
+        String descriptionViolation = description == null ? null
+                : SmithyValidationErrors.lengthOutOfRange("description", description, 0, 512);
+        if (descriptionViolation != null) {
+            violations.add(descriptionViolation);
         }
-        if (eventPattern != null && eventPattern.length() > 4096) {
-            violations.add("Value '" + eventPattern + "' at 'eventPattern' failed to satisfy constraint: "
-                    + "Member must have length less than or equal to 4096");
+        String eventPatternViolation = eventPattern == null ? null
+                : SmithyValidationErrors.lengthOutOfRange("eventPattern", eventPattern, 0, 4096);
+        if (eventPatternViolation != null) {
+            violations.add(eventPatternViolation);
         }
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
@@ -1499,6 +1581,24 @@ public class EventBridgeService implements ResourceProvider {
         connectionStore.put(key, connection);
         LOG.infov("Created connection: {0} with authorization type {1}", name, authorizationType);
         return connection;
+    }
+
+    @Override
+    public String namespace() {
+        return "events";
+    }
+
+    /**
+     * The ARN of the caller's connection or API destination of the name in the Region, which follows the name with
+     * the id it was minted with, as its handlers look it up.
+     */
+    @Override
+    public Optional<String> find(String type, String name, String region) {
+        return switch (type) {
+            case "connection" -> connectionStore.get(connectionKey(region, name)).map(Connection::getConnectionArn);
+            case "api-destination" -> apiDestinationStore.get(apiDestinationKey(region, name)).map(ApiDestination::getArn);
+            default -> Optional.empty();
+        };
     }
 
     public Connection describeConnection(String name, String region) {

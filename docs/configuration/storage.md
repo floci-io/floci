@@ -11,6 +11,28 @@ Floci supports four storage backends. You can set a global default and override 
 | `hybrid` | Yes | In-memory reads, async flush to disk | General local development |
 | `wal` | Yes | Append-only write-ahead log with compaction | High-write workloads |
 
+### Atomic replacement batches
+
+Services that need to replace related records together can use the opt-in
+`StorageBackend.putAllAtomically` operation. Values must be copied before modification;
+the operation does not make existing mutable objects immutable. Memory publication and
+individual scans see the whole batch. Separate reads are not a transaction. Atomic batches
+copy the store's key/value map before publishing it, so their memory and CPU cost grows
+with the number of stored entries. Reads remain lock-free during snapshot writes and WAL
+compaction; ordinary writes retain their existing storage policy.
+
+Persistent storage writes the complete candidate snapshot before publishing it in memory.
+WAL storage writes a single framed batch, so replay applies either the whole batch or none
+of a truncated frame. Both report write errors to the caller. Hybrid storage swaps in the prepared
+batch map and retains its configured asynchronous flush interval; an unflushed batch can still be lost on restart. Ordinary `putAll` keeps its
+existing batching behavior and does not provide this atomicity guarantee. Partitioned
+stores do not implement the opt-in operation.
+
+WAL replay still accepts existing PUT and DELETE records. Older Floci versions cannot
+read the new batch record format; do not downgrade a store containing batch records
+without first making a backup and completing a clean shutdown that compacts its WAL.
+This is a batch/replay guarantee, not a claim of hardware power-loss durability.
+
 ## Global Configuration
 
 | Variable | Default | Description |
@@ -29,11 +51,12 @@ current after every call but makes the cost of one write grow with the size of t
 Append-heavy stores are journaled instead: a change is appended to a `.wal` file next to the
 store, and the store's JSON file is rewritten from memory on the `FLOCI_STORAGE_WAL_COMPACTION_INTERVAL_MS`
 cadence and at shutdown, and only when something changed. Today this applies to CloudWatch Logs
-events (`cwlogs-events.json` with `cwlogs-events.wal`) and the S3 object index
-(`s3-objects.json` with `s3-objects.wal`), which holds the metadata of every object in every
-bucket. After a clean shutdown the JSON file holds every entry; while Floci runs it can be up to
+events (`cwlogs-events.json` with `cwlogs-events.wal`), CloudWatch metric datapoints
+(`cwmetrics.json` with `cwmetrics.wal`), which services such as SQS publish every minute, and the
+S3 object index (`s3-objects.json` with `s3-objects.wal`), which holds the metadata of every
+object in every bucket. After a clean shutdown the JSON file holds every entry; while Floci runs it can be up to
 one compaction interval behind, and the journal is replayed on the next start. An existing
-`cwlogs-events.json` or `s3-objects.json` from an older version is picked up as the first snapshot
+`cwlogs-events.json`, `cwmetrics.json` or `s3-objects.json` from an older version is picked up as the first snapshot
 without any migration.
 
 ## Per-Service Override
@@ -48,6 +71,8 @@ When not set for a service, it inherits `FLOCI_STORAGE_MODE`. Only override when
 | `FLOCI_STORAGE_SERVICES_S3_MODE` | global default | S3 storage mode |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_MODE` | global default | DynamoDB storage mode |
 | `FLOCI_STORAGE_SERVICES_DYNAMODB_FLUSH_INTERVAL_MS` | `5000` | DynamoDB flush interval (ms) |
+| `FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_LAYOUT` | `single-file` | `single-file` or `per-table` item files, see [DynamoDB](../services/dynamodb.md#item-layout-on-disk) |
+| `FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_SHARDS` | `1` | Files per table with the `per-table` item layout |
 | `FLOCI_STORAGE_SERVICES_SNS_MODE` | global default | SNS storage mode |
 | `FLOCI_STORAGE_SERVICES_SNS_FLUSH_INTERVAL_MS` | `5000` | SNS flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_LAMBDA_MODE` | global default | Lambda storage mode |

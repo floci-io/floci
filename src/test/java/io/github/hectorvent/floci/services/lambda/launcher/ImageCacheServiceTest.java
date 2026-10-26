@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
@@ -67,7 +68,28 @@ class ImageCacheServiceTest {
 
         verify(pullImage).exec(any(PullImageResultCallback.class));
         verify(pullImage, never()).withPlatform(nullable(String.class));
-        verify(callback).awaitCompletion(5, TimeUnit.MINUTES);
+        verify(callback).awaitCompletion(300, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void eachPullAttemptWaitsAsLongAsTheConfiguredImagePullTimeout() throws Exception {
+        DockerClient dockerClient = mock(DockerClient.class);
+        InspectImageCmd inspectImage = mock(InspectImageCmd.class);
+        PullImageCmd pullImage = mock(PullImageCmd.class);
+        PullImageResultCallback callback = completedPull();
+        when(dockerClient.inspectImageCmd(IMAGE)).thenReturn(inspectImage);
+        when(inspectImage.exec()).thenThrow(new NotFoundException("image not found"))
+                .thenReturn(new InspectImageResponse()
+                        .withId("sha256:native")
+                        .withOs("linux")
+                        .withArch("amd64"));
+        when(dockerClient.pullImageCmd(IMAGE)).thenReturn(pullImage);
+        when(pullImage.withAuthConfig(any())).thenReturn(pullImage);
+        when(pullImage.exec(any(PullImageResultCallback.class))).thenReturn(callback);
+
+        newService(dockerClient, 1800).ensureImageExists(IMAGE);
+
+        verify(callback).awaitCompletion(1800, TimeUnit.SECONDS);
     }
 
     @Test
@@ -105,7 +127,7 @@ class ImageCacheServiceTest {
 
         assertEquals("sha256:arm64", resolvedImage);
         verify(pullImage).withPlatform("linux/arm64");
-        verify(callback).awaitCompletion(5, TimeUnit.MINUTES);
+        verify(callback).awaitCompletion(300, TimeUnit.SECONDS);
     }
 
     @Test
@@ -697,11 +719,15 @@ class ImageCacheServiceTest {
 
     private static PullImageResultCallback completedPull() throws InterruptedException {
         PullImageResultCallback callback = mock(PullImageResultCallback.class);
-        when(callback.awaitCompletion(5, TimeUnit.MINUTES)).thenReturn(true);
+        when(callback.awaitCompletion(anyLong(), any(TimeUnit.class))).thenReturn(true);
         return callback;
     }
 
     private static ImageCacheService newService(DockerClient dockerClient) {
+        return newService(dockerClient, 300);
+    }
+
+    private static ImageCacheService newService(DockerClient dockerClient, int imagePullTimeoutSeconds) {
         InfoCmd infoCmd = mock(InfoCmd.class);
         when(dockerClient.infoCmd()).thenReturn(infoCmd);
         when(infoCmd.exec()).thenReturn(new Info().withOsType("linux").withArchitecture("amd64"));
@@ -709,6 +735,7 @@ class ImageCacheServiceTest {
         EmulatorConfig.DockerConfig dockerConfig = mock(EmulatorConfig.DockerConfig.class);
         when(config.docker()).thenReturn(dockerConfig);
         when(dockerConfig.registryCredentials()).thenReturn(List.of());
+        when(dockerConfig.imagePullTimeoutSeconds()).thenReturn(imagePullTimeoutSeconds);
         return new ImageCacheService(dockerClient, config);
     }
 }

@@ -5,17 +5,15 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.ExceptionMapper;
 import jakarta.ws.rs.ext.Provider;
 
-import java.util.Map;
-
 @Provider
-public final class LambdaWebInternalServerExceptionMapper implements ExceptionMapper<LambdaWebInternalServerException> {
+public final class LambdaWebErrorBodyExceptionMapper implements ExceptionMapper<LambdaWebErrorBodyException> {
 
     @Override
-    public Response toResponse(LambdaWebInternalServerException exception) {
+    public Response toResponse(LambdaWebErrorBodyException exception) {
         return Response.status(exception.getHttpStatus())
                 .type(MediaType.APPLICATION_JSON)
                 .header("X-Amzn-Errortype", exception.getErrorCode())
-                .entity(Map.of())
+                .entity(exception.body())
                 .build();
     }
 }

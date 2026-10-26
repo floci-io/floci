@@ -17,7 +17,6 @@ import jakarta.inject.Inject;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -233,8 +232,7 @@ public class ServiceQuotasService {
             return 0;
         }
         try {
-            byte[] decoded = Base64.getUrlDecoder().decode(token);
-            return Integer.parseInt(new String(decoded, StandardCharsets.UTF_8));
+            return Integer.parseInt(Base64Url.decode(token));
         } catch (IllegalArgumentException e) {
             return -1;
         }

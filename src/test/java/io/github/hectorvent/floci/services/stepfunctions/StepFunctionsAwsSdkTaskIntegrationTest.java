@@ -288,7 +288,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
 
     @Test
     @Order(9)
-    void sendTaskSuccessOnATokenWhoseResourceInvocationThrewFailsAsInvalid() throws Exception {
+    void sendTaskSuccessOnATokenWhoseResourceInvocationThrewFailsAsClosed() throws Exception {
         // "Leak" registers a task token, then fails invoking its own (unsupported) resource before it
         // ever waits on that token. The registration must not outlive the failure: the token is
         // recovered from the TaskScheduled event it wrote on its way to failing, and a second
@@ -332,7 +332,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
 
         assertEquals("FAILED", describe.jsonPath().getString("status"),
                 "Leak's token must be discarded once its resource invocation throws, not left pending");
-        assertEquals("Sfn.InvalidTokenException", describe.jsonPath().getString("error"));
+        assertEquals("Sfn.TaskTimedOutException", describe.jsonPath().getString("error"));
     }
 
     // ──────────────────────────── scheduler:createSchedule / updateSchedule ────────────────────────────

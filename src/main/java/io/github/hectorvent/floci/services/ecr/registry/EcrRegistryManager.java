@@ -124,6 +124,9 @@ public class EcrRegistryManager {
         if (image == null) {
             return null;
         }
+        if (!config.services().ecr().enabled()) {
+            return image;
+        }
         Matcher m = AWS_ECR_URI.matcher(image);
         if (!m.matches()) {
             return image;
@@ -272,6 +275,9 @@ public class EcrRegistryManager {
      * @return true when the registry container is running
      */
     public boolean tryEnsureStarted() {
+        if (!config.services().ecr().enabled()) {
+            return false;
+        }
         try {
             ensureStarted();
         } catch (RuntimeException e) {
@@ -294,6 +300,9 @@ public class EcrRegistryManager {
      * thread-safe. Throws if Docker is unreachable.
      */
     public synchronized void ensureStarted() {
+        if (!config.services().ecr().enabled()) {
+            throw new IllegalStateException("ECR is disabled, the backing registry is not started");
+        }
         if (started) {
             ContainerPresence presence = lifecycleManager.presenceOf(containerId);
             if (presence == ContainerPresence.RUNNING || presence == ContainerPresence.UNKNOWN) {

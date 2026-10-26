@@ -38,6 +38,13 @@ class RedshiftDataSqlParametersTest {
     }
 
     @Test
+    void numericParameterNamesDoNotRewriteArraySliceBounds() {
+        ParsedSql parsed = RedshiftDataSqlParameters.parse("SELECT :1::int, arr[1:2], :1, :2 FROM t");
+        assertEquals("SELECT ?::int, arr[1:2], ?, ? FROM t", parsed.sql());
+        assertEquals(List.of("1", "1", "2"), parsed.parameterOrder());
+    }
+
+    @Test
     void bindsValuesAsStringsAndDatabaseCoerces() throws Exception {
         String url = "jdbc:h2:mem:" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1;MODE=PostgreSQL";
         try (Connection c = DriverManager.getConnection(url, "sa", "")) {

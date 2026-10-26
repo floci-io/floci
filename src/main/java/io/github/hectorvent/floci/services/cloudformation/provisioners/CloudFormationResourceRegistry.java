@@ -44,6 +44,29 @@ public class CloudFormationResourceRegistry {
     }
 
     public Optional<CfnResourceProvisioner> forType(String resourceType) {
+        CfnResourceProvisioner provisioner = lookup(resourceType);
+        if (provisioner != null && provisioner.serviceDisabled()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(provisioner);
+    }
+
+    /**
+     * Whether a provisioner exists for {@code resourceType} but its service is turned off, so
+     * {@link #forType} serves nothing for it: the type is stubbed, not unsupported.
+     */
+    public boolean isServiceDisabled(String resourceType) {
+        CfnResourceProvisioner provisioner = lookup(resourceType);
+        return provisioner != null && provisioner.serviceDisabled();
+    }
+
+    /** The config property that enables the disabled service behind {@code resourceType}, or null. */
+    public String serviceEnabledFlag(String resourceType) {
+        CfnResourceProvisioner provisioner = lookup(resourceType);
+        return provisioner == null ? null : provisioner.serviceEnabledFlag();
+    }
+
+    private CfnResourceProvisioner lookup(String resourceType) {
         CfnResourceProvisioner provisioner = byType.get(resourceType);
         if (provisioner == null && resourceType != null && resourceType.startsWith("Custom::")) {
             // Custom::* is a dynamic, unenumerable prefix, so it cannot be a registered key. An
@@ -51,7 +74,7 @@ public class CloudFormationResourceRegistry {
             // above); only otherwise-unmatched Custom:: types fall through to the generic handler.
             provisioner = byType.get(CUSTOM_RESOURCE_TYPE);
         }
-        return Optional.ofNullable(provisioner);
+        return provisioner;
     }
 
     /**

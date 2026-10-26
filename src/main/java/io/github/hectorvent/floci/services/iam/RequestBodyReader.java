@@ -18,8 +18,7 @@ public final class RequestBodyReader {
 
     private static final Logger LOG = Logger.getLogger(RequestBodyReader.class);
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
-    private static final String BUFFERED_BODY_PROPERTY =
-            "io.github.hectorvent.floci.services.iam.RequestBodyReader.bufferedBody";
+    private static final String BUFFERED_BODY_PROPERTY = RequestBodyReader.class.getName() + ".bufferedBody";
 
     private RequestBodyReader() {
     }
@@ -46,16 +45,21 @@ public final class RequestBodyReader {
         return body;
     }
 
+    static boolean isForm(ContainerRequestContext ctx) {
+        MediaType mt = ctx.getMediaType();
+        return mt != null
+                && "application".equalsIgnoreCase(mt.getType())
+                && "x-www-form-urlencoded".equalsIgnoreCase(mt.getSubtype());
+    }
+
     public static String formField(ContainerRequestContext ctx, String key) {
         if ("GET".equalsIgnoreCase(ctx.getMethod()) && IamActionRegistry.isQueryRequest(ctx)) {
             return ctx.getUriInfo().getQueryParameters().getFirst(key);
         }
-        MediaType mt = ctx.getMediaType();
-        if (mt == null
-                || !"application".equalsIgnoreCase(mt.getType())
-                || !"x-www-form-urlencoded".equalsIgnoreCase(mt.getSubtype())) {
+        if (!isForm(ctx)) {
             return null;
         }
+        MediaType mt = ctx.getMediaType();
         byte[] body = buffer(ctx);
         if (body.length == 0) {
             return null;

@@ -95,13 +95,10 @@ final class RedshiftDataExecution {
         return true;
     }
 
-    void signalCancellation() {
-        Statement activeStatement;
-        Connection activeConnection;
-        synchronized (this) {
-            activeStatement = statement;
-            activeConnection = connection;
-        }
+    synchronized void signalCancellation() {
+        // terminal() must wait until the old cancellation reaches JDBC before the connection can be reused.
+        Statement activeStatement = statement;
+        Connection activeConnection = connection;
         try {
             if (activeStatement != null) {
                 activeStatement.cancel();

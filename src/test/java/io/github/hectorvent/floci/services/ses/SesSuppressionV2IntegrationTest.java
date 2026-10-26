@@ -275,7 +275,8 @@ class SesSuppressionV2IntegrationTest {
             .put("/v2/email/suppression/addresses")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("Start of list found where not expected"));
     }
 
     @Test

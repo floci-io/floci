@@ -715,6 +715,209 @@ class ApiGatewayV2CfnProvisionerTest {
         assertFalse(integration.getAttributes().containsKey("__FlociIntegrationConnectionSnapshot"));
     }
 
+    @Test
+    void integrationCreatePassesMethodParametersTemplatesTimeoutAndSelectionExpression() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree(INTEGRATION_PROPERTIES),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(this::carriesIntegrationProperties));
+    }
+
+    @Test
+    void integrationUpdatePassesMethodParametersTemplatesTimeoutAndSelectionExpression() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        StackResource integration = provisionIntegration(INTEGRATION_PROPERTIES);
+
+        assertTrue(integration.getStatus().endsWith("_COMPLETE"), integration.getStatus());
+        verify(apiGatewayV2Service).updateIntegration(eq(REGION), eq(API_ID), eq("int-1"),
+                argThat(this::carriesIntegrationProperties));
+    }
+
+    @Test
+    void integrationRequestParametersResolveIntrinsics() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree("""
+                        {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                         "RequestParameters":{"overwrite:header.x-stack":{"Ref":"AWS::StackName"}}}
+                        """),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(req ->
+                Map.of("overwrite:header.x-stack", "test-stack").equals(req.get("requestParameters"))));
+    }
+
+    @Test
+    void integrationWithNonNumericTimeoutIsRejected() throws Exception {
+        StackResource integration = provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration",
+                mapper.readTree("""
+                        {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                         "TimeoutInMillis":"soon"}
+                        """),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        assertEquals("CREATE_FAILED", integration.getStatus());
+        verify(apiGatewayV2Service, never()).createIntegration(any(), any(), anyMap());
+    }
+
+    @Test
+    void integrationUpdateWithoutSettingsReplacesThemWithNull() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-1"}
+                """);
+
+        assertTrue(integration.getStatus().endsWith("_COMPLETE"), integration.getStatus());
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null);
+    }
+
+    @Test
+    void integrationUpdateKeepsTheSettingsTheTemplateStillSets() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        provisionIntegration(INTEGRATION_PROPERTIES);
+
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "ANY",
+                "${request.method}", 15000, Map.of("append:header.x-request-id", "$context.requestId",
+                        "overwrite:header.x-example", "static-value"),
+                Map.of("application/json", "{\"a\":1}"));
+    }
+
+    @Test
+    void integrationMappingEntryWithNoValueIsOmitted() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree("""
+                        {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                         "RequestParameters":{"overwrite:header.x-on":"yes",
+                           "overwrite:header.x-off":{"Fn::If":["Off",{"Ref":"AWS::NoValue"},"no"]}}}
+                        """),
+                engine(Map.of("Off", true)), REGION, "000000000000", "test-stack", null, Map.of());
+
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(req ->
+                Map.of("overwrite:header.x-on", "yes").equals(req.get("requestParameters"))));
+    }
+
+    @Test
+    void rollbackOfAnIntegrationUpdateRestoresItsSettings() throws Exception {
+        Integration prior = priorVpcLinkIntegration();
+        prior.setIntegrationMethod("GET");
+        prior.setTemplateSelectionExpression("${request.method}");
+        prior.setTimeoutInMillis(15000);
+        prior.setRequestParameters(Map.of("overwrite:header.x-example", "old"));
+        prior.setRequestTemplates(Map.of("application/json", "{}"));
+        stubIntegrationUpdate(prior);
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-1","IntegrationMethod":"POST",
+                 "TimeoutInMillis":"3000","RequestParameters":{"overwrite:header.x-example":"new"}}
+                """);
+
+        assertTrue(provisioner.rollbackUpdate(integration));
+
+        InOrder order = inOrder(apiGatewayV2Service);
+        order.verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "POST", null, 3000,
+                Map.of("overwrite:header.x-example", "new"), null);
+        order.verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "GET",
+                "${request.method}", 15000, Map.of("overwrite:header.x-example", "old"),
+                Map.of("application/json", "{}"));
+    }
+
+    @Test
+    void failedIntegrationUpdateRestoresItsSettings() throws Exception {
+        Integration prior = priorVpcLinkIntegration();
+        prior.setRequestParameters(Map.of("overwrite:header.x-example", "old"));
+        stubIntegrationUpdate(prior);
+        when(apiGatewayV2Service.updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap()))
+                .thenThrow(new AwsException("NotFoundException", "Integration not found", 404));
+
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-1"}
+                """);
+
+        assertTrue(integration.getStatus().endsWith("_FAILED"), integration.getStatus());
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null);
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0,
+                Map.of("overwrite:header.x-example", "old"), null);
+    }
+
+    private static final String NO_VALUE_SETTINGS = """
+            {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+             "IntegrationMethod":{"Fn::If":["Off",{"Ref":"AWS::NoValue"},"ANY"]},
+             "TemplateSelectionExpression":{"Ref":"AWS::NoValue"},
+             "TimeoutInMillis":{"Fn::If":["Off",{"Ref":"AWS::NoValue"},"15000"]}}
+            """;
+
+    @Test
+    void integrationCreateTreatsNoValueScalarsAsAbsent() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        StackResource resource = provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration",
+                mapper.readTree(NO_VALUE_SETTINGS), engine(Map.of("Off", true)), REGION, "000000000000",
+                "test-stack", null, Map.of());
+
+        assertTrue(resource.getStatus().endsWith("_COMPLETE"), resource.getStatus());
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(req ->
+                req.get("integrationMethod") == null && req.get("templateSelectionExpression") == null
+                        && !req.containsKey("timeoutInMillis")));
+    }
+
+    @Test
+    void integrationUpdateTreatsNoValueScalarsAsAbsent() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        StackResource resource = provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration",
+                mapper.readTree(NO_VALUE_SETTINGS), engine(Map.of("Off", true)), REGION, "000000000000",
+                "test-stack", "int-1", Map.of("IntegrationId", "int-1"));
+
+        assertTrue(resource.getStatus().endsWith("_COMPLETE"), resource.getStatus());
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null);
+    }
+
+    @Test
+    void integrationScalarsKeepTheBranchAnFnIfSelects() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration",
+                mapper.readTree(NO_VALUE_SETTINGS), engine(Map.of("Off", false)), REGION, "000000000000",
+                "test-stack", "int-1", Map.of("IntegrationId", "int-1"));
+
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "ANY", null, 15000,
+                null, null);
+    }
+
+    private static final String INTEGRATION_PROPERTIES = """
+            {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+             "IntegrationMethod":"ANY","PayloadFormatVersion":"1.0","TimeoutInMillis":"15000",
+             "TemplateSelectionExpression":"${request.method}",
+             "RequestParameters":{"append:header.x-request-id":"$context.requestId",
+                                  "overwrite:header.x-example":"static-value"},
+             "RequestTemplates":{"application/json":"{\\"a\\":1}"}}
+            """;
+
+    private boolean carriesIntegrationProperties(Map<String, Object> req) {
+        return "ANY".equals(req.get("integrationMethod"))
+                && Integer.valueOf(15000).equals(req.get("timeoutInMillis"))
+                && "${request.method}".equals(req.get("templateSelectionExpression"))
+                && Map.of("append:header.x-request-id", "$context.requestId",
+                        "overwrite:header.x-example", "static-value").equals(req.get("requestParameters"))
+                && Map.of("application/json", "{\"a\":1}").equals(req.get("requestTemplates"));
+    }
+
     private static Integration priorVpcLinkIntegration() {
         Integration prior = new Integration();
         prior.setIntegrationId("int-1");
@@ -771,8 +974,12 @@ class ApiGatewayV2CfnProvisionerTest {
     }
 
     private CloudFormationTemplateEngine engine() {
+        return engine(Map.of());
+    }
+
+    private CloudFormationTemplateEngine engine(Map<String, Boolean> conditions) {
         return new CloudFormationTemplateEngine("000000000000", REGION, "test-stack", "stack/id",
-                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), mapper,
+                Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
                 (Function<String, String>) name -> null);
     }
 

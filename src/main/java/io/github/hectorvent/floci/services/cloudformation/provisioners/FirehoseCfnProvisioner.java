@@ -1,8 +1,12 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.S3DestinationValidator;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import jakarta.enterprise.context.ApplicationScoped;
 
@@ -16,6 +20,7 @@ import java.util.Set;
 @ApplicationScoped
 public class FirehoseCfnProvisioner implements CfnResourceProvisioner {
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int DELIVERY_STREAM_NAME_MAX_LENGTH = 64;
     private static final int DEFAULT_BUFFER_SIZE_MB = 5;
     private static final int DEFAULT_BUFFER_INTERVAL_SECONDS = 300;
@@ -37,7 +42,8 @@ public class FirehoseCfnProvisioner implements CfnResourceProvisioner {
                 r.getLogicalId(), DELIVERY_STREAM_NAME_MAX_LENGTH, false);
 
         DeliveryStreamDescription.S3Destination s3 = null;
-        JsonNode s3Node = props != null && props.has("ExtendedS3DestinationConfiguration")
+        boolean extended = props != null && props.has("ExtendedS3DestinationConfiguration");
+        JsonNode s3Node = extended
                 ? props.get("ExtendedS3DestinationConfiguration")
                 : (props != null ? props.get("S3DestinationConfiguration") : null);
         if (s3Node != null && !s3Node.isNull()) {
@@ -48,6 +54,15 @@ public class FirehoseCfnProvisioner implements CfnResourceProvisioner {
             );
             s3.setBucketArn(blankToNull(ctx.engine().resolve(s3Node.path("BucketARN"))));
             s3.setPrefix(blankToNull(ctx.engine().resolve(s3Node.path("Prefix"))));
+            s3.setRoleArn(blankToNull(ctx.engine().resolve(s3Node.path("RoleARN"))));
+            s3.setErrorOutputPrefix(blankToNull(ctx.engine().resolve(s3Node.path("ErrorOutputPrefix"))));
+            s3.setCloudWatchLoggingOptions(structured(s3Node, "CloudWatchLoggingOptions",
+                    DeliveryStreamDescription.CloudWatchLoggingOptions.class, ctx));
+            // Only the extended shape models a processor, so the legacy one carries none, as on the API path.
+            if (extended) {
+                s3.setProcessingConfiguration(structured(s3Node, "ProcessingConfiguration",
+                        DeliveryStreamDescription.ProcessingConfiguration.class, ctx));
+            }
             if (s3Node.has("BufferingHints")) {
                 JsonNode hints = s3Node.get("BufferingHints");
                 DeliveryStreamDescription.BufferingHints bufferingHints = new DeliveryStreamDescription.BufferingHints();
@@ -56,6 +71,8 @@ public class FirehoseCfnProvisioner implements CfnResourceProvisioner {
                         parseIntProp(hints, "IntervalInSeconds", ctx, DEFAULT_BUFFER_INTERVAL_SECONDS));
                 s3.setBufferingHints(bufferingHints);
             }
+            S3DestinationValidator.validateWireShape(s3,
+                    extended ? "extendedS3DestinationConfiguration" : "s3DestinationConfiguration");
         }
 
         List<DeliveryStreamDescription.Tag> tags = new ArrayList<>();
@@ -122,6 +139,25 @@ public class FirehoseCfnProvisioner implements CfnResourceProvisioner {
         }
         if (!desired.isEmpty()) {
             firehoseService.tagDeliveryStream(name, desired);
+        }
+    }
+
+    /**
+     * A structured destination member with its intrinsics resolved, read into the type
+     * CreateDeliveryStream reads it into. Null when the template leaves it out or AWS::NoValue
+     * drops it, which on an update keeps the stored value, as UpdateDestination does. A member
+     * present as anything but an object fails the resource, as CloudFormation rejects it.
+     */
+    private static <T> T structured(JsonNode destination, String name, Class<T> type, ProvisionContext ctx) {
+        JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(destination.get(name));
+        if (resolved == null || resolved.isMissingNode()) {
+            return null;
+        }
+        try {
+            return MAPPER.treeToValue(resolved, type);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("ValidationError",
+                    "AWS::KinesisFirehose::DeliveryStream has an invalid " + name + ": " + e.getOriginalMessage(), 400);
         }
     }
 

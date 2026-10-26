@@ -557,4 +557,123 @@ class SesSendVerifiedSenderIntegrationTest {
                 """.formatted(OWNER_IDENTITY_ARN, rawMessage(OWNER_ADDRESS,
                         "X-SES-SOURCE-ARN: " + DELEGATE_IDENTITY_ARN, "X-SES-FROM-ARN: " + DELEGATE_IDENTITY_ARN))));
     }
+
+    private static RequestSpecification sendBulkTemplatedEmail(String authorization, String source) {
+        return query(authorization, "SendBulkTemplatedEmail")
+                .formParam("Source", source)
+                .formParam("Template", TEMPLATE)
+                .formParam("DefaultTemplateData", "{}")
+                .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "to@example.com");
+    }
+
+    private static String bulkBody(String from, String extraMembers, String entries) {
+        return """
+                {
+                    "FromEmailAddress": "%s",
+                    %s
+                    "DefaultContent": {"Template": {"TemplateContent": {"Subject": "s", "Text": "b"}}},
+                    "BulkEmailEntries": %s
+                }
+                """.formatted(from, extraMembers, entries);
+    }
+
+    private static String bulkBody(String from) {
+        return bulkBody(from, "", "[{\"Destination\": {\"ToAddresses\": [\"to@example.com\"]}}]");
+    }
+
+    private static void assertBulkMessageRejectedV2(RequestSpecification request, String unverified) {
+        request
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("MessageRejected"))
+            .body("message", equalTo(NOT_VERIFIED_MESSAGE + unverified));
+    }
+
+    @Test
+    void v2SendBulkEmail_unverifiedFrom_rejectsTheWholeCall() {
+        assertBulkMessageRejectedV2(v2Request(AUTH_V2, bulkBody(UNVERIFIED)), UNVERIFIED);
+
+        assertNothingCapturedFrom(UNVERIFIED);
+    }
+
+    @Test
+    void v2SendBulkEmail_unverifiedFeedbackForwardingAddress_rejectsTheWholeCall() {
+        String source = "bulk-rp-" + VERIFIED;
+        String feedback = "bulk-bounces@unverified-sender.floci.test";
+        verifyEmailIdentity(source);
+
+        assertBulkMessageRejectedV2(v2Request(AUTH_V2, bulkBody(source,
+                "\"FeedbackForwardingEmailAddress\": \"" + feedback + "\",",
+                "[{\"Destination\": {\"ToAddresses\": [\"to@example.com\"]}}]")), feedback);
+
+        assertNothingCapturedFrom(source);
+    }
+
+    @Test
+    void v2SendBulkEmail_noEntryHasARecipient_senderIsNotChecked() {
+        // AWS fails each entry on its missing destination and never reaches the sender check.
+        v2Request(AUTH_V2, bulkBody(UNVERIFIED, "", "[{\"Destination\": {}}]"))
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(200)
+            .body("BulkEmailEntryResults[0].Status", equalTo("INVALID_PARAMETER"));
+    }
+
+    @Test
+    void v2SendBulkEmail_verifiedFrom_succeeds() {
+        String source = "bulk-" + VERIFIED;
+        verifyEmailIdentity(source);
+
+        v2Request(AUTH_V2, bulkBody(source))
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(200)
+            .body("BulkEmailEntryResults[0].Status", equalTo("SUCCESS"));
+    }
+
+    @Test
+    void v2SendBulkEmail_fromAndFeedbackForwardingIdentityArnsOfAnotherAccount_succeeds() {
+        verifyOwnerAddress();
+
+        v2Request(DELEGATE_AUTH_V2, bulkBody(OWNER_ADDRESS,
+                "\"FromEmailAddressIdentityArn\": \"" + OWNER_IDENTITY_ARN + "\","
+                        + "\"FeedbackForwardingEmailAddress\": \"" + OWNER_ADDRESS + "\","
+                        + "\"FeedbackForwardingEmailAddressIdentityArn\": \"" + OWNER_IDENTITY_ARN + "\",",
+                "[{\"Destination\": {\"ToAddresses\": [\"to@example.com\"]}}]"))
+        .when()
+            .post("/v2/email/outbound-bulk-emails")
+        .then()
+            .statusCode(200)
+            .body("BulkEmailEntryResults[0].Status", equalTo("SUCCESS"));
+    }
+
+    @Test
+    void v1SendBulkTemplatedEmail_unverifiedSource_returnsMessageRejected() {
+        createTemplate(AUTH_V1);
+
+        assertMessageRejected(sendBulkTemplatedEmail(AUTH_V1, UNVERIFIED), UNVERIFIED);
+
+        assertNothingCapturedFrom(UNVERIFIED);
+    }
+
+    @Test
+    void v1SendBulkTemplatedEmail_sourceAndReturnPathArnsOfAnotherAccount_succeeds() {
+        verifyOwnerAddress();
+        createTemplate(DELEGATE_AUTH_V1);
+
+        sendBulkTemplatedEmail(DELEGATE_AUTH_V1, OWNER_ADDRESS)
+            .formParam("SourceArn", OWNER_IDENTITY_ARN)
+            .formParam("ReturnPath", OWNER_ADDRESS)
+            .formParam("ReturnPathArn", OWNER_IDENTITY_ARN)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("SendBulkTemplatedEmailResponse.SendBulkTemplatedEmailResult.Status.member[0].Status",
+                    equalTo("Success"));
+    }
 }

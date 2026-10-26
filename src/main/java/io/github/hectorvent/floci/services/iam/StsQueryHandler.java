@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryController;
+import io.github.hectorvent.floci.core.common.AwsQueryLists;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
@@ -19,6 +20,7 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.iam.model.DelegationRequest;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Context;
@@ -34,10 +36,14 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -60,6 +66,27 @@ public class StsQueryHandler {
     /** "the maximum session duration of 900 seconds (15 minutes)", which is also the default here. */
     private static final int MAX_ROOT_SESSION_SECONDS = 900;
     private static final int MAX_SESSION_TOKEN_SIZE = 4096;
+    /** {@code webIdentityTokenAudienceListType}: 1 to 10 audiences, each 1 to 1000 characters. */
+    private static final int MAX_TOKEN_AUDIENCES = 10;
+    private static final int MAX_TOKEN_AUDIENCE_LENGTH = 1000;
+    /** {@code jwtAlgorithmType} is a fixed length of 5, which both valid values are. */
+    private static final int SIGNING_ALGORITHM_LENGTH = 5;
+    /** {@code tagListType} on this operation: at most 50 tags, each a key and a value. */
+    private static final int MAX_TOKEN_TAGS = 50;
+    private static final int MAX_TAG_KEY_LENGTH = 128;
+    private static final int MAX_TAG_VALUE_LENGTH = 256;
+    /** {@code tagKeyType} and {@code tagValueType} share this pattern, the value allowing empty. */
+    private static final Pattern TAG_PATTERN = Pattern.compile("[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]+");
+    /** A member of {@code Audience}, capturing the prefix it is named under and its index. */
+    private static final Pattern AUDIENCE_MEMBER =
+            Pattern.compile("(Audience(?:\\.member)?\\.([^.]+))");
+    /** A member of {@code Tags}, which carries its key and its value under that prefix. */
+    private static final Pattern TAG_MEMBER =
+            Pattern.compile("(Tags(?:\\.member)?\\.([^.]+))\\.(?:Key|Value)");
+    /** "If not specified, the default duration is 300 seconds (5 minutes)." */
+    private static final int DEFAULT_TOKEN_SECONDS = 300;
+    private static final int MIN_TOKEN_SECONDS = 60;
+    private static final int MAX_TOKEN_SECONDS = 3600;
     private static final String STS_AUDIENCE = "sts.amazonaws.com"; // partition-literal: web-identity audience; no source outside the commercial partition (P9)
 
     private final IamService iamService;
@@ -74,6 +101,7 @@ public class StsQueryHandler {
     private final SAMLTrustPolicyEvaluator samlTrustEvaluator;
     private final DelegationRequestService delegationRequestService;
     private final CentralRootAccess centralRootAccess;
+    private final WebIdentityTokenIssuer tokenIssuer;
     private final Clock clock;
 
     /** CSPRNG for session secret keys and session tokens; ordinary IDs keep using {@link ThreadLocalRandom}. */
@@ -94,10 +122,11 @@ public class StsQueryHandler {
                            SAMLProviderService samlProviderService,
                            SAMLTrustPolicyEvaluator samlTrustEvaluator,
                            DelegationRequestService delegationRequestService,
-                           CentralRootAccess centralRootAccess) {
+                           CentralRootAccess centralRootAccess,
+                           WebIdentityTokenIssuer tokenIssuer) {
         this(iamService, accountResolver, regionResolver, config, trustPolicyEvaluator, webIdentityTrustEvaluator,
                 tokenVerifier, oidcIssuerKeys, samlProviderService, samlTrustEvaluator, delegationRequestService,
-                centralRootAccess, Clock.systemUTC());
+                centralRootAccess, tokenIssuer, Clock.systemUTC());
     }
 
     StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
@@ -109,6 +138,7 @@ public class StsQueryHandler {
                     SAMLTrustPolicyEvaluator samlTrustEvaluator,
                     DelegationRequestService delegationRequestService,
                     CentralRootAccess centralRootAccess,
+                    WebIdentityTokenIssuer tokenIssuer,
                     Clock clock) {
         this.iamService = iamService;
         this.accountResolver = accountResolver;
@@ -122,6 +152,7 @@ public class StsQueryHandler {
         this.samlTrustEvaluator = samlTrustEvaluator;
         this.delegationRequestService = delegationRequestService;
         this.centralRootAccess = centralRootAccess;
+        this.tokenIssuer = tokenIssuer;
         this.clock = clock;
     }
 
@@ -139,6 +170,7 @@ public class StsQueryHandler {
             case "DecodeAuthorizationMessage"  -> handleDecodeAuthorizationMessage(params);
             case "GetDelegatedAccessToken"     -> handleGetDelegatedAccessToken(params);
             case "AssumeRoot"                  -> handleAssumeRoot(params);
+            case "GetWebIdentityToken"         -> handleGetWebIdentityToken(params);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported by STS.", AwsNamespaces.STS, 400);
         };
@@ -918,8 +950,7 @@ public class StsQueryHandler {
             String value = params.getFirst(name);
             if (value == null || value.isBlank()) {
                 return AwsQueryResponse.error("ValidationError",
-                        "1 validation error detected: Value null at '" + name
-                        + "' failed to satisfy constraint: Member must not be null",
+                        SmithyValidationErrors.message(List.of(SmithyValidationErrors.notNull(name))),
                         AwsNamespaces.STS, 400);
             }
         }
@@ -957,6 +988,243 @@ public class StsQueryHandler {
                     AwsNamespaces.STS, 400);
         }
         return null;
+    }
+
+    /**
+     * {@code GetWebIdentityToken} answers "a signed JSON Web Token (JWT) that represents the
+     * calling Amazon Web Services identity", signed by STS and verifiable "using the verification
+     * keys published at the issuer's JWKS endpoint". The issuer is the one IAM mints for the
+     * account when outbound web identity federation is enabled, so this reads the state that
+     * switch keeps and refuses while it is off, with
+     * {@code OutboundWebIdentityFederationDisabledException} rather than IAM's own
+     * {@code FeatureDisabled}.
+     *
+     * <p>The declared constraints are read ahead of all of it: {@code Audience} is 1 to 10 members
+     * of 1 to 1000 characters each and required, {@code SigningAlgorithm} is a fixed length of 5
+     * and required, {@code DurationSeconds} is 60 to 3600 and defaults to 300, and {@code Tags} is
+     * at most 50 tags whose keys and values carry their own lengths and pattern. A member sent
+     * empty is a member that is present, so it breaks its length rather than reading as absent.
+     * The duration keeps this file's own check, which answers the first thing it finds and reports
+     * a value that is no integer as {@code InvalidParameterValue}; everything else is reported
+     * together, in the order the model lists the members.
+     *
+     * <p>Three things here are readings rather than published behaviour, and the docs say so. The
+     * model publishes no enum for {@code SigningAlgorithm}, only the fixed length, so a five
+     * character value that is neither {@code RS256} nor {@code ES384} is answered with the enum
+     * violation this package renders for a value outside a documented set. The global endpoint is
+     * refused because the Reference says "The GetWebIdentityToken API is not available on the STS
+     * Global endpoint" without giving the refusal, so it borrows the wording AWS publishes for
+     * {@code AssumeRoot}, and a request to a local host names no such endpoint and is not
+     * refused. {@code JWTPayloadSizeExceededException} is modelled and nothing published says what
+     * the maximum payload is, so no size is invented here to refuse.
+     *
+     * <p>A temporary credential with no live session behind it is refused as expired rather than
+     * read as a caller that cannot be identified. {@link IamEnforcementFilter} answers
+     * {@code ExpiredTokenException} for one and it never reaches here, but with enforcement off,
+     * or in the window between that check and this one, the session lookup comes back empty and
+     * the caller would fall to the account root ARN this file hands an unresolvable caller. A
+     * token is not a request: its subject is signed and outlives the call, so a session already
+     * gone does not get one that speaks for the account. An unknown long-term key keeps the
+     * stand-in, which is what {@code GetCallerIdentity} answers it.
+     */
+    private Response handleGetWebIdentityToken(MultivaluedMap<String, String> params) {
+        if (arrivedOnTheGlobalEndpoint()) {
+            return AwsQueryResponse.error("ValidationError", "The global endpoint is not supported"
+                    + " for GetWebIdentityToken. You must send this request to a Regional AWS STS"
+                    + " endpoint.", AwsNamespaces.STS, 400);
+        }
+        Response durationValidation =
+                validateDurationSeconds(params, MIN_TOKEN_SECONDS, MAX_TOKEN_SECONDS);
+        if (durationValidation != null) {
+            return durationValidation;
+        }
+        List<ListMember> audiences = listMembers(params, AUDIENCE_MEMBER);
+        Map<String, String> tagClaims = new LinkedHashMap<>();
+        List<String> violations = new ArrayList<>(audienceViolations(params, audiences));
+        violations.addAll(signingAlgorithmViolations(params.getFirst("SigningAlgorithm")));
+        violations.addAll(tagViolations(params, tagClaims));
+        if (!violations.isEmpty()) {
+            return AwsQueryResponse.error("ValidationError",
+                    SmithyValidationErrors.message(violations), AwsNamespaces.STS, 400);
+        }
+
+        String accessKeyId = callerAccessKeyId();
+        Optional<Instant> sessionEnds = accessKeyId == null
+                ? Optional.empty()
+                : iamService.findSessionExpiration(accessKeyId);
+        if (sessionEnds.isEmpty() && IamService.isTemporaryAccessKey(accessKeyId)) {
+            return AwsQueryResponse.error("ExpiredTokenException",
+                    IamEnforcementFilter.EXPIRED_TOKEN, AwsNamespaces.STS, 403);
+        }
+
+        Optional<OutboundWebIdentityFederation> federation =
+                iamService.findEnabledOutboundWebIdentityFederation();
+        if (federation.isEmpty()) {
+            return AwsQueryResponse.error("OutboundWebIdentityFederationDisabledException",
+                    "The outbound web identity federation feature is not enabled for this account."
+                            + " To use this feature, you must first enable it through the AWS"
+                            + " Management Console or API.", AwsNamespaces.STS, 403);
+        }
+        Instant issuedAt = clock.instant();
+        Instant expiration = issuedAt.plusSeconds(
+                getIntParam(params, "DurationSeconds", DEFAULT_TOKEN_SECONDS));
+        if (sessionEnds.filter(expiration::isAfter).isPresent()) {
+            return AwsQueryResponse.error("SessionDurationEscalationException",
+                    "The requested token duration would extend the session beyond its original"
+                            + " expiration time. You cannot use this operation to extend the"
+                            + " lifetime of a session beyond what was granted when the session was"
+                            + " originally created.", AwsNamespaces.STS, 403);
+        }
+        String subject = iamService.resolveCallerArn(accessKeyId).orElseGet(() ->
+                regionResolver.buildGlobalArn("iam", regionResolver.getAccountId(), "root"));
+        String token = tokenIssuer.mint(
+                WebIdentityTokenIssuer.Algorithm.valueOf(params.getFirst("SigningAlgorithm")),
+                federation.get().getIssuerIdentifier(), subject,
+                audiences.stream().map(member -> value(params, member)).toList(),
+                new WebIdentityTokenIssuer.CustomClaims(regionResolver.getAccountId(),
+                        regionResolver.getRegion(), tagClaims),
+                issuedAt, expiration);
+        LOG.debugv("Issued a web identity token for {0} expiring at {1}", subject, expiration);
+        String result = new XmlBuilder()
+                .elem("WebIdentityToken", token)
+                .elem("Expiration", isoDate(expiration))
+                .build();
+        return Response.ok(
+                AwsQueryResponse.envelope("GetWebIdentityToken", AwsNamespaces.STS, result)).build();
+    }
+
+    /**
+     * One member of a Query list: the prefix its parameters are named under, and the index the
+     * request numbered it with, read back as it was spelled rather than as the number it reads as.
+     */
+    private record ListMember(String prefix, String index) {
+    }
+
+    /**
+     * The members of a list, in the order their indexes read. The patterns capture the prefix
+     * because a member of a list of structures carries its fields under it, which
+     * {@link AwsQueryLists#memberKeys} does not match, and because the index a path names is the
+     * one the request sent. A member present with an empty value is still a member.
+     */
+    private static List<ListMember> listMembers(MultivaluedMap<String, String> params,
+                                                Pattern names) {
+        return params.keySet().stream()
+                .map(names::matcher)
+                .filter(Matcher::matches)
+                .map(matcher -> new ListMember(matcher.group(1), matcher.group(2)))
+                .distinct()
+                .sorted(Comparator.comparingInt(
+                        member -> AwsQueryLists.memberIndex(member.prefix())))
+                .toList();
+    }
+
+    private static String value(MultivaluedMap<String, String> params, ListMember member) {
+        String value = params.getFirst(member.prefix());
+        return value == null ? "" : value;
+    }
+
+    /**
+     * {@code Audience} is required, so a list of no members is the required member reading as null:
+     * a Query list of none is how an absent one arrives, which is what makes its minimum of 1
+     * unreachable on its own.
+     */
+    private static List<String> audienceViolations(MultivaluedMap<String, String> params,
+                                                   List<ListMember> audiences) {
+        if (audiences.isEmpty()) {
+            return List.of(SmithyValidationErrors.notNull("audience"));
+        }
+        List<String> violations = new ArrayList<>();
+        if (audiences.size() > MAX_TOKEN_AUDIENCES) {
+            violations.add("Value at 'audience' failed to satisfy constraint: Member must have"
+                    + " length less than or equal to " + MAX_TOKEN_AUDIENCES);
+        }
+        for (ListMember audience : audiences) {
+            addIfPresent(violations, SmithyValidationErrors.lengthOutOfRange(
+                    "audience." + audience.index() + ".member", value(params, audience), 1,
+                    MAX_TOKEN_AUDIENCE_LENGTH));
+        }
+        return violations;
+    }
+
+    /**
+     * The model gives {@code jwtAlgorithmType} a fixed length of 5 and no enum, and the Reference
+     * names the two values that length is for, so the length is the declared constraint and the
+     * value set is read from the documentation.
+     */
+    private static List<String> signingAlgorithmViolations(String algorithm) {
+        if (algorithm == null) {
+            return List.of(SmithyValidationErrors.notNull("signingAlgorithm"));
+        }
+        String length = SmithyValidationErrors.lengthOutOfRange("signingAlgorithm", algorithm,
+                SIGNING_ALGORITHM_LENGTH, SIGNING_ALGORITHM_LENGTH);
+        if (length != null) {
+            return List.of(length);
+        }
+        if (!WebIdentityTokenIssuer.Algorithm.names().contains(algorithm)) {
+            return List.of(SmithyValidationErrors.notInEnum(algorithm, "signingAlgorithm",
+                    WebIdentityTokenIssuer.Algorithm.names()));
+        }
+        return List.of();
+    }
+
+    /**
+     * Each tag is a {@code Tag}, which declares both its key and its value required, so a member
+     * sent with only one of them breaks the other. The claims a valid tag set contributes are
+     * collected here rather than read a second time, the last value winning for a key sent twice,
+     * which is how a Query map's duplicate key resolves elsewhere in this package.
+     */
+    private static List<String> tagViolations(MultivaluedMap<String, String> params,
+                                              Map<String, String> claims) {
+        List<ListMember> tags = listMembers(params, TAG_MEMBER);
+        if (tags.isEmpty()) {
+            return List.of();
+        }
+        List<String> violations = new ArrayList<>();
+        if (tags.size() > MAX_TOKEN_TAGS) {
+            violations.add("Value at 'tags' failed to satisfy constraint: Member must have length"
+                    + " less than or equal to " + MAX_TOKEN_TAGS);
+        }
+        for (ListMember tag : tags) {
+            String path = "tags." + tag.index() + ".member.";
+            String key = params.getFirst(tag.prefix() + ".Key");
+            String value = params.getFirst(tag.prefix() + ".Value");
+            if (key == null) {
+                violations.add(SmithyValidationErrors.notNull(path + "key"));
+            } else {
+                addIfPresent(violations, SmithyValidationErrors.lengthOutOfRange(path + "key", key,
+                        1, MAX_TAG_KEY_LENGTH));
+                addIfPresent(violations, patternViolation(path + "key", key, false));
+            }
+            if (value == null) {
+                violations.add(SmithyValidationErrors.notNull(path + "value"));
+            } else {
+                addIfPresent(violations, SmithyValidationErrors.lengthOutOfRange(path + "value",
+                        value, 0, MAX_TAG_VALUE_LENGTH));
+                addIfPresent(violations, patternViolation(path + "value", value, true));
+            }
+            if (key != null && value != null) {
+                claims.put(key, value);
+            }
+        }
+        return violations;
+    }
+
+    /** {@code tagValueType}'s pattern allows an empty value where {@code tagKeyType}'s does not. */
+    private static String patternViolation(String path, String value, boolean emptyAllowed) {
+        if (emptyAllowed && value.isEmpty()) {
+            return null;
+        }
+        if (TAG_PATTERN.matcher(value).matches()) {
+            return null;
+        }
+        return "Value '" + value + "' at '" + path + "' failed to satisfy constraint: Member must"
+                + " satisfy regular expression pattern: " + TAG_PATTERN.pattern();
+    }
+
+    private static void addIfPresent(List<String> violations, String violation) {
+        if (violation != null) {
+            violations.add(violation);
+        }
     }
 
     private String credentialsXml(String accessKeyId, String secretKey, String sessionToken, Instant expiration) {

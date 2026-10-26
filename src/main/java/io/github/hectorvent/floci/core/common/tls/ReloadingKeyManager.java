@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.iot;
+package io.github.hectorvent.floci.core.common.tls;
 
 import io.vertx.core.Vertx;
 import io.vertx.core.net.KeyCertOptions;
@@ -18,7 +18,7 @@ import java.util.List;
 import java.util.function.LongSupplier;
 
 /**
- * Server key manager for the MQTT TLS listener that answers every handshake from the key material
+ * Server key manager for TLS listeners that answers every handshake from the key material
  * it was last given, so a reissued server certificate is served without rebuilding the listener's
  * SSL context: Vert.x drops the connections it accepts while a context is being rebuilt, whereas
  * JSSE asks the key manager for an alias, then that alias's key and chain, on every handshake.
@@ -29,7 +29,7 @@ import java.util.function.LongSupplier;
  * a handshake that began before any number of reloads still reads a matching key and chain.
  * Retired generations are dropped on the next reload after that window.
  */
-final class ReloadingKeyManager extends X509ExtendedKeyManager {
+public final class ReloadingKeyManager extends X509ExtendedKeyManager {
 
     static final Duration RETIRED_GENERATION_RETENTION = Duration.ofSeconds(60);
 
@@ -41,7 +41,7 @@ final class ReloadingKeyManager extends X509ExtendedKeyManager {
     /** Superseded generations, newest first, each within the retention window at its last reload. */
     private volatile List<Generation> retired = List.of();
 
-    ReloadingKeyManager(X509KeyManager delegate) {
+    public ReloadingKeyManager(X509KeyManager delegate) {
         this(delegate, System::nanoTime);
     }
 
@@ -51,7 +51,7 @@ final class ReloadingKeyManager extends X509ExtendedKeyManager {
     }
 
     /** The first X.509 key manager of {@code options}, the TLS registry's default key store. */
-    static X509KeyManager keyManagerOf(Vertx vertx, KeyCertOptions options) {
+    public static X509KeyManager keyManagerOf(Vertx vertx, KeyCertOptions options) {
         if (options == null) {
             throw new IllegalStateException("the default TLS configuration has no key store");
         }
@@ -72,7 +72,7 @@ final class ReloadingKeyManager extends X509ExtendedKeyManager {
     }
 
     /** Serves {@code delegate} from the next handshake on; the generations before it stay readable for a while. */
-    synchronized void reload(X509KeyManager delegate) {
+    public synchronized void reload(X509KeyManager delegate) {
         long now = nanoTime.getAsLong();
         List<Generation> kept = new ArrayList<>();
         kept.add(new Generation(current.number(), current.delegate(), now));

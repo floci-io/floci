@@ -239,6 +239,66 @@ class LambdaCrossAccountInvokeIntegrationTest {
     }
 
     @Test
+    void unpublishedCapacityValidationPrecedesMissingFunctionLookupAfterIamAuthorization() {
+        String name = "absent-capacity-" + suffix();
+        String user = createUser(OWNER, "capacity-admin-" + suffix(), """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"lambda:*","Resource":"*"}]}""");
+        String path = "/2019-09-30/functions/{name}/provisioned-concurrency";
+        lambda(user).queryParam("Qualifier", "$LATEST").body("{\"ProvisionedConcurrentExecutions\":1}")
+                .put(path, name).then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"))
+                .body("message", equalTo(
+                        "Provisioned Concurrency Configs cannot be applied to unpublished function versions."));
+        String message = "The function resource provided must be an alias or a published version.";
+        lambda(user).queryParam("Qualifier", "$LATEST").get(path, name).then().statusCode(400)
+                .body("message", equalTo(message));
+        lambda(user).queryParam("Qualifier", "$LATEST").delete(path, name).then().statusCode(400)
+                .body("message", equalTo(message));
+        lambda(user).queryParam("Qualifier", "1").get(path, name).then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+
+        String denied = createUser(OWNER, "capacity-denied-" + suffix(), INVOKE_ANYTHING);
+        lambda(denied).queryParam("Qualifier", "$LATEST").get(path, name).then().statusCode(403)
+                .body("__type", equalTo("AccessDeniedException"));
+    }
+
+    @Test
+    void provisionedConcurrencyRequiresTheOwnersQualifiedGrant() {
+        String name = "capacity-" + suffix();
+        String arn = createFunction(OWNER, name);
+        publishVersionAndAlias(OWNER, name, "live");
+        String user = createUser(CALLER, "capacity-reader-" + suffix(), """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"lambda:*","Resource":"*"}]}""");
+        String path = "/2019-09-30/functions/{name}/provisioned-concurrency";
+        lambda(user).queryParam("Qualifier", "1").get(path, arn).then().statusCode(403);
+        addPermission(OWNER, arn, "1", Map.of("Principal", CALLER,
+                "Action", "lambda:GetProvisionedConcurrencyConfig"));
+        lambda(user).queryParam("Qualifier", "1").get(path, arn).then().statusCode(404)
+                .body("__type", equalTo("ProvisionedConcurrencyConfigNotFoundException"));
+        lambda(user).queryParam("Qualifier", "live").get(path, arn).then().statusCode(403);
+        lambda(user).queryParam("Qualifier", "1").delete(path, arn).then().statusCode(403);
+        lambda(user).queryParam("Qualifier", "1").body("{\"ProvisionedConcurrentExecutions\":1}")
+                .put(path, arn).then().statusCode(403);
+        lambda(OWNER).queryParam("Qualifier", "1").get(path, name).then().statusCode(404);
+    }
+
+    @Test
+    void provisionedConcurrencyGrantDoesNotReplaceTheCallersIdentityPolicy() {
+        String name = "capacity-deny-" + suffix();
+        String arn = createFunction(OWNER, name);
+        publishVersionAndAlias(OWNER, name, "live");
+        addPermission(OWNER, arn, "1", Map.of("Principal", CALLER,
+                "Action", "lambda:GetProvisionedConcurrencyConfig"));
+        String user = createUser(CALLER, "capacity-denied-" + suffix(), """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"lambda:InvokeFunction","Resource":"*"}]}""");
+        lambda(user).queryParam("Qualifier", "1")
+                .get("/2019-09-30/functions/{name}/provisioned-concurrency", arn).then().statusCode(403);
+    }
+
+    @Test
     void rotateSecretIsRefusedForAnotherAccountsFunctionThatGrantsNothing() {
         String name = "rotator-" + suffix();
         String foreignArn = createFunction(OWNER, name);

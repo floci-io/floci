@@ -32,7 +32,6 @@ import jakarta.ws.rs.core.UriInfo;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -1375,7 +1374,7 @@ public class ScimController {
             throw validation("cursor is invalid.");
         }
         try {
-            String decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
+            String decoded = Base64Url.decode(cursor);
             int separator = decoded.indexOf('\n');
             if (separator <= 0) {
                 throw validation("cursor is invalid.");

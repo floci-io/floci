@@ -24,10 +24,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Delivers the log events of Web Function environments. Each event goes to the stream of its
- * environment in the {@code .local} companion of the revision's log group, and to the same stream
- * with an {@code -<account>-<region>} suffix in the log group itself, where AWS centralizes the
- * regions an endpoint serves. A group or stream is created when its first event arrives. The
- * {@code platform.*} events below the revision's {@code systemLogLevel} are dropped.
+ * environment in the {@code .local} companion of the revision's log group in the region the
+ * environment serves, and to the same stream with an {@code -<account>-<region>} suffix in the log
+ * group itself in the home region, where AWS centralizes the regions an endpoint serves. A group or
+ * stream is created when its first event arrives. The {@code platform.*} events below the
+ * revision's {@code systemLogLevel} are dropped.
  */
 @ApplicationScoped
 public class LambdaWebLogs {
@@ -50,10 +51,11 @@ public class LambdaWebLogs {
         this.logs = logs;
     }
 
-    public Sink open(String accountId, String region, String logGroup, String logStream, String systemLogLevel) {
+    public Sink open(String accountId, String region, String homeRegion, String logGroup, String logStream,
+                     String systemLogLevel) {
         return new Sink(accountId, region, SYSTEM_LEVELS.indexOf(systemLogLevel), List.of(
-                new Destination(logGroup + ".local", logStream),
-                new Destination(logGroup, logStream + "-" + accountId + "-" + region)));
+                new Destination(region, logGroup + ".local", logStream),
+                new Destination(homeRegion, logGroup, logStream + "-" + accountId + "-" + region)));
     }
 
     /** A time as AWS writes it in a platform event, without the trailing zeros of the fraction. */
@@ -68,7 +70,7 @@ public class LambdaWebLogs {
         writers.shutdownNow();
     }
 
-    private record Destination(String logGroup, String logStream) {
+    private record Destination(String region, String logGroup, String logStream) {
     }
 
     private record Event(long timestamp, String message) {
@@ -198,20 +200,22 @@ public class LambdaWebLogs {
         /** The group and the stream are created when an event finds one of them missing, also after a delete. */
         private void putTo(Destination destination, List<Map<String, Object>> batch) {
             try {
-                logs.putLogEventsForAccount(accountId, destination.logGroup(), destination.logStream(), batch, region);
+                logs.putLogEventsForAccount(accountId, destination.logGroup(), destination.logStream(), batch,
+                        destination.region());
             } catch (AwsException e) {
                 if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                     throw e;
                 }
                 createLogGroup(destination);
                 createLogStream(destination);
-                logs.putLogEventsForAccount(accountId, destination.logGroup(), destination.logStream(), batch, region);
+                logs.putLogEventsForAccount(accountId, destination.logGroup(), destination.logStream(), batch,
+                        destination.region());
             }
         }
 
         private void createLogGroup(Destination destination) {
             try {
-                logs.createLogGroupForAccount(accountId, destination.logGroup(), null, null, region);
+                logs.createLogGroupForAccount(accountId, destination.logGroup(), null, null, destination.region());
             } catch (AwsException e) {
                 ignoreAlreadyExists(e);
             }
@@ -219,7 +223,8 @@ public class LambdaWebLogs {
 
         private void createLogStream(Destination destination) {
             try {
-                logs.createLogStreamForAccount(accountId, destination.logGroup(), destination.logStream(), region);
+                logs.createLogStreamForAccount(accountId, destination.logGroup(), destination.logStream(),
+                        destination.region());
             } catch (AwsException e) {
                 ignoreAlreadyExists(e);
             }

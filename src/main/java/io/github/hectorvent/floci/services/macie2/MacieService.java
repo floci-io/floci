@@ -12,10 +12,8 @@ import io.github.hectorvent.floci.services.macie2.model.MacieState;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -196,7 +194,7 @@ public class MacieService implements Resettable {
             return 0;
         }
         try {
-            int offset = Integer.parseInt(new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8));
+            int offset = Integer.parseInt(Base64Url.decode(token));
             if (offset < 0 || offset > size) {
                 throw validation("nextToken is invalid.");
             }

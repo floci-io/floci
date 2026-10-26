@@ -1049,6 +1049,49 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    void redrivePolicyReadsBackAsCompactJson() {
+        String dlqUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-redrive-compact-dlq\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("QueueUrl");
+        String dlqArn = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+            .body("{\"QueueUrl\":\"" + dlqUrl + "\",\"AttributeNames\":[\"QueueArn\"]}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("Attributes.QueueArn");
+        String sourceUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-redrive-compact-source\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("QueueUrl");
+
+        // A trailing newline, as a YAML block scalar leaves on the document.
+        String policy = "{\\\"deadLetterTargetArn\\\":\\\"" + dlqArn + "\\\",\\\"maxReceiveCount\\\":3}\\n";
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SetQueueAttributes")
+            .body("{\"QueueUrl\":\"" + sourceUrl + "\",\"Attributes\":{\"RedrivePolicy\":\"" + policy + "\"}}")
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.GetQueueAttributes")
+            .body("{\"QueueUrl\":\"" + sourceUrl + "\",\"AttributeNames\":[\"RedrivePolicy\"]}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Attributes.RedrivePolicy",
+                    equalTo("{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":3}"));
+    }
+
+    @Test
     void queueUrlsUseTheFlociFormByDefault() {
         SqsQueueUrlRoundTrip.json(AUTH_SQS_EU_WEST_2, "eu-west-2", "json-floci-url-queue",
                 "http://localhost:4566/" + ACCOUNT_ID + "/json-floci-url-queue",

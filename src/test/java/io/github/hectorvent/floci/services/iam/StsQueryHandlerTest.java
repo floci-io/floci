@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.WebIdentityToken;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
 import io.github.hectorvent.floci.services.iam.model.DelegationRequest;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederation;
 import io.github.hectorvent.floci.testing.PartitionMatrix;
 import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -36,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -88,6 +90,13 @@ class StsQueryHandlerTest {
 
     private static StsQueryHandler newHandler(IamService iamService, RegionResolver regionResolver,
                                               Clock clock, DelegationRequestService delegation) {
+        return newHandler(iamService, regionResolver, clock, delegation,
+                mock(WebIdentityTokenIssuer.class));
+    }
+
+    private static StsQueryHandler newHandler(IamService iamService, RegionResolver regionResolver,
+                                              Clock clock, DelegationRequestService delegation,
+                                              WebIdentityTokenIssuer tokenIssuer) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iam = mock(EmulatorConfig.IamServiceConfig.class);
@@ -108,6 +117,7 @@ class StsQueryHandlerTest {
                 mock(SAMLTrustPolicyEvaluator.class),
                 delegation,
                 mock(CentralRootAccess.class),
+                tokenIssuer,
                 clock);
     }
 
@@ -141,6 +151,91 @@ class StsQueryHandlerTest {
             Response response = handler.handle(action, params);
             assertEquals(200, response.getStatus());
         }
+    }
+
+    /** The account's federation state with the feature on, which the operation reads the issuer from. */
+    private static OutboundWebIdentityFederation enabledFederation() {
+        OutboundWebIdentityFederation federation = new OutboundWebIdentityFederation();
+        federation.setEnabled(true);
+        federation.setIssuerIdentifier("https://sts.us-east-1.amazonaws.com/000000000000");
+        return federation;
+    }
+
+    /**
+     * A caller on temporary credentials "cannot use this operation to extend the lifetime of a
+     * session beyond what was granted when the session was originally created", so the ceiling on
+     * a web identity token is the session's own expiration. The boundary is that instant itself: a
+     * token ending exactly with the session is issued, and one ending a second later is not, which
+     * is why the clock is fixed here rather than read. A long-term caller has no session to
+     * escalate, so only the duration's own 3600 holds it.
+     */
+    @ParameterizedTest
+    @CsvSource({"ASIASESSION, 299, 200", "ASIASESSION, 300, 200", "ASIASESSION, 301, 403",
+            "ASIASESSION, 3600, 403", "AKIALONGTERM, 3600, 200"})
+    void aWebIdentityTokenCannotOutliveTheCallersSession(String accessKeyId, String duration,
+                                                         int expectedStatus) {
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        IamService iamService = mock(IamService.class);
+        when(iamService.findEnabledOutboundWebIdentityFederation())
+                .thenReturn(Optional.of(enabledFederation()));
+        when(iamService.findSessionExpiration("ASIASESSION"))
+                .thenReturn(Optional.of(now.plusSeconds(300)));
+        WebIdentityTokenIssuer tokenIssuer = mock(WebIdentityTokenIssuer.class);
+        when(tokenIssuer.mint(any(), anyString(), anyString(), anyList(), any(), any(), any()))
+                .thenReturn("header.claims.signature");
+        StsQueryHandler handler = newHandler(iamService, new RegionResolver(REGION, "000000000000"),
+                Clock.fixed(now, ZoneOffset.UTC), mock(DelegationRequestService.class),
+                tokenIssuer);
+        setCaller(handler, accessKeyId, "-");
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Audience.member.1", "app");
+        params.putSingle("SigningAlgorithm", "RS256");
+        params.putSingle("DurationSeconds", duration);
+        Response response = handler.handle("GetWebIdentityToken", params);
+
+        String body = (String) response.getEntity();
+        assertEquals(expectedStatus, response.getStatus(), body);
+        if (expectedStatus == 403) {
+            assertTrue(body.contains("<Code>SessionDurationEscalationException</Code>"), body);
+            assertTrue(body.contains("You cannot use this operation to extend the lifetime of a"
+                    + " session beyond what was granted when the session was originally created."),
+                    body);
+            verifyNoInteractions(tokenIssuer);
+        } else {
+            verify(tokenIssuer).mint(any(), anyString(), anyString(), anyList(), any(), any(),
+                    any());
+        }
+    }
+
+    /**
+     * A temporary credential the session store no longer knows is refused as expired rather than
+     * minted for. The lookup comes back empty for a session that has gone, which would otherwise
+     * fall through to the account root ARN this file hands a caller it cannot resolve, and a
+     * token's subject is signed and outlives the request that asked for it.
+     */
+    @Test
+    void aTemporaryCredentialWithNoLiveSessionIsRefusedRatherThanSignedAsRoot() {
+        IamService iamService = mock(IamService.class);
+        when(iamService.findEnabledOutboundWebIdentityFederation())
+                .thenReturn(Optional.of(enabledFederation()));
+        WebIdentityTokenIssuer tokenIssuer = mock(WebIdentityTokenIssuer.class);
+        StsQueryHandler handler = newHandler(iamService, new RegionResolver(REGION, "000000000000"),
+                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC),
+                mock(DelegationRequestService.class), tokenIssuer);
+        setCaller(handler, "ASIAGONE", "-");
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Audience.member.1", "app");
+        params.putSingle("SigningAlgorithm", "RS256");
+        Response response = handler.handle("GetWebIdentityToken", params);
+
+        String body = (String) response.getEntity();
+        assertEquals(403, response.getStatus(), body);
+        assertTrue(body.contains("<Code>ExpiredTokenException</Code>"), body);
+        assertTrue(body.contains("The security token included in the request has expired."), body);
+        assertFalse(body.contains(":root"), body);
+        verifyNoInteractions(tokenIssuer);
     }
 
     private static void setCaller(StsQueryHandler handler, String headerKey, String queryKey) {
@@ -662,7 +757,8 @@ class StsQueryHandlerTest {
         StsQueryHandler handler = new StsQueryHandler(iamService, mock(AccountResolver.class),
                 new RegionResolver(REGION, "000000000000"), config, mock(AssumeRolePolicyEvaluator.class),
                 trust, verifier, keys, mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class),
-                mock(DelegationRequestService.class), mock(CentralRootAccess.class));
+                mock(DelegationRequestService.class), mock(CentralRootAccess.class),
+                mock(WebIdentityTokenIssuer.class));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", requestedRoleArn);
         params.putSingle("RoleSessionName", "app");

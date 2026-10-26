@@ -208,6 +208,7 @@ public class RedshiftTest {
         RedshiftClient client = getClient();
         DeleteClusterResponse res = withRetry(() -> client.deleteCluster(DeleteClusterRequest.builder()
                 .clusterIdentifier("test-cluster")
+                .skipFinalClusterSnapshot(true)
                 .build()));
         assertEquals("test-cluster", res.cluster().clusterIdentifier());
         assertEquals("deleting", res.cluster().clusterStatus());

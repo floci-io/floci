@@ -16,6 +16,7 @@
 | `GetDelegatedAccessToken` | Exchange a delegation request's trade-in token for temporary credentials |
 | `GetAccessKeyInfo` | Returns the account an access key ID belongs to |
 | `AssumeRoot` | Opens a privileged session on a member account of the organization |
+| `GetWebIdentityToken` | Returns a signed JWT representing the calling identity |
 
 ## Privileged Root Sessions
 
@@ -99,6 +100,60 @@ Only the account that filed the delegation request may exchange its token; any o
 stating it is not populated for this operation. See the delegation request section of the
 [IAM service doc](iam.md) for the lifecycle that issues the token.
 
+## Web Identity Tokens
+
+`GetWebIdentityToken` answers "a signed JSON Web Token (JWT) that represents the calling AWS
+identity", for authenticating to an external service that supports OIDC discovery. The issuer is
+IAM's: outbound web identity federation mints one issuer URL per account, and the token names it as
+`iss`, so the operation reads the switch behind that URL and answers
+`OutboundWebIdentityFederationDisabledException` while the feature is off rather than IAM's own
+`FeatureDisabled`. The declared constraints are read ahead of the switch, as everywhere else in
+this package: `Audience` is required and holds 1 to 10 audiences of 1 to 1000 characters,
+`SigningAlgorithm` is required at a fixed length of 5, `DurationSeconds` is 60 to 3600 and defaults
+to 300, and `Tags` is at most 50 tags whose keys and values carry their own lengths and pattern. An
+audience sent empty is an audience that is present, so it breaks the minimum length rather than
+reading as absent.
+
+A session cannot outlive itself. `SessionDurationEscalationException` is what a caller holding
+temporary credentials gets when the requested duration would run past the moment its own session
+ends, which is the sentence the reference gives that error: "You cannot use this operation to
+extend the lifetime of a session beyond what was granted when the session was originally created."
+A long-term key names no session and is bounded only by the 3600-second maximum.
+
+A temporary credential with no live session behind it is refused with `ExpiredTokenException`, the
+wording the enforcement filter answers for an expired session, rather than read as a caller Floci
+cannot identify. An unresolvable caller is the account root stand-in elsewhere in this package,
+which is what `GetCallerIdentity` answers for an unknown key, and a token is not a request: its
+subject is signed and outlives the call, so a session that has already gone does not get one
+naming the account root. An unknown long-term key keeps the stand-in.
+
+The claim layout is the one the IAM User Guide publishes. The standard OIDC claims sit at the top
+level, `iss`, `aud`, `sub`, `iat`, `exp` and `jti`, with the caller's ARN as the subject, and the
+custom claims are nested under the `https://sts.amazonaws.com/` namespace: `aws_account` for the
+account the token was asked for, `source_region` for the region it was asked from, and the
+request's tags under `request_tags`. The guide notes that "all these claims may not be present in
+a token at the same time", so the organization, principal tag and session context claims it also
+lists are left out rather than invented, and `request_tags` is absent from a token whose request
+named no tags. The nesting is what keeps a tag off a claim STS sets, a tag named `exp` being a key
+under `request_tags` rather than the claim that chooses the token's lifetime.
+
+Two answers here are Floci's readings. `jwtAlgorithmType` publishes a fixed length of 5 and no enum, so a
+five-character value that is neither `RS256` nor `ES384` is answered with the enum violation this
+package renders for a value outside a documented set, the two values coming from the reference
+rather than from the model. The global endpoint is refused because the reference says "The
+GetWebIdentityToken API is not available on the STS Global endpoint" without giving the refusal, so
+it borrows the wording AWS publishes for `AssumeRoot`; a request to a local host names no such
+endpoint and is not refused. `JWTPayloadSizeExceededException` is modelled and nothing published
+says what the maximum payload is, so no size is invented here to refuse a request with.
+
+The signing key is the account's, minted on first use per algorithm and stored, so a restart does
+not invalidate a token already handed out. `RS256` signs with a 2048-bit RSA key and `ES384` with
+P-384, whose signature is the raw `R || S` pair JWS defines rather than the DER sequence a default
+ECDSA signer returns. What is not here yet is the other half of the feature: nothing publishes the
+verification key, so the `/.well-known/openid-configuration` and `/.well-known/jwks.json` documents
+the issuer URL would host are not served, and a relying party cannot verify one of these tokens
+against this emulator.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -138,6 +193,8 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, `AssumeRole` also evaluates 
 (`AssumeRolePolicyDocument`) against the caller and returns `AccessDenied` if it is not permitted. AWS principal
 forms are matched: `"*"`, an account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs;
 and an explicit `Deny` always wins. Both `Action` and `NotAction` elements are honored when matching `sts:AssumeRole`.
+The caller's own identity policy must allow `sts:AssumeRole` too, evaluated against the role's ARN, so a policy can
+allow assuming one role and not another. Other STS actions are evaluated against `*`, whatever `RoleArn` they carry.
 
 The caller is the account that owns the request's credentials, whether they sign the
 `Authorization` header or a presigned query string: an IAM user's or a role session's access key
@@ -157,9 +214,6 @@ when its condition matches.
 - **Session tags and source identity are not modelled.** `aws:RequestTag/*`, `aws:TagKeys`,
   `sts:TransitiveTagKeys` and `sts:SourceIdentity` are not in the request context, so a condition
   on them does not match, and `sts:TagSession` and `sts:SetSourceIdentity` are not checked.
-- **The caller's own permission is checked against `*`.** The caller's identity policy must allow
-  `sts:AssumeRole`, but it is evaluated for resource `*` rather than the role's ARN, so a policy
-  that names the role in `Resource` does not grant it.
 
 ## Web Identity Validation (IRSA)
 

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.AwsCanonicalUserId;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -115,6 +116,39 @@ class S3AclPublicAccessEvaluatorTest {
     }
 
     @Test
+    void ownerCanonicalUserGrantIsNotANonOwnerGrant() {
+        String ownerAccount = "000000000000";
+        String canonicalId = AwsCanonicalUserId.forAccount(ownerAccount);
+
+        assertFalse(S3AclPublicAccessEvaluator.aclGrantsNonOwner(acl(
+                canonicalUserGrant(canonicalId, "FULL_CONTROL")), ownerAccount));
+    }
+
+    @Test
+    void ownerAccountGrantStillMatchesForAclsWrittenBeforeCanonicalIds() {
+        String ownerAccount = "000000000000";
+
+        assertFalse(S3AclPublicAccessEvaluator.aclGrantsNonOwner(acl(
+                canonicalUserGrant(ownerAccount, "FULL_CONTROL")), ownerAccount));
+    }
+
+    @Test
+    void anotherCanonicalUserGrantIsANonOwnerGrant() {
+        String ownerAccount = "000000000000";
+
+        assertTrue(S3AclPublicAccessEvaluator.aclGrantsNonOwner(acl(
+                canonicalUserGrant(AwsCanonicalUserId.forAccount("111111111111"), "READ")),
+                ownerAccount));
+    }
+
+    @Test
+    void grantlessAclGrantsNonOwner() {
+        assertTrue(S3AclPublicAccessEvaluator.aclGrantsNonOwner(
+                "<AccessControlPolicy><AccessControlList/></AccessControlPolicy>",
+                "000000000000"));
+    }
+
+    @Test
     void canonicalUserOnlyAclIsNotPublic() {
         String acl = """
                 <AccessControlPolicy>
@@ -159,5 +193,16 @@ class S3AclPublicAccessEvaluatorTest {
                   <Permission>%s</Permission>
                 </Grant>
                 """.formatted(groupUri, permission);
+    }
+
+    private static String canonicalUserGrant(String id, String permission) {
+        return """
+                <Grant>
+                  <Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="CanonicalUser">
+                    <ID>%s</ID>
+                  </Grantee>
+                  <Permission>%s</Permission>
+                </Grant>
+                """.formatted(id, permission);
     }
 }

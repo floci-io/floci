@@ -33,6 +33,23 @@ each exclusion is deliberate:
 - **A tagging action alone.** EC2 lists `CreateCapacityReservationDateChangeQuote` as authorized by
   `ec2:CreateTags` only, the tag-on-create permission with the operation's own action missing.
 
+Two kinds of listed action do not count towards "exactly one":
+
+- **A Billing console permission.** Budgets lists `CreateNotification` as authorized by
+  `budgets:ModifyBudget` and `aws-portal:ModifyBilling`, and `DescribeBudgets` by
+  `budgets:ViewBudget` and `aws-portal:ViewBilling`. The `aws-portal` actions gate the Billing
+  console: the Service Authorization Reference has `aws-portal:UpdateConsoleActionSetEnforced`
+  choosing "whether existing or fine-grained IAM actions will be used to control authorization to
+  Billing, Cost Management, and Account consoles", and the Billing and Cost Management user guide
+  says the `aws-portal` namespace "reached the end of standard support on July 2023" and that
+  "Programmatic requests to AWS Cost Explorer, AWS Cost and Usage Reports, and AWS Budgets remains
+  unaffected".
+- **A tagging action beside one other.** Budgets lists `CreateBudget` as authorized by
+  `budgets:ModifyBudget` and `budgets:TagResource`, and the tagging action is the tag-on-create
+  permission: the Service Authorization Reference has `ModifyBudget` "Grants permission to create
+  and modify budgets", adding "Creating a budget with tags also requires the 'budgets:TagResource'
+  permission".
+
 The endpoint is live rather than a pinned dependency, so a fresh generation is not byte-identical.
 As with `regen_iam_action_resources.py`, what must hold is that nothing here is invented:
 
@@ -73,14 +90,21 @@ NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,127}$")
 TAGGING_ACTION_RE = re.compile(r"^(CreateTags|DeleteTags|TagResource|UntagResource|CreateOrUpdateTags"
                                r"|AddTags\w*|RemoveTags\w*)$")
 
+# The namespaces of console permissions, which an operation's authorized actions may list beside
+# the action its API call is authorized as.
+CONSOLE_NAMESPACES = {"aws-portal"}
+
 # The cases that justify vendoring this: batch operations authorized as their single-item action,
-# none of them an IAM action of its own.
+# and Budgets operations authorized as ModifyBudget or ViewBudget, none of them an IAM action of
+# its own.
 ANCHORS = {
     ("sqs", "SendMessageBatch"): "sqs:SendMessage",
     ("sqs", "DeleteMessageBatch"): "sqs:DeleteMessage",
     ("sqs", "ChangeMessageVisibilityBatch"): "sqs:ChangeMessageVisibility",
     ("sns", "PublishBatch"): "sns:Publish",
     ("dynamodb", "TransactGetItems"): "dynamodb:GetItem",
+    ("budgets", "CreateBudget"): "budgets:ModifyBudget",
+    ("budgets", "DescribeBudgets"): "budgets:ViewBudget",
 }
 
 
@@ -129,7 +153,7 @@ def authorized_actions_from(documents: list[dict]) -> dict[str, dict[str, str]]:
             name = operation.get("Name") if isinstance(operation, dict) else None
             if not isinstance(name, str) or not NAME_RE.match(name):
                 raise ValueError(f"{namespace}: operation entry without a usable 'Name': {operation!r}")
-            authorized = _authorized_actions(namespace, operation)
+            authorized = _counted_actions(namespace, _authorized_actions(namespace, operation))
             mapped = None
             if len(authorized) == 1 and len(_sdk_clients(namespace, operation)) <= 1:
                 service, action = authorized[0]
@@ -154,6 +178,15 @@ def _authorized_actions(namespace: str, operation: dict) -> list[tuple[str, str]
         raise ValueError(f"{namespace}:{operation['Name']}: 'AuthorizedActions' is not a list of "
                          f"objects with a string 'Service' and 'Name': {authorized!r}")
     return [(entry["Service"], entry["Name"]) for entry in authorized]
+
+
+def _counted_actions(namespace: str, authorized: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The authorized actions that count towards the operation's one action: none of a console's,
+    and, beside one other action, none of the namespace's tagging actions."""
+    counted = [(service, action) for service, action in authorized if service not in CONSOLE_NAMESPACES]
+    untagged = [(service, action) for service, action in counted
+                if service != namespace or not TAGGING_ACTION_RE.match(action)]
+    return untagged if len(untagged) == 1 else counted
 
 
 def _sdk_clients(namespace: str, operation: dict) -> set[str]:

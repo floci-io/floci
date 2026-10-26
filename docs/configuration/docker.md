@@ -92,6 +92,16 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_API_TIMEOUT_SECONDS`
 
+An image pull has a limit of its own: each attempt may take up to `image-pull-timeout-seconds`, 300 seconds (5 minutes) by default. A pull still downloading when the limit passes fails that attempt with "Could not pull image: Downloading" and is tried again, three attempts in all, so a launch that needs an image Docker does not have yet can wait up to about three times the limit before it fails; a pull that has reported no progress at all within the limit fails at once with "Timed out pulling image". A large image, such as an EMR Serverless runtime of 3.5 to 4.3 GB, can need longer on a slow connection: raise the limit, or pull the image with `docker pull` before the first launch. It must be at least 1:
+
+```yaml
+floci:
+  docker:
+    image-pull-timeout-seconds: 300
+```
+
+Environment variable: `FLOCI_DOCKER_IMAGE_PULL_TIMEOUT_SECONDS`
+
 ## Private Registry Authentication
 
 Any service that pulls a container image from a private registry (Lambda image functions, custom OpenSearch images, private Postgres images, etc.) needs Docker credentials. Two approaches are supported and can be combined.

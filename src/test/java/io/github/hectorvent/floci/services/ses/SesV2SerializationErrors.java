@@ -1,5 +1,9 @@
 package io.github.hectorvent.floci.services.ses;
 
+import org.junit.jupiter.params.provider.Arguments;
+
+import java.util.stream.Stream;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -17,8 +21,18 @@ final class SesV2SerializationErrors {
     static final String NUMBER = "NUMBER_VALUE can not be converted to a String";
     static final String EXPECTED_NULL = "Expected null";
     static final String EXPECTED_LIST = "Expected list or null";
+    static final String EXPECTED_MAP = "Expected map or null";
+    static final String STRING_FOR_INTEGER = "STRING_VALUE can not be converted to an Integer";
 
     private SesV2SerializationErrors() {
+    }
+
+    /** A body that is not a JSON object, with the message AWS answers it with. */
+    static Stream<Arguments> nonObjectBodies() {
+        return Stream.of(
+                Arguments.of("[1,2,3]", LIST),
+                Arguments.of("null", null),
+                Arguments.of("\"hello\"", null));
     }
 
     /** An Authorization header signed for {@code region}, for a test that needs its own region state. */

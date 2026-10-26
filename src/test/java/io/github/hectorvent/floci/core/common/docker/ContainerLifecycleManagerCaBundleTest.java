@@ -43,9 +43,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -226,8 +228,9 @@ class ContainerLifecycleManagerCaBundleTest {
         verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
     }
 
-    @Test
-    void aFailedCopyRecreatesTheContainerWithoutTheTrustVariables() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aFailedCopyRecreatesTheContainerWithoutTheTrustVariables(boolean ephemeral) throws Exception {
         // SSL_CERT_FILE and friends replace the image's trust store, so they must never name a
         // file that is not there: an image without /etc keeps its own trust instead.
         when(tlsConfig.enabled()).thenReturn(true);
@@ -245,7 +248,17 @@ class ContainerLifecycleManagerCaBundleTest {
         RemoveContainerCmd removeCmd = mock(RemoveContainerCmd.class, RETURNS_SELF);
         when(dockerClient.removeContainerCmd("container-id")).thenReturn(removeCmd);
 
-        assertEquals("container-id-2", manager().create(specWithEnv(List.of("FOO=bar"))));
+        ContainerSpec spec = specWithEnv(List.of("FOO=bar"));
+        if (ephemeral) {
+            ContainerLifecycleManager lifecycle = spy(manager());
+            ContainerLifecycleManager.ContainerInfo info =
+                    new ContainerLifecycleManager.ContainerInfo("container-id-2", Map.of());
+            doReturn(info).when(lifecycle).startCreated("container-id-2", spec);
+            assertEquals(info, lifecycle.createAndStartEphemeral(spec));
+        } else {
+            assertEquals("container-id-2", manager().create(spec));
+        }
+        verify(removeCmd, ephemeral ? times(1) : never()).withRemoveVolumes(true);
 
         verify(removeCmd).withForce(true);
         verify(removeCmd).exec();

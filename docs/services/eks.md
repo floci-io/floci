@@ -17,6 +17,9 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 | `DescribeAccessEntry` | Describe an access entry by IAM principal ARN |
 | `ListAccessEntries` | List principal ARNs with pagination |
 | `DeleteAccessEntry` | Delete access-entry metadata |
+| `AssociateAccessPolicy` | Associate an EKS access policy and its cluster or namespace scope with a STANDARD access entry |
+| `ListAssociatedAccessPolicies` | List the access policies associated with an access entry, with pagination |
+| `DisassociateAccessPolicy` | Remove an access policy from an access entry |
 | `CreatePodIdentityAssociation` | Create a pod identity association between a service account and IAM role |
 | `DescribePodIdentityAssociation` | Describe a pod identity association by association ID |
 | `ListPodIdentityAssociations` | List pod identity associations in a cluster with optional filtering and pagination |
@@ -45,7 +48,11 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 
 `CreateCluster` accepts `accessConfig.authenticationMode` (`CONFIG_MAP`, `API_AND_CONFIG_MAP`, or `API`) and `bootstrapClusterCreatorAdminPermissions`. The API default is `CONFIG_MAP`; access-entry operations require an ACTIVE cluster created with `API` or `API_AND_CONFIG_MAP`.
 
-The four access-entry management operations support `STANDARD` (the default) and `EC2_LINUX`. STANDARD accepts existing IAM users or roles, including principals in another account. EC2_LINUX requires a role in the cluster account and generates `system:node:{{EC2PrivateDNSName}}`; custom usernames and Kubernetes groups are not accepted for node entries. Tags supplied at creation are preserved. Repeating a create with the same client token and normalized parameters returns the existing entry. Listing accepts `maxResults` from 1 to 100 and cluster-specific `nextToken` values.
+The access-entry management operations support `STANDARD` (the default) and `EC2_LINUX`. STANDARD accepts existing IAM users or roles, including principals in another account. EC2_LINUX requires a role in the cluster account and generates `system:node:{{EC2PrivateDNSName}}`; custom usernames and Kubernetes groups are not accepted for node entries. Tags supplied at creation are preserved. Repeating a create with the same client token and normalized parameters returns the existing entry. Listing accepts `maxResults` from 1 to 100 and cluster-specific `nextToken` values.
+
+Access policies are management metadata, like the entries they belong to: Floci stores and returns them but does not enforce their Kubernetes permissions. `policyArn` must be an `arn:<partition>:eks::aws:cluster-access-policy/<name>` ARN in the cluster's partition. The policy name itself is not checked against AWS's list of access policies. The scope `type` is `cluster` (no namespaces) or `namespace` (one or more names; wildcards such as `dev-*` are kept as given, and a repeated name is stored once). Associating a policy that is already associated replaces its scope and keeps its `associatedAt`. Only STANDARD entries accept access policies, and deleting an entry removes its policies. Disassociating a policy the entry does not hold succeeds. `ListAccessEntries` accepts `associatedPolicyArn`.
+
+The principal ARN in an access-entry path should be URL-encoded, as the SDKs and the CLI send it. Sent unencoded, a principal whose ARN ends in `/access-policies` (a role named `access-policies`) is read as the access-policies route of the shorter principal before it. A DELETE is a disassociate only when a cluster access policy ARN follows `access-policies`, so an entry with `access-policies` inside its IAM path can always be deleted.
 
 Access entries use EKS storage and retain the IAM principal's stable ID internally. Cluster deletion removes its entries, and a cluster recreated with the same name does not inherit previous entries or pagination tokens.
 
@@ -66,7 +73,7 @@ rejects instance credentials. Obtain fresh IMDS credentials after upgrading so t
 includes the stable role ID.
 
 !!! note "Authentication scope"
-    Non-worker IAM users and ordinary STS sessions retain the existing cluster-admin compatibility behavior. STANDARD entries, access policies, aws-auth ConfigMap, the cluster-creator bootstrap flag and automatic managed-node entries are not enforced by this change. Updating authentication mode, UpdateAccessEntry, access-policy association, and entry tag updates remain unimplemented. Native AL2023 images, bootstrap RBAC/CSR approval, CNI and worker networking are separate requirements for registration and Ready.
+    Non-worker IAM users and ordinary STS sessions retain the existing cluster-admin compatibility behavior. STANDARD entries, access policies, aws-auth ConfigMap, the cluster-creator bootstrap flag and automatic managed-node entries are not enforced by this change. Updating authentication mode, UpdateAccessEntry, ListAccessPolicies, and entry tag updates remain unimplemented. Native AL2023 images, bootstrap RBAC/CSR approval, CNI and worker networking are separate requirements for registration and Ready.
 
 ```bash
 aws --endpoint-url http://localhost:4566 eks create-cluster \
@@ -393,7 +400,7 @@ Cluster metadata is stored in-process. No Docker containers are started. The clu
 
 Floci starts a **k3s** (`rancher/k3s`) container for each cluster. The k3s API server is exposed on a host port from the configured range (`6500-6599`). Once `/readyz` responds, the cluster transitions to `ACTIVE` and the CA certificate is extracted from the kubeconfig.
 
-By default `describe-cluster` returns a **host-reachable** endpoint (`https://localhost:<hostPort>`); the k3s server certificate includes a `localhost` SAN, so it verifies against the CA in `cluster.certificateAuthority.data`. Set `endpoint-mode: network` to return the container DNS name (`https://floci-eks-<name>:6443`) instead: reachable from other containers on the Docker network (the pre-#1118 behaviour). In `network` mode the endpoint falls back to the host-reachable form when Floci runs natively, since there is no container DNS name a host client could use.
+By default `describe-cluster` returns a **host-reachable** endpoint (`https://localhost:<hostPort>`); the k3s server certificate includes a `localhost` SAN, so it verifies against the CA in `cluster.certificateAuthority.data`. Set `endpoint-mode: network` to return the container DNS name (`https://floci-eks-<name>:6443`) instead: reachable from other containers on the Docker network (the pre-#1118 behaviour). Set `endpoint-host` to advertise a hostname other than `localhost` in `host` mode, for example when `kubectl` runs on another machine; Floci adds it to the k3s certificate too. It takes a DNS name (letters, digits, hyphens and dots), a dotted IPv4 address, or an IPv6 address with or without brackets, without scheme, port or path; anything else stops Floci at startup with an error naming the setting, whenever EKS runs real clusters (even in `network` mode). The certificate is fixed when the k3s container is created, so when `endpoint-host` changes, Floci recreates a surviving container on its next restart (keeping its data volume and port). If that replacement fails, the old container is kept and keeps advertising the host its certificate carries. `network` mode ignores it when Floci runs in a container, and metadata-only clusters (mock mode, or no Docker daemon) do not use it. In `network` mode the endpoint falls back to the host-reachable form when Floci runs natively, since there is no container DNS name a host client could use.
 
 #### Connecting with `kubectl` (native AWS workflow)
 
@@ -586,6 +593,7 @@ When an instance joins a cluster, Floci registers a Kubernetes `Node` matching A
 | `FLOCI_SERVICES_EKS_DOCKER_NETWORK` | *(unset)* | Docker network for k3s containers (falls back to the global `FLOCI_SERVICES_DOCKER_NETWORK`, then Floci's own network) |
 | `FLOCI_SERVICES_EKS_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave k3s containers running after Floci stops |
 | `FLOCI_SERVICES_EKS_ENDPOINT_MODE` | `host` | `describe-cluster` endpoint: `host` (`localhost:<hostPort>`) or `network` (container DNS) |
+| `FLOCI_SERVICES_EKS_ENDPOINT_HOST` | _(unset)_ | Hostname or IP address `host` mode advertises instead of `localhost`, for clients on other machines. Added to the k3s certificate as a SAN when the cluster's container is created |
 | `FLOCI_SERVICES_EKS_IAM_AUTH_WEBHOOK` | `true` | Wire a token-auth webhook into k3s so `aws eks get-token` works |
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
 | `FLOCI_SERVICES_EKS_DISABLE_CNI` | `false` | Start k3s without bundled flannel, network policy, and kube-proxy so an external CNI can take over |

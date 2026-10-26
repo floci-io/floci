@@ -175,7 +175,8 @@ final class S3PublicAccessEvaluator {
             return hasPublicPrincipal(statement.path("Principal"));
         }
         // An Allow on NotPrincipal grants to everyone the statement does not name.
-        return statement.hasNonNull("NotPrincipal");
+        return statement.hasNonNull("NotPrincipal")
+                && !hasPublicPrincipal(statement.path("NotPrincipal"));
     }
 
     private static boolean conditionPinsToFixedValues(JsonNode conditions) {

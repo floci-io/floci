@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
 import java.time.Clock;
@@ -82,6 +84,58 @@ class KinesisJsonHandlerTest {
 
     private ObjectNode responseEntity(Response response) {
         return (ObjectNode) response.getEntity();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PutRecord", "PutRecords"})
+    void writesReportAnOpenDescendantAfterRepeatedSplits(String action) {
+        createStream("test-stream");
+        KinesisStream stream = service.describeStream("test-stream", REGION);
+        service.splitShard("test-stream", FIRST_SHARD_ID,
+                "170141183460469231731687303715884105728", REGION);
+        service.splitShard("test-stream", stream.getShards().get(1).getShardId(),
+                "85070591730234615865843651857942052864", REGION);
+        service.splitShard("test-stream", stream.getShards().get(2).getShardId(),
+                "255211775190703847597530955573826158592", REGION);
+
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        ObjectNode record = "PutRecords".equals(action) ? request.putArray("Records").addObject() : request;
+        record.put("PartitionKey", "b").put("Data", "AQ==");
+        ObjectNode response = responseEntity(handler.handle(action, request, REGION));
+        JsonNode result = "PutRecords".equals(action) ? response.path("Records").get(0) : response;
+
+        assertEquals(stream.getShards().get(3).getShardId(), result.path("ShardId").asText());
+        assertFalse(result.path("SequenceNumber").asText().isEmpty());
+        if ("PutRecords".equals(action)) {
+            assertEquals(0, response.path("FailedRecordCount").asInt());
+        }
+        assertEquals(1, stream.getShards().get(3).recordCount());
+        assertTrue(stream.getShards().stream().filter(KinesisShard::isClosed)
+                .allMatch(shard -> shard.recordCount() == 0));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PutRecord", "PutRecords"})
+    void writesFailWithoutAppendingWhenNoOpenDescendantExists(String action) {
+        createStream("test-stream");
+        KinesisShard shard = service.describeStream("test-stream", REGION).getShards().getFirst();
+        shard.setClosed(true);
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        ObjectNode record = "PutRecords".equals(action) ? request.putArray("Records").addObject() : request;
+        record.put("PartitionKey", "b").put("Data", "AQ==");
+
+        if ("PutRecord".equals(action)) {
+            AwsException error = assertThrows(AwsException.class, () -> handler.handle(action, request, REGION));
+            assertEquals("InvalidArgumentException", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+        } else {
+            ObjectNode response = responseEntity(handler.handle(action, request, REGION));
+            assertEquals(1, response.path("FailedRecordCount").asInt());
+            assertEquals("InternalFailure", response.path("Records").get(0).path("ErrorCode").asText());
+            assertFalse(response.path("Records").get(0).has("SequenceNumber"));
+            assertFalse(response.path("Records").get(0).has("ShardId"));
+        }
+        assertEquals(0, shard.recordCount());
     }
 
     @Test

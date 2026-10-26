@@ -6,11 +6,26 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CopyStatementParserTest {
+
+    @Test
+    void copyAndUnloadAcceptDefaultIamRole() {
+        CopyStatementParser.S3CopyFrom copy = assertInstanceOf(CopyStatementParser.S3CopyFrom.class,
+                CopyStatementParser.parse("COPY people FROM 's3://bucket/data' IAM_ROLE default CSV"));
+        assertNull(copy.iamRoleArn());
+        assertTrue(copy.defaultIamRoleRequested());
+        CopyStatementParser.S3Unload unload = assertInstanceOf(CopyStatementParser.S3Unload.class,
+                CopyStatementParser.parse("UNLOAD ('SELECT 1') TO 's3://bucket/out/' IAM_ROLE DEFAULT CSV"));
+        assertNull(unload.iamRoleArn());
+        assertTrue(unload.defaultIamRoleRequested());
+        assertNull(CopyStatementParser.parse("COPY people FROM 's3://bucket/data' IAM_ROLE defaultRole"));
+        assertNull(CopyStatementParser.parse("COPY people FROM 's3://bucket/data' IAM_ROLE default IAM_ROLE default"));
+    }
 
     /** parse() returns S3Statement now; every COPY test wants the S3CopyFrom view. */
     private static CopyStatementParser.S3CopyFrom copyFrom(String sql) {
@@ -99,13 +114,59 @@ class CopyStatementParserTest {
     void copyWithoutIamRoleLeavesItNull() {
         CopyStatementParser.S3CopyFrom c = copyFrom("COPY t FROM 's3://b/k'");
         assertNull(c.iamRoleArn());
+        assertFalse(c.defaultIamRoleRequested());
     }
 
     @Test
-    void iamRoleDefaultKeywordIsStillUnsupported() {
-        // Bare `default` (no quotes) does not match the quoted-ARN clause, so it falls through
-        // to the existing catch-all and the whole statement is rejected (fail-open), same as today.
-        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' IAM_ROLE default"));
+    void quotedDefaultRemainsLiteralRegardlessOfClusterDefault() {
+        for (String defaultRole : new String[]{null, "arn:aws:iam::111111111111:role/copy"}) {
+            for (String authorization : List.of("IAM_ROLE 'default'", "IAM_ROLE \"default\"",
+                    "CREDENTIALS 'aws_iam_role=default'")) {
+                CopyStatementParser.S3Statement copy = CopyStatementParser.parse(
+                        "COPY people FROM 's3://bucket/data' " + authorization, defaultRole);
+                CopyStatementParser.S3Statement unload = CopyStatementParser.parse(
+                        "UNLOAD ('SELECT 1') TO 's3://bucket/out/' " + authorization, defaultRole);
+                assertNotNull(copy);
+                assertNotNull(unload);
+                assertEquals("default", copy.iamRoleArn());
+                assertEquals("default", unload.iamRoleArn());
+                assertFalse(copy.defaultIamRoleRequested());
+                assertFalse(unload.defaultIamRoleRequested());
+            }
+        }
+    }
+
+    @Test
+    void defaultIamRoleResolvesWithoutChangingCopyOptionsOrExplicitRoles() {
+        String role = "arn:aws:iam::111111111111:role/copy";
+        CopyStatementParser.S3CopyFrom copy = assertInstanceOf(CopyStatementParser.S3CopyFrom.class,
+                CopyStatementParser.parse("COPY t FROM 's3://b/k' IAM_ROLE default CSV GZIP TRUNCATECOLUMNS", role));
+        assertEquals(role, copy.iamRoleArn());
+        assertTrue(copy.defaultIamRoleRequested());
+        assertTrue(copy.csv());
+        assertTrue(copy.gzip());
+        assertTrue(copy.transforms().truncateColumns());
+        CopyStatementParser.S3CopyFrom explicit = assertInstanceOf(CopyStatementParser.S3CopyFrom.class,
+                CopyStatementParser.parse("COPY t FROM 's3://b/k' IAM_ROLE 'other-role'", role));
+        assertEquals("other-role", explicit.iamRoleArn());
+        assertFalse(explicit.defaultIamRoleRequested());
+        assertNull(CopyStatementParser.parse("SELECT 1", role));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' IAM_ROLE default ACCESS_KEY_ID 'x' "
+                + "SECRET_ACCESS_KEY 'y'", role));
+    }
+
+    @Test
+    void defaultIamRoleResolvesWithoutChangingUnloadOptions() {
+        String role = "arn:aws:iam::111111111111:role/unload";
+        CopyStatementParser.S3Unload unload = assertInstanceOf(CopyStatementParser.S3Unload.class,
+                CopyStatementParser.parse("UNLOAD ('SELECT 1') TO 's3://b/k' IAM_ROLE default CSV GZIP HEADER MANIFEST", role));
+        assertEquals(role, unload.iamRoleArn());
+        assertTrue(unload.defaultIamRoleRequested());
+        assertEquals("SELECT 1", unload.selectQuery());
+        assertTrue(unload.csv());
+        assertTrue(unload.gzip());
+        assertTrue(unload.header());
+        assertTrue(unload.manifest());
     }
 
     @Test

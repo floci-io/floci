@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds.proxy;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.testing.FileSystemAssumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -12,7 +13,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import javax.net.ssl.SSLContext;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.cert.CertificateExpiredException;
@@ -30,7 +30,6 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -153,8 +152,7 @@ class RdsProxyTlsCertificatesTest {
     @Test
     void privateKeyAndTlsDirAreRestrictedToOwnerOnly() throws Exception {
         Path tlsDir = tempDir.resolve("tls");
-        assumeTrue(Files.getFileStore(tempDir).supportsFileAttributeView(PosixFileAttributeView.class),
-                "POSIX permissions are not supported on this filesystem");
+        FileSystemAssumptions.assumePosixPermissions(tempDir);
 
         RdsProxyTlsCertificates certs = newCertificates();
         certs.ensureHost("172.17.0.5");

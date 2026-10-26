@@ -44,6 +44,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -316,9 +317,10 @@ public class NativeDynamoDbJsonHandler {
     // projection type check. A null NonKeyAttributes counts as not specified.
     private static String requireIndexName(JsonNode node, String memberPath) {
         JsonNode indexNameNode = node.path("IndexName");
-        String constraint = " at '" + memberPath + ".indexName' failed to satisfy constraint: ";
+        String path = memberPath + ".indexName";
+        String constraint = " at '" + path + "' failed to satisfy constraint: ";
         if (indexNameNode.isMissingNode() || indexNameNode.isNull()) {
-            throwValidationErrors(List.of("Value null" + constraint + "Member must not be null"));
+            throwValidationErrors(List.of(SmithyValidationErrors.notNull(path)));
         }
         String indexName = indexNameNode.asText();
         String value = "Value '" + indexName + "'" + constraint;
@@ -326,11 +328,9 @@ public class NativeDynamoDbJsonHandler {
         if (!INDEX_NAME_CHARS.matcher(indexName).matches()) {
             errors.add(value + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
         }
-        if (indexName.length() < 3) {
-            errors.add(value + "Member must have length greater than or equal to 3");
-        }
-        if (255 < indexName.length()) {
-            errors.add(value + "Member must have length less than or equal to 255");
+        String lengthViolation = SmithyValidationErrors.lengthOutOfRange(path, indexName, 3, 255);
+        if (lengthViolation != null) {
+            errors.add(lengthViolation);
         }
         throwValidationErrors(errors);
         return indexName;
@@ -352,9 +352,7 @@ public class NativeDynamoDbJsonHandler {
         JsonNode vectorAttribute = node.path("VectorAttribute");
         if (vectorAttribute.isObject() && !vectorAttribute.hasNonNull("AttributeName")) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at '" + memberPath
-                    + ".vectorAttribute.attributeName' failed to satisfy constraint: "
-                    + "Member must not be null");
+                    SmithyValidationErrors.notNull(memberPath + ".vectorAttribute.attributeName"));
         }
         List<SearchSchemaElement> searchSchema = new ArrayList<>();
         JsonNode searchSchemaArray = node.path("SearchSchema");
@@ -485,7 +483,7 @@ public class NativeDynamoDbJsonHandler {
         description.put("GlobalTableStatus", "ACTIVE");
         description.put("GlobalTableArn", table.getTableArn());
         if (table.getCreationDateTime() != null) {
-            description.put("CreationDateTime", table.getCreationDateTime().getEpochSecond());
+            description.put("CreationDateTime", epochSeconds(table.getCreationDateTime()));
         }
         description.set("ReplicationGroup", replicaNodes(table, objectMapper.createArrayNode(), true));
         return description;
@@ -626,22 +624,14 @@ public class NativeDynamoDbJsonHandler {
 
         validateItemSets(item);
 
-        JsonNode oldItem = null;
-        if ("ALL_OLD".equals(returnValues) || expected != null) {
-            dynamoDbService.requireTableForItemCall(tableName, region);
-            oldItem = dynamoDbService.getItem(tableName, item, region);
-        }
-
-        if (expected != null) {
-            evaluateLegacyExpected(oldItem, expected, conditionalOperator, returnValuesOnConditionCheckFailure);
-        }
-
-        var previousItem = dynamoDbService.putItem(tableName, item, conditionExpression,
-                exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure);
+        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, item, false, expected,
+                conditionalOperator, returnValuesOnConditionCheckFailure);
+        JsonNode previousItem = dynamoDbService.putItem(tableName, item, conditionExpression,
+                exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure, expectedCheck);
 
         ObjectNode response = objectMapper.createObjectNode();
-        if ("ALL_OLD" .equals(returnValues) && oldItem != null) {
-            response.set("Attributes", oldItem);
+        if ("ALL_OLD".equals(returnValues) && previousItem != null) {
+            response.set("Attributes", previousItem);
         }
         addItemCollectionMetrics(response, request, tableName, item, region);
         addWriteConsumedCapacity(response, request, tableName, region, previousItem, item);
@@ -745,13 +735,10 @@ public class NativeDynamoDbJsonHandler {
 
         String condOpDel = request.has("ConditionalOperator")
                 ? request.get("ConditionalOperator").asText() : "AND";
-        if (expectedDel != null) {
-            JsonNode existingForDel = dynamoDbService.getItem(tableName, key, region);
-            evaluateLegacyExpected(existingForDel, expectedDel, condOpDel, returnValuesOnConditionCheckFailure);
-        }
-
+        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedDel,
+                condOpDel, returnValuesOnConditionCheckFailure);
         JsonNode oldItem = dynamoDbService.deleteItem(tableName, key, conditionExpression,
-                exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure);
+                exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure, expectedCheck);
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_OLD" .equals(returnValues) && oldItem != null) {
@@ -855,14 +842,11 @@ public class NativeDynamoDbJsonHandler {
             ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
         }
 
-        if (expectedUpd != null) {
-            JsonNode existingForUpd = dynamoDbService.getItem(tableName, key, region);
-            evaluateLegacyExpected(existingForUpd, expectedUpd, conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
-        }
-
+        Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedUpd,
+                conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
         DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
                 tableName, key, updateData, updateExpression, exprAttrNames, exprAttrValues,
-                returnValues, conditionExpression, region, returnValuesOnConditionCheckFailure);
+                returnValues, conditionExpression, region, returnValuesOnConditionCheckFailure, expectedCheck);
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_NEW" .equals(returnValues) && result.newItem() != null) {
@@ -881,10 +865,26 @@ public class NativeDynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
+    /**
+     * Validates a legacy Expected map and returns its evaluation, for the service to run against
+     * the stored item under the item's lock, or null when the request has no Expected. The table
+     * and the key are checked first, so their errors take precedence over the map's.
+     */
+    private Consumer<JsonNode> legacyExpectedCheck(String tableName, String region, JsonNode keyOrItem,
+                                                   boolean isKeyArg, JsonNode expected,
+                                                   String conditionalOperator,
+                                                   String returnValuesOnConditionCheckFailure) {
+        if (expected == null) {
+            return null;
+        }
+        dynamoDbService.requireItemCallKey(tableName, keyOrItem, isKeyArg, region);
+        validateLegacyExpected(expected);
+        return existing -> evaluateLegacyExpected(existing, expected, conditionalOperator,
+                returnValuesOnConditionCheckFailure);
+    }
+
     private void evaluateLegacyExpected(JsonNode existing, JsonNode expected, String conditionalOperator,
                                           String returnValuesOnConditionCheckFailure) {
-        if (expected == null) return;
-        validateLegacyExpected(expected);
         boolean useOr = "OR".equals(conditionalOperator);
         boolean overall = !useOr;
         var fields = expected.fields();
@@ -1884,8 +1884,7 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbTableNames.resolveWithRegion(tableName, region);
         JsonNode spec = request.path("PointInTimeRecoverySpecification");
         if (spec.isMissingNode() || spec.isNull()) {
-            throwValidationErrors(List.of("Value null at 'pointInTimeRecoverySpecification' failed to satisfy "
-                    + "constraint: Member must not be null"));
+            throwValidationErrors(List.of(SmithyValidationErrors.notNull("pointInTimeRecoverySpecification")));
         }
         List<String> violations = new ArrayList<>();
         JsonNode period = spec.path("RecoveryPeriodInDays");
@@ -1899,8 +1898,8 @@ public class NativeDynamoDbJsonHandler {
         }
         JsonNode enabled = spec.path("PointInTimeRecoveryEnabled");
         if (enabled.isMissingNode() || enabled.isNull()) {
-            violations.add("Value null at 'pointInTimeRecoverySpecification.pointInTimeRecoveryEnabled' failed to "
-                    + "satisfy constraint: Member must not be null");
+            violations.add(
+                    SmithyValidationErrors.notNull("pointInTimeRecoverySpecification.pointInTimeRecoveryEnabled"));
         }
         throwValidationErrors(violations);
         Integer recoveryPeriodInDays = period.isNumber() ? period.asInt() : null;
@@ -1923,7 +1922,7 @@ public class NativeDynamoDbJsonHandler {
         JsonNode backupNameNode = request.path("BackupName");
         if (backupNameNode.isMissingNode() || backupNameNode.isNull()) {
             throwValidationErrors(List.of(
-                    "Value null at 'backupName' failed to satisfy constraint: Member must not be null"));
+                    SmithyValidationErrors.notNull("backupName")));
         }
         String backupName = backupNameNode.asText();
         throwValidationErrors(nameViolations(backupName, "backupName"));
@@ -1966,13 +1965,12 @@ public class NativeDynamoDbJsonHandler {
                     + "Member must have value less than or equal to " + MAX_LIST_BACKUPS_LIMIT);
         }
         String exclusiveStartBackupArn = textOrNull(request, "ExclusiveStartBackupArn");
-        if (exclusiveStartBackupArn != null && exclusiveStartBackupArn.length() < MIN_BACKUP_ARN_LENGTH) {
-            violations.add("Value '" + exclusiveStartBackupArn + "' at 'exclusiveStartBackupArn' failed to satisfy "
-                    + "constraint: Member must have length greater than or equal to " + MIN_BACKUP_ARN_LENGTH);
-        }
-        if (exclusiveStartBackupArn != null && MAX_BACKUP_ARN_LENGTH < exclusiveStartBackupArn.length()) {
-            violations.add("Value '" + exclusiveStartBackupArn + "' at 'exclusiveStartBackupArn' failed to satisfy "
-                    + "constraint: Member must have length less than or equal to " + MAX_BACKUP_ARN_LENGTH);
+        if (exclusiveStartBackupArn != null) {
+            String lengthViolation = SmithyValidationErrors.lengthOutOfRange("exclusiveStartBackupArn",
+                    exclusiveStartBackupArn, MIN_BACKUP_ARN_LENGTH, MAX_BACKUP_ARN_LENGTH);
+            if (lengthViolation != null) {
+                violations.add(lengthViolation);
+            }
         }
         String backupType = request.hasNonNull("BackupType") ? request.get("BackupType").asText() : "USER";
         if (!BACKUP_TYPE_FILTERS.contains(backupType)) {
@@ -1980,6 +1978,9 @@ public class NativeDynamoDbJsonHandler {
                     + "Member must satisfy enum value set: " + BACKUP_TYPE_FILTERS);
         }
         throwValidationErrors(violations);
+        if (exclusiveStartBackupArn != null) {
+            DynamoDbBackupArns.parse(exclusiveStartBackupArn);
+        }
         Instant lowerBound = timestampOrNull(request, "TimeRangeLowerBound");
         Instant upperBound = timestampOrNull(request, "TimeRangeUpperBound");
         if (lowerBound != null && upperBound != null && upperBound.isBefore(lowerBound)) {
@@ -2009,11 +2010,13 @@ public class NativeDynamoDbJsonHandler {
      */
     private Response handleRestoreTableFromBackup(JsonNode request, String region) {
         String backupArn = textOrNull(request, "BackupArn");
-        DynamoDbBackupArns.parse(backupArn);
+        DynamoDbBackupArns.BackupArn arn = dynamoDbService.requireOwnBackupArn(backupArn);
         String targetTableName = requireTableNameParameter(request, "TargetTableName");
         throwValidationErrors(restoreViolations(request, targetTableName));
+        DynamoDbService.requireSseOverrideAcrossRegions(arn.region(), region,
+                request.path("SSESpecificationOverride").isObject());
 
-        TableBackup backup = dynamoDbService.describeBackup(backupArn, region);
+        TableBackup backup = dynamoDbService.restoreSourceBackup(arn, targetTableName, region);
         TableDefinition table = tableService.restoreTable(DynamoDbService.snapshotOf(backup.getTable()),
                 targetTableName, parseRestoreOverrides(request), region);
         ObjectNode description = tableToNode(table);
@@ -2057,6 +2060,7 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException",
                     "Invalid Request: Must provide exactly one of: sourceTableArn, sourceTableName", 400);
         }
+        DynamoDbService.requireSourceInPartition(source.region(), region);
         boolean useLatestRestorableTime = request.path("UseLatestRestorableTime").asBoolean(false);
         Instant restoreDateTime = timestampOrNull(request, "RestoreDateTime");
         if (useLatestRestorableTime && restoreDateTime != null) {
@@ -2173,11 +2177,9 @@ public class NativeDynamoDbJsonHandler {
         if (!INDEX_NAME_CHARS.matcher(name).matches()) {
             violations.add(value + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
         }
-        if (name.length() < 3) {
-            violations.add(value + "Member must have length greater than or equal to 3");
-        }
-        if (255 < name.length()) {
-            violations.add(value + "Member must have length less than or equal to 255");
+        String lengthViolation = SmithyValidationErrors.lengthOutOfRange(memberPath, name, 3, 255);
+        if (lengthViolation != null) {
+            violations.add(lengthViolation);
         }
         return violations;
     }
@@ -2190,10 +2192,10 @@ public class NativeDynamoDbJsonHandler {
         }
         for (String member : List.of("WriteCapacityUnits", "ReadCapacityUnits")) {
             JsonNode value = throughput.path(member);
-            String constraint = " at '" + memberPath + "." + Character.toLowerCase(member.charAt(0))
-                    + member.substring(1) + "' failed to satisfy constraint: ";
+            String path = memberPath + "." + Character.toLowerCase(member.charAt(0)) + member.substring(1);
+            String constraint = " at '" + path + "' failed to satisfy constraint: ";
             if (value.isMissingNode() || value.isNull()) {
-                violations.add("Value null" + constraint + "Member must not be null");
+                violations.add(SmithyValidationErrors.notNull(path));
             } else if (value.asLong() < 1) {
                 violations.add("Value '" + value.asText() + "'" + constraint
                         + "Member must have value greater than or equal to 1");
@@ -2206,15 +2208,13 @@ public class NativeDynamoDbJsonHandler {
     private static List<String> restoreIndexNameViolations(JsonNode indexName, String memberPath) {
         String constraint = " at '" + memberPath + "' failed to satisfy constraint: ";
         if (indexName.isMissingNode() || indexName.isNull()) {
-            return List.of("Value null" + constraint + "Member must not be null");
+            return List.of(SmithyValidationErrors.notNull(memberPath));
         }
         String value = "Value '" + indexName.asText() + "'" + constraint;
         List<String> violations = new ArrayList<>();
-        if (indexName.asText().length() < 3) {
-            violations.add(value + "Member must have length greater than or equal to 3");
-        }
-        if (255 < indexName.asText().length()) {
-            violations.add(value + "Member must have length less than or equal to 255");
+        String lengthViolation = SmithyValidationErrors.lengthOutOfRange(memberPath, indexName.asText(), 3, 255);
+        if (lengthViolation != null) {
+            violations.add(lengthViolation);
         }
         if (!INDEX_NAME_CHARS.matcher(indexName.asText()).matches()) {
             violations.add(value + "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
@@ -2659,8 +2659,7 @@ public class NativeDynamoDbJsonHandler {
         }
         if (!request.hasNonNull("Policy")) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'policy' failed to satisfy constraint: "
-                    + "Member must not be null");
+                    SmithyValidationErrors.notNull("policy"));
         }
         String policy = request.path("Policy").asText();
         String expectedRevisionId = request.has("ExpectedRevisionId")
@@ -3127,7 +3126,7 @@ public class NativeDynamoDbJsonHandler {
         node.put("TableId", table.getTableId());
         node.put("TableStatus", table.getTableStatus());
         node.put("TableArn", table.getTableArn());
-        node.put("CreationDateTime", table.getCreationDateTime().getEpochSecond());
+        node.put("CreationDateTime", epochSeconds(table.getCreationDateTime()));
         node.put("ItemCount", table.getItemCount());
         node.put("TableSizeBytes", table.getTableSizeBytes());
         node.put("DeletionProtectionEnabled", table.isDeletionProtectionEnabled());
@@ -3136,7 +3135,7 @@ public class NativeDynamoDbJsonHandler {
             ObjectNode billing = objectMapper.createObjectNode();
             billing.put("BillingMode", "PAY_PER_REQUEST");
             billing.put("LastUpdateToPayPerRequestDateTime",
-                    table.getCreationDateTime().getEpochSecond());
+                    epochSeconds(table.getCreationDateTime()));
             node.set("BillingModeSummary", billing);
         }
 
@@ -3406,8 +3405,13 @@ public class NativeDynamoDbJsonHandler {
         request.fields().forEachRemaining(e -> params.put(e.getKey(), e.getValue().isTextual()
                 ? e.getValue().asText() : e.getValue()));
 
+        JsonNode spec = request.path("IncrementalExportSpecification");
+        DynamoDbService.IncrementalExportRequest incremental = spec.isObject()
+                ? new DynamoDbService.IncrementalExportRequest(timestampOrNull(spec, "ExportFromTime"),
+                        timestampOrNull(spec, "ExportToTime"), spec.path("ExportViewType").textValue())
+                : null;
         io.github.hectorvent.floci.services.dynamodb.model.ExportDescription desc =
-                dynamoDbService.exportTable(params, timestampOrNull(request, "ExportTime"), region);
+                dynamoDbService.exportTable(params, timestampOrNull(request, "ExportTime"), incremental, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("ExportDescription", objectMapper.valueToTree(desc));

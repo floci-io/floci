@@ -258,7 +258,6 @@
     <suppress id="NoFqcn" files="/floci/services/identitystore/ScimController\.java$"/>
     <suppress id="NoFqcn" files="/floci/services/inspector2/Inspector2Controller\.java$"/>
     <suppress id="NoFqcn" files="/floci/services/inspector2/Inspector2Service\.java$"/>
-    <suppress id="NoFqcn" files="/floci/services/iot/IotDataController\.java$"/>
     <suppress id="NoFqcn" files="/floci/services/iot/IotDeviceCertificateIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/floci/services/iot/IotIntegrationTest\.java$"/>
     <suppress id="NoFqcn" files="/floci/services/iot/IotMqttBrokerDeviceVerificationTest\.java$"/>

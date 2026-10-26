@@ -2942,18 +2942,6 @@ public class CloudFrontController {
                         }
                         case "Origin" -> {
                             if (inOrigin && current != null) {
-                                Integer completionTimeout = current.getResponseCompletionTimeout();
-                                int effectiveReadTimeout = originReadTimeoutSeconds != null
-                                        ? originReadTimeoutSeconds
-                                        : CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS;
-                                if (completionTimeout != null && completionTimeout > 0
-                                        && completionTimeout < effectiveReadTimeout) {
-                                    throw new AwsException(
-                                            "InvalidArgument",
-                                            "The parameter ResponseCompletionTimeout must be greater than or "
-                                                    + "equal to OriginReadTimeout.",
-                                            400);
-                                }
                                 result.add(current);
                             }
                             inOrigin = false;

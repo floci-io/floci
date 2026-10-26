@@ -9,6 +9,10 @@ import java.io.IOException;
  */
 final class CloudFrontOriginTimeoutException extends IOException {
 
+    CloudFrontOriginTimeoutException(String message) {
+        super(message);
+    }
+
     CloudFrontOriginTimeoutException(String message, Throwable cause) {
         super(message, cause);
     }

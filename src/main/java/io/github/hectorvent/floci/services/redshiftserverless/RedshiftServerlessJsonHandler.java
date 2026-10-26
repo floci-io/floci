@@ -124,6 +124,8 @@ public class RedshiftServerlessJsonHandler {
                 ServerlessSupport.stringList(request, "iamRoles"),
                 ServerlessSupport.stringList(request, "logExports"),
                 parseTagList(request.path("tags"), "tags"),
+                ServerlessSupport.bool(request, "manageAdminPassword"),
+                ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId"),
                 region);
         return namespaceResponse(namespace);
     }
@@ -153,6 +155,8 @@ public class RedshiftServerlessJsonHandler {
                 ServerlessSupport.text(request, "defaultIamRoleArn"),
                 ServerlessSupport.stringList(request, "iamRoles"),
                 ServerlessSupport.stringList(request, "logExports"),
+                ServerlessSupport.bool(request, "manageAdminPassword"),
+                ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId"),
                 region);
         return namespaceResponse(namespace);
     }
@@ -279,7 +283,9 @@ public class RedshiftServerlessJsonHandler {
     private Response handleRestoreFromSnapshot(JsonNode request, String region) {
         RedshiftServerlessService.RestoreResult result = service.restoreFromSnapshot(
                 ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
-                snapshotNameOf(request, region), ServerlessSupport.text(request, "ownerAccount"), region);
+                snapshotNameOf(request, region), ServerlessSupport.text(request, "ownerAccount"),
+                ServerlessSupport.bool(request, "manageAdminPassword"),
+                ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("namespace", namespaceNode(result.namespace()));
         response.put("ownerAccount", result.snapshot().getOwnerAccount());
@@ -400,6 +406,12 @@ public class RedshiftServerlessJsonHandler {
         node.put("dbName", namespace.getDbName());
         node.put("kmsKeyId", namespace.getKmsKeyId());
         node.put("status", namespace.getStatus());
+        if (namespace.getAdminPasswordSecretArn() != null) {
+            node.put("adminPasswordSecretArn", namespace.getAdminPasswordSecretArn());
+        }
+        if (namespace.getAdminPasswordSecretKmsKeyId() != null) {
+            node.put("adminPasswordSecretKmsKeyId", namespace.getAdminPasswordSecretKmsKeyId());
+        }
         if (namespace.getAdminUsername() != null) {
             node.put("adminUsername", namespace.getAdminUsername());
         }

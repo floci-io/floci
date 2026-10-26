@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.AwsCanonicalUserId;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
@@ -174,6 +175,10 @@ class S3OwnershipControlsIntegrationTest {
                 .then().statusCode(400).body(containsString("AccessControlListNotSupported"));
         given().header("x-amz-grant-full-control", "id=\"000000000000\"")
                 .when().post("/" + bucket + "/accepted?uploads")
+                .then().statusCode(200).body(containsString("<UploadId>"));
+        given().header("x-amz-grant-full-control",
+                        "id=\"" + AwsCanonicalUserId.forAccount("000000000000") + "\"")
+                .when().post("/" + bucket + "/accepted-canonical?uploads")
                 .then().statusCode(200).body(containsString("<UploadId>"));
     }
 

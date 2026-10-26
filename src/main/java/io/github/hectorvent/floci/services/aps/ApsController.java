@@ -60,10 +60,10 @@ public class ApsController {
         String alias = asString(body.get("alias"), "alias");
         String kmsKeyArn = asString(body.get("kmsKeyArn"), "kmsKeyArn");
         Map<String, String> tags = asStringMap(body.get("tags"), "tags");
-        // clientToken is accepted and ignored: creates are not deduplicated.
+        String clientToken = asString(body.get("clientToken"), "clientToken");
 
         PrometheusWorkspace workspace =
-                service.createWorkspace(regionResolver.resolveRegion(headers), alias, tags, kmsKeyArn);
+                service.createWorkspace(regionResolver.resolveRegion(headers), alias, tags, kmsKeyArn, clientToken);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("workspaceId", workspace.getWorkspaceId());

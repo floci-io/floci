@@ -27,6 +27,7 @@ public class RedshiftServerlessSnapshot {
     private String status = "AVAILABLE";
     private Instant snapshotCreateTime;
     private String adminUsername;
+    private String adminUserPassword;
     private String kmsKeyId;
     private Integer retentionPeriod;
     private String sqlDump;
@@ -46,6 +47,7 @@ public class RedshiftServerlessSnapshot {
         this.status = other.status;
         this.snapshotCreateTime = other.snapshotCreateTime;
         this.adminUsername = other.adminUsername;
+        this.adminUserPassword = other.adminUserPassword;
         this.kmsKeyId = other.kmsKeyId;
         this.retentionPeriod = other.retentionPeriod;
         this.sqlDump = other.sqlDump;
@@ -130,6 +132,14 @@ public class RedshiftServerlessSnapshot {
 
     public void setAdminUsername(String adminUsername) {
         this.adminUsername = adminUsername;
+    }
+
+    public String getAdminUserPassword() {
+        return adminUserPassword;
+    }
+
+    public void setAdminUserPassword(String adminUserPassword) {
+        this.adminUserPassword = adminUserPassword;
     }
 
     public String getKmsKeyId() {

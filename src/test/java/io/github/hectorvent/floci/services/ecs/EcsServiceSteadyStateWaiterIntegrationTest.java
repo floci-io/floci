@@ -230,22 +230,20 @@ class EcsServiceSteadyStateWaiterIntegrationTest {
                 + "\"alarmNames\":[\"" + alarmName + "\"],\"enable\":true,\"rollback\":false}},"
                 + NETWORK + "}");
 
+        // The intermediate STOP_REQUESTED transition is covered without a scheduled tick in
+        // EcsServiceDeploymentCircuitBreakerTest. Over HTTP, assert the stable terminal state.
+        ecsService.reconcileServices();
         ecsService.reconcileServices();
         Response listed = call("ListServiceDeployments", "{\"cluster\":\"" + CLUSTER
-                + "\",\"service\":\"waiter-alarm-svc\",\"status\":[\"STOP_REQUESTED\"]}");
+                + "\",\"service\":\"waiter-alarm-svc\",\"status\":[\"STOPPED\"]}");
         listed.then().body("serviceDeployments", hasSize(1));
         String deploymentArn = listed.jsonPath().getString("serviceDeployments[0].serviceDeploymentArn");
         call("DescribeServiceDeployments", "{\"serviceDeploymentArns\":[\"" + deploymentArn + "\"]}")
                 .then()
-                .body("serviceDeployments[0].status", equalTo("STOP_REQUESTED"))
+                .body("serviceDeployments[0].status", equalTo("STOPPED"))
+                .body("serviceDeployments[0].stoppedAt", notNullValue())
                 .body("serviceDeployments[0].statusReason", startsWith(
                         "A deployment alarm entered the ALARM state."));
-
-        ecsService.reconcileServices();
-        call("DescribeServiceDeployments", "{\"serviceDeploymentArns\":[\"" + deploymentArn + "\"]}")
-                .then()
-                .body("serviceDeployments[0].status", equalTo("STOPPED"))
-                .body("serviceDeployments[0].stoppedAt", notNullValue());
         call("DescribeServices", "{\"cluster\":\"" + CLUSTER
                 + "\",\"services\":[\"waiter-alarm-svc\"]}")
                 .then()

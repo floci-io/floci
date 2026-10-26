@@ -960,7 +960,7 @@ class SamTransformProcessor {
         resources.set(logicalId, lambdaResource);
 
         String aliasLogicalId = expandAutoPublishAlias(logicalId, properties,
-                lambdaResource.path("Properties"), passthrough, template, parameterValues, resources);
+                (ObjectNode) lambdaResource.path("Properties"), passthrough, template, parameterValues, resources);
         List<ObjectNode> eventInvokePolicies = expandEventInvokeConfig(
                 logicalId, properties, aliasLogicalId, passthrough, template, resources, parameterValues);
 
@@ -999,7 +999,7 @@ class SamTransformProcessor {
      * which publishes, and the alias follows it; a given {@code AutoPublishCodeSha256} fixes the id
      * instead.
      */
-    private String expandAutoPublishAlias(String functionLogicalId, JsonNode properties, JsonNode functionProperties,
+    private String expandAutoPublishAlias(String functionLogicalId, JsonNode properties, ObjectNode functionProperties,
                                           ObjectNode passthrough, JsonNode template,
                                           Map<String, String> parameterValues, ObjectNode resources) {
         validateVersionProperties(functionLogicalId, properties);
@@ -1009,6 +1009,7 @@ class SamTransformProcessor {
             return null;
         }
 
+        appendCodeSha256ToDescription(functionLogicalId, properties, functionProperties, template, parameterValues);
         String versionId = uniqueId(
                 versionLogicalId(functionLogicalId, properties, functionProperties, template, parameterValues),
                 resources);
@@ -1040,6 +1041,35 @@ class SamTransformProcessor {
         aliasDef.setAll(passthrough.deepCopy());
         resources.set(aliasId, aliasDef);
         return aliasId;
+    }
+
+    /**
+     * Appends a given {@code AutoPublishCodeSha256} to the function's {@code Description}, after a
+     * space, as SAM does. Lambda publishes no version of a function that has not changed since its
+     * last one, so without this a new value for the same code names a new version resource that
+     * publishes nothing, and the alias stays where it was. Like SAM, it resolves the description's
+     * template parameters first and joins any other intrinsic function with the value through
+     * {@code Fn::Join}. SAM tests the property as written, not the value it resolves to, so a
+     * {@code Ref} to an empty value appends an empty value.
+     */
+    private void appendCodeSha256ToDescription(String functionLogicalId, JsonNode properties,
+                                               ObjectNode functionProperties, JsonNode template,
+                                               Map<String, String> parameterValues) {
+        if (!isTruthy(properties.path("AutoPublishCodeSha256"))) {
+            return;
+        }
+        String codeSha256 = autoPublishCodeSha256(functionLogicalId, properties, template, parameterValues);
+        JsonNode description = resolveParameterRefs(properties.path("Description"), template, parameterValues);
+        if (!isTruthy(description)) {
+            functionProperties.put("Description", codeSha256);
+        } else if (description.isTextual()) {
+            functionProperties.put("Description", description.asText() + " " + codeSha256);
+        } else {
+            ObjectNode joined = objectMapper.createObjectNode();
+            joined.set("Fn::Join", objectMapper.createArrayNode().add(" ")
+                    .add(objectMapper.createArrayNode().add(description.deepCopy()).add(codeSha256)));
+            functionProperties.set("Description", joined);
+        }
     }
 
     /**
@@ -1515,7 +1545,7 @@ class SamTransformProcessor {
     }
 
     /** Python truthiness, which SAM applies to an optional property before reading it. */
-    private static boolean isTruthy(JsonNode node) {
+    static boolean isTruthy(JsonNode node) {
         if (node.isMissingNode() || node.isNull()) {
             return false;
         }
@@ -1629,6 +1659,7 @@ class SamTransformProcessor {
         copyIfPresent(properties, "PackageType", lambdaProps);
         copyIfPresent(properties, "Handler", lambdaProps);
         copyIfPresent(properties, "Runtime", lambdaProps);
+        copyIfPresent(properties, "Description", lambdaProps);
         copyIfPresent(properties, "ImageConfig", lambdaProps);
 
         lambdaProps.set("Code", buildLambdaCode(properties));

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.List;
+import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -650,12 +651,15 @@ class S3VersioningIntegrationTest {
         String legalHold = "<LegalHold><Status>OFF</Status></LegalHold>";
 
         String old = "/" + bucket + "/old";
+        given().body("replacement").when().put(old).then().statusCode(200);
         given().queryParam("versionId", "null").body(retention).when().put(old + "?retention").then().statusCode(200);
         given().queryParam("versionId", "null").when().get(old + "?retention")
                 .then().statusCode(200).body(containsString("<Mode>GOVERNANCE</Mode>"));
         given().queryParam("versionId", "null").body(legalHold).when().put(old + "?legal-hold").then().statusCode(200);
         given().queryParam("versionId", "null").when().get(old + "?legal-hold")
                 .then().statusCode(200).body(containsString("<Status>OFF</Status>"));
+        given().queryParam("versionId", "null").when().delete(old)
+                .then().statusCode(403).body(containsString("<Code>AccessDenied</Code>"));
 
         String added = "/" + bucket + "/new";
         Matcher<String> noSuchVersion = containsString("<Code>NoSuchVersion</Code>");
@@ -672,8 +676,78 @@ class S3VersioningIntegrationTest {
                 .when().delete(old).then().statusCode(204);
     }
 
+    @Test
+    @Order(26)
+    void aVersionedOverwritePreservesAndPromotesTheNullVersion() {
+        String bucket = "versioned-archived-null-test";
+        String key = "/" + bucket + "/key";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("null body").when().put(key).then().statusCode(200);
+        given().queryParam("annotationName", "labels").body("kept")
+                .when().put(key + "?annotation").then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        String currentVersion = given().body("versioned body").when().put(key)
+                .then().statusCode(200).extract().header("x-amz-version-id");
+
+        String versions = given().when().get("/" + bucket + "?versions&prefix=key")
+                .then().statusCode(200).extract().asString();
+        assertEquals(1, occurrences(versions, "<VersionId>null</VersionId>"));
+        assertEquals(1, occurrences(versions, "<VersionId>" + currentVersion + "</VersionId>"));
+        given().queryParam("versionId", "null").when().get(key)
+                .then().statusCode(200).body(equalTo("null body"));
+        given().queryParam("versionId", "null").queryParam("annotationName", "labels")
+                .when().get(key + "?annotation").then().statusCode(200).body(equalTo("kept"));
+        given().header("x-amz-copy-source", "/" + bucket + "/key?versionId=null")
+                .when().put("/" + bucket + "/copy").then().statusCode(200);
+        given().when().get("/" + bucket + "/copy").then().statusCode(200).body(equalTo("null body"));
+
+        given().when().delete(key + "?versionId=" + currentVersion).then().statusCode(204);
+        given().when().get(key).then().statusCode(200).body(equalTo("null body"));
+        versions = given().when().get("/" + bucket + "?versions&prefix=key")
+                .then().statusCode(200).extract().asString();
+        assertEquals(1, occurrences(versions, "<VersionId>null</VersionId>"));
+        assertEquals(1, occurrences(versions, "<IsLatest>true</IsLatest>"));
+
+        given().when().delete(key + "?versionId=null").then().statusCode(204);
+        given().when().get(key).then().statusCode(404);
+        given().queryParam("versionId", "null").queryParam("annotationName", "labels")
+                .when().get(key + "?annotation").then().statusCode(404);
+    }
+
+    @Test
+    @Order(27)
+    void aDeleteMarkerPreservesTheCurrentNullVersion() {
+        String bucket = "versioned-null-marker-test";
+        String key = "/" + bucket + "/key";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("null body").when().put(key).then().statusCode(200);
+        given().queryParam("annotationName", "labels").body("kept")
+                .when().put(key + "?annotation").then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+
+        String markerId = given().when().delete(key)
+                .then().statusCode(204).extract().header("x-amz-version-id");
+        given().when().get(key).then().statusCode(404);
+        given().queryParam("versionId", "null").when().get(key)
+                .then().statusCode(200).body(equalTo("null body"));
+        given().queryParam("versionId", "null").queryParam("annotationName", "labels")
+                .when().get(key + "?annotation").then().statusCode(200).body(equalTo("kept"));
+
+        given().when().delete(key + "?versionId=" + markerId).then().statusCode(204);
+        given().when().get(key).then().statusCode(200).body(equalTo("null body"));
+        String versions = given().when().get("/" + bucket + "?versions&prefix=key")
+                .then().statusCode(200).extract().asString();
+        assertEquals(1, occurrences(versions, "<VersionId>null</VersionId>"));
+    }
+
     private static String tagging(String value) {
         return "<Tagging><TagSet><Tag><Key>version</Key><Value>" + value + "</Value></Tag></TagSet></Tagging>";
+    }
+
+    private static int occurrences(String value, String needle) {
+        return value.split(Pattern.quote(needle), -1).length - 1;
     }
 
     private static Matcher<String> deleteMarkerRefused(String method) {
@@ -681,4 +755,39 @@ class S3VersioningIntegrationTest {
                 containsString("<Method>" + method + "</Method>"),
                 containsString("<ResourceType>DeleteMarker</ResourceType>"));
     }
+    @Test
+    @Order(28)
+    void versionedWritesAndMarkersPreserveComplianceLockedNullVersions() {
+        String bucket = "versioned-locked-null-preservation";
+        given().when().put("/" + bucket).then().statusCode(200);
+        for (String key : List.of("put", "copy", "marker")) {
+            given().body("original").when().put("/" + bucket + "/" + key).then().statusCode(200);
+        }
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        given().body("<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>")
+                .when().put("/" + bucket + "?object-lock").then().statusCode(200);
+        for (String key : List.of("put", "copy", "marker")) {
+            given().queryParam("versionId", "null")
+                    .body("<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>2031-01-01T00:00:00Z</RetainUntilDate></Retention>")
+                    .when().put("/" + bucket + "/" + key + "?retention").then().statusCode(200);
+        }
+
+        given().body("replacement").when().put("/" + bucket + "/put").then().statusCode(200);
+        given().header("x-amz-copy-source", "/" + bucket + "/put")
+                .when().put("/" + bucket + "/copy").then().statusCode(200);
+        given().when().delete("/" + bucket + "/marker").then().statusCode(204)
+                .header("x-amz-delete-marker", "true");
+
+        for (String key : List.of("put", "copy", "marker")) {
+            String path = "/" + bucket + "/" + key;
+            given().queryParam("versionId", "null").when().get(path)
+                    .then().statusCode(200).body(equalTo("original"));
+            given().queryParam("versionId", "null").when().get(path + "?retention")
+                    .then().statusCode(200).body(containsString("<Mode>COMPLIANCE</Mode>"));
+            given().queryParam("versionId", "null").header("x-amz-bypass-governance-retention", "true")
+                    .when().delete(path).then().statusCode(403).body(containsString("<Code>AccessDenied</Code>"));
+        }
+    }
+
 }

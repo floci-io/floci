@@ -197,6 +197,39 @@ public class CodeArtifactNuGetController {
         String packageName = nuspec.id().toLowerCase(Locale.ROOT);
         String version = NuGetVersions.normalize(nuspec.version());
 
+        // Raised by hectorvent's review: a real dotnet nuget push to a coordinate
+        // updatePackageVersionsStatus/disposePackageVersions left Archived or Disposed must be
+        // refused outright, the same way PublishPackageVersion already refuses it for the generic
+        // format, not accepted and then have forgetContainerBackedStatusOverride below silently
+        // un-block it afterward. Checked before even the existence check below, let alone the real
+        // write, the same way CodeArtifactNpmDataPlane's own guard already runs ahead of its
+        // byte-identical shortcut (Greptile review: an archived coordinate re-pushed byte-identical
+        // must still be refused, not quietly accepted as "nothing changed").
+        String beforeRevision;
+        try {
+            beforeRevision = service.requireContainerBackedVersionNotArchivedOrDisposed(handle.region(), domain,
+                    handle.owner(), repository, "nuget", null, packageName, version);
+        } catch (AwsException e) {
+            return Response.status(409).entity(e.getMessage()).build();
+        }
+
+        // Raised by Greptile's review: DisposePackageVersions holds CodeArtifactService's own
+        // lock for its whole call, and its container-backed asset deletion (see
+        // CodeArtifactService#deleteContainerBackedVersionAssets) acquires this exact same
+        // per-repository BaGetter lock from inside that hold. Calling any synchronized
+        // CodeArtifactService method (recordContainerBackedAssetBytes/
+        // forgetContainerBackedStatusOverride below) from inside this lock, as both used to, would
+        // let a push and a concurrent dispose of the same version each wait forever on the other's
+        // lock. Neither call needs this lock at all: BaGetter's own content is already finalized by
+        // the time forwardPush below returns, so both bookkeeping calls run after this block
+        // releases it instead. currentContainerBackedPackageFence is exempt from this concern: it
+        // is deliberately lock-free (see its own javadoc), not a synchronized CodeArtifactService
+        // method, so taking the snapshot before entering the lock changes nothing it protects
+        // against.
+        long fenceSnapshot = service.currentContainerBackedPackageFence(handle.region(), domain, handle.owner(),
+                repository, "nuget", null, packageName);
+        Response response;
+        boolean pushSucceeded;
         // The exact same lock BagetterSidecarClient#deletePackage takes for this repository, not
         // a private one: without sharing it, a DeletePackage racing this push could still list
         // its versions before this push lands and miss it, the one case a private lock here
@@ -211,21 +244,23 @@ public class CodeArtifactNuGetController {
                         .entity("A package with this id and version already exists.")
                         .build();
             }
-
-            // Snapshotted before the real write, not after: see
-            // CodeArtifactService#currentContainerBackedPackageFence's own javadoc for why the
-            // order matters.
-            long fenceSnapshot = service.currentContainerBackedPackageFence(handle.region(), domain, handle.owner(),
-                    repository, "nuget", null, packageName);
-            Response response = forwardPush(handle.baseUrl(), contentType, content);
-            boolean pushSucceeded = response.getStatus() == 200 || response.getStatus() == 201
+            response = forwardPush(handle.baseUrl(), contentType, content);
+            pushSucceeded = response.getStatus() == 200 || response.getStatus() == 201
                     || response.getStatus() == 202;
-            if (pushSucceeded) {
-                service.recordContainerBackedAssetBytes(handle.region(), domain, handle.owner(), repository,
-                        "nuget", null, packageName, nupkgBytes.length, fenceSnapshot);
-            }
-            return response;
         }
+        if (pushSucceeded) {
+            service.recordContainerBackedAssetBytes(handle.region(), domain, handle.owner(), repository,
+                    "nuget", null, packageName, nupkgBytes.length, fenceSnapshot);
+            // Found by Qodo review: a real dotnet nuget push that republishes a coordinate an
+            // earlier updatePackageVersionsStatus/disposePackageVersions call left Archived or
+            // Disposed would otherwise still have its fresh content blocked by that stale
+            // override, the same gap closed for Maven/npm/pypi's own native publish paths. Cleared
+            // only if still unchanged since the guard above ran (Greptile review): a status change
+            // that landed while forwardPush was in flight must not be erased by this.
+            service.forgetContainerBackedStatusOverrideIfUnchanged(handle.region(), domain, handle.owner(),
+                    repository, "nuget", null, packageName, version, beforeRevision);
+        }
+        return response;
     }
 
     /**

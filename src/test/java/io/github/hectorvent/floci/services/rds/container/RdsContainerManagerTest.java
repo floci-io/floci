@@ -3,6 +3,13 @@ package io.github.hectorvent.floci.services.rds.container;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.command.ExecCreateCmd;
+import com.github.dockerjava.api.command.ExecCreateCmdResponse;
+import com.github.dockerjava.api.command.ExecStartCmd;
+import com.github.dockerjava.api.command.InspectContainerCmd;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.command.InspectExecCmd;
+import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.LogContainerCmd;
 import com.github.dockerjava.api.command.PauseContainerCmd;
 import com.github.dockerjava.api.command.UnpauseContainerCmd;
@@ -35,6 +42,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -50,7 +58,9 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -99,6 +109,141 @@ class RdsContainerManagerTest {
                 DatabaseEngine.MARIADB, "mariadb:11").isEmpty());
         assertTrue(RdsContainerManager.buildContainerCmd(
                 DatabaseEngine.SQLSERVER, "mcr.microsoft.com/mssql/server:2022-latest").isEmpty());
+    }
+
+    @Test
+    void parameterGroupOverridesBecomeLooseServerOptionsAheadOfTheAuthenticationOptions() {
+        Map<String, String> overrides = new LinkedHashMap<>();
+        overrides.put("slow_query_log", "1");
+        overrides.put("max_connections", "500");
+        overrides.put("aurora_binlog_replication_max_yield_seconds", "0");
+        overrides.put("innodb_buffer_pool_size", "{DBInstanceClassMemory*3/4}");
+        overrides.put("port", "3307");
+        overrides.put("bind-address", "127.0.0.1");
+        overrides.put("default_authentication_plugin", "caching_sha2_password");
+        overrides.put("max_connections --skip-grant-tables", "1");
+
+        assertEquals(
+                List.of(
+                        "--loose-aurora_binlog_replication_max_yield_seconds=0",
+                        "--loose-default_authentication_plugin=caching_sha2_password",
+                        "--loose-max_connections=500",
+                        "--loose-slow_query_log=1",
+                        "--default-authentication-plugin=mysql_native_password"),
+                RdsContainerManager.buildContainerCmd(DatabaseEngine.MYSQL, "mysql:8.0.36", overrides));
+        assertEquals(
+                List.of(
+                        "--loose-max_connections=500",
+                        "--mysql-native-password=ON",
+                        "--authentication-policy=mysql_native_password"),
+                RdsContainerManager.buildContainerCmd(
+                        DatabaseEngine.MYSQL, "mysql:8.4", Map.of("max_connections", "500")));
+        assertEquals(List.of("--loose-max_connections=500"),
+                RdsContainerManager.buildContainerCmd(
+                        DatabaseEngine.MARIADB, "mariadb:11", Map.of("max_connections", "500")));
+    }
+
+    @Test
+    void parameterGroupCannotTurnOnSettingsThatLockTheProxyOut() {
+        Map<String, String> overrides = new LinkedHashMap<>();
+        overrides.put("require_secure_transport", "ON");
+        overrides.put("require-secure-transport", "1");
+        overrides.put("skip_grant_tables", "ON");
+        overrides.put("skip-grant-tables", "1");
+        overrides.put("max_connections", "500");
+
+        assertEquals(List.of("--loose-max_connections=500"),
+                RdsContainerManager.engineParameterOptions(DatabaseEngine.MYSQL, overrides));
+        assertEquals(List.of("--loose-max_connections=500"),
+                RdsContainerManager.engineParameterOptions(DatabaseEngine.MARIADB, overrides));
+    }
+
+    @Test
+    void timeZoneAndAuroraBinlogOffTakeTheServerOptionsThatSetThem() {
+        Map<String, String> overrides = new LinkedHashMap<>();
+        overrides.put("time_zone", "UTC");
+        overrides.put("binlog_format", "OFF");
+
+        assertEquals(List.of("--skip-log-bin", "--loose-default-time-zone=UTC"),
+                RdsContainerManager.engineParameterOptions(DatabaseEngine.MYSQL, overrides));
+        assertEquals(List.of("--loose-binlog_format=ROW"),
+                RdsContainerManager.engineParameterOptions(DatabaseEngine.MYSQL, Map.of("binlog_format", "ROW")));
+    }
+
+    @Test
+    void parameterGroupOverridesAreNotPassedToOtherEngines() {
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.POSTGRES, "postgres:18", Map.of("max_connections", "500")).isEmpty());
+        assertTrue(RdsContainerManager.buildContainerCmd(
+                DatabaseEngine.SQLSERVER, "mcr.microsoft.com/mssql/server:2022-latest",
+                Map.of("max_connections", "500")).isEmpty());
+    }
+
+    @Test
+    void mysqlContainerIsCreatedWithItsParameterGroupOverrides() {
+        EmulatorConfig config = config(tempDir.resolve("mysql-params-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "mysql-container", Map.of(3306,
+                new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = databaseDockerClient("mysql-container");
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        ContainerDetector detector = mock(ContainerDetector.class);
+        when(detector.isRunningInContainer()).thenReturn(false);
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, logStreamer, detector, config,
+                new RegionResolver("us-east-1", "000000000000"), mock(ServiceConfigAccess.class));
+
+        manager.start("db1", "db1", "db1", "floci-rds-db1", DatabaseEngine.MYSQL, "mysql:8.0.36",
+                "root", "password", "db", Map.of("max_connections", "500"));
+
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(spec.capture());
+        assertEquals(
+                List.of("--loose-max_connections=500", "--default-authentication-plugin=mysql_native_password"),
+                spec.getValue().cmd());
+    }
+
+    @Test
+    void aServerThatStopsOnItsParameterGroupLeavesNoContainerAndIsReportedUntilItStarts() {
+        EmulatorConfig config = config(tempDir.resolve("mysql-refused-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        stubStarts(lifecycleManager,
+                new ContainerLifecycleManager.ContainerInfo("refused-container", Map.of(3306,
+                        new ContainerLifecycleManager.EndpointInfo("db1", 3306))),
+                new ContainerLifecycleManager.ContainerInfo("accepted-container", Map.of(3306,
+                        new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = databaseDockerClient("accepted-container");
+        stubStoppedServer(dockerClient, "refused-container",
+                "2026-10-23T10:00:00Z [ERROR] [MY-000077] [Server] mysqld: Error while setting value "
+                        + "'NOT_A_MODE' to 'sql_mode'.\n2026-10-23T10:00:01Z [ERROR] [MY-010119] [Server] Aborting\n");
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        ContainerDetector detector = mock(ContainerDetector.class);
+        when(detector.isRunningInContainer()).thenReturn(false);
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, logStreamer, detector, config,
+                new RegionResolver("us-east-1", "000000000000"), mock(ServiceConfigAccess.class));
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
+
+        assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1", DatabaseEngine.MYSQL,
+                "mysql:8.0.36", "root", "password", "db", Map.of("sql_mode", "NOT_A_MODE")));
+
+        assertTrue(manager.refusedParameterGroup(runtimeId));
+        assertNull(manager.getActiveHandle(runtimeId));
+        verify(lifecycleManager).stopAndRemoveStrict(eq("refused-container"), any());
+
+        RdsContainerHandle accepted = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0.36", "root", "password", "db",
+                Map.of("sql_mode", "STRICT_TRANS_TABLES"));
+
+        assertEquals("accepted-container", accepted.getContainerId());
+        assertFalse(manager.refusedParameterGroup(runtimeId));
     }
 
     @Test
@@ -656,7 +801,7 @@ class RdsContainerManagerTest {
 
         for (int attempt = 0; attempt < 3; attempt++) {
             assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                    DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"),
+                    DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()),
                     "attempt " + attempt + " should report unavailable");
         }
         assertFalse(manager.isDockerReachable());
@@ -677,7 +822,7 @@ class RdsContainerManagerTest {
 
         IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> manager.tryStart("arn:aws:rds:us-east-1:000000000000:db:db1", "db1", "db1",
-                        "floci-rds-db1", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+                        "floci-rds-db1", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()));
 
         assertEquals("no such image: mysql:8.0", failure.getMessage());
         assertTrue(manager.isDockerReachable());
@@ -696,7 +841,7 @@ class RdsContainerManagerTest {
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
         assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()));
 
         // A Docker daemon appears.
         org.mockito.Mockito.reset(lifecycleManager);
@@ -706,7 +851,7 @@ class RdsContainerManagerTest {
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
         RdsContainerHandle handle = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of());
 
         assertEquals("late-container", handle.getContainerId());
         assertEquals(3306, handle.getPort());
@@ -729,12 +874,12 @@ class RdsContainerManagerTest {
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
         assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()));
         assertEquals("created-container", manager.getActiveHandle(runtimeId).getContainerId());
 
         // Still no daemon: the retry keeps the identity rather than dropping it.
         assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db"));
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()));
         assertEquals("created-container", manager.getActiveHandle(runtimeId).getContainerId());
 
         // The daemon is back: the leftover is removed first, then the start goes through.
@@ -745,7 +890,7 @@ class RdsContainerManagerTest {
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
         RdsContainerHandle handle = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of());
 
         assertEquals("late-container", handle.getContainerId());
         verify(lifecycleManager).stopAndRemoveStrict(
@@ -778,7 +923,7 @@ class RdsContainerManagerTest {
         assertEquals(first, manager.getActiveHandle(runtimeId));
 
         RdsContainerHandle retried = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
-                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of());
 
         assertEquals("second-container", retried.getContainerId());
         assertEquals(retried, manager.getActiveHandle(runtimeId));
@@ -1294,6 +1439,8 @@ class RdsContainerManagerTest {
     void restoreScriptDropsNonSystemDatabasesAndRoles() {
         String script = RdsContainerManager.postgresRestoreScript();
 
+        assertTrue(script.contains("WITH (FORCE)"),
+                "Restore must terminate sessions such as pg_cron connected to the target database");
         assertTrue(script.contains("datistemplate = false"),
                 "Script must only drop non-template databases");
         assertTrue(script.contains("datname <> 'postgres'"),
@@ -1456,6 +1603,56 @@ class RdsContainerManagerTest {
         when(storage.hostPersistentPath()).thenReturn(hostRoot.toString());
         when(storage.mode()).thenReturn("persistent");
         return config;
+    }
+
+    /**
+     * A Docker client on which {@code runningContainerId} runs and every exec succeeds, so a
+     * server started with a parameter group is seen listening at once.
+     */
+    private static DockerClient databaseDockerClient(String runningContainerId) {
+        DockerClient dockerClient = mock(DockerClient.class);
+        stubContainerState(dockerClient, runningContainerId, true);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, RETURNS_SELF);
+        ExecCreateCmdResponse created = mock(ExecCreateCmdResponse.class);
+        when(created.getId()).thenReturn("probe");
+        when(createCmd.exec()).thenReturn(created);
+        when(dockerClient.execCreateCmd(anyString())).thenReturn(createCmd);
+        ExecStartCmd startCmd = mock(ExecStartCmd.class);
+        when(startCmd.exec(any())).thenAnswer(invocation -> {
+            ResultCallback.Adapter<Frame> callback = invocation.getArgument(0);
+            callback.onComplete();
+            return callback;
+        });
+        when(dockerClient.execStartCmd(anyString())).thenReturn(startCmd);
+        InspectExecCmd inspectExec = mock(InspectExecCmd.class);
+        InspectExecResponse inspected = mock(InspectExecResponse.class);
+        when(inspected.getExitCodeLong()).thenReturn(0L);
+        when(inspectExec.exec()).thenReturn(inspected);
+        when(dockerClient.inspectExecCmd(anyString())).thenReturn(inspectExec);
+        return dockerClient;
+    }
+
+    /** {@code containerId} has stopped after writing {@code log}. */
+    private static void stubStoppedServer(DockerClient dockerClient, String containerId, String log) {
+        stubContainerState(dockerClient, containerId, false);
+        LogContainerCmd logCmd = mock(LogContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.logContainerCmd(containerId)).thenReturn(logCmd);
+        when(logCmd.exec(any())).thenAnswer(invocation -> {
+            ResultCallback.Adapter<Frame> callback = invocation.getArgument(0);
+            callback.onNext(new Frame(StreamType.STDERR, log.getBytes(StandardCharsets.UTF_8)));
+            callback.onComplete();
+            return callback;
+        });
+    }
+
+    private static void stubContainerState(DockerClient dockerClient, String containerId, boolean running) {
+        InspectContainerResponse.ContainerState state = mock(InspectContainerResponse.ContainerState.class);
+        when(state.getRunning()).thenReturn(running);
+        InspectContainerResponse response = mock(InspectContainerResponse.class);
+        when(response.getState()).thenReturn(state);
+        InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class);
+        when(inspectCmd.exec()).thenReturn(response);
+        when(dockerClient.inspectContainerCmd(containerId)).thenReturn(inspectCmd);
     }
 
     private static void stubStarts(

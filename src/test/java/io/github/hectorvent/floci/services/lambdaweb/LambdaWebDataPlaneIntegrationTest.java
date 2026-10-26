@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambdaweb;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
@@ -16,6 +17,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
@@ -36,6 +38,9 @@ class LambdaWebDataPlaneIntegrationTest {
 
     @Inject
     S3Service s3Service;
+
+    @Inject
+    IamService iamService;
 
     @Inject
     LambdaWebMetrics metrics;
@@ -123,6 +128,35 @@ class LambdaWebDataPlaneIntegrationTest {
         given().when().delete(BASE + "/web-functions/" + functionName + "/endpoints/dev").then().statusCode(204);
         given().header("Host", domain).when().get("/")
                 .then().statusCode(404).header("lambda-web-error-type", "Platform.InvalidEndpoint");
+        given().when().delete(BASE + "/web-functions/" + functionName).then().statusCode(204);
+    }
+
+    @Test
+    void anEnvironmentDoesNotStartWhenLambdaCanNoLongerAssumeTheRole() {
+        String functionName = "dp-role-" + Long.toString(System.nanoTime(), 36);
+        String domain = createFunction(functionName, "ApplicationManaged", LambdaWebZips.indexJs(""),
+                "arn:aws:iam::000000000000:role/" + functionName);
+        iamService.updateAssumeRolePolicy(functionName, """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}""");
+
+        Response response = given().header("Host", domain).when().get("/");
+        response.then().statusLine("HTTP/1.1 502 Bad Gateway")
+                .header("content-type", "text/html")
+                .header("connection", "keep-alive")
+                .header("lambda-web-error-type", "Platform.CannotAssumeRole")
+                .header("lambda-web-request-id", matchesPattern(REQUEST_ID))
+                .header("lambda-web-logstream", nullValue())
+                .header("content-length", "228")
+                .body(equalTo(LambdaWebErrorPages.html(LambdaWebErrorPages.CANNOT_ASSUME_ROLE,
+                        response.header("lambda-web-request-id"))));
+
+        iamService.deleteRole(functionName);
+        given().header("Host", domain).when().get("/")
+                .then().statusCode(502).header("lambda-web-error-type", "Platform.CannotAssumeRole");
+        given().contentType("application/json").body("{}")
+                .when().post(BASE + "/web-functions/" + functionName + "/list-revisions")
+                .then().statusCode(200).body("revisions[0].state", equalTo("Active"));
         given().when().delete(BASE + "/web-functions/" + functionName).then().statusCode(204);
     }
 
@@ -269,6 +303,64 @@ class LambdaWebDataPlaneIntegrationTest {
     }
 
     @Test
+    void aPerRegionEndpointCountsAPageInTheRegionThatServedAndInTheHomeRegion() {
+        String functionName = "dp-regions-" + Long.toString(System.nanoTime(), 36);
+        createFunction(functionName);
+        String endpoints = BASE + "/web-functions/" + functionName + "/endpoints";
+        String revisionId = given().when().get(endpoints + "/dev").then().statusCode(200)
+                .extract().path("revisionWeights[0].revisionId");
+        String west = given().contentType("application/json")
+                .body("""
+                        {"endpointName": "per", "endpointType": "PerRegion", "regions": ["us-west-2"],
+                         "authType": "IamAuth", "revisionWeights": [{"revisionId": "%s", "weight": 100}]}"""
+                        .formatted(revisionId))
+                .when().put(endpoints)
+                .then().statusCode(202)
+                .extract().path("regionalEndpoints.us-west-2.domainName");
+        given().header("Host", west).when().get("/").then().statusCode(403);
+
+        Map<String, String> endpoint = Map.of("FunctionName", functionName, "EndpointName", "per");
+        metrics.awaitPublished(Duration.ofSeconds(5));
+        assertEquals(1, LambdaWebMetricStatistics.of("us-west-2", LambdaWebMetrics.NAMESPACE,
+                "HTTPResponseStatusClass4XX", endpoint, "Sum"));
+        assertEquals(1, LambdaWebMetricStatistics.of("us-east-1", LambdaWebMetrics.NAMESPACE,
+                "HTTPResponseStatusClass4XX", endpoint, "Sum"));
+
+        given().when().delete(endpoints + "/per").then().statusCode(204);
+        given().header("Host", west).when().get("/")
+                .then().statusCode(404).header("lambda-web-error-type", "Platform.InvalidEndpoint");
+        given().when().delete(BASE + "/web-functions/" + functionName).then().statusCode(204);
+    }
+
+    @Test
+    void theGlobalDomainOfAFunctionInAnotherRegionCountsAPageInTheDefaultRegion() {
+        String functionName = "dp-global-" + Long.toString(System.nanoTime(), 36);
+        createFunction("us-west-2", functionName, "ApplicationManaged", LambdaWebZips.indexJs(""), ROLE);
+        String west = auth("test", "us-west-2", "lambda");
+        String endpoints = BASE + "/web-functions/" + functionName + "/endpoints";
+        String revisionId = given().header("Authorization", west).when().get(endpoints + "/dev").then().statusCode(200)
+                .extract().path("revisionWeights[0].revisionId");
+        String global = given().header("Authorization", west).contentType("application/json")
+                .body("""
+                        {"endpointName": "global", "endpointType": "MultiRegion", "regions": ["us-east-1"],
+                         "authType": "IamAuth", "revisionWeights": [{"revisionId": "%s", "weight": 100}]}"""
+                        .formatted(revisionId))
+                .when().put(endpoints)
+                .then().statusCode(202)
+                .extract().path("domainName");
+        given().header("Host", global).when().get("/").then().statusCode(403);
+
+        Map<String, String> endpoint = Map.of("FunctionName", functionName, "EndpointName", "global");
+        metrics.awaitPublished(Duration.ofSeconds(5));
+        assertEquals(1, LambdaWebMetricStatistics.of("us-east-1", LambdaWebMetrics.NAMESPACE,
+                "HTTPResponseStatusClass4XX", endpoint, "Sum"));
+        assertEquals(1, LambdaWebMetricStatistics.of("us-west-2", LambdaWebMetrics.NAMESPACE,
+                "HTTPResponseStatusClass4XX", endpoint, "Sum"));
+        given().header("Authorization", west).when().delete(BASE + "/web-functions/" + functionName)
+                .then().statusCode(204);
+    }
+
+    @Test
     void otherHostsStillReachTheControlPlane() {
         given().when().get(BASE + "/web-account-settings").then().statusCode(200);
     }
@@ -282,9 +374,18 @@ class LambdaWebDataPlaneIntegrationTest {
     }
 
     private String createFunction(String functionName, String authType, byte[] code) {
-        s3Service.createBucket(BUCKET, "us-east-1");
+        return createFunction(functionName, authType, code, ROLE);
+    }
+
+    private String createFunction(String functionName, String authType, byte[] code, String role) {
+        return createFunction("us-east-1", functionName, authType, code, role);
+    }
+
+    private String createFunction(String region, String functionName, String authType, byte[] code, String role) {
+        LambdaWebRoles.trustLambda(iamService, role);
+        LambdaWebCodeBuckets.create(s3Service, BUCKET);
         s3Service.putObject(BUCKET, "app.zip", code, "application/zip", Map.of());
-        return given().contentType("application/json")
+        return given().header("Authorization", auth("test", region, "lambda")).contentType("application/json")
                 .body("""
                         {"functionName": "%s",
                          "revisionConfig": {
@@ -293,7 +394,7 @@ class LambdaWebDataPlaneIntegrationTest {
                            "serviceConfig": {"executionRoleArn": "%s"}},
                          "endpointConfig": {"endpointName": "dev", "endpointType": "HomeRegion",
                                             "authType": "%s", "autoDeploymentMode": "LatestRevision"}}
-                        """.formatted(functionName, BUCKET, ROLE, authType))
+                        """.formatted(functionName, BUCKET, role, authType))
                 .when().put(BASE + "/web-functions")
                 .then().statusCode(202)
                 .extract().path("endpoint.domainName");

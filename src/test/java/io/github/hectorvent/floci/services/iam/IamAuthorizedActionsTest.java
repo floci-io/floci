@@ -23,6 +23,15 @@ class IamAuthorizedActionsTest {
     }
 
     @Test
+    void budgetsOperationsAreAuthorizedAsModifyBudgetOrViewBudget() {
+        assertEquals("budgets:ModifyBudget", IamAuthorizedActions.actionFor("budgets", "CreateBudget"));
+        assertEquals("budgets:ModifyBudget", IamAuthorizedActions.actionFor("budgets", "UpdateSubscriber"));
+        assertEquals("budgets:ViewBudget", IamAuthorizedActions.actionFor("budgets", "DescribeBudgets"));
+        // A budget action is authorized by an action of its own.
+        assertEquals("budgets:CreateBudgetAction", IamAuthorizedActions.actionFor("budgets", "CreateBudgetAction"));
+    }
+
+    @Test
     void anOperationTheFileDoesNotNameKeepsItsOwnName() {
         assertEquals("sqs:SendMessage", IamAuthorizedActions.actionFor("sqs", "SendMessage"));
     }

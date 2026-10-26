@@ -262,17 +262,17 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
                 ctx, r.getLogicalId());
         String protocol = ctx.resolveOptional(props, "Protocol");
         String protocolVersion = ctx.resolveOptional(props, "ProtocolVersion");
-        Integer port = optionalInt(props, ctx, "Port");
+        Integer port = ctx.resolveOptionalInt(props, "Port");
         String vpcId = ctx.resolveOptional(props, "VpcId");
         String targetType = ctx.resolveOptional(props, "TargetType");
         String hcProtocol = ctx.resolveOptional(props, "HealthCheckProtocol");
         String hcPort = ctx.resolveOptional(props, "HealthCheckPort");
         Boolean hcEnabled = parseBooleanOrNull(ctx.resolveOptional(props, "HealthCheckEnabled"));
         String hcPath = ctx.resolveOptional(props, "HealthCheckPath");
-        Integer hcInterval = optionalInt(props, ctx, "HealthCheckIntervalSeconds");
-        Integer hcTimeout = optionalInt(props, ctx, "HealthCheckTimeoutSeconds");
-        Integer healthyThreshold = optionalInt(props, ctx, "HealthyThresholdCount");
-        Integer unhealthyThreshold = optionalInt(props, ctx, "UnhealthyThresholdCount");
+        Integer hcInterval = ctx.resolveOptionalInt(props, "HealthCheckIntervalSeconds");
+        Integer hcTimeout = ctx.resolveOptionalInt(props, "HealthCheckTimeoutSeconds");
+        Integer healthyThreshold = ctx.resolveOptionalInt(props, "HealthyThresholdCount");
+        Integer unhealthyThreshold = ctx.resolveOptionalInt(props, "UnhealthyThresholdCount");
         String matcher = parseMatcher(props, ctx);
         String ipAddressType = ctx.resolveOptional(props, "IpAddressType");
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
@@ -305,14 +305,21 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
      */
     private void provisionListener(StackResource r, JsonNode props, ProvisionContext ctx) {
         String lbArn = ctx.resolveOptional(props, "LoadBalancerArn");
-        String protocol = ctx.resolveOrDefault(props, "Protocol", "HTTP");
-        int port = parseInt(ctx.resolveOptional(props, "Port"), "Port", 80);
+        Listener prior = ctx.isUpdate() ? priorListener(ctx) : null;
+        String effectiveLbArn = lbArn != null ? lbArn : prior != null ? prior.getLoadBalancerArn() : null;
+        LoadBalancer lb = effectiveLbArn == null ? null
+                : elbV2Service.describeLoadBalancers(ctx.region(), List.of(effectiveLbArn),
+                null, null, null).getFirst();
+        boolean gateway = lb != null && "gateway".equals(lb.getType());
+        String protocol = gateway ? ctx.resolveOptional(props, "Protocol")
+                : ctx.resolveOrDefault(props, "Protocol", "HTTP");
+        Integer port = gateway ? ctx.resolveOptionalInt(props, "Port")
+                : Integer.valueOf(parseInt(ctx.resolveOptional(props, "Port"), "Port", 80));
         String sslPolicy = ctx.resolveOptional(props, "SslPolicy");
         List<String> certificates = parseCertificates(props, ctx);
         List<Action> defaultActions = parseActions(props != null ? props.get("DefaultActions") : null, ctx);
 
         Listener listener;
-        Listener prior = ctx.isUpdate() ? priorListener(ctx) : null;
         if (prior != null && (lbArn == null || lbArn.equals(prior.getLoadBalancerArn()))) {
             listener = elbV2Service.modifyListener(ctx.region(), ctx.priorPhysicalId(), protocol, port, sslPolicy,
                     certificates, defaultActions, null);
@@ -566,26 +573,6 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     private static int parseInt(String value, String property, int fallback) {
         if (value == null || value.isBlank()) {
             return fallback;
-        }
-        try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException e) {
-            throw notAnInteger(property);
-        }
-    }
-
-    /**
-     * An omitted property stays unset for the service to default, and so does one an intrinsic resolves
-     * to nothing: the engine resolves {@code AWS::NoValue} to blank, which is how the common
-     * {@code Fn::If [cond, value, AWS::NoValue]} drops a property. A value written into the template
-     * has to be an integer, a literal blank included, as CloudFormation's schema type check requires.
-     * A {@code Ref} to a parameter whose value is blank cannot be told apart from {@code AWS::NoValue}
-     * here, so it stays unset too.
-     */
-    private static Integer optionalInt(JsonNode props, ProvisionContext ctx, String property) {
-        String value = ctx.resolveOptional(props, property);
-        if (value == null || (value.isBlank() && !props.get(property).isTextual())) {
-            return null;
         }
         try {
             return Integer.parseInt(value.trim());

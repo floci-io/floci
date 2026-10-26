@@ -2,8 +2,11 @@ package io.github.hectorvent.floci.services.applicationautoscaling;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
+import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.Alarm;
@@ -45,6 +48,8 @@ import java.util.UUID;
 public class ApplicationAutoScalingService {
 
     private static final Logger LOG = Logger.getLogger(ApplicationAutoScalingService.class);
+    private static final int MAX_TARGET_PAGE_SIZE = 50;
+    private static final int MAX_POLICY_PAGE_SIZE = 10;
 
     static final Set<String> SERVICE_NAMESPACES = Set.of(
             "ecs", "elasticmapreduce", "ec2", "appstream", "dynamodb", "rds", "sagemaker",
@@ -85,6 +90,7 @@ public class ApplicationAutoScalingService {
     private final StorageBackend<String, ScalingActivity> activities;
     private final RegionResolver regionResolver;
     private final CloudWatchMetricsService cloudWatchMetricsService;
+    private final SignedMarkers pageTokens = new SignedMarkers();
 
     @Inject
     public ApplicationAutoScalingService(StorageFactory factory,
@@ -186,6 +192,18 @@ public class ApplicationAutoScalingService {
                 .toList();
     }
 
+    PaginatedResult<ScalableTarget> describeScalableTargets(String serviceNamespace, List<String> resourceIds,
+                                                            String scalableDimension, Integer maxResults,
+                                                            String nextToken, String region) {
+        String cursor = decodeNextToken(nextToken, "DescribeScalableTargets");
+        List<ScalableTarget> matching = describeScalableTargets(serviceNamespace, resourceIds,
+                scalableDimension, region);
+        return signedPage(Pagination.paginate(matching, ApplicationAutoScalingService::scalableTargetCursor,
+                pageSize(maxResults, MAX_TARGET_PAGE_SIZE), cursor,
+                pageNamespace(resourceIds, "DescribeScalableTargets", region, serviceNamespace, scalableDimension),
+                token -> invalidNextToken("DescribeScalableTargets")));
+    }
+
     /**
      * Deregisters a scalable target and, per AWS semantics, deletes every scaling policy
      * attached to it along with the CloudWatch alarms those policies own.
@@ -275,8 +293,21 @@ public class ApplicationAutoScalingService {
                 .filter(p -> resourceId == null || resourceId.equals(p.getResourceId()))
                 .filter(p -> scalableDimension == null || scalableDimension.equals(p.getScalableDimension()))
                 .filter(p -> policyNames == null || policyNames.isEmpty() || policyNames.contains(p.getPolicyName()))
-                .sorted(Comparator.comparing(ScalingPolicy::getPolicyName))
+                .sorted(Comparator.comparing(ApplicationAutoScalingService::scalingPolicyCursor))
                 .toList();
+    }
+
+    PaginatedResult<ScalingPolicy> describeScalingPolicies(String serviceNamespace, String resourceId,
+                                                           String scalableDimension, List<String> policyNames,
+                                                           Integer maxResults, String nextToken, String region) {
+        String cursor = decodeNextToken(nextToken, "DescribeScalingPolicies");
+        List<ScalingPolicy> matching = describeScalingPolicies(serviceNamespace, resourceId,
+                scalableDimension, policyNames, region);
+        return signedPage(Pagination.paginate(matching, ApplicationAutoScalingService::scalingPolicyCursor,
+                pageSize(maxResults, MAX_POLICY_PAGE_SIZE), cursor,
+                pageNamespace(policyNames, "DescribeScalingPolicies", region, serviceNamespace,
+                        resourceId, scalableDimension),
+                token -> invalidNextToken("DescribeScalingPolicies")));
     }
 
     public void deleteScalingPolicy(String policyName, String serviceNamespace, String resourceId,
@@ -511,6 +542,57 @@ public class ApplicationAutoScalingService {
     private static double nowEpochSeconds() {
         Instant now = Instant.now();
         return now.getEpochSecond() + (now.getNano() / 1_000_000 / 1000.0d);
+    }
+
+    private static int pageSize(Integer maxResults, int maximum) {
+        if (maxResults != null && (maxResults < 1 || maxResults > maximum)) {
+            throw new AwsException("ValidationException",
+                    "MaxResults must be between 1 and " + maximum + ".", 400);
+        }
+        return maxResults == null ? maximum : maxResults;
+    }
+
+    private static AwsException invalidNextToken(String operation) {
+        return new AwsException("InvalidNextTokenException",
+                "Invalid NextToken for " + operation + ".", 400);
+    }
+
+    private String decodeNextToken(String nextToken, String operation) {
+        if (nextToken == null) {
+            return null;
+        }
+        String cursor = pageTokens.cursorOf(nextToken);
+        if (cursor == null) {
+            throw invalidNextToken(operation);
+        }
+        return cursor;
+    }
+
+    private <T> PaginatedResult<T> signedPage(PaginatedResult<T> page) {
+        return new PaginatedResult<>(page.items(),
+                page.nextToken() == null ? null : pageTokens.issue(page.nextToken()));
+    }
+
+    private static String scalableTargetCursor(ScalableTarget target) {
+        return target.getResourceId() + "\u0000" + target.getScalableDimension();
+    }
+
+    private static String scalingPolicyCursor(ScalingPolicy policy) {
+        return policy.getPolicyName() + "\u0000" + policy.getResourceId()
+                + "\u0000" + policy.getScalableDimension();
+    }
+
+    private static String pageNamespace(List<String> filters, String... fields) {
+        StringBuilder namespace = new StringBuilder();
+        for (String field : fields) {
+            namespace.append(field == null ? "-1:" : field.length() + ":" + field);
+        }
+        List<String> normalized = filters == null ? List.of() : filters.stream().distinct().sorted().toList();
+        namespace.append(normalized.size()).append(':');
+        for (String filter : normalized) {
+            namespace.append(filter.length()).append(':').append(filter);
+        }
+        return namespace.toString();
     }
 
     private static String targetKey(String region, String serviceNamespace, String resourceId,

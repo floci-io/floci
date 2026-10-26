@@ -10,7 +10,9 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
+import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.Route;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
 import io.github.hectorvent.floci.services.ec2.model.RouteTableAssociation;
@@ -18,7 +20,10 @@ import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.invocation.Invocation;
+import org.mockito.stubbing.OngoingStubbing;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,7 +40,9 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -55,6 +62,8 @@ class Ec2NetworkCfnProvisionerTest {
     private static final String ASSOC_ID = "rtbassoc-0123456789abcdef0";
     private static final String ALLOC_ID = "eipalloc-0123456789abcdef0";
     private static final String PUBLIC_IP = "54.0.0.1";
+    private static final String PREFIX_LIST_ID = "pl-0123456789abcdef0";
+    private static final PrefixListEntry OFFICE = new PrefixListEntry("192.0.2.0/24", "office");
 
     private final Ec2Service ec2 = mock(Ec2Service.class);
     private final Ec2NetworkCfnProvisioner provisioner = new Ec2NetworkCfnProvisioner(ec2);
@@ -65,14 +74,20 @@ class Ec2NetworkCfnProvisionerTest {
     }
 
     private ProvisionContext ctx(String priorPhysicalId) {
+        return ctx(priorPhysicalId, null);
+    }
+
+    private ProvisionContext ctx(String priorPhysicalId, JsonNode priorProperties) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.resolveStringList(any())).thenCallRealMethod();
-        return new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId);
+        return new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId, event -> { },
+                priorProperties);
     }
 
     private static StackResource resource(String type, String logicalId) {
@@ -1002,6 +1017,414 @@ class Ec2NetworkCfnProvisionerTest {
                 withTags(mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.0/24"), "k", "v"), ctx(SUBNET_ID)));
 
         verify(ec2, never()).deleteSubnet(any(), any());
+    }
+
+    private static ManagedPrefixList prefixList(long version, int maxEntries, PrefixListEntry... entries) {
+        ManagedPrefixList list = new ManagedPrefixList();
+        list.setPrefixListId(PREFIX_LIST_ID);
+        list.setPrefixListName("firewall");
+        list.setPrefixListArn("arn:aws:ec2:us-east-1:000000000000:prefix-list/" + PREFIX_LIST_ID);
+        list.setOwnerId("000000000000");
+        list.setAddressFamily("IPv4");
+        list.setMaxEntries(maxEntries);
+        list.setVersion(version);
+        list.getEntriesByVersion().put(String.valueOf(version), List.of(entries));
+        return list;
+    }
+
+    /** PrefixList properties with the given capacity and entries, each a CIDR followed by its description. */
+    private ObjectNode prefixListProps(int maxEntries, String... cidrsAndDescriptions) {
+        ObjectNode props = mapper.createObjectNode().put("PrefixListName", "firewall").put("AddressFamily", "IPv4")
+                .put("MaxEntries", maxEntries);
+        ArrayNode entries = props.putArray("Entries");
+        for (int i = 0; i + 1 < cidrsAndDescriptions.length; i += 2) {
+            entries.addObject().put("Cidr", cidrsAndDescriptions[i]).put("Description", cidrsAndDescriptions[i + 1]);
+        }
+        return props;
+    }
+
+    private static List<String> entryPairs(List<PrefixListEntry> entries) {
+        return entries.stream().map(entry -> entry.getCidr() + "=" + entry.getDescription()).toList();
+    }
+
+    /** DescribeManagedPrefixLists answers with each state in turn, then keeps answering with the last. */
+    private void describesPrefixList(ManagedPrefixList first, ManagedPrefixList... then) {
+        OngoingStubbing<List<ManagedPrefixList>> answers =
+                when(ec2.describeManagedPrefixLists(REGION, List.of(PREFIX_LIST_ID), Map.of())).thenReturn(List.of(first));
+        for (ManagedPrefixList next : then) {
+            answers = answers.thenReturn(List.of(next));
+        }
+    }
+
+    @Test
+    void prefixListUsesTheEc2IdAndItsFourRegistryAttributes() {
+        ManagedPrefixList created = prefixList(1, 2, new PrefixListEntry("192.0.2.19/24", "office"));
+        when(ec2.createManagedPrefixList(eq(REGION), eq("firewall"), eq("IPv4"), eq(2), any(), any())).thenReturn(created);
+        StackResource r = resource("AWS::EC2::PrefixList", "Firewall");
+
+        provisioner.provision(r, withTags(prefixListProps(2, "192.0.2.19/24", "office"), "team", "network"), ctx());
+
+        assertEquals(PREFIX_LIST_ID, r.getPhysicalId());
+        assertEquals(Map.of("PrefixListId", PREFIX_LIST_ID, "Arn", created.getPrefixListArn(),
+                "OwnerId", "000000000000", "Version", "1"), r.getAttributes());
+        ArgumentCaptor<List<PrefixListEntry>> entries = ArgumentCaptor.captor();
+        verify(ec2).createManagedPrefixList(eq(REGION), eq("firewall"), eq("IPv4"), eq(2), entries.capture(), eq(List.of()));
+        assertEquals(List.of("192.0.2.19/24=office"), entryPairs(entries.getValue()), "a CIDR is passed on as written");
+        assertEquals(List.of("team=network"), tagsWritten(PREFIX_LIST_ID), "tags go through CreateTags, which checks them");
+    }
+
+    @Test
+    void prefixListRequiredPropertiesAreValidatedBeforeAnyServiceCall() {
+        record Case(ObjectNode props, String expected) { }
+        List<Case> cases = List.of(
+                new Case(prefixListProps(1).without("PrefixListName"), "AWS::EC2::PrefixList requires PrefixListName"),
+                new Case(prefixListProps(1).without("AddressFamily"), "AWS::EC2::PrefixList requires AddressFamily"),
+                new Case(prefixListProps(1).without("MaxEntries"), "AWS::EC2::PrefixList requires MaxEntries"),
+                new Case(prefixListProps(1).put("MaxEntries", "ten"), "Value of property MaxEntries must be an integer."),
+                new Case(prefixListProps(1).put("MaxEntries", ""), "Value of property MaxEntries must be an integer."),
+                new Case(withEntry(prefixListProps(1), mapper.createObjectNode().put("Description", "no cidr")),
+                        "AWS::EC2::PrefixList requires Entries.Cidr"));
+        for (Case c : cases) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> provisioner.provision(resource("AWS::EC2::PrefixList", "Firewall"), c.props(), ctx()), c.expected());
+            assertEquals("ValidationError", e.getErrorCode());
+            assertEquals(c.expected(), e.getMessage());
+        }
+        verify(ec2, never()).createManagedPrefixList(any(), any(), any(), any(), any(), any());
+    }
+
+    private static ObjectNode withEntry(ObjectNode props, ObjectNode entry) {
+        ((ArrayNode) props.get("Entries")).add(entry);
+        return props;
+    }
+
+    @Test
+    void prefixListDeleteToleratesOnlyItsOwnNotFoundCode() {
+        provisioner.delete("AWS::EC2::PrefixList", PREFIX_LIST_ID, REGION);
+        verify(ec2).deleteManagedPrefixList(REGION, PREFIX_LIST_ID);
+
+        doThrow(new AwsException("InvalidPrefixListID.NotFound", "gone", 400)).when(ec2).deleteManagedPrefixList(REGION, "pl-gone");
+        assertDoesNotThrow(() -> provisioner.delete("AWS::EC2::PrefixList", "pl-gone", REGION));
+        doThrow(new AwsException("DependencyViolation", "in use", 400)).when(ec2).deleteManagedPrefixList(REGION, "pl-busy");
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.delete("AWS::EC2::PrefixList", "pl-busy", REGION));
+        assertEquals("DependencyViolation", e.getErrorCode());
+    }
+
+    @Test
+    void aChangedDescriptionIsAddedBackByASecondCallAfterTheFirstCarriesTheRestAndARollbackDoesTheSame() {
+        ManagedPrefixList changed = prefixList(3, 3, new PrefixListEntry("192.0.2.0/24", "head office"),
+                new PrefixListEntry("198.51.100.0/24", "branch"));
+        describesPrefixList(prefixList(1, 3, OFFICE), changed, changed);
+        when(ec2.modifyManagedPrefixList(eq(REGION), eq(PREFIX_LIST_ID), any(), any(), any(), any(), any()))
+                .thenReturn(prefixList(2, 3), changed, prefixList(4, 3), prefixList(5, 3, OFFICE));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID,
+                Map.of("PrefixListId", PREFIX_LIST_ID, "Version", "1"));
+
+        provisioner.provision(r, prefixListProps(3, "192.0.2.0/24", "head office", "198.51.100.0/24", "branch"),
+                ctx(PREFIX_LIST_ID));
+
+        assertEquals(PREFIX_LIST_ID, r.getPhysicalId());
+        assertEquals("3", r.getAttributes().get("Version"));
+        assertEquals(List.of(
+                "version=1 name=firewall max=null add=[198.51.100.0/24=branch] remove=[192.0.2.0/24]",
+                "version=2 name=null max=null add=[192.0.2.0/24=head office] remove=[]"),
+                modifyCalls(), "EC2 refuses one call that removes and adds the same CIDR");
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(List.of(
+                "version=3 name=firewall max=null add=[] remove=[198.51.100.0/24, 192.0.2.0/24]",
+                "version=4 name=null max=null add=[192.0.2.0/24=office] remove=[]"),
+                modifyCalls().subList(2, 4));
+        assertEquals("5", r.getAttributes().get("Version"), "the restore makes new versions, and Version follows them");
+        assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void aCidrWrittenWithHostBitsIsMatchedByBlockWhenItsDescriptionChanges() {
+        describesPrefixList(prefixList(1, 2, new PrefixListEntry("192.0.2.19/24", "office")));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+        when(ec2.modifyManagedPrefixList(eq(REGION), eq(PREFIX_LIST_ID), any(), any(), any(), any(), any()))
+                .thenReturn(prefixList(2, 2), prefixList(3, 2, new PrefixListEntry("192.0.2.0/24", "head office")));
+
+        provisioner.provision(r, prefixListProps(2, "192.0.2.0/24", "head office"), ctx(PREFIX_LIST_ID));
+
+        assertEquals(List.of(
+                "version=1 name=firewall max=null add=[] remove=[192.0.2.19/24]",
+                "version=2 name=null max=null add=[192.0.2.0/24=head office] remove=[]"), modifyCalls());
+    }
+
+    @Test
+    void aDescriptionChangeThatWouldOverflowTheCapacityFailsBeforeAnyCall() {
+        ManagedPrefixList current = prefixList(1, 2, OFFICE);
+        current.setTags(List.of(new Tag("team", "network")));
+        describesPrefixList(current);
+        // What EC2 would answer: a removal goes through, an addition past the capacity does not.
+        when(ec2.modifyManagedPrefixList(eq(REGION), eq(PREFIX_LIST_ID), any(), any(), any(), any(), any()))
+                .thenReturn(prefixList(2, 2))
+                .thenThrow(new AwsException("InvalidParameterValue", "The number of entries exceeds the maximum of 2.", 400));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+        ObjectNode props = withTags(prefixListProps(2, "192.0.2.0/24", "head office", "198.51.100.0/24", "branch",
+                "203.0.113.0/24", "lab"), "team", "platform");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx(PREFIX_LIST_ID)));
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertEquals("The number of entries exceeds the maximum of 2.", e.getMessage());
+        assertEquals(List.of(), modifyCalls(), "the list is never left half changed");
+        ArgumentCaptor<List<Tag>> written = ArgumentCaptor.captor();
+        verify(ec2, times(2)).createTags(eq(REGION), eq(List.of(PREFIX_LIST_ID)), written.capture());
+        assertEquals(List.of("team=network"), pairs(written.getAllValues().get(1)), "the prior tags are written back");
+    }
+
+    @Test
+    void aRenameKeepsTheVersionAndARollbackPutsTheNameBack() {
+        ManagedPrefixList renamed = prefixList(1, 2, OFFICE);
+        renamed.setPrefixListName("firewall-renamed");
+        describesPrefixList(prefixList(1, 2, OFFICE), renamed, renamed);
+        when(ec2.modifyManagedPrefixList(eq(REGION), eq(PREFIX_LIST_ID), any(), any(), any(), any(), any()))
+                .thenReturn(renamed, prefixList(1, 2, OFFICE));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+
+        provisioner.provision(r, prefixListProps(2, "192.0.2.0/24", "office").put("PrefixListName", "firewall-renamed"),
+                ctx(PREFIX_LIST_ID));
+
+        assertEquals("1", r.getAttributes().get("Version"), "a rename makes no new version");
+        assertTrue(provisioner.rollbackUpdate(r));
+        assertEquals(List.of("version=1 name=firewall-renamed max=null add=[] remove=[]",
+                "version=1 name=firewall max=null add=[] remove=[]"), modifyCalls());
+    }
+
+    @Test
+    void anUnchangedPrefixListIsKeptWithoutAModifyOrASnapshot() {
+        describesPrefixList(prefixList(1, 2, OFFICE));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+
+        provisioner.provision(r, prefixListProps(2, "192.0.2.19/24", "office"), ctx(PREFIX_LIST_ID));
+
+        assertEquals(PREFIX_LIST_ID, r.getPhysicalId());
+        assertEquals("1", r.getAttributes().get("Version"));
+        assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR),
+                "a CIDR written with host bits is the same block, not a change");
+        verify(ec2, never()).modifyManagedPrefixList(any(), any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).createManagedPrefixList(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aResizeAloneChangesOnlyMaxEntriesAndARollbackPutsTheCapacityBack() {
+        ManagedPrefixList resized = prefixList(1, 5, OFFICE);
+        describesPrefixList(prefixList(1, 2, OFFICE), resized, resized);
+        when(ec2.modifyManagedPrefixList(eq(REGION), eq(PREFIX_LIST_ID), any(), any(), any(), any(), any()))
+                .thenReturn(resized, prefixList(1, 2, OFFICE));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+
+        provisioner.provision(r, prefixListProps(5, "192.0.2.0/24", "office"), ctx(PREFIX_LIST_ID));
+        assertEquals("1", r.getAttributes().get("Version"), "only an entry change makes a new version");
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(List.of("version=1 name=firewall max=5 add=[] remove=[]",
+                "version=1 name=firewall max=2 add=[] remove=[]"), modifyCalls());
+    }
+
+    @Test
+    void anUpdateWithoutMaxEntriesKeepsTheCapacity() {
+        describesPrefixList(prefixList(1, 5, OFFICE));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+
+        provisioner.provision(r, prefixListProps(5, "192.0.2.0/24", "office").without("MaxEntries"), ctx(PREFIX_LIST_ID));
+
+        verify(ec2, never()).modifyManagedPrefixList(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void anAddressFamilyChangeFailsTheUpdateBeforeAnythingChanges() {
+        describesPrefixList(prefixList(1, 2, OFFICE));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+        ObjectNode props = withTags(prefixListProps(2), "team", "network").put("AddressFamily", "IPv6");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx(PREFIX_LIST_ID)));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("AWS::EC2::PrefixList cannot change the AddressFamily of prefix list " + PREFIX_LIST_ID
+                + " from IPv4 to IPv6", e.getMessage());
+        verify(ec2, never()).modifyManagedPrefixList(any(), any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).createTags(any(), any(), any());
+        verify(ec2, never()).createManagedPrefixList(any(), any(), any(), any(), any(), any());
+        assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void changingMaxEntriesAndEntriesTogetherFailsTheUpdateBeforeAnythingChanges() {
+        describesPrefixList(prefixList(1, 2, OFFICE));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+        ObjectNode props = withTags(prefixListProps(3, "192.0.2.0/24", "office", "198.51.100.0/24", "branch"),
+                "team", "network");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx(PREFIX_LIST_ID)));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("AWS::EC2::PrefixList cannot change MaxEntries (from 2 to 3) and Entries (1 to add, 0 to remove)"
+                + " in the same update", e.getMessage());
+        verify(ec2, never()).modifyManagedPrefixList(any(), any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).createTags(any(), any(), any());
+        assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void aPrefixListGoneOutOfBandIsCreatedAnewAndThePriorIdIsOwedToCleanup() {
+        when(ec2.describeManagedPrefixLists(REGION, List.of("pl-gone"), Map.of()))
+                .thenThrow(new AwsException("InvalidPrefixListID.NotFound", "gone", 400));
+        when(ec2.createManagedPrefixList(eq(REGION), eq("firewall"), eq("IPv4"), eq(2), any(), any()))
+                .thenReturn(prefixList(1, 2, OFFICE));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", "pl-gone", Map.of("PrefixListId", "pl-gone"));
+
+        provisioner.provision(r, prefixListProps(2, "192.0.2.0/24", "office"), ctx("pl-gone"));
+
+        assertEquals(PREFIX_LIST_ID, r.getPhysicalId());
+        assertEquals("pl-gone", provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
+    void droppingTheTagsThePreviousTemplateDeclaredRemovesThem() {
+        ManagedPrefixList current = prefixList(1, 2, OFFICE);
+        current.setTags(List.of(new Tag("team", "network"), new Tag("aws:cloudformation:stack-id", "stack")));
+        describesPrefixList(current);
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+        JsonNode previous = withTags(prefixListProps(2, "192.0.2.0/24", "office"), "team", "network");
+
+        provisioner.provision(r, prefixListProps(2, "192.0.2.0/24", "office"), ctx(PREFIX_LIST_ID, previous));
+
+        ArgumentCaptor<List<Tag>> removed = ArgumentCaptor.captor();
+        verify(ec2).deleteTags(eq(REGION), eq(List.of(PREFIX_LIST_ID)), removed.capture());
+        assertEquals(List.of("team=null"), pairs(removed.getValue()));
+        verify(ec2, never()).createTags(any(), any(), any());
+    }
+
+    @Test
+    void aPrefixListWhoseTemplatesNeverDeclaredTagsKeepsTheTagsItCarries() {
+        ManagedPrefixList current = prefixList(1, 2, OFFICE);
+        current.setTags(List.of(new Tag("owner", "ops")));
+        describesPrefixList(current);
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+
+        provisioner.provision(r, prefixListProps(2, "192.0.2.0/24", "office"),
+                ctx(PREFIX_LIST_ID, prefixListProps(2, "192.0.2.0/24", "office")));
+
+        verify(ec2, never()).deleteTags(any(), any(), any());
+        verify(ec2, never()).createTags(any(), any(), any());
+    }
+
+    @Test
+    void aRejectedModifyPutsThePriorTagsBackAndLeavesTheListOnItsVersion() {
+        ManagedPrefixList current = prefixList(1, 1, OFFICE);
+        current.setTags(List.of(new Tag("team", "network")));
+        describesPrefixList(current);
+        doThrow(new AwsException("InvalidParameterValue", "The number of entries exceeds the maximum of 1.", 400))
+                .when(ec2).modifyManagedPrefixList(any(), any(), any(), any(), any(), any(), any());
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+        ObjectNode props = withTags(prefixListProps(1, "192.0.2.0/24", "office", "198.51.100.0/24", "branch"),
+                "team", "platform");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx(PREFIX_LIST_ID)));
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        ArgumentCaptor<List<Tag>> written = ArgumentCaptor.captor();
+        verify(ec2, times(2)).createTags(eq(REGION), eq(List.of(PREFIX_LIST_ID)), written.capture());
+        assertEquals(List.of("team=platform"), pairs(written.getAllValues().get(0)));
+        assertEquals(List.of("team=network"), pairs(written.getAllValues().get(1)), "the prior tags are written back");
+        verify(ec2, times(1)).modifyManagedPrefixList(any(), any(), any(), any(), any(), any(), any());
+        assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void aStubLeftByAnOlderFlociBecomesARealListAndARollbackPutsTheStubBack() {
+        when(ec2.describeManagedPrefixLists(REGION, List.of("Firewall-1a2b3c4d"), Map.of()))
+                .thenThrow(new AwsException("InvalidPrefixListID.NotFound", "gone", 400));
+        when(ec2.createManagedPrefixList(eq(REGION), eq("firewall"), eq("IPv4"), eq(2), any(), any()))
+                .thenReturn(prefixList(1, 2, OFFICE));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", "Firewall-1a2b3c4d",
+                Map.of("Arn", "arn:aws:stub:::Firewall"));
+
+        provisioner.provision(r, prefixListProps(2, "192.0.2.0/24", "office"), ctx("Firewall-1a2b3c4d"));
+
+        assertEquals(PREFIX_LIST_ID, r.getPhysicalId());
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(ec2).deleteManagedPrefixList(REGION, PREFIX_LIST_ID);
+        assertEquals("Firewall-1a2b3c4d", r.getPhysicalId());
+        assertEquals("arn:aws:stub:::Firewall", r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void entriesNoTemplateDeclaredAreLeftAloneAndDoNotBlockAResize() {
+        PrefixListEntry outside = new PrefixListEntry("203.0.113.0/24", "added outside the stack");
+        ManagedPrefixList resized = prefixList(2, 6, outside);
+        describesPrefixList(prefixList(2, 5, outside), resized);
+        when(ec2.modifyManagedPrefixList(eq(REGION), eq(PREFIX_LIST_ID), any(), any(), any(), any(), any()))
+                .thenReturn(resized);
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+
+        provisioner.provision(r, prefixListProps(6).without("Entries"), ctx(PREFIX_LIST_ID, prefixListProps(5).without("Entries")));
+
+        assertEquals(List.of("version=2 name=firewall max=6 add=[] remove=[]"), modifyCalls());
+    }
+
+    @Test
+    void droppingTheEntriesThePreviousTemplateDeclaredClearsThem() {
+        describesPrefixList(prefixList(1, 2, OFFICE), prefixList(2, 2));
+        when(ec2.modifyManagedPrefixList(eq(REGION), eq(PREFIX_LIST_ID), any(), any(), any(), any(), any()))
+                .thenReturn(prefixList(2, 2));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+
+        provisioner.provision(r, prefixListProps(2).without("Entries"),
+                ctx(PREFIX_LIST_ID, prefixListProps(2, "192.0.2.0/24", "office")));
+
+        assertEquals(List.of("version=1 name=firewall max=null add=[] remove=[192.0.2.0/24]"), modifyCalls());
+    }
+
+    @Test
+    void aTagEc2RefusesFailsTheCreateAndRemovesTheNewList() {
+        when(ec2.createManagedPrefixList(eq(REGION), eq("firewall"), eq("IPv4"), eq(2), any(), any()))
+                .thenReturn(prefixList(1, 2, OFFICE));
+        doThrow(new AwsException("InvalidParameterValue", "Tag key exceeds the maximum length of 128 characters", 400))
+                .when(ec2).createTags(any(), any(), any());
+        StackResource r = resource("AWS::EC2::PrefixList", "Firewall");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                withTags(prefixListProps(2, "192.0.2.0/24", "office"), "k".repeat(129), "x"), ctx()));
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        verify(ec2).deleteManagedPrefixList(REGION, PREFIX_LIST_ID);
+        assertFalse(r.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR), "the list was removed again");
+    }
+
+    @Test
+    void aCreateWhoseTagsAndUndoBothFailLeavesTheNewListOwnedAndNamed() {
+        when(ec2.createManagedPrefixList(eq(REGION), eq("firewall"), eq("IPv4"), eq(2), any(), any()))
+                .thenReturn(prefixList(1, 2, OFFICE));
+        doThrow(new AwsException("InvalidParameterValue", "refused tag", 400)).when(ec2).createTags(any(), any(), any());
+        doThrow(new AwsException("InternalError", "delete failed", 500)).when(ec2).deleteManagedPrefixList(REGION, PREFIX_LIST_ID);
+        StackResource r = resource("AWS::EC2::PrefixList", "Firewall");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                withTags(prefixListProps(2, "192.0.2.0/24", "office"), "team", "network"), ctx()));
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertEquals(PREFIX_LIST_ID, r.getPhysicalId(), "the list left behind is the one the resource names");
+        assertEquals("true", r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR), "so the engine's rollback deletes it");
+        assertTrue(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR).contains(PREFIX_LIST_ID));
+    }
+
+    /** Every ModifyManagedPrefixList call so far: the version it named, the name, the capacity, the entries added and the CIDRs removed. */
+    private List<String> modifyCalls() {
+        List<String> calls = new ArrayList<>();
+        for (Invocation call : mockingDetails(ec2).getInvocations()) {
+            if ("modifyManagedPrefixList".equals(call.getMethod().getName())) {
+                List<PrefixListEntry> added = call.getArgument(5);
+                calls.add("version=" + call.getArgument(2) + " name=" + call.getArgument(3) + " max=" + call.getArgument(4)
+                        + " add=" + entryPairs(added) + " remove=" + call.getArgument(6));
+            }
+        }
+        return calls;
     }
 
     @Test

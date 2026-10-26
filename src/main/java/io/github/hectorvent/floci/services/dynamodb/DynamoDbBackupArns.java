@@ -14,44 +14,61 @@ import java.util.regex.Pattern;
  */
 final class DynamoDbBackupArns {
 
-    private static final Pattern RESOURCE = Pattern.compile("table/([a-zA-Z0-9_.\\-]+)/backup/([^/]{3,})");
+    private static final Pattern RESOURCE = Pattern.compile("table/([a-zA-Z0-9_.\\-]{3,255})/backup/([^/]{3,})");
     private static final Pattern BACKUP_ID = Pattern.compile("\\d{14}-[0-9a-fA-F]{8}");
 
     private DynamoDbBackupArns() {}
 
-    record BackupArn(String arn, String region, String accountId, String tableName, long creationMillis) {}
+    record BackupArn(String arn, String partition, String service, String region, String accountId,
+                     String tableName, String backupId) {
+
+        /** AWS answers "Invalid Request: BackupArn is not valid" when this fails. */
+        boolean isValid() {
+            return "dynamodb".equals(service) && AwsRegions.isRegionId(region)
+                    && AwsRegions.partitionFor(region).equals(partition) && !accountId.isEmpty()
+                    && BACKUP_ID.matcher(backupId).matches();
+        }
+
+        long creationMillis() {
+            return Long.parseLong(backupId.substring(0, 14));
+        }
+    }
 
     /**
-     * AWS rejects an ARN it cannot split into a table and a backup id with "Invalid Backup ARN", and
-     * one that splits but names another service, an unknown region or a malformed id with
-     * "Invalid Request: BackupArn is not valid".
+     * AWS answers "Invalid Backup ARN" when it cannot split the input into the ARN fields. It checks
+     * the account right after this, before the rest of the ARN.
      */
-    static BackupArn parse(String input) {
-        if (input == null) {
-            throw invalidBackupArn();
-        }
+    static AwsArnUtils.Arn split(String input) {
         AwsArnUtils.Arn arn;
         try {
             arn = AwsArnUtils.parse(input);
         } catch (IllegalArgumentException e) {
             throw invalidBackupArn();
         }
+        if (arn.partition().isEmpty() || arn.service().isEmpty() || arn.resource().isEmpty()) {
+            throw invalidBackupArn();
+        }
+        return arn;
+    }
+
+    /** AWS answers "Invalid Backup ARN" when the resource is not a table and a backup id. */
+    static BackupArn parse(String input) {
+        AwsArnUtils.Arn arn = split(input);
         Matcher resource = RESOURCE.matcher(arn.resource());
         if (!resource.matches()) {
             throw invalidBackupArn();
         }
-        String backupId = resource.group(2);
-        if (!"dynamodb".equals(arn.service()) || !AwsRegions.isRegionId(arn.region())
-                || !BACKUP_ID.matcher(backupId).matches()) {
-            throw new AwsException("ValidationException", "Invalid Request: BackupArn is not valid", 400);
-        }
-        long creationMillis = Long.parseLong(backupId.substring(0, 14));
-        return new BackupArn(input, arn.region(), arn.accountId(), resource.group(1), creationMillis);
+        return new BackupArn(input, arn.partition(), arn.service(), arn.region(), arn.accountId(),
+                resource.group(1), resource.group(2));
     }
 
     static String mint(String tableArn, Instant creationDateTime) {
-        return tableArn + "/backup/" + String.format("%014d", creationDateTime.toEpochMilli())
-                + "-" + UUID.randomUUID().toString().substring(0, 8);
+        return tableArn + "/backup/" + timedId(creationDateTime);
+    }
+
+    /** AWS ids a backup and an export by their time in milliseconds and 8 random hex digits. */
+    static String timedId(Instant time) {
+        return String.format("%014d", time.toEpochMilli()) + "-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
     /** AWS ends the id of a system backup with zeros instead of random hex digits. */

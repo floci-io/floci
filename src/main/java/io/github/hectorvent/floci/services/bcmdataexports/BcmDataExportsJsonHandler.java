@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.bcmdataexports.model.DataQuery;
 import io.github.hectorvent.floci.services.bcmdataexports.model.DestinationConfiguration;
 import io.github.hectorvent.floci.services.bcmdataexports.model.Export;
@@ -20,7 +21,6 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -51,7 +51,7 @@ public class BcmDataExportsJsonHandler {
         return switch (action) {
             case "CreateExport" -> handleCreate(request, region);
             case "GetExport" -> handleGet(request);
-            case "ListExports" -> handleList();
+            case "ListExports" -> handleList(request);
             case "UpdateExport" -> handleUpdate(request);
             case "DeleteExport" -> handleDelete(request);
             case "ListExecutions" -> handleListExecutions(request);
@@ -85,12 +85,15 @@ public class BcmDataExportsJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleList() {
-        List<Export> exports = service.listExports();
+    private Response handleList(JsonNode request) {
+        PaginatedResult<Export> page = service.listExports(maxResults(request), nextToken(request));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Exports");
-        for (Export export : exports) {
+        for (Export export : page.items()) {
             arr.add(serializeExportReference(export));
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
@@ -119,13 +122,38 @@ public class BcmDataExportsJsonHandler {
 
     private Response handleListExecutions(JsonNode request) {
         String arn = stringOrNull(request, "ExportArn");
-        List<ExportExecution> executions = service.listExecutions(arn);
+        PaginatedResult<ExportExecution> page = service.listExecutions(arn, maxResults(request), nextToken(request));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Executions");
-        for (ExportExecution exec : executions) {
+        for (ExportExecution exec : page.items()) {
             arr.add(serializeExecution(exec));
         }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
         return Response.ok(response).build();
+    }
+
+    private static Integer maxResults(JsonNode request) {
+        JsonNode value = request.get("MaxResults");
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new AwsException("ValidationException", "MaxResults must be an integer between 1 and 300.", 400);
+        }
+        return value.intValue();
+    }
+
+    private static String nextToken(JsonNode request) {
+        JsonNode value = request.get("NextToken");
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException("ValidationException", "NextToken must be a string.", 400);
+        }
+        return value.textValue();
     }
 
     private Response handleGetExecution(JsonNode request) {

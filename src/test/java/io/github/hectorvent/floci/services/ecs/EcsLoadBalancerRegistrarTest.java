@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ecs;
 
+import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
@@ -25,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 
 /**
  * Component test for {@link EcsLoadBalancerRegistrar}: drives the register/deregister
@@ -41,6 +43,9 @@ class EcsLoadBalancerRegistrarTest {
 
     @InjectSpy
     ElbV2Service elbV2Service;
+
+    @InjectSpy
+    EcsContainerManager containerManager;
 
     private String createTargetGroup(String name) {
         TargetGroup tg = elbV2Service.createTargetGroup(REGION, name, "HTTP", "HTTP1",
@@ -108,6 +113,24 @@ class EcsLoadBalancerRegistrarTest {
         assertEquals(80, health.get(0).getTarget().getPort());
 
         registrar.deregisterTask(task, svc, REGION);
+    }
+
+    @Test
+    void publishedAwsvpcBindingRegistersTheContainerPortAtTheDockerNetworkAddress() {
+        String tgArn = createTargetGroup("reg-tg-published-awsvpc");
+        EcsTask task = taskWithContainer("web", 80, 32781);
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 80);
+        doReturn("172.18.0.7").when(containerManager).resolveContainerHost(task.getContainers().getFirst());
+
+        registrar.registerTask(task, svc, REGION);
+
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals(1, health.size());
+        assertEquals("172.18.0.7", health.getFirst().getTarget().getId());
+        assertEquals(80, health.getFirst().getTarget().getPort());
+
+        registrar.deregisterTask(task, svc, REGION);
+        assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty());
     }
 
     @Test

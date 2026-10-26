@@ -32,6 +32,9 @@ ANCHOR_SERVICES = [
             ["SendMessage", "DeleteMessage", "ChangeMessageVisibility"]),
     service("sns", {"PublishBatch": ["sns:Publish"]}, ["Publish"]),
     service("dynamodb", {"TransactGetItems": ["dynamodb:GetItem"]}, ["GetItem"]),
+    service("budgets", {"CreateBudget": ["aws-portal:ModifyBilling", "budgets:ModifyBudget", "budgets:TagResource"],
+                        "DescribeBudgets": ["aws-portal:ViewBilling", "budgets:ViewBudget"]},
+            ["ModifyBudget", "TagResource", "ViewBudget"]),
 ]
 
 
@@ -84,6 +87,33 @@ def test_a_name_differing_only_in_case_is_the_same_action():
 def test_a_tagging_action_alone_is_a_side_permission():
     found = r.authorized_actions_from([service(
         "ec2", {"CreateCapacityReservationDateChangeQuote": ["ec2:CreateTags"]}, ["CreateTags"])])
+    assert found == {}
+
+
+def test_a_billing_console_permission_does_not_count():
+    # The aws-portal actions gate the Billing console; the Budgets API is authorized by budgets alone.
+    found = r.authorized_actions_from([service(
+        "budgets", {"CreateNotification": ["aws-portal:ModifyBilling", "budgets:ModifyBudget"],
+                    "DescribeBudgets": ["aws-portal:ViewBilling", "budgets:ViewBudget"]},
+        ["ModifyBudget", "ViewBudget"])])
+    assert found == {"budgets": {"CreateNotification": "budgets:ModifyBudget",
+                                 "DescribeBudgets": "budgets:ViewBudget"}}
+
+
+def test_a_console_permission_alone_is_no_action():
+    assert r.authorized_actions_from([service("budgets", {"DescribeBudget": ["aws-portal:ViewBilling"]})]) == {}
+
+
+def test_a_tagging_action_beside_one_other_is_the_tag_on_create_permission():
+    found = r.authorized_actions_from([service(
+        "budgets", {"CreateBudget": ["aws-portal:ModifyBilling", "budgets:ModifyBudget", "budgets:TagResource"]},
+        ["ModifyBudget", "TagResource"])])
+    assert found == {"budgets": {"CreateBudget": "budgets:ModifyBudget"}}
+
+
+def test_a_tagging_action_beside_several_leaves_them_several():
+    found = r.authorized_actions_from([service(
+        "budgets", {"CreateBudget": ["budgets:ModifyBudget", "budgets:ViewBudget", "budgets:TagResource"]})])
     assert found == {}
 
 
@@ -155,7 +185,7 @@ def test_a_name_listed_twice_with_different_answers_keeps_its_own_name():
 
     found = r.authorized_actions_from([
         service("s3", {"GetPublicAccessBlock": ["s3:GetBucketPublicAccessBlock"]}),
-        service("s3", {"GetPublicAccessBlock": ["s3:GetBucketPublicAccessBlock", "s3:TagResource"]}),
+        service("s3", {"GetPublicAccessBlock": ["s3:GetBucketPublicAccessBlock", "iam:PassRole"]}),
     ])
     assert found == {}
 

@@ -25,6 +25,7 @@ OPERATIONS = (
     "PutRegistryPolicy", "GetRegistryPolicy", "DeleteRegistryPolicy",
     "PutReplicationConfiguration", "DescribeRegistry",
     "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration",
+    "BatchGetRepositoryScanningConfiguration",
 )
 
 

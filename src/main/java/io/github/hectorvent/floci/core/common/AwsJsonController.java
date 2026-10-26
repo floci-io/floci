@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsJsonHandle
 import io.github.hectorvent.floci.services.swf.SwfJsonHandler;
 import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbJsonHandler;
 import io.github.hectorvent.floci.services.verifiedpermissions.VerifiedPermissionsJsonHandler;
+import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
@@ -34,6 +35,9 @@ import org.jboss.logging.Logger;
  * Currently supported services:
  * - DynamoDB (DynamoDB_20120810.*)
  * - SQS (AmazonSQS.*)
+ * <p>
+ * Requests run on virtual threads: SQS ReceiveMessage and Step Functions GetActivityTask wait up
+ * to 20 and 60 seconds for work, and that wait must not hold one of the shared request workers.
  */
 @Path("/")
 public class AwsJsonController {
@@ -100,6 +104,7 @@ public class AwsJsonController {
     @POST
     @Consumes("application/json")
     @Produces("application/json")
+    @RunOnVirtualThread
     public Response handlePlainJsonRequest(
             @HeaderParam("X-Amz-Target") String target,
             @Context HttpHeaders httpHeaders,
@@ -118,6 +123,7 @@ public class AwsJsonController {
     @POST
     @Consumes(CONTENT_TYPE_AWS_JSON_1_0)
     @Produces(CONTENT_TYPE_AWS_JSON_1_0)
+    @RunOnVirtualThread
     public Response handleJsonRequest(
             @HeaderParam("X-Amz-Target") String target,
             @Context HttpHeaders httpHeaders,
@@ -170,7 +176,9 @@ public class AwsJsonController {
                 case "sns" -> snsJsonHandler.handle(action, request, region);
                 case "states" -> sfnJsonHandler.handle(action, request, region);
                 case "swf" -> swfJsonHandler.handle(action, request, region);
-                case "monitoring" -> cloudWatchMetricsJsonHandler.handle(action, request, region);
+                case "monitoring" -> targetMatch.jsonOnly()
+                        ? cloudWatchMetricsJsonHandler.handleLegacy(action, request, region)
+                        : cloudWatchMetricsJsonHandler.handle(action, request, region);
                 case "cloudcontrol" -> cloudControlJsonHandler.handle(
                                         action, request, region, regionResolver.getAccountId());
                 case "network-firewall" -> networkFirewallJsonHandler.handle(

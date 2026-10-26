@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -64,6 +65,8 @@ public class DelegationRequestService {
     /** {@code tradeInTokenType} publishes no length and no pattern, so this is simply unguessable. */
     private static final int TOKEN_BYTES = 32;
     private static final Pattern ID_PATTERN = Pattern.compile("[\\w-]+");
+    private static final int ID_MIN = 16;
+    private static final int ID_MAX = 128;
     private static final Pattern ACCOUNT_PATTERN = Pattern.compile("\\d{12}");
     private static final Pattern NOTIFICATION_CHANNEL_PATTERN = Pattern.compile("^[a-zA-Z0-9:_.-]+$");
     /**
@@ -86,6 +89,32 @@ public class DelegationRequestService {
 
     private static final int SESSION_DURATION_MIN = 300;
     private static final int SESSION_DURATION_MAX = 43200;
+
+    /**
+     * The longest delegation the account root may approve. Not a declared constraint but a
+     * documented one, and it belongs to the approval rather than to the request: the user guide's
+     * own note reads "The maximum duration for delegated access is 12 hours. However, root users
+     * can only approve delegation requests with a duration of 4 hours or less. If a request
+     * specifies more than 4 hours, you must use a non-root identity to approve the request."
+     */
+    private static final int ROOT_APPROVAL_DURATION_MAX = 14400;
+
+    /**
+     * {@code summaryStateType}, of which {@code FAILED} is unreachable here: it reports a
+     * generation that ran and did not finish, and nothing is generated asynchronously.
+     */
+    private static final String SUMMARY_AVAILABLE = "AVAILABLE";
+    private static final String SUMMARY_NOT_AVAILABLE = "NOT_AVAILABLE";
+    private static final String SUMMARY_NOT_SUPPORTED = "NOT_SUPPORTED";
+    /** {@code summaryContentType} holds the content to 10000 characters. */
+    private static final int SUMMARY_MAX_CONTENT = 10000;
+    /** "At this time, the only supported entity type is delegation-request". */
+    private static final String SUMMARY_ENTITY_TYPE = "delegation-request";
+
+    /** The service that registers one, which is the only service whose ARN names a request. */
+    private static final String SUMMARY_ENTITY_SERVICE = "iam";
+    /** The locale the reference's own example answers, and the one language Floci writes. */
+    private static final String SUMMARY_LOCALE = "en";
 
     /**
      * The path the console deep link points at. AWS publishes the field's purpose and its length
@@ -257,6 +286,7 @@ public class DelegationRequestService {
                 DelegationRequest request = visible(callerAccountId, id, now, notices);
                 requireState(request, DelegationRequestState.ASSIGNED,
                         DelegationRequestState.PENDING_APPROVAL);
+                requireApproverMayHoldItThatLong(request, callerArn);
                 request.setApproverId(callerArn);
                 return moveTo(request, DelegationRequestState.ACCEPTED, now, notices);
             }
@@ -432,6 +462,61 @@ public class DelegationRequestService {
         }
     }
 
+    /** The answer {@code GetHumanReadableSummary} gives: content, its locale, and how it went. */
+    public record Summary(String content, String locale, String state) {}
+
+    /**
+     * The summary of an entity, which is only ever a delegation request.
+     *
+     * <p>Who may read it is the question {@link #get} answers: "these rules are identical to
+     * GetDelegationRequest API behavior, such that a party who has permissions to call
+     * GetDelegationRequest for a given delegation request will always be able to retrieve the
+     * human readable summary for that request", so the lookup is the same one and a request this
+     * account cannot see is {@code NoSuchEntity} here too.
+     *
+     * <p>The answers here that are chosen rather than read. An ARN naming any other entity type
+     * is {@code NOT_SUPPORTED}, which is the state the model publishes and the only thing a type
+     * AWS says it does not support can mean. A locale Floci does not write is
+     * {@code NOT_AVAILABLE} with no content, because "summary content is non-empty only if the
+     * SummaryState is AVAILABLE" and answering English text under another locale would be a claim
+     * the response itself contradicts. And a request id inside a well-formed ARN that no id could
+     * ever match is {@code NoSuchEntity} rather than a constraint failure: the operation declares
+     * the ARN's length and nothing about what is inside it, so the id is not a member to validate,
+     * and an unmatchable id names no request, which is what that error says.
+     *
+     * <p>The ARN's own account is not matched against the request. The id is what resolves across
+     * accounts, which is how the whole family reads one, and Floci mints these ARNs under the
+     * calling account rather than the owner's, so holding a caller to the account in the ARN would
+     * refuse the ARN Floci itself hands out.
+     */
+    public Summary summarize(String callerAccountId, String entityArn, String locale) {
+        requirePresent(entityArn, "entityArn");
+        checkText(entityArn, "entityArn", 20, 2048, null);
+        checkText(locale, "locale", 2, 12, null);
+        String answeredLocale = locale == null ? SUMMARY_LOCALE : locale;
+        String id = summarizedRequestId(entityArn);
+        if (id == null) {
+            return new Summary(null, answeredLocale, SUMMARY_NOT_SUPPORTED);
+        }
+        if (!namesARequest(id)) {
+            throw new AwsException("NoSuchEntity", "The delegation request named by " + entityArn
+                    + " cannot be found.", 404);
+        }
+        List<DelegationNotifier.Notice> notices = new ArrayList<>();
+        try {
+            synchronized (requestLock) {
+                DelegationRequest request = visible(callerAccountId, id, clock.instant(), notices);
+                if (!writtenIn(answeredLocale)) {
+                    return new Summary(null, answeredLocale, SUMMARY_NOT_AVAILABLE);
+                }
+                return new Summary(DelegationRequestSummary.markdown(request, SUMMARY_MAX_CONTENT),
+                        answeredLocale, SUMMARY_AVAILABLE);
+            }
+        } finally {
+            notifier.publish(notices);
+        }
+    }
+
     private List<DelegationRequest> visibleToOwner(String callerAccountId, String ownerId,
                                                    Instant now,
                                                    List<DelegationNotifier.Notice> notices) {
@@ -459,7 +544,7 @@ public class DelegationRequestService {
     private DelegationRequest visible(String callerAccountId, String id, Instant now,
                                       List<DelegationNotifier.Notice> notices) {
         requirePresent(id, "delegationRequestId");
-        checkText(id, "delegationRequestId", 16, 128, ID_PATTERN);
+        checkText(id, "delegationRequestId", ID_MIN, ID_MAX, ID_PATTERN);
         DelegationRequest request = requests.scanAllAccounts().stream()
                 .filter(candidate -> id.equals(candidate.getDelegationRequestId()))
                 .findFirst()
@@ -469,6 +554,43 @@ public class DelegationRequestService {
             throw noSuchRequest(id);
         }
         return expireIfDue(request, now, notices);
+    }
+
+    /**
+     * The request id an entity ARN names, or null when the ARN names another type of entity.
+     *
+     * <p>A value that is not an ARN at all is the modeled {@code InvalidInput}: {@code arnType}
+     * declares a length and no pattern, so this cannot be a constraint failure, and it is the
+     * same split the rest of this family makes between a member that breaks its constraints and
+     * one that cannot be read as its type.
+     *
+     * <p>Another service's ARN is read as another type of entity rather than as a request of
+     * IAM's that happens to be spelled oddly. Only IAM registers a delegation request, so an ARN
+     * naming any other service names nothing this can summarize, however its resource reads.
+     */
+    private static String summarizedRequestId(String entityArn) {
+        if (!AwsArnUtils.isArn(entityArn)) {
+            throw new AwsException("InvalidInput", "The value '" + entityArn + "' at 'entityArn' "
+                    + "is not an Amazon Resource Name.", 400);
+        }
+        return AwsArnUtils.resourceIfArnFor(entityArn, SUMMARY_ENTITY_SERVICE)
+                .filter(resource -> resource.startsWith(SUMMARY_ENTITY_TYPE + "/"))
+                .map(resource -> resource.substring(SUMMARY_ENTITY_TYPE.length() + 1))
+                .orElse(null);
+    }
+
+    /** Whether an id is inside {@code delegationRequestIdType} at all. */
+    private static boolean namesARequest(String id) {
+        return id.length() >= ID_MIN && id.length() <= ID_MAX && ID_PATTERN.matcher(id).matches();
+    }
+
+    /**
+     * Whether Floci writes the summary in this locale. The supported strings are the console's
+     * languages, and Floci writes one of them, so the language subtag decides and the region
+     * inside {@code en-GB} does not.
+     */
+    private static boolean writtenIn(String locale) {
+        return locale.split("[-_]", 2)[0].equalsIgnoreCase(SUMMARY_LOCALE);
     }
 
     private Optional<DelegationRequest> findByWorkflowId(String requestorAccountId, String workflowId) {
@@ -534,6 +656,35 @@ public class DelegationRequestService {
         throw new AwsException("ConcurrentModification", "Delegation request "
                 + request.getDelegationRequestId() + " is " + request.getState()
                 + " and cannot be changed from that state.", 409);
+    }
+
+    /**
+     * The four-hour cap on what the account root may approve, which {@code create} cannot apply:
+     * the twelve hours it enforces belong to the request, and this one belongs to whoever
+     * approves it, so it is read here where the approver is known.
+     *
+     * <p>Root is the caller whose ARN ends in {@code :root}, which is what this family already
+     * names an approver by, and covers a root credential itself as well as a key resolving to no
+     * IAM user, which this service answers with the account-root stand-in.
+     *
+     * <p>{@code AcceptDelegationRequest} models {@code NoSuchEntity}, {@code ServiceFailure} and
+     * {@code ConcurrentModification} and nothing for this, and no source gives the code AWS
+     * answers, so the code is chosen: the guide states the rule as which identity may approve,
+     * which is what {@code SendDelegationToken}'s own owner rule answers {@code AccessDenied}
+     * for. A duration the record does not carry is nothing to hold to a cap.
+     */
+    private static void requireApproverMayHoldItThatLong(DelegationRequest request,
+                                                         String callerArn) {
+        if (callerArn == null || !callerArn.endsWith(":root")
+                || request.getSessionDuration() == null
+                || request.getSessionDuration() <= ROOT_APPROVAL_DURATION_MAX) {
+            return;
+        }
+        throw new AwsException("AccessDenied", "User is not authorized to perform: "
+                + "iam:AcceptDelegationRequest on " + request.getDelegationRequestId()
+                + ", which asks for " + request.getSessionDuration() + " seconds: the root user may"
+                + " only approve a delegation of " + ROOT_APPROVAL_DURATION_MAX / 3600
+                + " hours or less. Approve it as an IAM user or role instead.", 403);
     }
 
     private void put(DelegationRequest request) {

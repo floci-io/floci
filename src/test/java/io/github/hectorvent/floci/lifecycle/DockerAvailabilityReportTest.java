@@ -92,6 +92,22 @@ class DockerAvailabilityReportTest {
     }
 
     @Test
+    void ec2RunsAsMetadataOnlyByDefault() {
+        when(config.network().securityGroupEnforcement().enabled()).thenReturn(false);
+
+        assertThat(report.metadataOnly(Set.of("ec2", "rds")), contains("rds", "ec2"));
+        assertThat(report.failOnUse(Set.of("ec2", "ecs")), contains("ecs"));
+    }
+
+    @Test
+    void ec2FailsOnUseWithSecurityGroupEnforcement() {
+        when(config.network().securityGroupEnforcement().enabled()).thenReturn(true);
+
+        assertThat(report.metadataOnly(Set.of("ec2", "rds")), contains("rds"));
+        assertThat(report.failOnUse(Set.of("ec2", "ecs")), contains("ec2", "ecs"));
+    }
+
+    @Test
     void pipesIsQualifiedToItsKafkaSources() {
         assertThat(report.failOnUse(Set.of("pipes")), contains("pipes (Kafka sources)"));
     }

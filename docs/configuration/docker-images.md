@@ -109,7 +109,7 @@ Use `cosign verify`, not `cosign verify-attestation`. The latter targets cosign'
 
 If the standard ARM64 image exits with `CPU features [FP, ASIMD, CRC32, LSE] not supported`, use the `-baseline` release tag. The baseline image is compiled with GraalVM `-march=armv8-a`, so it does not require LSE. For example, use `floci/floci:latest-baseline` or pin `floci/floci:x.y.z-baseline`.
 
-The baseline variant currently covers the Docker image only. The standalone `floci-linux-arm64` binary remains tracked in [#1114](https://github.com/floci-io/floci/issues/1114).
+The same build is published as the standalone binary `floci-aws-linux-arm64-baseline`; see [Native binary](../getting-started/installation.md#native-binary).
 
 ## Reusable Image Publishing
 

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
 import io.github.hectorvent.floci.testing.SignedIamEnforcementProfile;
+import io.github.hectorvent.floci.testing.SignedIamUsers;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -53,48 +54,37 @@ class CloudWatchQueryGetSignatureIntegrationTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void regionalWritesAndIamConditionsUseTheSigningRegion(boolean presigned) throws Exception {
-        String user = "cw-query-" + UUID.randomUUID();
         String alarm = "cw-query-" + UUID.randomUUID();
-        String key = null;
         AwsRequestSigner root = AwsRequestSigner.signedAs("test", "test", "monitoring").inRegion("us-west-2");
-        iam("CreateUser", Map.of("UserName", user)).then().statusCode(200);
-        try {
-            Response credentials = iam("CreateAccessKey", Map.of("UserName", user));
-            credentials.then().statusCode(200);
-            key = credentials.xmlPath().getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
-            String secret = credentials.xmlPath().getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey");
-            iam("PutUserPolicy", Map.of("UserName", user, "PolicyName", "regional-cloudwatch", "PolicyDocument", """
-                    {"Version":"2012-10-17","Statement":[{
-                      "Effect":"Allow","Action":["cloudwatch:PutMetricAlarm","cloudwatch:DescribeAlarms"],
-                      "Resource":"*","Condition":{"StringEquals":{
-                        "aws:RequestedRegion":"us-west-2","aws:PrincipalAccount":"000000000000"}}
-                    }]}
-                    """)).then().statusCode(200);
-            AwsRequestSigner signer = AwsRequestSigner.signedAs(key, secret, "monitoring").inRegion("us-west-2");
-            request(signer, Map.of("Action", "PutMetricAlarm", "Version", "2010-08-01", "AlarmName", alarm,
-                    "Namespace", "Example/QueryGet", "MetricName", "Requests", "Statistic", "Sum", "Period", "60",
-                    "EvaluationPeriods", "1", "Threshold", "1", "ComparisonOperator", "GreaterThanThreshold"), presigned)
-                    .then().statusCode(200);
-            Map<String, String> describe = Map.of("Action", "DescribeAlarms", "Version", "2010-08-01",
-                    "AlarmNames.member.1", alarm);
-            request(signer, describe, presigned).then().statusCode(200)
-                    .body(containsString("arn:aws:cloudwatch:us-west-2:000000000000:alarm:" + alarm));
-            request(signer.inRegion("us-east-1"), describe, presigned).then().statusCode(403)
-                    .body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
-            request(root.inRegion("us-east-1"), describe, presigned).then().statusCode(200)
-                    .body(not(containsString(alarm)));
-            request(signer, Map.of("Action", "DeleteAlarms", "Version", "2010-08-01",
-                    "AlarmNames.member.1", alarm), presigned).then().statusCode(403)
-                    .body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
-            request(signer, describe, presigned).then().statusCode(200).body(containsString(alarm));
-        } finally {
-            request(root, Map.of("Action", "DeleteAlarms", "Version", "2010-08-01",
-                    "AlarmNames.member.1", alarm), false).then().statusCode(200);
-            if (key != null) {
-                iam("DeleteAccessKey", Map.of("UserName", user, "AccessKeyId", key)).then().statusCode(200);
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "cw-query-", "regional-cloudwatch", """
+                {"Version":"2012-10-17","Statement":[{
+                  "Effect":"Allow","Action":["cloudwatch:PutMetricAlarm","cloudwatch:DescribeAlarms"],
+                  "Resource":"*","Condition":{"StringEquals":{
+                    "aws:RequestedRegion":"us-west-2","aws:PrincipalAccount":"000000000000"}}
+                }]}
+                """)) {
+            AwsRequestSigner signer = user.signer("monitoring").inRegion("us-west-2");
+            try {
+                request(signer, Map.of("Action", "PutMetricAlarm", "Version", "2010-08-01", "AlarmName", alarm,
+                        "Namespace", "Example/QueryGet", "MetricName", "Requests", "Statistic", "Sum", "Period", "60",
+                        "EvaluationPeriods", "1", "Threshold", "1", "ComparisonOperator", "GreaterThanThreshold"),
+                        presigned).then().statusCode(200);
+                Map<String, String> describe = Map.of("Action", "DescribeAlarms", "Version", "2010-08-01",
+                        "AlarmNames.member.1", alarm);
+                request(signer, describe, presigned).then().statusCode(200)
+                        .body(containsString("arn:aws:cloudwatch:us-west-2:000000000000:alarm:" + alarm));
+                request(signer.inRegion("us-east-1"), describe, presigned).then().statusCode(403)
+                        .body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
+                request(root.inRegion("us-east-1"), describe, presigned).then().statusCode(200)
+                        .body(not(containsString(alarm)));
+                request(signer, Map.of("Action", "DeleteAlarms", "Version", "2010-08-01",
+                        "AlarmNames.member.1", alarm), presigned).then().statusCode(403)
+                        .body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
+                request(signer, describe, presigned).then().statusCode(200).body(containsString(alarm));
+            } finally {
+                request(root, Map.of("Action", "DeleteAlarms", "Version", "2010-08-01",
+                        "AlarmNames.member.1", alarm), false).then().statusCode(200);
             }
-            iam("DeleteUserPolicy", Map.of("UserName", user, "PolicyName", "regional-cloudwatch"));
-            iam("DeleteUser", Map.of("UserName", user)).then().statusCode(200);
         }
     }
 
@@ -110,13 +100,6 @@ class CloudWatchQueryGetSignatureIntegrationTest {
         }
         URI uri = URI.create(endpoint + "?" + encode(query));
         return given().urlEncodingEnabled(false).headers(signer.headersFor("GET", uri, Map.of(), new byte[0])).get(uri);
-    }
-
-    private Response iam(String action, Map<String, String> parameters) throws Exception {
-        String body = "Action=" + action + "&Version=2010-05-08&" + encode(parameters);
-        return given().headers(AwsRequestSigner.signedAs("test", "test", "iam")
-                        .headersFor("POST", endpoint, Map.of(), body.getBytes(StandardCharsets.UTF_8)))
-                .contentType("application/x-www-form-urlencoded").body(body).post(endpoint);
     }
 
     private static String encode(Map<String, String> parameters) {

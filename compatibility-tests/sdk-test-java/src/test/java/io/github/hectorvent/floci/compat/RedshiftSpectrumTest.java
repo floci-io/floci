@@ -96,7 +96,8 @@ class RedshiftSpectrumTest {
                 if (!clusterCreated) {
                     return;
                 }
-                redshift.deleteCluster(DeleteClusterRequest.builder().clusterIdentifier(clusterId).build());
+                redshift.deleteCluster(DeleteClusterRequest.builder().clusterIdentifier(clusterId)
+                        .skipFinalClusterSnapshot(true).build());
             } finally {
                 if (bucketCreated) {
                     s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key("events/part-1.csv").build());

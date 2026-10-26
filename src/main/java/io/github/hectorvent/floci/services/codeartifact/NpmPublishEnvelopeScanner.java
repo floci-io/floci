@@ -53,6 +53,29 @@ final class NpmPublishEnvelopeScanner {
                     .build())
             .build();
 
+    /**
+     * Raised by Greptile's review: {@link CodeArtifactNpmDataPlane#checkRepublish}'s own
+     * Archived/Disposed guard needs to know which versions a publish names even when {@link
+     * #FACTORY}'s own stricter limit throws, the real way a legitimate publish whose per-version
+     * {@code readme} exceeds {@code maxStringLength} (1,000,000 characters is generous for
+     * almost any real README, but not unbounded) reaches that catch block. Jackson's own
+     * {@code maxStringLength} enforcement happens while the tokenizer itself scans a string
+     * token to find its end, during {@code nextToken()}, not lazily when a caller later reads
+     * its value, so there is no way to skip past an oversized field with {@link #FACTORY}'s own
+     * limit still in force; only a parse with a higher one can get past it at all. This ceiling
+     * is still bounded, not unlimited, specifically so a truly pathological payload still fails
+     * both this and {@link #FACTORY}'s own parse and is rejected outright by the caller rather
+     * than silently forwarded with no guard having run at all.
+     */
+    private static final JsonFactory LENIENT_FACTORY = JsonFactory.builder()
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .streamReadConstraints(StreamReadConstraints.builder()
+                    .maxNestingDepth(32)
+                    .maxNumberLength(1_000_000)
+                    .maxStringLength(64_000_000)
+                    .build())
+            .build();
+
     @FunctionalInterface
     private interface FieldHandler {
         void accept(String fieldName) throws IOException;
@@ -69,7 +92,36 @@ final class NpmPublishEnvelopeScanner {
     }
 
     static Envelope scan(InputStream in) throws IOException {
-        try (JsonParser parser = FACTORY.createParser(in)) {
+        return scan(in, FACTORY);
+    }
+
+    /**
+     * {@link #LENIENT_FACTORY}'s own fallback parse, for a caller ({@link
+     * CodeArtifactNpmDataPlane#checkRepublish}) that still needs the full envelope once {@link
+     * #scan} itself has already thrown; see that factory's own javadoc for why a second, more
+     * tolerant pass is the only way to recover any of it at all. Both parses run the identical
+     * scanning logic over the identical bytes (see {@link #scan(InputStream, JsonFactory)}, which
+     * both this and {@link #scan} delegate to), only with a higher string-length ceiling, so every
+     * field this returns, {@code readme} and {@code attachments} included, is exactly as reliable
+     * as {@link #scan}'s own result (raised by Greptile's review, which this PR's own bookkeeping
+     * fix already relies on: {@link CodeArtifactNpmDataPlane#checkRepublish}'s own post-write
+     * byte accounting, readme capture, and redispose-protection call all key off this result's
+     * {@code readmeByVersion}, not just {@code versions().keySet()}).
+     *
+     * <p>What a caller must still never do with this result on its own: treat it as grounds for
+     * {@code CodeArtifactNpmDataPlane.RepublishCheck#confirmed} (a byte-identical idempotent
+     * retry safe to skip forwarding entirely). That determination compares the envelope against
+     * the sidecar's own stored packument content, which {@link #scan} itself threw before this
+     * fallback ever ran for, and {@code checkRepublish} always forwards on this path rather than
+     * attempting it; this parse's own tolerance has no bearing on that separate guarantee either
+     * way.
+     */
+    static Envelope scanLeniently(InputStream in) throws IOException {
+        return scan(in, LENIENT_FACTORY);
+    }
+
+    private static Envelope scan(InputStream in, JsonFactory factory) throws IOException {
+        try (JsonParser parser = factory.createParser(in)) {
             NpmPublishEnvelopeScanner scanner = new NpmPublishEnvelopeScanner(parser);
             scanner.parseEnvelope();
             return scanner.envelope();

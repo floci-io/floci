@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import org.junit.jupiter.api.Test;
 
@@ -82,6 +83,17 @@ class RedshiftDataResourceResolverTest {
         assertEquals("arn:aws:redshift:us-east-1:" + ACCOUNT + ":cluster:wh", target.arn());
     }
 
+    @Test
+    void dbUserTargetUsesTheRequestRegionForAuditDelivery() {
+        RedshiftService redshift = mock(RedshiftService.class);
+        when(redshift.describeClusters("wh")).thenReturn(List.of(cluster()));
+        ObjectNode request = mapper.createObjectNode().put("ClusterIdentifier", "wh")
+                .put("Database", "dev").put("DbUser", "admin");
+        RedshiftDataResourceResolver.DatabaseTarget target =
+                resolver(redshift, mock(SecretsManagerService.class)).resolve(request, "us-west-2");
+        assertEquals("arn:aws:redshift:us-west-2:acc:cluster:wh", target.arn());
+    }
+
     private static RedshiftServerlessService.WorkgroupTarget workgroupTarget() {
         return new RedshiftServerlessService.WorkgroupTarget(
                 "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT + ":workgroup/wg-id", "wg-1",
@@ -129,6 +141,87 @@ class RedshiftDataResourceResolverTest {
 
         assertEquals("root", target.user());
         assertEquals("Secret123", target.password());
+        assertEquals(55433, target.port());
+    }
+
+    @Test
+    void aWorkgroupWithARenamedAdminSecretConnectsWithTheBackendRole() {
+        String secretArn = "arn:aws:secretsmanager:us-east-1:" + ACCOUNT + ":secret:redshift-serverless/ns-1";
+        RedshiftServerlessService.WorkgroupTarget renamedTarget = new RedshiftServerlessService.WorkgroupTarget(
+                "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT + ":workgroup/wg-id", "wg-1",
+                "127.0.0.1", 55433, "analytics", "root", "Secret123", "renamed_admin",
+                List.of("arn:aws:iam::" + ACCOUNT + ":role/Spectrum"), secretArn);
+        when(serverless.getWorkgroupTarget("wg-1", REGION)).thenReturn(renamedTarget);
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        SecretVersion version = new SecretVersion();
+        version.setSecretString("{\"username\":\"renamed_admin\",\"password\":\"Secret123\"}");
+        when(secrets.getSecretValue(eq(secretArn), any(), any(), eq(REGION))).thenReturn(version);
+        ObjectNode req = mapper.createObjectNode();
+        req.put("WorkgroupName", "wg-1");
+        req.put("Database", "analytics");
+        req.put("SecretArn", secretArn);
+
+        RedshiftDataResourceResolver.DatabaseTarget target =
+                resolver(mock(RedshiftService.class), secrets).resolve(req, REGION);
+
+        assertEquals("root", target.user());
+        assertEquals("Secret123", target.password());
+        assertEquals(55433, target.port());
+    }
+
+    @Test
+    void aWorkgroupResolvesAPartialManagedSecretArnToTheBackendRole() {
+        String fullSecretArn = "arn:aws:secretsmanager:us-east-1:" + ACCOUNT
+                + ":secret:redshift-serverless/ns-1-AbCdEf";
+        String partialSecretArn = "arn:aws:secretsmanager:us-east-1:" + ACCOUNT
+                + ":secret:redshift-serverless/ns-1";
+        RedshiftServerlessService.WorkgroupTarget renamedTarget = new RedshiftServerlessService.WorkgroupTarget(
+                "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT + ":workgroup/wg-id", "wg-1",
+                "127.0.0.1", 55433, "analytics", "root", "Secret123", "renamed_admin",
+                List.of("arn:aws:iam::" + ACCOUNT + ":role/Spectrum"), fullSecretArn);
+        when(serverless.getWorkgroupTarget("wg-1", REGION)).thenReturn(renamedTarget);
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        SecretVersion version = new SecretVersion();
+        version.setSecretString("{\"username\":\"renamed_admin\",\"password\":\"Secret123\"}");
+        when(secrets.getSecretValue(eq(partialSecretArn), any(), any(), eq(REGION))).thenReturn(version);
+        Secret metadata = new Secret();
+        metadata.setArn(fullSecretArn);
+        when(secrets.describeSecret(partialSecretArn, REGION)).thenReturn(metadata);
+        ObjectNode req = mapper.createObjectNode();
+        req.put("WorkgroupName", "wg-1");
+        req.put("Database", "analytics");
+        req.put("SecretArn", partialSecretArn);
+
+        RedshiftDataResourceResolver.DatabaseTarget target =
+                resolver(mock(RedshiftService.class), secrets).resolve(req, REGION);
+
+        assertEquals("root", target.user());
+        assertEquals("Secret123", target.password());
+    }
+
+    @Test
+    void aCallerOwnedSecretDoesNotRewriteUsernameEvenWhenMatchingAdminUsername() {
+        String managedSecretArn = "arn:aws:secretsmanager:us-east-1:" + ACCOUNT + ":secret:redshift-serverless/ns-1";
+        String callerSecretArn = "arn:aws:secretsmanager:us-east-1:" + ACCOUNT + ":secret:caller-secret";
+        RedshiftServerlessService.WorkgroupTarget renamedTarget = new RedshiftServerlessService.WorkgroupTarget(
+                "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT + ":workgroup/wg-id", "wg-1",
+                "127.0.0.1", 55433, "analytics", "root", "Secret123", "report_reader",
+                List.of("arn:aws:iam::" + ACCOUNT + ":role/Spectrum"), managedSecretArn);
+        when(serverless.getWorkgroupTarget("wg-1", REGION)).thenReturn(renamedTarget);
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        SecretVersion version = new SecretVersion();
+        version.setSecretString("{\"username\":\"report_reader\",\"password\":\"ReaderPass123\"}");
+        when(secrets.getSecretValue(eq(callerSecretArn), any(), any(), eq(REGION))).thenReturn(version);
+        ObjectNode req = mapper.createObjectNode();
+        req.put("WorkgroupName", "wg-1");
+        req.put("Database", "analytics");
+        req.put("SecretArn", callerSecretArn);
+
+        RedshiftDataResourceResolver.DatabaseTarget target =
+                resolver(mock(RedshiftService.class), secrets).resolve(req, REGION);
+
+        assertEquals("report_reader", target.user());
+        assertEquals("ReaderPass123", target.password());
         assertEquals(55433, target.port());
     }
 
@@ -211,6 +304,7 @@ class RedshiftDataResourceResolverTest {
                 resolver(redshift, mock(SecretsManagerService.class)).resolve(req, REGION);
 
         assertEquals("admin", target.user());
+        assertEquals("analyst", target.auditUser());
         assertEquals("Secret123", target.password());
     }
 

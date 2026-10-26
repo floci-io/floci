@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.testing.MainSources;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -16,6 +17,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -27,11 +29,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class PartitionSmokeInventoryTest {
 
-    private static final Path SERVICES = Path.of("src/main/java/io/github/hectorvent/floci/services");
+    private static final Path SERVICES = MainSources.BASE_DIR.resolve("services");
     private static final Path EXEMPTIONS = Path.of("src/test/resources/partition/smoke-exemptions.tsv");
     private static final Pattern MINTS = Pattern.compile(
             "buildArn\\(|buildGlobalArn\\(|\\bArn\\.of\\(|\\bArn\\.global\\(|\\bnew (AwsArnUtils\\.)?Arn\\("
-                    + "|dnsSuffixFor\\(|AwsEndpoints\\.\\w+\\(");
+                    + "|dnsSuffixFor\\(|AwsEndpoints\\.\\w+\\("
+                    // An ARN concatenated by hand mints as surely as Arn.of; a PARTITION_REGEX pattern only matches one.
+                    + "|\"arn:\"\\s*\\+(?!\\s*(?:AwsArnUtils\\s*\\.\\s*)?PARTITION_REGEX\\b)");
 
     @Test
     void everyMintingPackageIsCoveredOrExempted() {
@@ -75,6 +79,62 @@ class PartitionSmokeInventoryTest {
         assertTrue(unknown.isEmpty(), "COVERED_PACKAGES names packages that do not mint ARNs or hosts: " + unknown);
     }
 
+    @Test
+    void commentsNeitherMintNorHideAPattern() {
+        assertFalse(mintsIn("Pattern p = Pattern.compile(\"arn:\" + /* partition */ AwsArnUtils.PARTITION_REGEX"
+                + " + \":iam::\\\\d{12}:role/.+\");"));
+        assertFalse(mintsIn("// String arn = \"arn:\" + partition;\n/** see Arn.of( */ int x;"));
+        assertTrue(mintsIn("String arn = \"arn:\" + /* the request's */ partition + \":iam::\" + account;"));
+        assertTrue(mintsIn("String url = \"https://\" + host; Arn.of(service, region, account, resource);"));
+    }
+
+    private static boolean mintsIn(String source) {
+        return MINTS.matcher(codeText(source)).find();
+    }
+
+    /**
+     * The source with every comment and text block blanked and string literals kept, as
+     * {@code code_text} in {@code tools/partition/partition_literals.py} does: a {@code //} inside a
+     * string is a URL, not a comment, and a call shape in a comment or javadoc never counts.
+     */
+    static String codeText(String text) {
+        StringBuilder out = new StringBuilder(text.length());
+        int n = text.length();
+        int i = 0;
+        while (i < n) {
+            if (text.startsWith("//", i)) {
+                int end = text.indexOf('\n', i);
+                end = end < 0 ? n : end;
+                out.append(" ".repeat(end - i));
+                i = end;
+            } else if (text.startsWith("/*", i) || text.startsWith("\"\"\"", i)) {
+                String closer = text.charAt(i + 1) == '*' ? "*/" : "\"\"\"";
+                int j = i + closer.length();
+                while (j < n && !text.startsWith(closer, j)) {
+                    j += closer.equals("\"\"\"") && text.charAt(j) == '\\' ? 2 : 1;
+                }
+                int end = Math.min(j + closer.length(), n);
+                for (int k = i; k < end; k++) {
+                    out.append(text.charAt(k) == '\n' ? '\n' : ' ');
+                }
+                i = end;
+            } else if (text.charAt(i) == '"' || text.charAt(i) == '\'') {
+                char quote = text.charAt(i);
+                int j = i + 1;
+                while (j < n && text.charAt(j) != quote && text.charAt(j) != '\n') {
+                    j += text.charAt(j) == '\\' ? 2 : 1;
+                }
+                int end = j < n && text.charAt(j) == quote ? j + 1 : Math.min(j, n);
+                out.append(text, i, end);
+                i = end;
+            } else {
+                out.append(text.charAt(i));
+                i++;
+            }
+        }
+        return out.toString();
+    }
+
     private static Set<String> mintingPackages() {
         Set<String> packages = new TreeSet<>();
         try (Stream<Path> dirs = Files.list(SERVICES)) {
@@ -94,7 +154,7 @@ class PartitionSmokeInventoryTest {
     private static boolean mints(Path dir) throws IOException {
         try (Stream<Path> files = Files.walk(dir)) {
             for (Path file : files.filter(f -> f.toString().endsWith(".java")).toList()) {
-                if (MINTS.matcher(Files.readString(file, StandardCharsets.UTF_8)).find()) {
+                if (mintsIn(Files.readString(file, StandardCharsets.UTF_8))) {
                     return true;
                 }
             }

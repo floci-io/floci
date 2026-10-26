@@ -53,7 +53,7 @@ class IamRestRouteCoverageTest {
 
     /** Models every operation of which is checked: the services whose routes the registry maps in full. */
     private static final Set<String> FULLY_ROUTED_MODELS =
-            Set.of("scheduler", "pipes", "lambda", "lambda-microvms", "lambda-core");
+            Set.of("scheduler", "pipes", "eks", "lambda", "lambda-microvms", "lambda-core", "dsql");
 
     private final IamActionRegistry registry = new IamActionRegistry();
 
@@ -91,7 +91,8 @@ class IamRestRouteCoverageTest {
                 Map.Entry<String, JsonNode> operation = operations.next();
                 Route route = new Route(scope, model, operation.getKey(), operation.getValue().path("method").asText(),
                         operation.getValue().path("requestUri").asText());
-                String expected = authorized.path(scope).path(operation.getKey()).asText(scope + ":" + operation.getKey());
+                String expected = RUN_AS_ANOTHER_OPERATION.getOrDefault(operation.getKey(),
+                        authorized.path(scope).path(operation.getKey()).asText(scope + ":" + operation.getKey()));
                 tests.add(DynamicTest.dynamicTest(model + " " + operation.getKey(),
                         () -> assertEquals(expected, resolve(route), route.toString())));
             }
@@ -149,12 +150,18 @@ class IamRestRouteCoverageTest {
             return ctx;
         }
 
-        /** The path with each {@code {label}} filled in, and a greedy {@code {label+}} given two segments. */
+        /**
+         * The path with each {@code {label}} filled in, and a greedy {@code {label+}} given two segments. A
+         * {@code {policyArn}} gets a cluster access policy ARN, encoded as an SDK sends it, since only that
+         * shape routes to the policy operations.
+         */
         private static String fill(String template) {
             Matcher label = LABEL.matcher(template);
             StringBuilder path = new StringBuilder();
             while (label.find()) {
-                String value = label.group(1).toLowerCase() + "-value";
+                String value = label.group(1).equals("policyArn")
+                        ? "arn%3Aaws%3Aeks%3A%3Aaws%3Acluster-access-policy%2FAmazonEKSViewPolicy"
+                        : label.group(1).toLowerCase() + "-value";
                 label.appendReplacement(path, label.group(2).isEmpty() ? value : value + "/part");
             }
             label.appendTail(path);

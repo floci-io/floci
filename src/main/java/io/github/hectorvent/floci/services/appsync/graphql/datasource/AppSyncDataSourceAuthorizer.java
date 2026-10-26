@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.datasource;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnShapes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -63,8 +64,7 @@ public class AppSyncDataSourceAuthorizer {
         } catch (IllegalArgumentException e) {
             throw denied(dataSource, "serviceRoleArn is not an IAM role ARN");
         }
-        if (!"iam".equals(roleId.service()) || !roleId.region().isEmpty()
-                || roleId.accountId().isBlank() || !roleId.resource().startsWith("role/")
+        if (!AwsArnShapes.isIamRole(roleId)
                 || roleId.resource().endsWith("/")) {
             throw denied(dataSource, "serviceRoleArn is not an IAM role ARN");
         }

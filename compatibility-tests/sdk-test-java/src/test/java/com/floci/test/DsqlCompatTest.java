@@ -16,21 +16,12 @@ import software.amazon.awssdk.services.dsql.model.GetClusterResponse;
 import software.amazon.awssdk.services.dsql.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.dsql.model.ValidationException;
 
-import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
-import javax.net.ssl.TrustManagerFactory;
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.Socket;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.security.KeyStore;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateFactory;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -179,11 +170,33 @@ class DsqlCompatTest {
                 .hasMessageContaining("Wrong user to action mapping. user: admin, action: DbConnect");
     }
 
+    @Test
+    @Order(6)
+    void adminSignsInWithTlsStartedAtOnce() throws Exception {
+        String token = dsql.utilities().generateDbConnectAdminAuthToken(b -> b.hostname(endpoint).region(REGION));
+
+        try (Connection connection = connect("admin", token, "direct");
+             Statement statement = connection.createStatement();
+             ResultSet row = statement.executeQuery("SELECT current_user")) {
+            assertThat(row.next()).isTrue();
+            assertThat(row.getString(1)).isEqualTo("admin");
+        }
+    }
+
     private static Connection connect(String user, String token) throws SQLException {
+        return connect(user, token, "postgres");
+    }
+
+    /**
+     * {@code sslNegotiation} is pgjdbc's: {@code postgres} sends an SSLRequest first, {@code direct}
+     * starts TLS at once, offering the ALPN protocol postgresql.
+     */
+    private static Connection connect(String user, String token, String sslNegotiation) throws SQLException {
         Properties properties = new Properties();
         properties.setProperty("user", user);
         properties.setProperty("password", token);
         properties.setProperty("sslmode", "require");
+        properties.setProperty("sslNegotiation", sslNegotiation);
         properties.setProperty("sslfactory", ServerNameSocketFactory.class.getName());
         properties.setProperty(SERVER_NAME_PROPERTY, endpoint);
         String host = TestFixtures.endpoint().getHost();
@@ -207,21 +220,7 @@ class DsqlCompatTest {
 
         public ServerNameSocketFactory(Properties info) throws Exception {
             this.serverName = info.getProperty(SERVER_NAME_PROPERTY);
-            HttpResponse<String> ca = TestFixtures.emulatorHttpClient().send(
-                    HttpRequest.newBuilder(TestFixtures.endpoint().resolve("/_floci/ca.pem")).build(),
-                    HttpResponse.BodyHandlers.ofString());
-            KeyStore trusted = KeyStore.getInstance(KeyStore.getDefaultType());
-            trusted.load(null, null);
-            int index = 0;
-            for (Certificate certificate : CertificateFactory.getInstance("X.509").generateCertificates(
-                    new ByteArrayInputStream(ca.body().getBytes(StandardCharsets.US_ASCII)))) {
-                trusted.setCertificateEntry("floci-" + index++, certificate);
-            }
-            TrustManagerFactory trust = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-            trust.init(trusted);
-            SSLContext context = SSLContext.getInstance("TLS");
-            context.init(null, trust.getTrustManagers(), null);
-            this.delegate = context.getSocketFactory();
+            this.delegate = TestFixtures.flociCaTrust().getSocketFactory();
         }
 
         @Override

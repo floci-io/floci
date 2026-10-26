@@ -4,6 +4,9 @@ import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebCodeBuckets;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebRoles;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebZips;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
@@ -38,13 +41,16 @@ class CloudFrontWebFunctionOriginServingTest {
     @Inject
     S3Service s3Service;
 
+    @Inject
+    IamService iamService;
+
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
     @Test
     void anEndpointOriginIsReachedWhateverPortAndProtocolTheOriginNames() {
         String functionName = "cf-disabled-" + Long.toString(System.nanoTime(), 36);
-        String domain = createFunction(s3Service, cleanup, functionName, "ApplicationManaged");
+        String domain = createFunction(s3Service, iamService, cleanup, functionName, "ApplicationManaged");
         given().contentType("application/json").body("{\"throttleConfig\": {\"rateLimit\": 0}}")
                 .when().patch(BASE + "/web-functions/" + functionName + "/endpoints/dev")
                 .then().statusCode(202);
@@ -59,7 +65,7 @@ class CloudFrontWebFunctionOriginServingTest {
 
     @Test
     void anIamAuthEndpointRefusesTheUnsignedRequestOfADistributionWithoutOriginAccessControl() {
-        String domain = createFunction(s3Service, cleanup, "cf-iam-" + Long.toString(System.nanoTime(), 36), "IamAuth");
+        String domain = createFunction(s3Service, iamService, cleanup, "cf-iam-" + Long.toString(System.nanoTime(), 36), "IamAuth");
         Distribution created = createDistribution(cloudFrontService, cleanup, domain,
                 CloudFrontService.MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID);
 
@@ -72,7 +78,7 @@ class CloudFrontWebFunctionOriginServingTest {
 
     @Test
     void forwardingTheViewerHostToAnEndpointIsABadGateway() {
-        String domain = createFunction(s3Service, cleanup, "cf-host-" + Long.toString(System.nanoTime(), 36),
+        String domain = createFunction(s3Service, iamService, cleanup, "cf-host-" + Long.toString(System.nanoTime(), 36),
                 "ApplicationManaged");
         Distribution created = createDistribution(cloudFrontService, cleanup, domain,
                 CloudFrontService.MANAGED_ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID);
@@ -81,8 +87,10 @@ class CloudFrontWebFunctionOriginServingTest {
                 .then().statusCode(502);
     }
 
-    static String createFunction(S3Service s3Service, PartitionCleanup cleanup, String functionName, String authType) {
-        s3Service.createBucket(BUCKET, "us-east-1");
+    static String createFunction(S3Service s3Service, IamService iamService, PartitionCleanup cleanup,
+                                 String functionName, String authType) {
+        LambdaWebRoles.trustLambda(iamService, ROLE);
+        LambdaWebCodeBuckets.create(s3Service, BUCKET);
         s3Service.putObject(BUCKET, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
         String domain = given().contentType("application/json")
                 .body("""

@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.dsql;
 import io.github.hectorvent.floci.core.common.PostgresWire;
 import org.postgresql.ssl.NonValidatingFactory;
 
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -22,13 +24,42 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 public final class DsqlWireClient implements AutoCloseable {
 
-    private final Socket socket;
+    private final SSLSocket socket;
     private final InputStream in;
     private final OutputStream out;
 
     /** Signs in to the endpoint on {@code port} as {@code user}, naming {@code host} as the server. */
     public DsqlWireClient(int port, String host, String user, String password) throws Exception {
-        this(port, host);
+        this(handshake(afterSslRequest(port), host, port));
+        signIn(user, password);
+    }
+
+    private DsqlWireClient(SSLSocket tls) throws IOException {
+        socket = tls;
+        in = new BufferedInputStream(socket.getInputStream());
+        out = socket.getOutputStream();
+    }
+
+    /**
+     * TLS to the endpoint on {@code port} after an SSLRequest, naming {@code host} and offering
+     * {@code alpn} (none when empty), and nothing sent on it yet: no startup packet.
+     */
+    public static DsqlWireClient tls(int port, String host, String... alpn) throws Exception {
+        return new DsqlWireClient(handshake(afterSslRequest(port), host, port, alpn));
+    }
+
+    /** As {@link #tls}, but TLS started at once, with no SSLRequest, as {@code sslnegotiation=direct} does. */
+    public static DsqlWireClient direct(int port, String host, String... alpn) throws Exception {
+        return new DsqlWireClient(handshake(new Socket("127.0.0.1", port), host, port, alpn));
+    }
+
+    /** The ALPN protocol the endpoint picked, empty when none. */
+    public String applicationProtocol() {
+        return socket.getApplicationProtocol();
+    }
+
+    /** Sends the startup packet and the password, and reads up to the first ReadyForQuery. */
+    public DsqlWireClient signIn(String user, String password) throws IOException {
         Map<String, String> startup = new LinkedHashMap<>();
         startup.put("user", user);
         startup.put("database", "postgres");
@@ -36,21 +67,26 @@ public final class DsqlWireClient implements AutoCloseable {
         assertEquals('R', PostgresWire.read(in, Integer.MAX_VALUE, "message").type());
         send(message('p', PostgresWire.cStringBytes(password)));
         untilReady();
+        return this;
     }
 
-    private DsqlWireClient(int port, String host) throws Exception {
+    private static Socket afterSslRequest(int port) throws IOException {
         Socket plain = new Socket("127.0.0.1", port);
         plain.getOutputStream().write(PostgresWire.int32(8));
         plain.getOutputStream().write(PostgresWire.int32(PostgresWire.SSL_REQUEST));
         assertEquals('S', plain.getInputStream().read());
-        socket = new NonValidatingFactory(null).createSocket(plain, host, port, true);
-        in = new BufferedInputStream(socket.getInputStream());
-        out = socket.getOutputStream();
+        return plain;
     }
 
-    /** TLS to the endpoint on {@code port}, naming {@code host}, and nothing sent on it yet: no startup packet. */
-    public static DsqlWireClient tls(int port, String host) throws Exception {
-        return new DsqlWireClient(port, host);
+    private static SSLSocket handshake(Socket plain, String host, int port, String... alpn) throws Exception {
+        SSLSocket tls = (SSLSocket) new NonValidatingFactory(null).createSocket(plain, host, port, true);
+        if (alpn.length > 0) {
+            SSLParameters parameters = tls.getSSLParameters();
+            parameters.setApplicationProtocols(alpn);
+            tls.setSSLParameters(parameters);
+        }
+        tls.startHandshake();
+        return tls;
     }
 
     /** The next message the endpoint sends; an {@link IOException} once it has closed the connection. */

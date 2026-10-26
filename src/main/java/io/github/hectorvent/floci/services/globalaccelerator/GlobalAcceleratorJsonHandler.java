@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.services.globalaccelerator.model.Accelerator;
 import io.github.hectorvent.floci.services.globalaccelerator.model.EndpointGroup;
 import io.github.hectorvent.floci.services.globalaccelerator.model.PortOverride;
 import io.github.hectorvent.floci.services.globalaccelerator.model.PortRange;
@@ -57,7 +59,25 @@ public class GlobalAcceleratorJsonHandler {
                 service.deleteAccelerator(text(request, "AcceleratorArn"));
                 yield Response.ok(Map.of()).build();
             }
-            case "ListAccelerators" -> Response.ok(Map.of("Accelerators", service.listAccelerators())).build();
+            case "ListAccelerators" -> {
+                JsonNode maxResults = request.get("MaxResults");
+                if (maxResults != null && !maxResults.isNull()
+                        && (!maxResults.isIntegralNumber() || !maxResults.canConvertToInt())) {
+                    throw new AwsException("InvalidArgumentException", "MaxResults must be between 1 and 100", 400);
+                }
+                JsonNode nextToken = request.get("NextToken");
+                if (nextToken != null && !nextToken.isNull() && !nextToken.isTextual()) {
+                    throw new AwsException("InvalidNextTokenException", "Invalid NextToken", 400);
+                }
+                PaginatedResult<Accelerator> page = service.listAccelerators(
+                        integer(request, "MaxResults"), text(request, "NextToken"));
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("Accelerators", page.items());
+                if (page.nextToken() != null) {
+                    result.put("NextToken", page.nextToken());
+                }
+                yield Response.ok(result).build();
+            }
             case "DescribeAcceleratorAttributes" -> Response.ok(Map.of("AcceleratorAttributes",
                     service.describeAcceleratorAttributes(text(request, "AcceleratorArn")))).build();
             case "UpdateAcceleratorAttributes" -> Response.ok(Map.of("AcceleratorAttributes",

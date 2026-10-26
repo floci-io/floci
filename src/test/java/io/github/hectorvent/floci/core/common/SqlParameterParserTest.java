@@ -49,11 +49,11 @@ class SqlParameterParserTest {
     }
 
     @Test
-    void redshiftKeepsColonDigitAsLiteralText() {
+    void redshiftAcceptsParameterNamesThatStartWithADigit() {
         ParsedSql parsed = SqlParameterParser.parse("select :1", Options.REDSHIFT);
 
-        assertEquals("select :1", parsed.sql());
-        assertEquals(List.of(), parsed.parameterOrder());
+        assertEquals("select ?", parsed.sql());
+        assertEquals(List.of("1"), parsed.parameterOrder());
     }
 
     @Test

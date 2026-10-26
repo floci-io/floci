@@ -723,7 +723,8 @@ public class CognitoJsonHandler {
         service.adminUpdateUserAttributes(
                 request.path("UserPoolId").asText(),
                 request.path("Username").asText(),
-                attrs
+                attrs,
+                clientMetadata(request)
         );
         return Response.ok(objectMapper.createObjectNode()).build();
     }

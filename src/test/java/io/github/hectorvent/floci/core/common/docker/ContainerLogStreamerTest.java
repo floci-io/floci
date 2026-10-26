@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService
 import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
@@ -16,11 +17,13 @@ import java.io.Closeable;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.LogRecord;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -198,6 +201,91 @@ class ContainerLogStreamerTest {
 
         // append() splits faithfully; the emit layer is what skips blanks.
         assertEquals(List.of("a", "", "b"), buffer.append(utf8("a\n\nb\n")));
+    }
+
+    static Stream<byte[]> completeFrames() {
+        return Stream.of(
+                utf8("\n"),
+                utf8("\n\n"),
+                utf8("first\n\nlast\n\n"),
+                utf8("café\n東京\n🚀\n"),
+                new byte[]{(byte) 0xe2, '\n', (byte) 0x80, '\n'},
+                new byte[]{(byte) 0xf0, (byte) 0x9f, '\n'},
+                utf8("a".repeat(256 * 1024 - 4) + "\n"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("completeFrames")
+    void completeFrameMatchesBytewiseReassembly(byte[] payload) {
+        ContainerLogStreamer.LogLineBuffer whole = new ContainerLogStreamer.LogLineBuffer();
+        ContainerLogStreamer.LogLineBuffer fragmented = new ContainerLogStreamer.LogLineBuffer();
+        List<String> expected = new ArrayList<>();
+        for (byte value : payload) {
+            expected.addAll(fragmented.append(new byte[]{value}));
+        }
+
+        assertEquals(expected, whole.append(payload));
+        assertFalse(whole.hasPendingBytes());
+        assertTrue(whole.flush().isEmpty());
+        assertEquals(List.of("next"), whole.append(utf8("next\n")));
+    }
+
+    @Test
+    void nearCapFrameKeepsEarlySplitBeforeMalformedLead() {
+        ContainerLogStreamer.LogLineBuffer buffer = new ContainerLogStreamer.LogLineBuffer();
+        String prefix = "a".repeat(256 * 1024 - 2);
+        byte[] payload = Arrays.copyOf(utf8(prefix), 256 * 1024);
+        payload[payload.length - 2] = (byte) 0xf0;
+        payload[payload.length - 1] = '\n';
+
+        assertEquals(List.of(prefix, "\uFFFD"), buffer.append(payload));
+        assertFalse(buffer.hasPendingBytes());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2, 3})
+    void fastFramePreservesContinuationStateForNextFrameAtCap(int characterBytesInFirstFrame) {
+        ContainerLogStreamer.LogLineBuffer buffer = new ContainerLogStreamer.LogLineBuffer();
+        String prefix = "a".repeat(256 * 1024 - 3 - characterBytesInFirstFrame);
+        byte[] payload = utf8(prefix + "🚀€\n");
+        int boundary = 256 * 1024 - 3;
+
+        assertEquals(List.of(), buffer.append(Arrays.copyOfRange(payload, 0, boundary)));
+        assertEquals(List.of(prefix + "🚀", "€"),
+                buffer.append(Arrays.copyOfRange(payload, boundary, payload.length)));
+        assertFalse(buffer.hasPendingBytes());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 3, 1024, 262145})
+    void frameBoundariesPreserveCappedUnicodeLinesAndTrailingContent(int frameSize) {
+        int cap = 256 * 1024;
+        String first = "a".repeat(cap - 3) + "€";
+        String rockets = "🚀".repeat(cap / 4);
+        byte[] payload = utf8(first + "\nshort\n" + rockets + "🚀\ntail");
+        ContainerLogStreamer.LogLineBuffer buffer = new ContainerLogStreamer.LogLineBuffer();
+        List<String> lines = new ArrayList<>();
+
+        for (int offset = 0; offset < payload.length; offset += frameSize) {
+            lines.addAll(buffer.append(Arrays.copyOfRange(payload, offset,
+                    Math.min(offset + frameSize, payload.length))));
+        }
+
+        assertEquals(List.of(first, "", "short", rockets, "🚀"), lines);
+        assertEquals("tail", buffer.flush().orElseThrow());
+        assertFalse(buffer.hasPendingBytes());
+    }
+
+    @Test
+    void emittedLinesAndBufferedFragmentsSurvivePayloadReuse() {
+        ContainerLogStreamer.LogLineBuffer buffer = new ContainerLogStreamer.LogLineBuffer();
+        byte[] payload = utf8("first\npartial");
+
+        List<String> lines = buffer.append(payload);
+        Arrays.fill(payload, (byte) 'x');
+
+        assertEquals(List.of("first"), lines);
+        assertEquals(List.of("partial"), buffer.append(utf8("\n")));
     }
 
     @Test

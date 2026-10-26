@@ -17,13 +17,11 @@ import io.github.hectorvent.floci.services.rum.model.AppMonitor;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -487,7 +485,7 @@ public class RumService implements ResourceProvider {
             return 0;
         }
         try {
-            String decoded = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+            String decoded = Base64Url.decode(token);
             if (!decoded.startsWith(TOKEN_PREFIX)) {
                 throw validation("nextToken is invalid.");
             }
