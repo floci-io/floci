@@ -80,6 +80,11 @@ public class Ec2KeyPairCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        if (ctx.isUpdate()) {
+            // Rolling this update back undoes it alone; only ContinueUpdateRollback retries the
+            // delete the last rollback could not make.
+            ReplacementCleanup.endRollbackRetry(r);
+        }
         String name = resolveProperty(props, "KeyName", ctx);
         if (name == null || name.isBlank()) {
             throw new AwsException("ValidationError", TYPE + " requires KeyName.", 400);

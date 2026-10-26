@@ -381,6 +381,31 @@ class Ec2KeyPairCfnProvisionerTest {
         verify(ec2, times(1)).createKeyPair(REGION, "first", null, null);
     }
 
+    /**
+     * Once ContinueUpdateRollback skipped the replacement it could not delete, rolling back a later
+     * update that failed before creating anything undoes that update alone; the next committed
+     * update still deletes the replacement.
+     */
+    @Test
+    void aLaterFailedUpdateDoesNotRetryTheDeleteAnEarlierRollbackLeft() throws Exception {
+        StackResource r = renamed();
+        when(ec2.describeKeyPairs(REGION, List.of("next"), List.of())).thenReturn(List.of(created("next", "key-2")));
+        when(ec2.deleteKeyPair(REGION, null, "key-2"))
+                .thenThrow(new AwsException("InternalServerError", "simulated delete failure", 500))
+                .thenReturn(null);
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertThrows(AwsException.class,
+                () -> provisioner.provision(r, props("{\"KeyName\": \"first\", \"KeyType\": \"ed25519\"}"), ctx("first")));
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(ec2, times(1)).deleteKeyPair(REGION, null, "key-2");
+
+        provisioner.provision(r, props("{\"KeyName\": \"first\"}"), ctx("first"));
+        assertTrue(provisioner.completeUpdate(r).complete());
+        verify(ec2, times(2)).deleteKeyPair(REGION, null, "key-2");
+        verify(ec2, never()).deleteKeyPair(REGION, null, "key-1");
+    }
+
     /** The cleanup goes by name, yet a displaced key deleted outside the stack still takes its parameter. */
     @Test
     void theCommittedRenameRemovesTheParameterOfADisplacedKeyDeletedOutsideTheStack() throws Exception {
