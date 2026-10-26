@@ -212,6 +212,66 @@ class EcrImagePushApiDockerIntegrationTest {
 
     @Test
     @Order(7)
+    void batchDeleteImageByTagLeavesTheSurvivingTagPullable() throws Exception {
+        call("BatchDeleteImage", "{\"repositoryName\":\"" + repo + "\",\"imageIds\":["
+                + "{\"imageTag\":\"v1\"},{\"imageTag\":\"nope\"}]}")
+                .statusCode(200)
+                .body("imageIds", hasSize(1))
+                .body("imageIds[0].imageTag", equalTo("v1"))
+                .body("imageIds[0].imageDigest", equalTo(manifestDigest))
+                .body("failures", hasSize(1))
+                .body("failures[0].imageId.imageTag", equalTo("nope"))
+                .body("failures[0].failureCode", equalTo("ImageNotFound"));
+
+        call("DescribeImages", "{\"repositoryName\":\"" + repo + "\",\"imageIds\":[{\"imageTag\":\"release\"}]}")
+                .statusCode(200)
+                .body("imageDetails[0].imageDigest", equalTo(manifestDigest))
+                .body("imageDetails[0].imageTags", hasSize(1))
+                .body("imageDetails[0].imageTags[0]", equalTo("release"));
+
+        Fetched byTag = registryGet("000000000000.dkr.ecr.us-east-1.localhost",
+                "/v2/" + repo + "/manifests/release", DOCKER_MANIFEST);
+        assertEquals(200, byTag.statusCode());
+        assertEquals(manifestDigest, byTag.digest());
+
+        Fetched byDigest = registryGet("000000000000.dkr.ecr.us-east-1.localhost",
+                "/v2/" + repo + "/manifests/" + manifestDigest, DOCKER_MANIFEST);
+        assertEquals(200, byDigest.statusCode());
+        assertEquals(manifestDigest, byDigest.digest());
+    }
+
+    @Test
+    @Order(8)
+    void batchDeleteImageByDigestRemovesTheManifestAndEveryTag() throws Exception {
+        call("PutImage", putImage(repo, manifest, "v1")).statusCode(200)
+                .body("image.imageId.imageDigest", equalTo(manifestDigest));
+
+        call("BatchDeleteImage", "{\"repositoryName\":\"" + repo + "\",\"imageIds\":"
+                + "[{\"imageDigest\":\"" + manifestDigest + "\"}]}")
+                .statusCode(200)
+                .body("imageIds", hasSize(2))
+                .body("imageIds.imageTag", hasItems("v1", "release"))
+                .body("imageIds.imageDigest", hasItems(manifestDigest, manifestDigest))
+                .body("failures", hasSize(0));
+
+        call("ListImages", "{\"repositoryName\":\"" + repo + "\"}")
+                .statusCode(200)
+                .body("imageIds", hasSize(0));
+
+        Fetched byDigest = registryGet("000000000000.dkr.ecr.us-east-1.localhost",
+                "/v2/" + repo + "/manifests/" + manifestDigest, DOCKER_MANIFEST);
+        assertEquals(404, byDigest.statusCode());
+
+        call("BatchGetImage", "{\"repositoryName\":\"" + repo + "\",\"imageIds\":[{\"imageTag\":\"release\"}]}")
+                .statusCode(200)
+                .body("images", hasSize(0))
+                .body("failures", hasSize(1))
+                .body("failures[0].imageId.imageTag", equalTo("release"))
+                .body("failures[0].failureCode", equalTo("ImageNotFound"));
+    }
+
+    @Test
+    @Order(9)
     void anImmutableTagIsWrittenOnce() {
         String upload = initiate(immutableRepo);
         part(immutableRepo, upload, 0, config).statusCode(200);
@@ -231,7 +291,7 @@ class EcrImagePushApiDockerIntegrationTest {
 
     /** Last, since every class on this profile shares one registry. */
     @Test
-    @Order(8)
+    @Order(10)
     void cleanUp() {
         call("DeleteRepository", "{\"repositoryName\":\"" + repo + "\",\"force\":true}").statusCode(200);
         call("DeleteRepository", "{\"repositoryName\":\"" + immutableRepo + "\",\"force\":true}").statusCode(200);

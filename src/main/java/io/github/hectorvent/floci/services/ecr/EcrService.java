@@ -856,26 +856,141 @@ public class EcrService implements ResourceProvider {
         if (imageIds == null) imageIds = List.of();
         for (ImageIdentifier id : imageIds) {
             try {
-                String digest = id.getImageDigest();
-                if (digest == null && id.getImageTag() != null) {
-                    digest = http.headManifestDigest(internal, id.getImageTag(), null);
+                if (id.getImageDigest() == null && id.getImageTag() != null) {
+                    deleteImageTag(repo, repositoryName, internal, http, id, region, deleted, failures);
+                } else {
+                    deleteImageDigest(repo, repositoryName, internal, http, id, region, deleted, failures);
                 }
-                if (digest == null) {
-                    failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
-                    continue;
-                }
-                boolean ok = http.deleteManifest(internal, digest);
-                if (!ok) {
-                    failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
-                    continue;
-                }
-                deleted.add(new ImageIdentifier(id.getImageTag(), digest));
-                imageMetaStore.delete(imageMetaKey(region, repo.getRegistryId(), repositoryName, digest));
             } catch (Exception e) {
                 failures.add(new ImageFailure(id, "ImageNotFound", e.getMessage()));
             }
         }
         return new BatchDeleteImageResult(deleted, failures);
+    }
+
+    /**
+     * Deletes one tag as BatchDeleteImage does on AWS: the manifest goes with it only when no
+     * other tag still references the shared digest. The backing registry deletes manifests by
+     * digest only, and that untags every tag the digest has, so while another tag remains the
+     * manifest is dropped and immediately written back under the surviving tags from a copy
+     * read before the drop, which restores the identical digest.
+     */
+    private void deleteImageTag(Repository repo, String repositoryName, String internal,
+                                RegistryHttpClient http, ImageIdentifier id, String region,
+                                List<ImageIdentifier> deleted, List<ImageFailure> failures)
+            throws Exception {
+        String digest = http.headManifestDigest(internal, id.getImageTag(), null);
+        if (digest == null) {
+            failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+            return;
+        }
+        List<String> survivingTags;
+        try {
+            survivingTags = tagsReferencing(internal, http, digest, id.getImageTag());
+        } catch (Exception e) {
+            failures.add(new ImageFailure(id, "ServerException",
+                    "The tags of '" + repositoryName + "' could not be listed before deleting tag '"
+                            + id.getImageTag() + "': " + e.getMessage()));
+            return;
+        }
+        if (survivingTags.isEmpty()) {
+            if (!http.deleteManifest(internal, digest)) {
+                failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+                return;
+            }
+            deleted.add(new ImageIdentifier(id.getImageTag(), digest));
+            imageMetaStore.delete(imageMetaKey(region, repo.getRegistryId(), repositoryName, digest));
+            return;
+        }
+        RegistryHttpClient.ManifestResult manifest = http.getManifest(internal, digest, null);
+        if (manifest == null || manifest.body() == null || manifest.mediaType() == null) {
+            failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+            return;
+        }
+        if (!http.deleteManifest(internal, digest)) {
+            failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+            return;
+        }
+        for (String survivingTag : survivingTags) {
+            restoreTag(internal, http, digest, manifest, survivingTag, id.getImageTag(), repositoryName);
+        }
+        deleted.add(new ImageIdentifier(id.getImageTag(), digest));
+    }
+
+    /**
+     * Deletes a manifest with every tag that references it, reporting one imageId per removed
+     * tag the way the API reference's example response does.
+     */
+    private void deleteImageDigest(Repository repo, String repositoryName, String internal,
+                                   RegistryHttpClient http, ImageIdentifier id, String region,
+                                   List<ImageIdentifier> deleted, List<ImageFailure> failures)
+            throws Exception {
+        String digest = id.getImageDigest();
+        if (digest == null) {
+            failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+            return;
+        }
+        List<String> removedTags;
+        try {
+            removedTags = tagsReferencing(internal, http, digest, null);
+        } catch (Exception e) {
+            failures.add(new ImageFailure(id, "ServerException",
+                    "The tags of '" + repositoryName + "' could not be listed before deleting manifest '"
+                            + digest + "': " + e.getMessage()));
+            return;
+        }
+        if (!http.deleteManifest(internal, digest)) {
+            failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+            return;
+        }
+        if (removedTags.isEmpty()) {
+            deleted.add(new ImageIdentifier(id.getImageTag(), digest));
+        } else {
+            for (String removedTag : removedTags) {
+                deleted.add(new ImageIdentifier(removedTag, digest));
+            }
+        }
+        imageMetaStore.delete(imageMetaKey(region, repo.getRegistryId(), repositoryName, digest));
+    }
+
+    /**
+     * The repository's tags, other than {@code exclude}, that resolve to {@code digest}. Both
+     * calls are strict, so a registry that answers an error fails the delete instead of quietly
+     * dropping a surviving tag from the set to restore.
+     */
+    private List<String> tagsReferencing(String internal, RegistryHttpClient http,
+                                         String digest, String exclude) throws Exception {
+        List<String> referencing = new ArrayList<>();
+        for (String tag : http.listTagsStrict(internal)) {
+            if (tag.equals(exclude)) {
+                continue;
+            }
+            if (digest.equals(http.headManifestDigestStrict(internal, tag, null))) {
+                referencing.add(tag);
+            }
+        }
+        return referencing;
+    }
+
+    /**
+     * Writes a manifest back under one of its tags after the digest-addressed delete removed
+     * them all. The requested tag is already gone when this runs, so its delete is reported as
+     * done; a restore that fails leaves the surviving tag broken, which is logged for the
+     * operator because no imageId can say it.
+     */
+    private void restoreTag(String internal, RegistryHttpClient http, String digest,
+                            RegistryHttpClient.ManifestResult manifest, String survivingTag,
+                            String deletedTag, String repositoryName) {
+        try {
+            String restored = http.putManifest(internal, survivingTag, manifest.mediaType(), manifest.body());
+            if (restored != null && !restored.equals(digest)) {
+                LOG.warnv("Restoring ECR tag {0} in repository {1} rewrote manifest {2} as {3}",
+                        survivingTag, repositoryName, digest, restored);
+            }
+        } catch (Exception e) {
+            LOG.warnv("Restoring ECR tag {0} of manifest {1} in repository {2} failed after deleting tag {3}: {4}",
+                    survivingTag, digest, repositoryName, deletedTag, e.getMessage());
+        }
     }
 
     // ============================================================

@@ -26,7 +26,9 @@ import org.mockito.Mockito;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.ConnectException;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Collections;
@@ -805,6 +807,176 @@ class EcrServiceTest {
         }
     }
 
+    // ------------------------------------------------------------
+    // BatchDeleteImage
+    // ------------------------------------------------------------
+
+    private static final String DELETE_MANIFEST = """
+            {
+              "schemaVersion": 2,
+              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+              "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": 1, "digest": "sha256:c"},
+              "layers": []
+            }
+            """;
+    private static final String DELETE_DIGEST =
+            "sha256:9999999999999999999999999999999999999999999999999999999999999999";
+
+    @Test
+    void batchDeleteImageByTagKeepsTheSharedManifestForTheSurvivingTags() throws Exception {
+        String repositoryName = "batch-delete/shared-manifest";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "release", "stable")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            EcrService.BatchDeleteImageResult result = service.batchDeleteImage(
+                    repositoryName, List.of(new ImageIdentifier("release", null)), null, REGION);
+
+            assertTrue(result.failures().isEmpty(), () -> "unexpected failures: " + result.failures());
+            assertEquals(1, result.imageIds().size());
+            assertEquals("release", result.imageIds().get(0).getImageTag());
+            assertEquals(DELETE_DIGEST, result.imageIds().get(0).getImageDigest());
+            assertEquals(List.of(DELETE_DIGEST), registry.deletedManifests());
+            assertEquals(List.of("stable"), registry.putTags());
+
+            List<ImageIdentifier> remaining = service.listImages(repositoryName, null, REGION, null, null).items();
+            assertEquals(1, remaining.size());
+            assertEquals("stable", remaining.get(0).getImageTag());
+            assertEquals(DELETE_DIGEST, remaining.get(0).getImageDigest());
+
+            EcrService.BatchGetImageResult got = service.batchGetImage(
+                    repositoryName, List.of(new ImageIdentifier("stable", null)), null, null, REGION);
+            assertTrue(got.failures().isEmpty(), () -> "unexpected failures: " + got.failures());
+            assertEquals(1, got.images().size());
+            assertEquals(DELETE_DIGEST, got.images().get(0).getImageId().getImageDigest());
+
+            EcrService.DescribeImagesResult described = service.describeImages(
+                    repositoryName, List.of(new ImageIdentifier("stable", null)), null, REGION);
+            assertTrue(described.failures().isEmpty(), () -> "unexpected failures: " + described.failures());
+            assertEquals(1, described.imageDetails().size());
+            assertEquals(DELETE_DIGEST, described.imageDetails().get(0).getImageDigest());
+            assertEquals(List.of("stable"), described.imageDetails().get(0).getImageTags());
+        }
+    }
+
+    @Test
+    void batchDeleteImageByTagKeepsTheImagePushedAtOfTheSurvivingTag() throws Exception {
+        String repositoryName = "batch-delete/pushed-at";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        InMemoryStorage<String, ImageMetadata> metaStore = new InMemoryStorage<>();
+        EcrService withMeta = new EcrService(new InMemoryStorage<>(), metaStore, pullThroughCacheRuleStore,
+                registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "release", "stable")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            withMeta.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            withMeta.describeImages(repositoryName, List.of(new ImageIdentifier("stable", null)), null, REGION);
+            ImageMetadata before = metaStore.scan(k -> k.endsWith(DELETE_DIGEST)).get(0);
+
+            withMeta.batchDeleteImage(repositoryName, List.of(new ImageIdentifier("release", null)), null, REGION);
+
+            List<ImageMetadata> after = metaStore.scan(k -> k.endsWith(DELETE_DIGEST));
+            assertEquals(1, after.size());
+            assertEquals(before.getPushedAt(), after.get(0).getPushedAt());
+        }
+    }
+
+    @Test
+    void batchDeleteImageByTagDeletesTheManifestWhenTheLastTagGoes() throws Exception {
+        String repositoryName = "batch-delete/last-tag";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "v1")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            EcrService.BatchDeleteImageResult result = service.batchDeleteImage(
+                    repositoryName, List.of(new ImageIdentifier("v1", null)), null, REGION);
+
+            assertTrue(result.failures().isEmpty(), () -> "unexpected failures: " + result.failures());
+            assertEquals(1, result.imageIds().size());
+            assertEquals("v1", result.imageIds().get(0).getImageTag());
+            assertEquals(DELETE_DIGEST, result.imageIds().get(0).getImageDigest());
+            assertEquals(List.of(DELETE_DIGEST), registry.deletedManifests());
+            assertTrue(registry.putTags().isEmpty());
+            assertTrue(service.listImages(repositoryName, null, REGION, null, null).items().isEmpty());
+        }
+    }
+
+    @Test
+    void batchDeleteImageByDigestDeletesTheManifestAndAllItsTags() throws Exception {
+        String repositoryName = "batch-delete/by-digest";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "release", "stable")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            EcrService.BatchDeleteImageResult result = service.batchDeleteImage(
+                    repositoryName, List.of(new ImageIdentifier(null, DELETE_DIGEST)), null, REGION);
+
+            assertTrue(result.failures().isEmpty(), () -> "unexpected failures: " + result.failures());
+            assertEquals(2, result.imageIds().size());
+            List<String> reportedTags = result.imageIds().stream().map(ImageIdentifier::getImageTag).toList();
+            assertTrue(reportedTags.contains("release"), "imageIds must report tag release");
+            assertTrue(reportedTags.contains("stable"), "imageIds must report tag stable");
+            for (ImageIdentifier id : result.imageIds()) {
+                assertEquals(DELETE_DIGEST, id.getImageDigest());
+            }
+            assertEquals(List.of(DELETE_DIGEST), registry.deletedManifests());
+            assertTrue(registry.tags().isEmpty());
+            assertTrue(service.listImages(repositoryName, null, REGION, null, null).items().isEmpty());
+        }
+    }
+
+    @Test
+    void batchDeleteImageReportsAnUnknownTagAsAnImageFailure() throws Exception {
+        String repositoryName = "batch-delete/unknown-tag";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "release", "stable")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            EcrService.BatchDeleteImageResult result = service.batchDeleteImage(repositoryName,
+                    List.of(new ImageIdentifier("nope", null), new ImageIdentifier("release", null)),
+                    null, REGION);
+
+            assertEquals(1, result.imageIds().size());
+            assertEquals("release", result.imageIds().get(0).getImageTag());
+            assertEquals(1, result.failures().size());
+            assertEquals("nope", result.failures().get(0).getImageId().getImageTag());
+            assertEquals("ImageNotFound", result.failures().get(0).getFailureCode());
+            assertEquals(List.of("stable"), registry.tags());
+        }
+    }
+
+    @Test
+    void batchDeleteImageRefusesTheDeleteWhenTheTagListingFails() throws Exception {
+        String repositoryName = "batch-delete/listing-fails";
+        RegistryHttpClient http = Mockito.mock(RegistryHttpClient.class);
+        when(registryManager.httpClient()).thenReturn(http);
+        when(http.headManifestDigest(anyString(), anyString(), any())).thenReturn(DELETE_DIGEST);
+        when(http.listTagsStrict(anyString())).thenThrow(new ConnectException("Connection refused"));
+        service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+        EcrService.BatchDeleteImageResult result = service.batchDeleteImage(
+                repositoryName, List.of(new ImageIdentifier("release", null)), null, REGION);
+
+        assertTrue(result.imageIds().isEmpty());
+        assertEquals(1, result.failures().size());
+        assertEquals("ServerException", result.failures().get(0).getFailureCode());
+        verify(http, never()).deleteManifest(anyString(), anyString());
+    }
+
     @Test
     void bareEntryClaimedByOtherAccountIsNotResolvedForThisScope() throws Exception {
         // Both accounts have metadata for the same repo name in the same region;
@@ -1316,6 +1488,135 @@ class EcrServiceTest {
                         .orElse("");
                 sendJson(exchange, 200, "{\"repositories\":[" + joined + "]}");
                 return;
+            }
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        }
+
+        private static void sendJson(HttpExchange exchange, int status, String body) throws IOException {
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            send(exchange, status, body);
+        }
+
+        private static void send(HttpExchange exchange, int status, String body) throws IOException {
+            byte[] bytes = body.getBytes();
+            exchange.sendResponseHeaders(status, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+
+        @Override
+        public void close() {
+            server.stop(0);
+        }
+    }
+
+    /** Registry fake holding several tags over one shared manifest, following registry:2's answers. */
+    private static final class MultiTagRegistryServer implements AutoCloseable {
+        private final HttpServer server;
+        private final String repository;
+        private final String digest;
+        private final String manifest;
+        private final List<String> tags = new java.util.ArrayList<>();
+        private final List<String> deletedManifests = new java.util.ArrayList<>();
+        private final List<String> putTags = new java.util.ArrayList<>();
+        private boolean manifestGone;
+
+        private MultiTagRegistryServer(String repository, String digest, String manifest, String... tags)
+                throws IOException {
+            this.repository = repository;
+            this.digest = digest;
+            this.manifest = manifest;
+            this.tags.addAll(List.of(tags));
+            this.server = HttpServer.create(new InetSocketAddress(0), 0);
+            this.server.createContext("/v2/", this::handle);
+            this.server.start();
+        }
+
+        private int port() {
+            return server.getAddress().getPort();
+        }
+
+        private List<String> tags() {
+            return List.copyOf(tags);
+        }
+
+        private List<String> deletedManifests() {
+            return List.copyOf(deletedManifests);
+        }
+
+        private List<String> putTags() {
+            return List.copyOf(putTags);
+        }
+
+        private void handle(HttpExchange exchange) throws IOException {
+            String path = exchange.getRequestURI().getPath();
+            String method = exchange.getRequestMethod();
+            if ("/v2/".equals(path) && "GET".equals(method)) {
+                send(exchange, 200, "");
+                return;
+            }
+            if ("/v2/_catalog".equals(path) && "GET".equals(method)) {
+                sendJson(exchange, 200, "{\"repositories\":[\"" + repository + "\"]}");
+                return;
+            }
+            String manifestsPrefix = "/v2/" + repository + "/manifests/";
+            if ((path.equals("/v2/" + repository + "/tags/list")) && "GET".equals(method)) {
+                String listed = tags.isEmpty()
+                        ? "null"
+                        : "[" + tags.stream().map(t -> "\"" + t + "\"")
+                                .reduce((a, b) -> a + "," + b).orElse("") + "]";
+                sendJson(exchange, 200, "{\"name\":\"" + repository + "\",\"tags\":" + listed + "}");
+                return;
+            }
+            if (path.startsWith(manifestsPrefix)) {
+                String reference = path.substring(manifestsPrefix.length());
+                if ("DELETE".equals(method)) {
+                    if (digest.equals(reference) && !manifestGone) {
+                        deletedManifests.add(reference);
+                        manifestGone = true;
+                        tags.clear();
+                        exchange.sendResponseHeaders(202, -1);
+                        exchange.close();
+                        return;
+                    }
+                    exchange.sendResponseHeaders(404, -1);
+                    exchange.close();
+                    return;
+                }
+                if ("PUT".equals(method)) {
+                    String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                    if (manifest.equals(body)) {
+                        if (manifestGone) {
+                            manifestGone = false;
+                        }
+                        if (!tags.contains(reference)) {
+                            tags.add(reference);
+                        }
+                        putTags.add(reference);
+                        exchange.getResponseHeaders().add("Docker-Content-Digest", digest);
+                        exchange.sendResponseHeaders(201, -1);
+                        exchange.close();
+                        return;
+                    }
+                    sendJson(exchange, 400, "{\"errors\":[{\"code\":\"DIGEST_INVALID\"}]}");
+                    return;
+                }
+                boolean byDigest = digest.equals(reference);
+                boolean byTag = !byDigest && tags.contains(reference);
+                if ((byDigest || byTag) && !manifestGone && ("GET".equals(method) || "HEAD".equals(method))) {
+                    exchange.getResponseHeaders().add("Docker-Content-Digest", digest);
+                    if ("HEAD".equals(method)) {
+                        exchange.sendResponseHeaders(200, -1);
+                        exchange.close();
+                        return;
+                    }
+                    exchange.getResponseHeaders().add("Content-Type",
+                            "application/vnd.docker.distribution.manifest.v2+json");
+                    send(exchange, 200, manifest);
+                    return;
+                }
             }
             exchange.sendResponseHeaders(404, -1);
             exchange.close();
