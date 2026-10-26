@@ -287,7 +287,6 @@ The following ECR features are **not** implemented. Stored values for policies a
 
 **`docker login` fails with TLS errors.** When TLS URI advertising is enabled, Docker must trust the Floci CA independently of the AWS CLI, and the server certificate must cover the returned registry hostname. Follow the trust steps above; setting only `AWS_CA_BUNDLE` is insufficient. Default loopback URIs remain usable over HTTP without additional Docker trust configuration.
 
-<<<<<<< HEAD
 **Registry requests return `503 Service Unavailable`.** Floci could not start or connect to its
 backing registry. Errors detected by Floci include a Distribution `errors` array with a network configuration
 hint. Check Docker availability and the registry container's health. When Floci itself runs in

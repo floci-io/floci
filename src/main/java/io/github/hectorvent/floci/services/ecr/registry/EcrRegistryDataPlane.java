@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.NetworkExposureGuard;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.vertx.core.Vertx;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpClientRequest;
@@ -38,6 +39,13 @@ public class EcrRegistryDataPlane {
             "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.localhost(?:\\.floci\\.io)?(?::[0-9]+)?$");
     private static final String MANIFESTS_PATH = "/manifests/";
     private static final long REPOSITORY_LOCK_POLL_MILLIS = 5;
+    /**
+     * The most a manifest PUT waiting for its repository's write lock may buffer. A manifest
+     * is kilobytes of JSON with layer references, and a body past this is refused rather than
+     * held in memory; the plane-wide request limit is gigabytes, so nothing else bounds a
+     * body that waits.
+     */
+    private static final int WAITING_MANIFEST_BODY_LIMIT_BYTES = 4 * 1024 * 1024;
     private static final Set<String> HOP_BY_HOP_HEADERS = Set.of(
             "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
             "te", "trailers", "transfer-encoding", "upgrade");
@@ -118,21 +126,59 @@ public class EcrRegistryDataPlane {
      * shared manifest by digest and writes it back under its surviving tags, so a push that
      * arrives during such a delete waits here instead of landing between the drop and the
      * write-back and being overwritten by the restore. The event loop thread must not block on
-     * the lock, so the request stays paused and each poll rechecks; a client that goes away
-     * ends the exchange and the polling with it.
+     * the lock, so each poll rechecks; a waiting PUT drains its body into memory rather than
+     * leaving it unread, which keeps the connection's flow-control window moving for the
+     * exchange that holds the lock. A client that goes away ends the exchange and the polling
+     * with it.
      */
     private void lockRepositoryWritesThenCheck(RoutingContext context, RegistryRequest request, Exchange exchange) {
-        if (exchange.ended()) {
+        if (exchange.ended() || exchange.holdingWriteLock()) {
             return;
         }
         String repository = exchange.writeLockRepository();
         if (repository == null || ecrService.tryLockRepositoryWrites(repository)) {
             exchange.writeLockAcquired();
-            checkTagAndProxy(context, request, exchange);
+            if (exchange.waitingBodyReady()) {
+                checkTagAndProxy(context, request, exchange);
+            }
             return;
         }
+        drainWaitingBody(context, request, exchange);
         vertx.setTimer(REPOSITORY_LOCK_POLL_MILLIS,
                 ignored -> lockRepositoryWritesThenCheck(context, request, exchange));
+    }
+
+    /**
+     * Reads the whole body of a manifest PUT that waits for its repository's write lock into
+     * memory, so its bytes do not sit unread in the client connection's flow-control window:
+     * on one HTTP/2 connection they would fill the window the exchange holding the lock needs
+     * for its own remaining bytes, and neither push would ever finish. The buffered bytes are
+     * replayed to the registry in the live request's place once the exchange has the lock. A
+     * manifest DELETE sends no body and keeps waiting paused as before, and a PUT that takes
+     * the lock on the first try streams its body untouched.
+     */
+    private void drainWaitingBody(RoutingContext context, RegistryRequest request, Exchange exchange) {
+        if (!"PUT".equals(context.request().method().name()) || !exchange.startWaitingBody()) {
+            return;
+        }
+        context.request().handler(chunk -> {
+            if (exchange.ended()) {
+                return;
+            }
+            if (!exchange.appendWaitingBody(chunk)) {
+                exchange.end();
+                failUnlessGone(context, 413);
+            }
+        });
+        context.request().endHandler(ignored -> {
+            if (exchange.ended() || !exchange.finishWaitingBody()) {
+                return;
+            }
+            if (exchange.holdingWriteLock()) {
+                checkTagAndProxy(context, request, exchange);
+            }
+        });
+        context.request().resume();
     }
 
     private String immutableTag(RoutingContext context, RegistryRequest request) {
@@ -211,11 +257,19 @@ public class EcrRegistryDataPlane {
                 copyResponseHeaders(context, upstreamResponse.result(), request);
                 upstreamResponse.result().pipeTo(context.response()).onComplete(ignored -> exchange.end());
             });
-            clientReq.send(context.request()).onFailure(ignored -> {
-                exchange.end();
-                failUnlessGone(context, 502);
-            });
-            context.request().resume();
+            Buffer waitingBody = exchange.replayBody();
+            if (waitingBody == null) {
+                clientReq.send(context.request()).onFailure(ignored -> {
+                    exchange.end();
+                    failUnlessGone(context, 502);
+                });
+                context.request().resume();
+            } else {
+                clientReq.send(waitingBody).onFailure(ignored -> {
+                    exchange.end();
+                    failUnlessGone(context, 502);
+                });
+            }
         });
     }
 
@@ -295,10 +349,11 @@ public class EcrRegistryDataPlane {
 
     /**
      * One proxied request: the registry client it opens once it gets that far, the immutable
-     * tag it holds, and the repository write lock it holds once a manifest write has it. It
-     * ends once, at whichever comes first of the registry's answer, a failure and the client
-     * going away; the close handler also fires after an exchange that ended normally, when
-     * another exchange may already hold the same tag.
+     * tag it holds, the repository write lock it holds once a manifest write has it, and the
+     * body a manifest PUT drains while it waits for that lock. It ends once, at whichever
+     * comes first of the registry's answer, a failure and the client going away; the close
+     * handler also fires after an exchange that ended normally, when another exchange may
+     * already hold the same tag.
      */
     private final class Exchange {
 
@@ -306,6 +361,8 @@ public class EcrRegistryDataPlane {
         private final String writeLockRepository;
         private final AtomicBoolean writeLockHeld = new AtomicBoolean();
         private final AtomicBoolean ended = new AtomicBoolean();
+        private Buffer waitingBody;
+        private boolean waitingBodyRead;
         private HttpClient client;
 
         private Exchange(String immutableTag, String writeLockRepository) {
@@ -321,10 +378,51 @@ public class EcrRegistryDataPlane {
             return writeLockRepository;
         }
 
+        private boolean holdingWriteLock() {
+            return writeLockHeld.get();
+        }
+
         private void writeLockAcquired() {
             if (writeLockRepository != null) {
                 writeLockHeld.set(true);
             }
+        }
+
+        /**
+         * Starts the buffer a waiting manifest PUT drains its body into, once: from here the
+         * bytes are read instead of left to hold the client connection's flow-control window.
+         */
+        private boolean startWaitingBody() {
+            if (waitingBody != null) {
+                return false;
+            }
+            waitingBody = Buffer.buffer();
+            return true;
+        }
+
+        /** Appends one chunk of the drained body, or refuses it past the buffering limit. */
+        private boolean appendWaitingBody(Buffer chunk) {
+            waitingBody.appendBuffer(chunk);
+            return waitingBody.length() <= WAITING_MANIFEST_BODY_LIMIT_BYTES;
+        }
+
+        /** Marks the drained body complete, once; the exchange may then continue to the registry. */
+        private boolean finishWaitingBody() {
+            if (waitingBodyRead) {
+                return false;
+            }
+            waitingBodyRead = true;
+            return true;
+        }
+
+        /** Whether nothing of a waiting body still holds the exchange back from the registry. */
+        private boolean waitingBodyReady() {
+            return waitingBody == null || waitingBodyRead;
+        }
+
+        /** The drained body to send the registry in the live request's place, or null. */
+        private Buffer replayBody() {
+            return waitingBodyRead ? waitingBody : null;
         }
 
         private HttpClient open(HttpClient registryClient) {

@@ -47,6 +47,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -1077,6 +1079,113 @@ class EcrServiceTest {
             service.unlockRepositoryWrites(storageRepositoryName);
         }
         return !acquired;
+    }
+
+    @Test
+    void repositoryWriteLockEntriesAreCollectedOnceTheirWritersAreDone() {
+        String internal = ACCOUNT + "/" + REGION + "/write-locks/collected";
+        assertTrue(service.tryLockRepositoryWrites(internal));
+        assertEquals(1, service.liveRepositoryWriteLocks(), "a held lock keeps its entry");
+        service.unlockRepositoryWrites(internal);
+        assertEquals(0, service.liveRepositoryWriteLocks(),
+                "the entry is collected once its writer is done");
+
+        String missing = ACCOUNT + "/" + REGION + "/no-such/repository";
+        assertTrue(service.tryLockRepositoryWrites(missing),
+                "a registry write to a repository that does not exist takes the lock all the same");
+        service.unlockRepositoryWrites(missing);
+        assertEquals(0, service.liveRepositoryWriteLocks(),
+                "a missing repository's lock entry must not stay in memory");
+    }
+
+    /**
+     * A writer waiting on a held lock keeps the entry in the map, so a writer arriving later
+     * meets the same lock instance and stays mutual-excluded with it: were the entry removed
+     * at the release, the later writer would take a fresh instance while the waiter still
+     * queues on the old one, and both would believe they hold the repository's write lock.
+     */
+    @Test
+    void aWaitingWriterKeepsTheLockEntrySharedWithLaterArrivals() throws Exception {
+        String internal = ACCOUNT + "/" + REGION + "/write-locks/waiting";
+        assertTrue(service.tryLockRepositoryWrites(internal), "the test holds the lock first");
+
+        AtomicReference<Thread> waiterThread = new AtomicReference<>();
+        CountDownLatch waiterStarted = new CountDownLatch(1);
+        CountDownLatch waiterHeld = new CountDownLatch(1);
+        CountDownLatch waiterMayRelease = new CountDownLatch(1);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> waiter = executor.submit(() -> {
+                waiterThread.set(Thread.currentThread());
+                waiterStarted.countDown();
+                service.lockRepositoryWrites(internal);
+                waiterHeld.countDown();
+                waiterMayRelease.await();
+                service.unlockRepositoryWrites(internal);
+                return null;
+            });
+            assertTrue(waiterStarted.await(5, TimeUnit.SECONDS));
+            awaitParkedOnTheLock(waiterThread.get());
+
+            service.unlockRepositoryWrites(internal);
+            assertTrue(waiterHeld.await(5, TimeUnit.SECONDS),
+                    "the waiting writer takes the lock once the holder releases it");
+            assertFalse(service.tryLockRepositoryWrites(internal),
+                    "a later writer must be mutual-excluded by the writer waiting on the same entry");
+
+            waiterMayRelease.countDown();
+            waiter.get(5, TimeUnit.SECONDS);
+            assertTrue(service.tryLockRepositoryWrites(internal),
+                    "the lock is free again once its last writer is done");
+            service.unlockRepositoryWrites(internal);
+            assertEquals(0, service.liveRepositoryWriteLocks(),
+                    "the entry is collected once its last writer is done");
+        } finally {
+            waiterMayRelease.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void anInterruptedLockWaiterLeavesNoEntryBehind() throws Exception {
+        String internal = ACCOUNT + "/" + REGION + "/write-locks/interrupted";
+        service.lockRepositoryWrites(internal);
+
+        AtomicReference<Thread> waiterThread = new AtomicReference<>();
+        CountDownLatch waiterStarted = new CountDownLatch(1);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> waiter = executor.submit(() -> {
+                waiterThread.set(Thread.currentThread());
+                waiterStarted.countDown();
+                service.lockRepositoryWrites(internal);
+                return null;
+            });
+            assertTrue(waiterStarted.await(5, TimeUnit.SECONDS));
+            awaitParkedOnTheLock(waiterThread.get());
+
+            waiterThread.get().interrupt();
+            ExecutionException failed = assertThrows(ExecutionException.class,
+                    () -> waiter.get(5, TimeUnit.SECONDS),
+                    "the interrupted waiter fails instead of taking the lock");
+            assertEquals("ServerException", ((AwsException) failed.getCause()).getErrorCode());
+
+            service.unlockRepositoryWrites(internal);
+            assertEquals(0, service.liveRepositoryWriteLocks(),
+                    "the interrupted waiter's entry is collected once the holder is done");
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /** Polls until the waiter is parked on the lock's semaphore, so it holds the entry. */
+    private static void awaitParkedOnTheLock(Thread waiter) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (waiter.getState() != Thread.State.WAITING) {
+            assertTrue(System.currentTimeMillis() < deadline,
+                    "the waiting writer never parked on the lock");
+            Thread.sleep(5);
+        }
     }
 
     @Test
