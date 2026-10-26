@@ -1057,6 +1057,8 @@ A standalone ENI created via `CreateNetworkInterface` can also be handed to `Run
 | AttachVolume | Attaches a volume to an instance at the requested device; returns the attachment in `attaching` state. |
 | DetachVolume | Detaches a volume from an instance, optionally forced; returns the attachment in `detaching` state. |
 
+A volume `CreateVolume` makes encrypted reports the KMS key it was created with as `kmsKeyId` in `CreateVolume` and `DescribeVolumes`: the request's `KmsKeyId`, or else the region's default EBS key as `GetEbsDefaultKmsKeyId` reported it then (`alias/aws/ebs` until `ModifyEbsDefaultKmsKeyId` sets another). An instance's root volume reports no key yet, even when encryption by default encrypts it or its block device mapping names one. Keys are kept as given (a key id, key ARN, alias name or alias ARN) and are not checked against KMS; AWS reports the key's ARN, and fails the volume later when the key cannot be used. A volume that is not encrypted has no key. AWS refuses a `KmsKeyId` without `Encrypted=true`, even with encryption by default on; Floci accepts it, and the volume keeps the key only when encryption by default makes it encrypted. Volumes stored before Floci kept keys report none, and snapshots do not record a key.
+
 When `floci.services.ec2.volume-block-devices` is enabled (the default), attached EBS volumes are backed by real Linux loop devices inside running instance containers and synthesized EKS cluster node containers:
 - **Storage mechanism**: Backing sparse raw image files are allocated in Floci storage under `floci-aws-ec2-volumes` (named volume or host path). A privileged helper container (`floci-aws-ec2-volume-helper`, running `floci.services.ec2.volume-helper-image`, default `alpine:3.21`) manages Linux loop devices via `losetup`. It starts on the first volume operation and is removed when Floci shuts down; the backing files stay in storage.
 - **Target device nodes**: Inside privileged target instance containers, the corresponding device node is created at the requested path (for example `/dev/xvdf` or `/dev/sdf`) using `mknod` or a symlink to the loop device, matching the exact size specified during volume creation. Target containers can format filesystems (such as ext4 or xfs), mount them, and persist data across detach and reattach.
@@ -1116,7 +1118,7 @@ Spot prices returned by `DescribeSpotPriceHistory` are synthetic and derived det
 | EnableEbsEncryptionByDefault | Turns on default encryption for new volumes in the region. |
 | DisableEbsEncryptionByDefault | Turns default encryption back off. |
 | GetEbsEncryptionByDefault | Reports whether default encryption is on. |
-| ModifyEbsDefaultKmsKeyId | Sets the KMS key used when a volume names none. |
+| ModifyEbsDefaultKmsKeyId | Sets the KMS key an encrypted `CreateVolume` volume gets when it names none. |
 | GetEbsDefaultKmsKeyId | Reports the current default KMS key. |
 | ResetEbsDefaultKmsKeyId | Restores the AWS-managed default key. |
 
