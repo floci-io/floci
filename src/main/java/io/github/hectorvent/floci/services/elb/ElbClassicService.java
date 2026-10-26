@@ -637,16 +637,9 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
     @Override
     public List<Reference> serverCertificateReferences() {
         List<Reference> references = new ArrayList<>();
-        for (Map<String, ClassicLoadBalancer> regionLbs : loadBalancers.values()) {
-            for (ClassicLoadBalancer lb : regionLbs.values()) {
-                for (ClassicListener listener : lb.getListeners()) {
-                    String certificate = listener.getSslCertificateId();
-                    if (certificate != null && !certificate.isBlank()) {
-                        references.add(new Reference(certificate,
-                                "load balancer " + lb.getLoadBalancerName()));
-                    }
-                }
-            }
+        for (ListenerCertificate served : listenerCertificates()) {
+            references.add(new Reference(served.certificateId(),
+                    "load balancer " + served.loadBalancer().getLoadBalancerName()));
         }
         return references;
     }
@@ -658,18 +651,32 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
      */
     public List<CertificateReference> acmCertificateReferences() {
         List<CertificateReference> references = new ArrayList<>();
+        for (ListenerCertificate served : listenerCertificates()) {
+            ClassicLoadBalancer lb = served.loadBalancer();
+            String loadBalancerArn = AwsArnUtils.Arn.of("elasticloadbalancing", lb.getRegion(),
+                    lb.getAccountId(), "loadbalancer/" + lb.getLoadBalancerName()).toString();
+            references.add(new CertificateReference(served.certificateId(), loadBalancerArn));
+        }
+        return references;
+    }
+
+    private record ListenerCertificate(ClassicLoadBalancer loadBalancer, String certificateId) {
+    }
+
+    /** Every certificate a listener names, skipping the empty id Terraform sends for a plain listener. */
+    private List<ListenerCertificate> listenerCertificates() {
+        List<ListenerCertificate> served = new ArrayList<>();
         for (Map<String, ClassicLoadBalancer> regionLbs : loadBalancers.values()) {
             for (ClassicLoadBalancer lb : regionLbs.values()) {
-                String loadBalancerArn = AwsArnUtils.Arn.of("elasticloadbalancing", lb.getRegion(),
-                        lb.getAccountId(), "loadbalancer/" + lb.getLoadBalancerName()).toString();
                 for (ClassicListener listener : lb.getListeners()) {
-                    if (listener.getSslCertificateId() != null) {
-                        references.add(new CertificateReference(listener.getSslCertificateId(), loadBalancerArn));
+                    String certificateId = listener.getSslCertificateId();
+                    if (certificateId != null && !certificateId.isBlank()) {
+                        served.add(new ListenerCertificate(lb, certificateId));
                     }
                 }
             }
         }
-        return references;
+        return served;
     }
 
     private static AwsException duplicateLoadBalancerName(String name) {
@@ -695,11 +702,18 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
     private void requireCertificates(String region, List<ClassicListener> listeners) {
         for (ClassicListener listener : listeners) {
             String certificateId = listener.getSslCertificateId();
-            if (certificateId != null && !certificates.exists(region, certificateId)) {
+            if (certificateId == null || (certificateId.isBlank() && !terminatesTls(listener))) {
+                continue;
+            }
+            if (!certificates.exists(region, certificateId)) {
                 throw new AwsException("CertificateNotFound",
                         "Server Certificate not found for the key: " + certificateId, 400);
             }
         }
+    }
+
+    private static boolean terminatesTls(ClassicListener listener) {
+        return "HTTPS".equalsIgnoreCase(listener.getProtocol()) || "SSL".equalsIgnoreCase(listener.getProtocol());
     }
 
     private static List<String> certificateIdsOf(List<ClassicListener> listeners) {

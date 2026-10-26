@@ -163,6 +163,21 @@ class ElbClassicServerCertificateIntegrationTest {
     }
 
     @Test
+    void createLoadBalancerAcceptsAnHttpListenerWithAnEmptyCertificateId() {
+        given().header("Authorization", ELB_AUTH)
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Version", CLASSIC_VERSION)
+                .formParam("LoadBalancerName", "elb-cert-http-" + suffix())
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .formParam("Listeners.member.1.Protocol", "HTTP")
+                .formParam("Listeners.member.1.LoadBalancerPort", "80")
+                .formParam("Listeners.member.1.InstanceProtocol", "HTTP")
+                .formParam("Listeners.member.1.InstancePort", "8080")
+                .formParam("Listeners.member.1.SSLCertificateId", "")
+            .when().post("/").then().statusCode(200);
+    }
+
+    @Test
     void acmCertificateInUseCannotBeDeletedUntilTheListenerIsGone() {
         String lb = "elb-acm-in-use-" + suffix();
         String arn = requestAcmCertificate();
