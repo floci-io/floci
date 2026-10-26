@@ -617,6 +617,27 @@ class Ec2QueryHandlerTest {
         return (String) response.getEntity();
     }
 
+    /** A rejected tag specification keeps its error on a dry run: the tags are read before DryRun is answered. */
+    @ParameterizedTest
+    @CsvSource({"CreateVpc,vpc,InvalidParameter", "CreateSubnet,subnet,InvalidParameter",
+            "CreateSecurityGroup,security-group,InvalidParameterValue"})
+    void aDryRunKeepsTheErrorOfAReservedTagKey(String action, String resourceType, String code) {
+        Ec2Service service = mock(Ec2Service.class);
+        MultivaluedMap<String, String> params = createSubnetParams("10.38.1.0/24");
+        params.putSingle("GroupName", "test");
+        params.putSingle("GroupDescription", "test");
+        params.putSingle("DryRun", "true");
+        params.putSingle("TagSpecification.1.ResourceType", resourceType);
+        params.putSingle("TagSpecification.1.Tag.1.Key", "aws:reserved");
+        params.putSingle("TagSpecification.1.Tag.1.Value", "invalid");
+
+        Response response = handler(service).handle(action, params, "us-east-1");
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>" + code + "</Code>"));
+        verifyNoInteractions(service);
+    }
+
     @Test
     void aSecurityGroupDryRunWithoutAVpcIdNeedsTheDefaultVpcToExist() {
         Ec2Service service = mock(Ec2Service.class);
