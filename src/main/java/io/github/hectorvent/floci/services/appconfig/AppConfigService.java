@@ -88,7 +88,7 @@ public class AppConfigService {
         return applicationStore.get(applicationId);
     }
 
-    public void deleteApplication(String idOrName) {
+    public synchronized void deleteApplication(String idOrName) {
         applicationStore.get(idOrName)
                 .or(() -> listApplications().stream().filter(a -> idOrName.equals(a.getName())).findFirst())
                 .ifPresent(application -> applicationStore.delete(application.getId()));
@@ -280,7 +280,7 @@ public class AppConfigService {
         return profile;
     }
 
-    public void deleteConfigurationProfile(String applicationIdentifier, String profileIdentifier) {
+    public synchronized void deleteConfigurationProfile(String applicationIdentifier, String profileIdentifier) {
         String appId = resolveApplication(applicationIdentifier).getId();
         // Unlike deleteApplication (a single, unscoped ID), a profile is nested under an
         // application - a mismatched appId must not be able to delete another application's
@@ -443,7 +443,7 @@ public class AppConfigService {
         return strategy;
     }
 
-    public void deleteDeploymentStrategy(String id) {
+    public synchronized void deleteDeploymentStrategy(String id) {
         // Predefined strategies aren't real stored resources (see builtinStrategy above) -
         // silently no-op'ing here would report success for a delete that did nothing, and the
         // "deleted" strategy would still show up in every subsequent Get/List call.
@@ -631,13 +631,13 @@ public class AppConfigService {
         return getApplication(appId).getTags();
     }
 
-    public void tagApplication(String appId, Map<String, String> tags) {
+    public synchronized void tagApplication(String appId, Map<String, String> tags) {
         Application app = getApplication(appId);
         app.getTags().putAll(tags);
         applicationStore.put(app.getId(), app);
     }
 
-    public void untagApplication(String appId, List<String> tagKeys) {
+    public synchronized void untagApplication(String appId, List<String> tagKeys) {
         Application app = getApplication(appId);
         tagKeys.forEach(app.getTags()::remove);
         applicationStore.put(app.getId(), app);

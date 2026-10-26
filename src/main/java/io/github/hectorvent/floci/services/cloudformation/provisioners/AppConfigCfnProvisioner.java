@@ -35,8 +35,8 @@ import java.util.Set;
  * leaves the displaced one to the {@link ReplacementCleanup} record. Whether one changed is judged on
  * the resolved template values the entity was made from, as CloudFormation compares them.
  *
- * <p>AppConfig keeps tags on applications only, so {@code Tags} on the other three types are
- * accepted and not stored, as AppConfig's TagResource treats them. So are a profile's
+ * <p>Floci keeps AppConfig tags on applications only, so {@code Tags} on the other three types are
+ * accepted and not stored, as Floci's AppConfig TagResource treats them. So are a profile's
  * {@code KmsKeyIdentifier}, {@code RetrievalRoleArn} and {@code Validators}, and the
  * {@code DeletionProtectionCheck} of an environment or profile, which Floci's create operations do
  * not keep either.
@@ -281,14 +281,10 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
      * string a parameter supplies is a value, as the same string written literally is.
      */
     private static JsonNode resolved(JsonNode props, String name, ProvisionContext ctx) {
-        if (props == null || !props.has(name) || props.get(name).isNull()) {
+        if (props == null || !props.has(name)) {
             return null;
         }
-        JsonNode value = ctx.engine().omitNoValue(props.get(name));
-        if (value.isMissingNode()) {
-            return null;
-        }
-        JsonNode resolved = ctx.engine().resolveNode(value);
+        JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(props.get(name));
         return resolved == null || resolved.isNull() || resolved.isMissingNode() ? null : resolved;
     }
 
@@ -390,7 +386,8 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
      * never selects another one, and the displaced entity of a replacement is found by its ID alone.
      * An environment or profile is deleted without looking up its application, which the stack may
      * already have deleted: an update that moves them to a new application and removes the old one
-     * deletes that application before the entities it displaced. One already gone counts as deleted. An environment takes its
+     * deletes that application before the entities it displaced. One already gone counts as
+     * deleted. An environment takes its
      * deployments with it, and a profile its hosted configuration versions.
      */
     @Override
