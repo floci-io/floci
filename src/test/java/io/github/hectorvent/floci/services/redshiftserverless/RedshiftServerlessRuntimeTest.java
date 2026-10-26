@@ -12,17 +12,22 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -106,6 +111,30 @@ class RedshiftServerlessRuntimeTest {
         verify(containers, times(2)).resetUserSchemas(ACCOUNT, BACKEND_ID, "root", "analytics");
         verify(containers, times(2)).restoreSnapshot(eq(ACCOUNT), eq(BACKEND_ID), eq("root"), eq("analytics"),
                 any(Path.class), eq(true));
+    }
+
+    @Test
+    void credentialFailureKeepsSafetyDumpUntilDataIsRestored() {
+        Path dump = Path.of("/tmp/dump.sql");
+        AtomicReference<Path> safety = new AtomicReference<>();
+        doAnswer(invocation -> {
+            safety.set(invocation.getArgument(4, Path.class));
+            return null;
+        }).when(containers).takeSnapshot(any(), any(), any(), any(), any(), eq(true));
+        AwsException failure = new AwsException("InvalidRequestException", "Secret has replicas", 400);
+
+        assertSame(failure, assertThrows(AwsException.class, () -> runtime.restoreSnapshot(
+                ACCOUNT, REGION, "my-wg", "root", "analytics", dump, () -> {
+                    assertTrue(Files.exists(safety.get()));
+                    throw failure;
+                })));
+
+        InOrder order = inOrder(containers);
+        order.verify(containers).resetUserSchemas(ACCOUNT, BACKEND_ID, "root", "analytics");
+        order.verify(containers).restoreSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", dump, true);
+        order.verify(containers).resetUserSchemas(ACCOUNT, BACKEND_ID, "root", "analytics");
+        order.verify(containers).restoreSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", safety.get(), true);
+        assertFalse(Files.exists(safety.get()));
     }
 
     @Test

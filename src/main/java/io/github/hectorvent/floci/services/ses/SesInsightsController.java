@@ -1,10 +1,13 @@
 package io.github.hectorvent.floci.services.ses;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.ses.SesMailboxValidation.Result;
+import io.github.hectorvent.floci.services.ses.SesMailboxValidation.Verdict;
 import io.github.hectorvent.floci.services.ses.model.EmailInsights;
 import io.github.hectorvent.floci.services.ses.model.InsightsBounce;
 import io.github.hectorvent.floci.services.ses.model.InsightsComplaint;
@@ -15,6 +18,7 @@ import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
@@ -26,6 +30,7 @@ import jakarta.ws.rs.core.Response;
 import java.util.List;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 
 /**
  * SES V2 message insights ({@code /v2/email/insights/{MessageId}/}), the read side of the
@@ -35,6 +40,10 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
  * gated on Virtual Deliverability Manager and the gate is checked before the message id, so an
  * unparseable id in a VDM-disabled region still reports the VDM error. A message that is absent
  * reports the account id alongside the id.
+ *
+ * <p>Email address insights ({@code /v2/email/email-address-insights/}) share the name but not the
+ * gate: they answer with Virtual Deliverability Manager disabled (probe-confirmed 2026-10-25), and
+ * {@link SesMailboxValidation} derives the verdicts.
  */
 @Path("/v2/email")
 @Produces(MediaType.APPLICATION_JSON)
@@ -66,6 +75,33 @@ public class SesInsightsController {
                         "Message <" + messageId + "> not found for account <"
                                 + regionResolver.getAccountId() + ">", 404));
         return Response.ok(render(email)).build();
+    }
+
+    @POST
+    @Path("/email-address-insights")
+    public Response getEmailAddressInsights(String body) {
+        JsonNode request = readOptionBody(objectMapper, body);
+        SesV2RequestShapes.check("GetEmailAddressInsights", request);
+        String emailAddress = request.path("EmailAddress").textValue();
+        if (emailAddress == null || emailAddress.isEmpty()) {
+            throw new AwsException("BadRequestException", "Email address must not be null nor empty", 400);
+        }
+        Result result = SesMailboxValidation.evaluate(emailAddress);
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode validation = response.putObject("MailboxValidation");
+        putVerdict(validation, "IsValid", result.isValid());
+        ObjectNode evaluations = validation.putObject("Evaluations");
+        putVerdict(evaluations, "HasValidSyntax", result.hasValidSyntax());
+        putVerdict(evaluations, "HasValidDnsRecords", result.hasValidDnsRecords());
+        putVerdict(evaluations, "MailboxExists", result.mailboxExists());
+        putVerdict(evaluations, "IsRoleAddress", result.isRoleAddress());
+        putVerdict(evaluations, "IsDisposable", result.isDisposable());
+        putVerdict(evaluations, "IsRandomInput", result.isRandomInput());
+        return Response.ok(response).build();
+    }
+
+    private static void putVerdict(ObjectNode parent, String field, Verdict verdict) {
+        parent.putObject(field).put("ConfidenceVerdict", verdict.name());
     }
 
     private ObjectNode render(SentEmail email) {

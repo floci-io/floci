@@ -90,6 +90,10 @@ class RedshiftServerlessServiceTest {
         endpoints = mock(RedshiftServerlessEndpoints.class);
         when(endpoints.allocate()).thenAnswer(invocation -> new Endpoint("localhost", nextPort++));
         runtime = mock(RedshiftServerlessRuntime.class);
+        doAnswer(invocation -> {
+            invocation.getArgument(6, Runnable.class).run();
+            return null;
+        }).when(runtime).restoreSnapshot(any(), any(), any(), any(), any(), any(), any());
         when(runtime.generatePassword()).thenReturn("Generated123");
         when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
                 any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
@@ -925,7 +929,7 @@ class RedshiftServerlessServiceTest {
         assertTrue(Files.exists(Path.of(snapshot.getSqlDump())));
         service.restoreFromSnapshot("dump-ns", "dump-wg", "dump-snap", null, REGION);
         verify(runtime).restoreSnapshot(eq(ACCOUNT_ID), eq(REGION), eq("dump-wg"), any(), eq("dev"),
-                eq(Path.of(snapshot.getSqlDump())));
+                eq(Path.of(snapshot.getSqlDump())), any(Runnable.class));
 
         service.deleteSnapshot("dump-snap", REGION);
         assertFalse(Files.exists(Path.of(snapshot.getSqlDump())));
@@ -945,7 +949,7 @@ class RedshiftServerlessServiceTest {
         AwsException missing = assertThrows(AwsException.class,
                 () -> service.restoreFromSnapshot("gone-ns", "gone-wg", "gone-snap", null, REGION));
         assertEquals("InternalServerException", missing.getErrorCode());
-        verify(runtime, never()).restoreSnapshot(any(), any(), any(), any(), any(), any());
+        verify(runtime, never()).restoreSnapshot(any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -962,7 +966,7 @@ class RedshiftServerlessServiceTest {
 
         assertNull(snapshot.getSqlDump());
         verify(runtime, never()).takeSnapshot(any(), any(), any(), any(), any(), any());
-        verify(runtime, never()).restoreSnapshot(any(), any(), any(), any(), any(), any());
+        verify(runtime, never()).restoreSnapshot(any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test

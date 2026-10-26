@@ -404,7 +404,7 @@ class EcrServiceTest {
         when(registryManager.tryEnsureStarted()).thenReturn(false);
 
         assertEquals("ServerException",
-                assertThrows(AwsException.class, () -> service.listImages(REPO, null, REGION)).getErrorCode());
+                assertThrows(AwsException.class, () -> service.listImages(REPO, null, REGION, null, null)).getErrorCode());
         assertEquals("ServerException",
                 assertThrows(AwsException.class,
                         () -> service.describeImages(REPO, null, null, REGION)).getErrorCode());
@@ -639,7 +639,7 @@ class EcrServiceTest {
 
             service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
 
-            List<ImageIdentifier> imageIds = service.listImages(repositoryName, null, REGION);
+            List<ImageIdentifier> imageIds = service.listImages(repositoryName, null, REGION, null, null).items();
             assertEquals(1, imageIds.size());
             assertEquals(tag, imageIds.get(0).getImageTag());
             assertEquals(digest, imageIds.get(0).getImageDigest());
@@ -693,7 +693,7 @@ class EcrServiceTest {
 
             service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
 
-            List<ImageIdentifier> imageIds = service.listImages(repositoryName, null, REGION);
+            List<ImageIdentifier> imageIds = service.listImages(repositoryName, null, REGION, null, null).items();
             assertEquals(1, imageIds.size());
             assertEquals(tag, imageIds.get(0).getImageTag());
             assertEquals(digest, imageIds.get(0).getImageDigest());
@@ -758,7 +758,7 @@ class EcrServiceTest {
                     .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
 
             service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
-            List<ImageIdentifier> ids = service.listImages(repositoryName, null, REGION);
+            List<ImageIdentifier> ids = service.listImages(repositoryName, null, REGION, null, null).items();
             assertEquals(1, ids.size());
             assertEquals(tag, ids.get(0).getImageTag());
             assertEquals(digest, ids.get(0).getImageDigest());
@@ -831,7 +831,7 @@ class EcrServiceTest {
             // ambiguity guard must keep resolution on A's namespaced form.
             service.createRepository(repositoryName, ACCOUNT, null, null, null, null, null, REGION);
 
-            List<ImageIdentifier> ids = service.listImages(repositoryName, ACCOUNT, REGION);
+            List<ImageIdentifier> ids = service.listImages(repositoryName, ACCOUNT, REGION, null, null).items();
             assertTrue(ids.isEmpty(),
                     "bare entry owned by another account must not resolve for this scope");
         }

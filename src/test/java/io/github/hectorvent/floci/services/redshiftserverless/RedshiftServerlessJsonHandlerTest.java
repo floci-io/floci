@@ -50,6 +50,27 @@ class RedshiftServerlessJsonHandlerTest {
         assertTrue(response.path("namespace").path("adminPasswordSecretArn").isTextual(), response.toString());
     }
 
+    @Test
+    void restoreFromSnapshotEnablesManagedCredentialsWhenRequested() {
+        body(handler.handle("CreateNamespace", parse(
+                "{\"namespaceName\":\"restore-managed-ns\",\"adminUsername\":\"admin\","
+                        + "\"adminUserPassword\":\"Initial123\"}"), REGION));
+        body(handler.handle("CreateSnapshot", parse(
+                "{\"snapshotName\":\"restore-managed-snap\",\"namespaceName\":\"restore-managed-ns\"}"), REGION));
+        body(handler.handle("CreateWorkgroup", parse(
+                "{\"workgroupName\":\"restore-managed-wg\",\"namespaceName\":\"restore-managed-ns\"}"), REGION));
+
+        JsonNode restored = body(handler.handle("RestoreFromSnapshot", parse(
+                "{\"namespaceName\":\"restore-managed-ns\",\"workgroupName\":\"restore-managed-wg\","
+                        + "\"snapshotName\":\"restore-managed-snap\",\"manageAdminPassword\":true,"
+                        + "\"adminPasswordSecretKmsKeyId\":\"arn:aws:kms:us-east-1:123456789012:key/managed\"}"),
+                REGION));
+
+        assertTrue(restored.path("namespace").path("adminPasswordSecretArn").isTextual(), restored.toString());
+        assertEquals("arn:aws:kms:us-east-1:123456789012:key/managed",
+                restored.path("namespace").path("adminPasswordSecretKmsKeyId").textValue());
+    }
+
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT_ID = "123456789012";
 

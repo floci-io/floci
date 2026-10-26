@@ -8,16 +8,24 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
+import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
+import io.github.hectorvent.floci.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -29,6 +37,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -54,11 +64,18 @@ class RedshiftServerlessAdminSecretsServiceTest {
     private RedshiftServerlessRuntime runtime;
     private SecretsManagerService secrets;
     private ObjectMapper mapper;
+    private StorageFactory storageFactory;
+    private RegionResolver regions;
+    private RedshiftServerlessEndpoints endpoints;
+    private EmulatorConfig config;
+
+    @TempDir
+    Path tempDir;
 
     @BeforeEach
     @SuppressWarnings({"unchecked", "rawtypes"})
     void setup() {
-        StorageFactory storageFactory = mock(StorageFactory.class);
+        storageFactory = mock(StorageFactory.class);
         namespaces = spy(AccountAwareStorageBackend.inMemory(ACCOUNT));
         when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-namespaces.json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend) namespaces);
@@ -66,12 +83,12 @@ class RedshiftServerlessAdminSecretsServiceTest {
                 any(TypeReference.class))).thenReturn(AccountAwareStorageBackend.inMemory(ACCOUNT));
         when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-snapshots.json"),
                 any(TypeReference.class))).thenReturn(AccountAwareStorageBackend.inMemory(ACCOUNT));
-        RegionResolver regions = mock(RegionResolver.class);
+        regions = mock(RegionResolver.class);
         when(regions.getAccountId()).thenReturn(ACCOUNT);
         when(regions.buildArn(eq("redshift-serverless"), eq(REGION), any(String.class)))
                 .thenAnswer(invocation -> "arn:aws:redshift-serverless:" + REGION + ":" + ACCOUNT + ":"
                         + invocation.getArgument(2, String.class));
-        RedshiftServerlessEndpoints endpoints = mock(RedshiftServerlessEndpoints.class);
+        endpoints = mock(RedshiftServerlessEndpoints.class);
         when(endpoints.allocate()).thenReturn(new Endpoint("localhost", 7100));
         runtime = mock(RedshiftServerlessRuntime.class);
         when(runtime.generatePassword()).thenReturn(GENERATED_PASSWORD);
@@ -82,10 +99,13 @@ class RedshiftServerlessAdminSecretsServiceTest {
         Secret secret = new Secret();
         secret.setArn(SECRET_ARN);
         secret.setKmsKeyId(SECRET_KEY);
+        secret.setOwningService("redshift");
+        when(secrets.describeSecret(SECRET_ARN, REGION)).thenReturn(secret);
         when(secrets.createSecret(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(secret);
         when(secrets.createSecret(any(), any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(secret);
         mapper = new ObjectMapper().findAndRegisterModules();
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.storage().persistentPath()).thenReturn(tempDir.toString());
         service = new RedshiftServerlessService(storageFactory, regions, endpoints, runtime, config,
                 new RedshiftServerlessAdminSecrets(secrets, mapper));
     }
@@ -229,6 +249,186 @@ class RedshiftServerlessAdminSecretsServiceTest {
         Namespace copy = new Namespace(restored);
         assertEquals(SECRET_ARN, copy.getAdminPasswordSecretArn());
         assertEquals(SECRET_KEY, copy.getAdminPasswordSecretKmsKeyId());
+    }
+
+    @Test
+    void namespaceRollbackRestoresDeletedManagedSecretAndBackendPassword() {
+        Namespace previous = createManaged();
+        attachWorkgroup();
+        RedshiftServerlessService.NamespaceUpdateSnapshot snapshot = service.snapshotNamespaceUpdate(NAME, REGION);
+        update(null, ORIGINAL_PASSWORD, false);
+        clearInvocations(runtime, secrets);
+
+        service.restoreNamespaceUpdate(snapshot, REGION);
+
+        assertEquals(previous.getAdminPasswordSecretArn(), service.getNamespace(NAME, REGION).getAdminPasswordSecretArn());
+        assertEquals(GENERATED_PASSWORD, service.getNamespace(NAME, REGION).getAdminUserPassword());
+        verify(runtime).changeMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics",
+                ORIGINAL_PASSWORD, GENERATED_PASSWORD);
+        ArgumentCaptor<Secret> restored = ArgumentCaptor.forClass(Secret.class);
+        verify(secrets).restoreManagedSecret(restored.capture(), eq(REGION));
+        assertEquals(SECRET_ARN, restored.getValue().getArn());
+        assertEquals(SECRET_KEY, restored.getValue().getKmsKeyId());
+    }
+
+    @Test
+    void namespaceRollbackLeavesCredentialsUnchangedWhenSecretRestoreConflicts() {
+        createManaged();
+        attachWorkgroup();
+        RedshiftServerlessService.NamespaceUpdateSnapshot snapshot = service.snapshotNamespaceUpdate(NAME, REGION);
+        Namespace current = update(null, ORIGINAL_PASSWORD, false);
+        clearInvocations(runtime, secrets);
+        AwsException conflict = new AwsException("ResourceExistsException", "Secret name has been reused", 400);
+        doThrow(conflict).when(secrets).restoreManagedSecret(any(Secret.class), eq(REGION));
+
+        assertSame(conflict, assertThrows(AwsException.class, () -> service.restoreNamespaceUpdate(snapshot, REGION)));
+
+        assertSame(current, service.getNamespace(NAME, REGION));
+        assertEquals(ORIGINAL_PASSWORD, current.getAdminUserPassword());
+        assertNull(current.getAdminPasswordSecretArn());
+        verify(runtime, never()).changeMasterPassword(any(), any(), any(), any(), any(), any(), any());
+        verify(runtime, never()).restoreMasterPassword(any(), any(), any(), any(), any(), any());
+        verify(secrets, never()).deleteSecret(any(), any(), anyBoolean(), any());
+    }
+
+    @Test
+    void namespaceRollbackRemovesNewManagedSecretAndRestoresUnmanagedPassword() {
+        createUnmanaged();
+        attachWorkgroup();
+        RedshiftServerlessService.NamespaceUpdateSnapshot snapshot = service.snapshotNamespaceUpdate(NAME, REGION);
+        update(null, null, true);
+        clearInvocations(runtime, secrets);
+
+        service.restoreNamespaceUpdate(snapshot, REGION);
+
+        assertNull(service.getNamespace(NAME, REGION).getAdminPasswordSecretArn());
+        assertEquals(ORIGINAL_PASSWORD, service.getNamespace(NAME, REGION).getAdminUserPassword());
+        verify(runtime).changeMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics",
+                GENERATED_PASSWORD, ORIGINAL_PASSWORD);
+        verify(secrets).deleteSecret(SECRET_ARN, null, true, REGION);
+    }
+
+    @Test
+    void blockedRollbackSecretDeletionRestoresCurrentBackendPasswordAndCanRetry() {
+        createUnmanaged();
+        attachWorkgroup();
+        RedshiftServerlessService.NamespaceUpdateSnapshot snapshot = service.snapshotNamespaceUpdate(NAME, REGION);
+        Namespace managed = update(null, null, true);
+        AtomicReference<String> backendPassword = new AtomicReference<>(GENERATED_PASSWORD);
+        doAnswer(invocation -> {
+            backendPassword.set(invocation.getArgument(6, String.class));
+            return null;
+        }).when(runtime).changeMasterPassword(any(), any(), any(), any(), any(), any(), any());
+        doAnswer(invocation -> {
+            backendPassword.set(invocation.getArgument(5, String.class));
+            return null;
+        }).when(runtime).restoreMasterPassword(any(), any(), any(), any(), any(), any());
+        AwsException failure = new AwsException("InvalidRequestException", "Secret has replicas", 400);
+        doThrow(failure).when(secrets).deleteSecret(SECRET_ARN, null, true, REGION);
+
+        assertSame(failure, assertThrows(AwsException.class, () -> service.restoreNamespaceUpdate(snapshot, REGION)));
+
+        assertEquals(GENERATED_PASSWORD, backendPassword.get());
+        assertSame(managed, service.getNamespace(NAME, REGION));
+        assertEquals(SECRET_ARN, managed.getAdminPasswordSecretArn());
+        assertEquals(managed.getAdminUserPassword(), backendPassword.get());
+        doReturn(null).when(secrets).deleteSecret(SECRET_ARN, null, true, REGION);
+
+        service.restoreNamespaceUpdate(snapshot, REGION);
+
+        assertEquals(ORIGINAL_PASSWORD, backendPassword.get());
+        assertEquals(ORIGINAL_PASSWORD, service.getNamespace(NAME, REGION).getAdminUserPassword());
+        assertNull(service.getNamespace(NAME, REGION).getAdminPasswordSecretArn());
+    }
+
+    @Test
+    void failedCredentialRestorePutsBackLiveDatabaseContents() throws Exception {
+        createUnmanaged();
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("failed-restore", NAME, null, null, REGION);
+        Path dump = tempDir.resolve("redshift-serverless-dumps").resolve(ACCOUNT).resolve(REGION)
+                .resolve("failed-restore.sql");
+        Files.createDirectories(dump.getParent());
+        Files.writeString(dump, "snapshot-data");
+        snapshot.setSqlDump(dump.toString());
+        attachWorkgroup();
+        Namespace previous = update(null, null, true);
+        AtomicReference<String> contents = new AtomicReference<>("live-data");
+        RedshiftContainerManager containers = mock(RedshiftContainerManager.class);
+        doAnswer(invocation -> {
+            Files.writeString(invocation.getArgument(4, Path.class), contents.get());
+            return null;
+        }).when(containers).takeSnapshot(any(), any(), any(), any(), any(), eq(true));
+        doAnswer(invocation -> {
+            contents.set("");
+            return null;
+        }).when(containers).resetUserSchemas(any(), any(), any(), any());
+        doAnswer(invocation -> {
+            contents.set(Files.readString(invocation.getArgument(4, Path.class)));
+            return null;
+        }).when(containers).restoreSnapshot(any(), any(), any(), any(), any(), eq(true));
+        RedshiftServerlessRuntime realRuntime = new RedshiftServerlessRuntime(containers,
+                mock(RedshiftProxyManager.class), mock(RedshiftCredentialBroker.class));
+        service = new RedshiftServerlessService(storageFactory, regions, endpoints, realRuntime, config,
+                new RedshiftServerlessAdminSecrets(secrets, mapper));
+        AwsException failure = new AwsException("InvalidRequestException", "Secret has replicas", 400);
+        doThrow(failure).when(secrets).deleteSecret(SECRET_ARN, null, true, REGION);
+
+        assertSame(failure, assertThrows(AwsException.class,
+                () -> service.restoreFromSnapshot(NAME, WORKGROUP, "failed-restore", null, REGION)));
+
+        assertEquals("live-data", contents.get());
+        assertSame(previous, service.getNamespace(NAME, REGION));
+        assertEquals(GENERATED_PASSWORD, service.getNamespace(NAME, REGION).getAdminUserPassword());
+    }
+
+    @Test
+    void restoreWithoutManagedCredentialsRestoresSnapshotPasswordAndRemovesManagedSecret() {
+        createUnmanaged();
+        service.createSnapshot("managed-restore-snap", NAME, null, null, REGION);
+        attachWorkgroup();
+        update(null, null, true);
+        clearInvocations(secrets, runtime);
+
+        Namespace restored = service.restoreFromSnapshot(NAME, WORKGROUP, "managed-restore-snap", null, REGION)
+                .namespace();
+
+        assertEquals(ORIGINAL_PASSWORD, restored.getAdminUserPassword());
+        assertNull(restored.getAdminPasswordSecretArn());
+        verify(runtime).changeMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics",
+                GENERATED_PASSWORD, ORIGINAL_PASSWORD);
+        verify(secrets).deleteSecret(SECRET_ARN, null, true, REGION);
+    }
+
+    @Test
+    void restoreWithManagedCredentialsRefreshesPasswordAndExistingSecret() throws Exception {
+        when(runtime.generatePassword()).thenReturn(GENERATED_PASSWORD, "Restored456!");
+        createManaged();
+        service.createSnapshot("refresh-managed-snap", NAME, null, null, REGION);
+        attachWorkgroup();
+        clearInvocations(secrets, runtime);
+
+        Namespace restored = service.restoreFromSnapshot(NAME, WORKGROUP, "refresh-managed-snap", null,
+                true, SECRET_KEY, REGION).namespace();
+
+        assertEquals("Restored456!", restored.getAdminUserPassword());
+        assertEquals(SECRET_ARN, restored.getAdminPasswordSecretArn());
+        verify(runtime).changeMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics",
+                GENERATED_PASSWORD, "Restored456!");
+        ArgumentCaptor<String> secretValue = ArgumentCaptor.forClass(String.class);
+        verify(secrets).putSecretValue(eq(SECRET_ARN), secretValue.capture(), isNull(), isNull(), eq(REGION), any());
+        assertEquals("Restored456!", mapper.readTree(secretValue.getValue()).path("password").asText());
+    }
+
+    @Test
+    void restoreFromSnapshotWithoutStoredPasswordKeepsCurrentCredentials() {
+        createUnmanaged();
+        service.createSnapshot("legacy-snap", NAME, null, null, REGION).setAdminUserPassword(null);
+        service.updateNamespace(NAME, null, "Changed123!", null, null, null, null, REGION);
+        attachWorkgroup();
+
+        Namespace restored = service.restoreFromSnapshot(NAME, WORKGROUP, "legacy-snap", null, REGION).namespace();
+
+        assertEquals("Changed123!", restored.getAdminUserPassword());
     }
 
     private Namespace createManaged() {

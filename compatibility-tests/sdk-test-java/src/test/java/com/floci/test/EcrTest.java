@@ -142,6 +142,34 @@ class EcrTest {
 
     @Test
     @Order(8)
+    @DisplayName("Batch scanning configuration returns valid results alongside missing repositories")
+    void scanningBatchReportsMissingRepositories() {
+        String missing = "floci-it/missing-scan-config";
+        BatchGetRepositoryScanningConfigurationResponse mixed =
+                ecr.batchGetRepositoryScanningConfiguration(b -> b.repositoryNames(missing, REPO_NAME));
+
+        assertThat(mixed.scanningConfigurations()).hasSize(1);
+        RepositoryScanningConfiguration config = mixed.scanningConfigurations().get(0);
+        assertThat(config.repositoryName()).isEqualTo(REPO_NAME);
+        assertThat(config.scanOnPush()).isFalse();
+        assertThat(config.scanFrequency()).isEqualTo(ScanFrequency.MANUAL);
+        assertThat(config.appliedScanFilters()).isEmpty();
+        assertThat(mixed.failures()).hasSize(1);
+        RepositoryScanningConfigurationFailure failure = mixed.failures().get(0);
+        assertThat(failure.repositoryName()).isEqualTo(missing);
+        assertThat(failure.failureCode()).isEqualTo(ScanningConfigurationFailureCode.REPOSITORY_NOT_FOUND);
+        assertThat(failure.failureReason()).contains(missing);
+
+        BatchGetRepositoryScanningConfigurationResponse absent =
+                ecr.batchGetRepositoryScanningConfiguration(b -> b.repositoryNames(missing));
+        assertThat(absent.scanningConfigurations()).isEmpty();
+        assertThat(absent.failures()).hasSize(1);
+        assertThat(absent.failures().get(0).failureCode())
+                .isEqualTo(ScanningConfigurationFailureCode.REPOSITORY_NOT_FOUND);
+    }
+
+    @Test
+    @Order(8)
     @DisplayName("PutLifecyclePolicy round-trips the policy text")
     void lifecyclePolicyRoundTrip() {
         String policy = "{\"rules\":[{\"rulePriority\":1,\"selection\":{\"tagStatus\":\"untagged\",\"countType\":\"imageCountMoreThan\",\"countNumber\":5},\"action\":{\"type\":\"expire\"}}]}";

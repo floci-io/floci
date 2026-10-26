@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.ecr;
 
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
@@ -9,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.mockito.Mockito.when;
 
 /**
  * The registry's own settings over the JSON protocol: the registry policy, the replication
@@ -17,6 +20,9 @@ import static org.hamcrest.Matchers.hasSize;
  */
 @QuarkusTest
 class EcrRegistrySettingsIntegrationTest {
+
+    @InjectMock
+    EcrRegistryManager registryManager;
 
     private static final String CT = "application/x-amz-json-1.1";
     private static final String PREFIX = "AmazonEC2ContainerRegistry_V20150921.";
@@ -97,6 +103,35 @@ class EcrRegistrySettingsIntegrationTest {
                 + "\"CONTINUOUS_SCAN\",\"repositoryFilters\":[{\"filter\":\"*\",\"filterType\":\"WILDCARD\"}]}]}",
                 region).statusCode(400)
                 .body("__type", equalTo("InvalidParameterException"));
+    }
+
+    @Test
+    void repositoryScanningBatchKeepsValidResultsWhenAnotherNameIsMissing() {
+        String region = "eu-west-3";
+        when(registryManager.getRepositoryUri("000000000000", region, "batch-scan-present"))
+                .thenReturn("localhost:4566/batch-scan-present");
+        call("CreateRepository", """
+                {"repositoryName":"batch-scan-present","imageScanningConfiguration":{"scanOnPush":true}}
+                """, region).statusCode(200);
+
+        call("BatchGetRepositoryScanningConfiguration", """
+                {"repositoryNames":["batch-scan-missing","batch-scan-present"]}
+                """, region).statusCode(200)
+                .body("scanningConfigurations", hasSize(1))
+                .body("scanningConfigurations[0].repositoryName", equalTo("batch-scan-present"))
+                .body("scanningConfigurations[0].scanOnPush", equalTo(true))
+                .body("scanningConfigurations[0].scanFrequency", equalTo("SCAN_ON_PUSH"))
+                .body("scanningConfigurations[0].appliedScanFilters", hasSize(0))
+                .body("failures", hasSize(1))
+                .body("failures[0].repositoryName", equalTo("batch-scan-missing"))
+                .body("failures[0].failureCode", equalTo("REPOSITORY_NOT_FOUND"));
+
+        call("BatchGetRepositoryScanningConfiguration", """
+                {"repositoryNames":["batch-scan-missing"]}
+                """, region).statusCode(200)
+                .body("scanningConfigurations", hasSize(0))
+                .body("failures", hasSize(1))
+                .body("failures[0].failureCode", equalTo("REPOSITORY_NOT_FOUND"));
     }
 
     private static String quote(String text) {

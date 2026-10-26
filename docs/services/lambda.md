@@ -285,6 +285,32 @@ aws lambda invoke --function-name my-function out.json
 !!! note "Local development behavior"
     This mechanism requires no custom configuration or special strings. It uses standard AWS SDK and CLI calls; automatic redeployment after an S3 upload is a Floci convenience.
 
+### Configuration {#reactive-s3-sync-configuration}
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ENABLED` | `true` | Re-deploy a function when the S3 object it was deployed from is overwritten. `false` only stores the object, as AWS does |
+| `FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ASYNC` | `false` | Re-deploy in the background, so the upload returns without waiting for it |
+
+By default the re-deploy runs inside the upload: `PutObject`, `CopyObject` or
+`CompleteMultipartUpload` returns only once the function has its new code. With
+`FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ASYNC=true` the upload returns at once, and the
+function reports `LastUpdateStatus` `InProgress` until the re-deploy finishes. Wait for it
+before invoking, or the invocation may still run the previous code:
+
+```bash
+aws s3 cp updated-function.zip s3://my-bucket/function.zip
+aws lambda wait function-updated --function-name my-function
+aws lambda invoke --function-name my-function out.json
+```
+
+Uploads that arrive while a re-deploy is running are coalesced: the next re-deploy reads the
+object as it is when it starts, so a burst of uploads costs at most one more. A re-deploy that
+fails, for example because the object is not a valid ZIP, leaves the previous code in place and
+reports `LastUpdateStatus` `Failed` with a `LastUpdateStatusReason` until the function's next
+successful update: a re-deploy, `UpdateFunctionCode` or `UpdateFunctionConfiguration`, since the
+status describes the last update of either kind. The status is kept in memory and is not persisted.
+
 ## Hot-Reload via Bind Mount
 
 For the tightest inner-loop development cycle, Floci supports a **bind-mount hot-reload** mode. Instead of packaging code into a ZIP and uploading it to S3, you point Floci directly at a directory on your host machine. The directory is bind-mounted read-only into `/var/task` inside the container, as `/var/task` is read-only in AWS Lambda, so every invocation runs the files as they currently exist on disk, with no upload or redeploy.
@@ -579,6 +605,8 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_UNRESERVED_CONCURRENCY_MIN` | `100` | Minimum unreserved capacity `PutFunctionConcurrency` must leave |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Enable bind-mount hot-reload via `S3Bucket=hot-reload` |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS` | *(unset)* | Comma-separated allowlist of host paths that may be bind-mounted |
+| `FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ENABLED` | `true` | Re-deploy a function when its S3 deployment object is overwritten. See [Reactive S3 Sync](#reactive-s3-sync-configuration) |
+| `FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ASYNC` | `false` | Run that re-deploy in the background so the upload does not wait for it |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | *(unset)* | Docker network to attach Lambda containers to (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_FLAGS` | *(unset)* | Additional Docker flags applied to Lambda containers, including `--env`, `--volume`, `--publish`, `--add-host`, `--dns`, `--label`, `--network`, `--user`, `--privileged`, and `--platform`. Explicit `--dns` entries replace automatic embedded DNS and public fallback resolvers. Published ports support `host:container` and `127.0.0.1:host:container` forms |
 | `FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS` | *(unset)* | Comma-separated `hostname:ip` entries added to each Lambda container's `/etc/hosts`; `ip` may be `host-gateway`, mirroring `docker run --add-host` |

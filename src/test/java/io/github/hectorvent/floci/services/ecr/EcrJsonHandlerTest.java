@@ -22,12 +22,13 @@ class EcrJsonHandlerTest {
     @Test
     void theScanningConfigurationIsOfTheCallersRepositories() throws Exception {
         EcrService service = mock(EcrService.class);
-        when(service.describeRepositories(List.of("web"), null, "us-east-1")).thenReturn(List.of());
+        when(service.batchGetRepositoryScanningConfiguration(List.of("web"), null, "us-east-1"))
+                .thenReturn(new EcrService.BatchScanningConfigurationResult(List.of(), List.of()));
         EcrJsonHandler handler = new EcrJsonHandler(service, MAPPER);
 
         assertEquals(200, handler.handle("BatchGetRepositoryScanningConfiguration",
                 MAPPER.readTree("{\"registryId\":\"111122223333\",\"repositoryNames\":[\"web\"]}"), "us-east-1")
                 .getStatus());
-        verify(service).describeRepositories(List.of("web"), null, "us-east-1");
+        verify(service).batchGetRepositoryScanningConfiguration(List.of("web"), null, "us-east-1");
     }
 }

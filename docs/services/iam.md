@@ -1957,6 +1957,20 @@ it does on AWS, and a `Deny` on the full ARN applies. `CreateSecret` is evaluate
 policy scoped to a name prefix such as `secret:app/*` allows it. A name that matches no secret in the
 request's account and region is evaluated as `secret:<name>`, and an ARN that matches none as given.
 
+**KMS keys.** A request that names a key by its id, an alias name, an alias ARN or a key ARN is
+evaluated against the stored key's ARN, as the KMS API reference resolves the request's key
+identifier, so a policy scoped to one key ARN allows that key and no other, and a `Deny` scoped to
+one fires for that key. A `Decrypt` that names no `KeyId` is evaluated against the key that encrypted
+its `CiphertextBlob`. `CreateAlias`, `UpdateAlias` and `DeleteAlias` are evaluated against the alias
+ARN and the key it points at, `UpdateAlias` also against the key it will point at, the resource
+types the Service Authorization Reference lists for them. `CreateKey`, `GenerateRandom`, `ListKeys`,
+`ListAliases` and `ListRetirableGrants` name no key resource and are evaluated against `*`, the
+resource a policy must name for them on AWS. `ReEncrypt` is evaluated against both keys it acts on
+under the single `kms:ReEncrypt` action; AWS authorizes the two halves separately as
+`kms:ReEncryptFrom` and `kms:ReEncryptTo`, which Floci does not split yet. A request that names no
+key the account holds is evaluated against every key the account holds, so a permissive `key/*`
+policy still matches it and the operation fails in the handler with its own error.
+
 **Redshift GetClusterCredentials options.** Besides `redshift:GetClusterCredentials`, a request with
 `DbGroups` needs `redshift:JoinGroup` on each group's `dbgroup:<cluster>/<group>` ARN, and a request with
 `AutoCreate` set to `true` needs `redshift:CreateClusterUser` on the user's `dbuser:<cluster>/<user>` ARN,

@@ -150,12 +150,15 @@ public interface CfnResourceProvisioner {
     }
 
     /**
-     * Carries additive ownership tracking a failed update discovered onto the last known-good
-     * resource metadata CloudFormation restores, so entities the failed attempt created but could
-     * not remove are not orphaned. Only additive tracking belongs here; committed resource state
-     * must not be overwritten. The default has none to carry.
+     * Carries additive tracking a failed update discovered onto the last known-good resource
+     * metadata CloudFormation restores: entities the failed attempt created but could not remove,
+     * so they are not orphaned, and the snapshot of an undo the attempt could not complete, so a
+     * ContinueUpdateRollback can try it again, or report again that it cannot. Only additive
+     * tracking belongs here; committed resource state must not be overwritten. The default has
+     * none to carry.
      */
     default void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
-        // no-op by default: only a provisioner that tracks generated sub-resources needs this
+        // no-op by default: only a provisioner with tracking of its own to carry (generated
+        // sub-resources, cleanup entries, an undo snapshot) needs this
     }
 }

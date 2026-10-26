@@ -182,6 +182,9 @@ floci:
         # allowed-paths:                      # Optional allowlist of host paths that may be bind-mounted
         #   - /home/user/projects
         #   - /tmp
+      reactive-s3-sync:
+        enabled: true                         # Re-deploy a function when the S3 object it was deployed from is overwritten
+        async: false                          # true = re-deploy in the background so the upload does not wait
 
     apigateway:
       enabled: true

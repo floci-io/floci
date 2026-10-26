@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import jakarta.enterprise.inject.Instance;
@@ -1131,6 +1132,303 @@ class ResourceArnBuilderTest {
         assertEquals(List.of("arn:aws-us-gov:secretsmanager:polygondwanaland-west-1:000000000000:secret:app/core"),
                 builder.buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx, "polygondwanaland-west-1",
                         ACCOUNT, "aws-us-gov"));
+    }
+
+    // ── KMS ──────────────────────────────────────────────────────────────────────
+
+    private static final String KMS_KEY_ID = "1234abcd-12ab-34cd-56ef-1234567890ab";
+    private static final String KMS_KEY_ARN = "arn:aws:kms:us-east-1:000000000000:key/" + KMS_KEY_ID;
+    private static final String KMS_OTHER_KEY_ARN = "arn:aws:kms:us-east-1:000000000000:key/5678efab-34cd-12ab-90ef-1234567890ab";
+    private static final String KMS_ALIAS_ARN = "arn:aws:kms:us-east-1:000000000000:alias/app";
+
+    /** A builder reading {@code kms}, for a key named by an id, an alias or an ARN. */
+    private static ResourceArnBuilder backedBy(KmsService kms) {
+        @SuppressWarnings("unchecked")
+        Instance<KmsService> instance = mock(Instance.class);
+        when(instance.get()).thenReturn(kms);
+        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, null, instance);
+    }
+
+    /**
+     * The gap issue 6256 describes. KMS is a JSON protocol on {@code /} with the key in the body,
+     * so reading a {@code /keys/<id>} path segment named nothing and every call was evaluated
+     * against {@code key/*}: an {@code Allow} scoped to one key ARN never matched, and a
+     * {@code Deny} scoped to one never fired. A key-scoped operation is now evaluated against the
+     * key its request names.
+     */
+    @Test
+    void kmsNamesTheKeyAKeyScopedOperationActsOn() {
+        KmsService kms = mock(KmsService.class);
+        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        when(kms.findKeyArn(KMS_KEY_ID, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        ResourceArnBuilder backed = backedBy(kms);
+        for (String action : List.of("kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey",
+                "kms:GenerateDataKeyWithoutPlaintext", "kms:DescribeKey", "kms:GetPublicKey",
+                "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion", "kms:CreateGrant", "kms:ListGrants",
+                "kms:RevokeGrant", "kms:Sign", "kms:Verify", "kms:GenerateMac", "kms:VerifyMac",
+                "kms:TagResource", "kms:UntagResource", "kms:ListResourceTags", "kms:GetKeyPolicy",
+                "kms:PutKeyPolicy", "kms:ListKeyPolicies", "kms:UpdateKeyDescription",
+                "kms:EnableKey", "kms:DisableKey", "kms:EnableKeyRotation", "kms:DisableKeyRotation",
+                "kms:GetKeyRotationStatus", "kms:RotateKeyOnDemand", "kms:GetParametersForImport",
+                "kms:ImportKeyMaterial", "kms:DeleteImportedKeyMaterial", "kms:ReplicateKey",
+                "kms:RetireGrant")) {
+            setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\"}");
+            assertEquals(List.of(KMS_KEY_ARN),
+                    backed.buildKmsResources(action, ctx, "us-east-1", ACCOUNT, "aws"), action);
+        }
+    }
+
+    /** A key named by an alias is authorized against the key it points at, as the handler resolves it. */
+    @Test
+    void kmsResolvesAnAliasToTheKeyItPointsAt() {
+        KmsService kms = mock(KmsService.class);
+        when(kms.findKeyArn("alias/app", "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findKeyArn(KMS_ALIAS_ARN, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        ResourceArnBuilder backed = backedBy(kms);
+
+        setJsonBody("{\"KeyId\":\"alias/app\"}");
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"KeyId\":\"" + KMS_ALIAS_ARN + "\"}");
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * The operations the KMS permissions reference gives no resource, which it also requires a
+     * policy to name {@code *} for, stay at the wildcard; a key-scoped operation that names no
+     * key keeps the permissive fallback rather than being refused here, since the handler
+     * refuses it with its own error.
+     */
+    @Test
+    void kmsLeavesTheActionsThatNameNoKeyAtTheirOwnResources() {
+        ResourceArnBuilder backed = backedBy(mock(KmsService.class));
+        for (String action : List.of("kms:CreateKey", "kms:GenerateRandom", "kms:ListKeys",
+                "kms:ListAliases", "kms:ListRetirableGrants")) {
+            setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\"}");
+            assertEquals(List.of("*"),
+                    backed.buildKmsResources(action, ctx, "us-east-1", ACCOUNT, "aws"), action);
+        }
+        setJsonBody("{}");
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:RetireGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of("arn:aws-cn:kms:cn-north-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:RetireGrant", ctx, "cn-north-1", ACCOUNT, "aws-cn"));
+    }
+
+    /**
+     * A request with no body at all keeps the action's own resources: the operations the reference
+     * gives no resource stay at {@code *}, and a key-scoped one falls back to every key the
+     * account holds rather than being refused here.
+     */
+    @Test
+    void kmsKeepsEachActionsOwnResourcesForARequestWithNoBody() {
+        ResourceArnBuilder backed = backedBy(mock(KmsService.class));
+        assertEquals(List.of("*"),
+                backed.buildKmsResources("kms:CreateKey", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * A key ARN the account holds nothing of is kept as the caller spelled it, a bare key id is
+     * minted in the request's partition, and an alias that resolves to nothing names every key:
+     * the operation fails before a policy matters.
+     */
+    @Test
+    void kmsMintsKeyArnsInTheRequestPartitionAndFallsBackForTheUnresolvable() {
+        KmsService kms = mock(KmsService.class);
+        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        ResourceArnBuilder backed = backedBy(kms);
+
+        setJsonBody("{\"KeyId\":\"" + KMS_KEY_ARN + "\"}");
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\"}");
+        assertEquals(List.of("arn:aws-cn:kms:cn-north-1:000000000000:key/" + KMS_KEY_ID),
+                backed.buildKmsResources("kms:Encrypt", ctx, "cn-north-1", ACCOUNT, "aws-cn"));
+
+        setJsonBody("{\"KeyId\":\"alias/gone\"}");
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:Encrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * A {@code Decrypt} names its key in an optional {@code KeyId}; without one the key is the
+     * one that encrypted the {@code CiphertextBlob}, read the same way the handler reads it.
+     */
+    @Test
+    void kmsDecryptResolvesTheKeyFromTheCiphertextItNames() {
+        byte[] blob = "ciphertext".getBytes(StandardCharsets.UTF_8);
+        String encoded = Base64.getEncoder().encodeToString(blob);
+        KmsService kms = mock(KmsService.class);
+        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        when(kms.decryptToKeyArn(blob, "us-east-1")).thenReturn(KMS_KEY_ARN);
+        ResourceArnBuilder backed = backedBy(kms);
+
+        setJsonBody("{\"CiphertextBlob\":\"" + encoded + "\"}");
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        when(kms.findKeyArn("alias/app", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        setJsonBody("{\"KeyId\":\"alias/app\",\"CiphertextBlob\":\"" + encoded + "\"}");
+        assertEquals(List.of(KMS_OTHER_KEY_ARN),
+                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        KmsService unresolvable = mock(KmsService.class);
+        when(unresolvable.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        when(unresolvable.decryptToKeyArn(any(), any())).thenReturn(null);
+        setJsonBody("{\"CiphertextBlob\":\"" + encoded + "\"}");
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backedBy(unresolvable).buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"CiphertextBlob\":629}");
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"CiphertextBlob\":{\"KeyId\":\"x\"}}");
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"CiphertextBlob\":[\"aGk=\"]}");
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:Decrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * The alias operations name their resources as the alias permissions page gives them:
+     * {@code CreateAlias} the alias and the key, {@code UpdateAlias} the alias, the key it points
+     * at and the key it will point at, and {@code DeleteAlias} the alias and the key it points
+     * at. A request naming no alias AWS would accept the name of names nothing.
+     */
+    @Test
+    void kmsAliasOperationsNameTheAliasAndTheKeysTheyTouch() {
+        KmsService kms = mock(KmsService.class);
+        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        when(kms.findKeyArn(KMS_KEY_ID, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findKeyArn("alias/app", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        ResourceArnBuilder backed = backedBy(kms);
+
+        setJsonBody("{\"AliasName\":\"alias/app\",\"TargetKeyId\":\"" + KMS_KEY_ID + "\"}");
+        assertEquals(List.of(KMS_ALIAS_ARN, KMS_KEY_ARN),
+                backed.buildKmsResources("kms:CreateAlias", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"AliasName\":\"alias/app\",\"TargetKeyId\":\"" + KMS_KEY_ID + "\"}");
+        assertEquals(List.of(KMS_ALIAS_ARN, KMS_OTHER_KEY_ARN, KMS_KEY_ARN),
+                backed.buildKmsResources("kms:UpdateAlias", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        // A retarget onto the key the alias already points at names that key once.
+        when(kms.findKeyArn("alias/app", "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        setJsonBody("{\"AliasName\":\"alias/app\",\"TargetKeyId\":\"" + KMS_KEY_ID + "\"}");
+        assertEquals(List.of(KMS_ALIAS_ARN, KMS_KEY_ARN),
+                backed.buildKmsResources("kms:UpdateAlias", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        when(kms.findKeyArn("alias/app", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        setJsonBody("{\"AliasName\":\"alias/app\"}");
+        assertEquals(List.of(KMS_ALIAS_ARN, KMS_OTHER_KEY_ARN),
+                backed.buildKmsResources("kms:DeleteAlias", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        // A name AWS would refuse contributes no alias resource, and a request naming no alias
+        // at all names nothing but the wildcard.
+        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        setJsonBody("{\"AliasName\":\"app\",\"TargetKeyId\":\"" + KMS_KEY_ID + "\"}");
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:CreateAlias", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{}");
+        assertEquals(List.of("*"),
+                backed.buildKmsResources("kms:DeleteAlias", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * A {@code ReEncrypt} acts on two keys, and the filter authorizes a request once per
+     * resource, so both are named: the source the ciphertext or its optional {@code SourceKeyId}
+     * resolves to, and the destination its {@code DestinationKeyId} names.
+     */
+    @Test
+    void kmsReEncryptNamesBothKeysItActsOn() {
+        byte[] blob = "ciphertext".getBytes(StandardCharsets.UTF_8);
+        String encoded = Base64.getEncoder().encodeToString(blob);
+        KmsService kms = mock(KmsService.class);
+        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        when(kms.decryptToKeyArn(blob, "us-east-1")).thenReturn(KMS_KEY_ARN);
+        when(kms.findKeyArn("alias/destination", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        ResourceArnBuilder backed = backedBy(kms);
+
+        setJsonBody("{\"CiphertextBlob\":\"" + encoded + "\",\"DestinationKeyId\":\"alias/destination\"}");
+        assertEquals(List.of(KMS_KEY_ARN, KMS_OTHER_KEY_ARN),
+                backed.buildKmsResources("kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        when(kms.findKeyArn("alias/source", "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        setJsonBody("{\"SourceKeyId\":\"alias/source\",\"DestinationKeyId\":\"alias/destination\"}");
+        assertEquals(List.of(KMS_KEY_ARN, KMS_OTHER_KEY_ARN),
+                backed.buildKmsResources("kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * A {@code ReEncrypt} never reads a {@code KeyId}: its source is the key that encrypted the
+     * ciphertext when the request names no {@code SourceKeyId}, so a {@code KeyId} naming
+     * another key cannot choose the key the request is authorized against. A caller allowed
+     * on the claimed key only could otherwise submit another key's ciphertext and have it
+     * re-encrypted under the allowed one.
+     */
+    @Test
+    void kmsReEncryptNamesTheSourceTheHandlerDecryptsWithNotAKeyId() {
+        byte[] blob = "ciphertext".getBytes(StandardCharsets.UTF_8);
+        String encoded = Base64.getEncoder().encodeToString(blob);
+        KmsService kms = mock(KmsService.class);
+        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        when(kms.decryptToKeyArn(blob, "us-east-1")).thenReturn(KMS_KEY_ARN);
+        when(kms.findKeyArn("alias/claimed", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        ResourceArnBuilder backed = backedBy(kms);
+
+        setJsonBody("{\"CiphertextBlob\":\"" + encoded
+                + "\",\"KeyId\":\"alias/claimed\",\"DestinationKeyId\":\"" + KMS_OTHER_KEY_ARN + "\"}");
+        assertEquals(List.of(KMS_KEY_ARN, KMS_OTHER_KEY_ARN),
+                backed.buildKmsResources("kms:ReEncrypt", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * A grant operation names the key the grant it acts on belongs to: a token-only
+     * {@code RetireGrant} the key the token's grant belongs to, since the handler finds the
+     * grant by the token alone, and a {@code RetireGrant} or a {@code RevokeGrant} identifying
+     * its grant by {@code KeyId} and {@code GrantId} the key it names together with that grant's
+     * key. A token naming no grant the account holds keeps the permissive fallback.
+     */
+    @Test
+    void kmsGrantOperationsNameTheKeyTheGrantTheyActOnBelongsTo() {
+        KmsService kms = mock(KmsService.class);
+        when(kms.findKeyArn(any(), any())).thenReturn(Optional.empty());
+        when(kms.findKeyArn(KMS_KEY_ID, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findKeyArn("other-key", "us-east-1")).thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        when(kms.findGrantKeyArn("grant-token", null, "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findGrantKeyArn(null, "grant-id", "us-east-1")).thenReturn(Optional.of(KMS_KEY_ARN));
+        when(kms.findGrantKeyArn("unknown-token", null, "us-east-1")).thenReturn(Optional.empty());
+        ResourceArnBuilder backed = backedBy(kms);
+
+        setJsonBody("{\"GrantToken\":\"grant-token\"}");
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:RetireGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"GrantToken\":\"unknown-token\"}");
+        assertEquals(List.of("arn:aws:kms:us-east-1:000000000000:key/*"),
+                backed.buildKmsResources("kms:RetireGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\",\"GrantId\":\"grant-id\"}");
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:RetireGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:RevokeGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"KeyId\":\"other-key\",\"GrantId\":\"grant-id\"}");
+        assertEquals(List.of(KMS_OTHER_KEY_ARN, KMS_KEY_ARN),
+                backed.buildKmsResources("kms:RevokeGrant", ctx, "us-east-1", ACCOUNT, "aws"));
+
+        when(kms.findGrantKeyArn("grant-token", "grant-id", "us-east-1"))
+                .thenReturn(Optional.of(KMS_OTHER_KEY_ARN));
+        setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\",\"GrantId\":\"grant-id\",\"GrantToken\":\"grant-token\"}");
+        assertEquals(List.of(KMS_KEY_ARN),
+                backed.buildKmsResources("kms:RevokeGrant", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     // ── SSM ──────────────────────────────────────────────────────────────────────

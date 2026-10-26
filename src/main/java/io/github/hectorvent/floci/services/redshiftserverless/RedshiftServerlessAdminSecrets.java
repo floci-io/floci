@@ -50,6 +50,17 @@ public class RedshiftServerlessAdminSecrets {
         }
     }
 
+    Secret snapshot(Namespace namespace, String region) {
+        if (namespace.getAdminPasswordSecretArn() == null) {
+            return null;
+        }
+        return mapper.convertValue(secrets.describeSecret(namespace.getAdminPasswordSecretArn(), region), Secret.class);
+    }
+
+    void restore(Secret snapshot, String region) {
+        secrets.restoreManagedSecret(mapper.convertValue(snapshot, Secret.class), region);
+    }
+
     private String value(Namespace namespace) {
         return mapper.createObjectNode().put("engine", "redshift")
                 .put("username", namespace.getAdminUsername())

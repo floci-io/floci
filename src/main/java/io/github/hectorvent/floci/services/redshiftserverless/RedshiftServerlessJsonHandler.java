@@ -283,7 +283,9 @@ public class RedshiftServerlessJsonHandler {
     private Response handleRestoreFromSnapshot(JsonNode request, String region) {
         RedshiftServerlessService.RestoreResult result = service.restoreFromSnapshot(
                 ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
-                snapshotNameOf(request, region), ServerlessSupport.text(request, "ownerAccount"), region);
+                snapshotNameOf(request, region), ServerlessSupport.text(request, "ownerAccount"),
+                ServerlessSupport.bool(request, "manageAdminPassword"),
+                ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("namespace", namespaceNode(result.namespace()));
         response.put("ownerAccount", result.snapshot().getOwnerAccount());

@@ -9,16 +9,18 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
  * A stack whose AWS::ApiGateway::RestApi declares a Body that PutRestApi rejects fails to create.
- * The REST API was created before the import ran, and the rollback removes it, so neither
- * ROLLBACK_COMPLETE nor DeleteStack leaves it behind. A REST API of the same name that the stack
- * did not create is left alone.
+ * The provisioner created the REST API before the import ran and deletes it when the import fails,
+ * so neither ROLLBACK_COMPLETE nor DeleteStack leaves it behind. A REST API of the same name that
+ * the stack did not create is left alone.
  */
 @QuarkusTest
 class ApiGatewayRestApiCfnImportRollbackIntegrationTest {
@@ -43,7 +45,7 @@ class ApiGatewayRestApiCfnImportRollbackIntegrationTest {
     }
 
     @Test
-    void rollbackRemovesTheRestApiWhoseBodyWasRejected() {
+    void aCreateWhoseBodyIsRejectedLeavesNoRestApiBehind() {
         String stack = "apigw-cfn-restapi-import-rollback-it";
         String outsideId = given().contentType("application/json")
                 .body("{\"name\":\"" + API_NAME + "\",\"description\":\"outside the stack\"}")
@@ -56,15 +58,16 @@ class ApiGatewayRestApiCfnImportRollbackIntegrationTest {
             assertEquals("ROLLBACK_COMPLETE", state.status(), state.reason());
             assertThat(CfnStackWaits.failedResourceReason(stack), containsString("authorizerResultTtlInSeconds"));
             createdId = physicalId(stack, "Api");
+            assertNotNull(createdId, "the failed RestApi resource carries the id of the API it created");
             assertNotEquals(outsideId, createdId);
 
             given().when().get("/restapis/" + createdId).then().statusCode(404);
-            assertOutsideApiIntact(outsideId);
+            assertOnlyTheOutsideApiIsLeft(outsideId);
 
             deleteStack(stack);
             stackDeleted = true;
             given().when().get("/restapis/" + createdId).then().statusCode(404);
-            assertOutsideApiIntact(outsideId);
+            assertOnlyTheOutsideApiIsLeft(outsideId);
         } finally {
             try {
                 if (!stackDeleted) {
@@ -79,9 +82,11 @@ class ApiGatewayRestApiCfnImportRollbackIntegrationTest {
         }
     }
 
-    private static void assertOutsideApiIntact(String apiId) {
-        given().when().get("/restapis/" + apiId).then().statusCode(200)
-                .body("name", equalTo(API_NAME))
+    /** Of the REST APIs named {@link #API_NAME}, only the one created outside the stack is left, unchanged. */
+    private static void assertOnlyTheOutsideApiIsLeft(String outsideId) {
+        given().when().get("/restapis").then().statusCode(200)
+                .body("item.findAll { it.name == '" + API_NAME + "' }.id", contains(outsideId));
+        given().when().get("/restapis/" + outsideId).then().statusCode(200)
                 .body("description", equalTo("outside the stack"));
     }
 

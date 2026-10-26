@@ -746,7 +746,11 @@ public class LambdaController {
                 .format(Instant.ofEpochMilli(fn.getLastModified()).atOffset(ZoneOffset.UTC)));
         node.put("RevisionId", fn.getRevisionId());
         node.put("Version", fn.getVersion());
-        node.put("LastUpdateStatus", "Successful");
+        node.put("LastUpdateStatus", lambdaService.lastUpdateStatus(fn));
+        String lastUpdateStatusReason = lambdaService.lastUpdateStatusReason(fn);
+        if (lastUpdateStatusReason != null) {
+            node.put("LastUpdateStatusReason", lastUpdateStatusReason);
+        }
 
         // Architectures — always present; default x86_64
         ArrayNode archNode = node.putArray("Architectures");

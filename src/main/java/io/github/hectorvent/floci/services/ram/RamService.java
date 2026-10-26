@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -11,6 +13,7 @@ import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.Organization;
 import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
+import io.github.hectorvent.floci.services.ram.model.ResourceShareAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
 import io.github.hectorvent.floci.services.ram.model.SharePermission;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
@@ -54,6 +57,9 @@ public class RamService {
     /** The modeled ResourceShareStatus enum. */
     private static final List<String> SHARE_STATUSES =
             List.of("PENDING", "ACTIVE", "FAILED", "DELETING", "DELETED");
+    private static final List<String> ASSOCIATION_TYPES = List.of("PRINCIPAL", "RESOURCE", "SOURCE");
+    private static final List<String> ASSOCIATION_STATUSES = List.of("ASSOCIATING", "ASSOCIATED", "FAILED",
+            "DISASSOCIATING", "DISASSOCIATED", "SUSPENDED", "SUSPENDING", "RESTORING");
     /** The owner segment of an AWS managed permission ARN. */
     private static final String MANAGED_PERMISSION_OWNER = "aws";
     /**
@@ -325,15 +331,7 @@ public class RamService {
         requireResourceOwner(resourceOwner);
         List<SharedResource> result = new ArrayList<>();
         for (ResourceShare share : sharesIn(region)) {
-            if (!isVisible(share, callerAccountId, resourceOwner)) {
-                continue;
-            }
-            // A deleted share stays readable via GetResourceShares (status DELETED)
-            // but its contents stop being consumable.
-            if ("DELETED".equals(share.getStatus())) {
-                continue;
-            }
-            if (!resourceShareArns.isEmpty() && !resourceShareArns.contains(share.getResourceShareArn())) {
+            if (!isConsumableShare(share, callerAccountId, resourceOwner, resourceShareArns)) {
                 continue;
             }
             for (String resourceArn : share.getResourceArns()) {
@@ -400,15 +398,7 @@ public class RamService {
         requireResourceOwner(resourceOwner);
         List<PrincipalAssociation> result = new ArrayList<>();
         for (ResourceShare share : sharesIn(region)) {
-            if (!isVisible(share, callerAccountId, resourceOwner)) {
-                continue;
-            }
-            // A deleted share stays readable via GetResourceShares (status DELETED)
-            // but its contents stop being consumable.
-            if ("DELETED".equals(share.getStatus())) {
-                continue;
-            }
-            if (!resourceShareArns.isEmpty() && !resourceShareArns.contains(share.getResourceShareArn())) {
+            if (!isConsumableShare(share, callerAccountId, resourceOwner, resourceShareArns)) {
                 continue;
             }
             for (String principal : share.getPrincipals()) {
@@ -417,6 +407,70 @@ public class RamService {
             }
         }
         return result;
+    }
+
+    public PaginatedResult<ResourceShareAssociation> getResourceShareAssociations(
+            String callerAccountId, String region, String associationType, String associationStatus,
+            List<String> resourceShareArns, String resourceArn, String principal,
+            Integer maxResults, String nextToken) {
+        if (associationType == null || !ASSOCIATION_TYPES.contains(associationType)) {
+            throw new AwsException("InvalidParameterException", "associationType must be one of "
+                    + ASSOCIATION_TYPES + ".", 400);
+        }
+        if (associationStatus != null && !ASSOCIATION_STATUSES.contains(associationStatus)) {
+            throw new AwsException("InvalidParameterException", "associationStatus must be one of "
+                    + ASSOCIATION_STATUSES + ".", 400);
+        }
+        if (("RESOURCE".equals(associationType) && principal != null)
+                || ("PRINCIPAL".equals(associationType) && resourceArn != null)) {
+            throw new AwsException("InvalidParameterException",
+                    "The entity filter is not valid for this associationType.", 400);
+        }
+        requireValidArns(resourceShareArns);
+        if (resourceArn != null && !isValidArn(resourceArn)) {
+            throw new AwsException("MalformedArnException", "Invalid resourceArn: " + resourceArn, 400);
+        }
+        if (maxResults != null && (maxResults < 1 || maxResults > 500)) {
+            throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 500.", 400);
+        }
+        if (nextToken != null && nextToken.isEmpty()) {
+            throw new AwsException("InvalidNextTokenException", "Invalid nextToken.", 400);
+        }
+
+        List<ResourceShareAssociation> associations = new ArrayList<>();
+        if (associationStatus == null || "ASSOCIATED".equals(associationStatus)) {
+            for (ResourceShare share : sharesIn(region)) {
+                if (!isConsumableShare(share, callerAccountId, "SELF", resourceShareArns)) {
+                    continue;
+                }
+                if ("RESOURCE".equals(associationType)) {
+                    for (String entity : new LinkedHashSet<>(share.getResourceArns())) {
+                        if (resourceArn == null || resourceArn.equals(entity)) {
+                            associations.add(association(share, entity, "RESOURCE"));
+                        }
+                    }
+                } else if ("PRINCIPAL".equals(associationType)) {
+                    for (String entity : new LinkedHashSet<>(share.getPrincipals())) {
+                        if (principal == null || principal.equals(entity)) {
+                            associations.add(association(share, entity, "PRINCIPAL"));
+                        }
+                    }
+                }
+            }
+        }
+
+        String namespace = "ram-associations|" + callerAccountId + "|" + region + "|" + associationType
+                + "|" + associationStatus + "|" + resourceShareArns.stream().sorted().toList()
+                + "|" + resourceArn + "|" + principal;
+        return Pagination.paginate(associations,
+                association -> association.resourceShareArn() + "\u0000" + association.associatedEntity(),
+                maxResults != null ? maxResults : 100, nextToken, namespace,
+                ignored -> new AwsException("InvalidNextTokenException", "Invalid nextToken.", 400));
+    }
+
+    private static ResourceShareAssociation association(ResourceShare share, String entity, String type) {
+        return new ResourceShareAssociation(share.getResourceShareArn(), share.getName(), entity, type,
+                share.getCreationTime(), share.getLastUpdatedTime());
     }
 
     /**
@@ -591,6 +645,14 @@ public class RamService {
         }
         return share.getPrincipals().stream()
                 .anyMatch(principal -> isVisibleToPrincipal(share, principal, callerAccountId));
+    }
+
+    private boolean isConsumableShare(ResourceShare share, String callerAccountId,
+                                      String resourceOwner, List<String> resourceShareArns) {
+        // Deleted shares remain readable through GetResourceShares, but not these contents.
+        return isVisible(share, callerAccountId, resourceOwner)
+                && !"DELETED".equals(share.getStatus())
+                && (resourceShareArns.isEmpty() || resourceShareArns.contains(share.getResourceShareArn()));
     }
 
     private boolean isVisibleToPrincipal(ResourceShare share, String principal, String callerAccountId) {

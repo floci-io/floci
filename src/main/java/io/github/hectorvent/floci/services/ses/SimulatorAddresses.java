@@ -47,11 +47,11 @@ final class SimulatorAddresses {
         if (at < 0) {
             return trimmed;
         }
-        String localPart = trimmed.substring(0, at);
+        return withoutLabel(trimmed.substring(0, at)) + trimmed.substring(at);
+    }
+
+    static String withoutLabel(String localPart) {
         int plus = localPart.indexOf('+');
-        if (plus < 0) {
-            return trimmed;
-        }
-        return localPart.substring(0, plus) + trimmed.substring(at);
+        return plus < 0 ? localPart : localPart.substring(0, plus);
     }
 }

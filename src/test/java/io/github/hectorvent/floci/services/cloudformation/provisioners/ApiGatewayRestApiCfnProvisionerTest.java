@@ -230,6 +230,107 @@ class ApiGatewayRestApiCfnProvisionerTest {
     }
 
     @Test
+    void restApiUpdateReportsARollbackFailureWhenItsPatchCannotBePutBack() throws Exception {
+        RestApi existing = restApi("api-1", "shop", "v1", "REGIONAL");
+        existingApi(existing);
+        when(api.putRestApi(eq("us-east-1"), eq("api-1"), eq("overwrite"), anyString()))
+                .thenThrow(new AwsException("BadRequestException", "Invalid OpenAPI input", 400));
+        AwsException restoreFailure = new AwsException("TooManyRequestsException", "Too Many Requests", 429);
+        when(api.updateRestApi(eq("us-east-1"), eq("api-1"), any())).thenReturn(existing).thenThrow(restoreFailure);
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"Name": "shop", "Description": "v2", "Body": {"openapi": "3.0.1", "paths": {}}}
+                """), ctx("api-1")));
+
+        assertEquals("BadRequestException", failure.getErrorCode());
+        assertSame(restoreFailure, failure.getSuppressed()[0]);
+        assertTrue(r.getAttributes().getOrDefault(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, "").contains("api-1"));
+        verify(api, never()).deleteRestApi(anyString(), anyString());
+    }
+
+    @Test
+    void restApiUpdateReportsARollbackFailureOnceItsDocumentWasApplied() throws Exception {
+        StackResource r = updateWhoseReapplyFailsAfterItsDocumentWasApplied();
+
+        // The patch is put back, but the definition the document replaced cannot be, which is
+        // reported rather than claimed restored.
+        verify(api).updateRestApi("us-east-1", "api-1", List.of(
+                op("replace", "/name", "shop"), op("replace", "/description", "v1")));
+        assertTrue(r.getAttributes().getOrDefault(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, "")
+                .contains("OpenAPI document was already applied"));
+        verify(api, never()).deleteRestApi(anyString(), anyString());
+    }
+
+    @Test
+    void restApiRetriedRollbackFailsAgainOnceTheDocumentWasApplied() throws Exception {
+        StackResource attempted = updateWhoseReapplyFailsAfterItsDocumentWasApplied();
+        StackResource previous = committedRestApi("api-1");
+
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+
+        // ContinueUpdateRollback asks again, and is told again that this rollback cannot be done.
+        assertTrue(previous.getAttributes().containsKey(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR));
+        assertFalse(provisioner.rollbackUpdate(previous));
+        assertFalse(provisioner.rollbackUpdate(previous));
+    }
+
+    @Test
+    void restApiRetriedRollbackPutsBackThePatchWhoseFirstRestoreFailed() throws Exception {
+        RestApi existing = restApi("api-1", "shop", "v1", "REGIONAL");
+        existingApi(existing);
+        when(api.putRestApi(eq("us-east-1"), eq("api-1"), eq("overwrite"), anyString()))
+                .thenThrow(new AwsException("BadRequestException", "Invalid OpenAPI input", 400));
+        when(api.updateRestApi(eq("us-east-1"), eq("api-1"), any())).thenReturn(existing)
+                .thenThrow(new AwsException("TooManyRequestsException", "Too Many Requests", 429))
+                .thenReturn(existing);
+        StackResource attempted = resource("AWS::ApiGateway::RestApi", "Api");
+        assertThrows(AwsException.class, () -> provisioner.provision(attempted, props("""
+                {"Name": "shop", "Description": "v2", "Body": {"openapi": "3.0.1", "paths": {}}}
+                """), ctx("api-1")));
+        StackResource previous = committedRestApi("api-1");
+
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+
+        assertTrue(provisioner.rollbackUpdate(previous));
+        verify(api, times(2)).updateRestApi("us-east-1", "api-1", List.of(
+                op("replace", "/name", "shop"), op("replace", "/description", "v1")));
+        assertFalse(previous.getAttributes().containsKey(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void restApiFailedUpdateWhoseOwnUndoCompletedLeavesNoSnapshotForARetry() throws Exception {
+        existingApi(restApi("api-1", "shop", "v1", "REGIONAL"));
+        when(api.putRestApi(eq("us-east-1"), eq("api-1"), eq("overwrite"), anyString()))
+                .thenThrow(new AwsException("BadRequestException", "Invalid OpenAPI input", 400));
+        StackResource attempted = resource("AWS::ApiGateway::RestApi", "Api");
+        assertThrows(AwsException.class, () -> provisioner.provision(attempted, props("""
+                {"Name": "shop", "Description": "v2", "Body": {"openapi": "3.0.1", "paths": {}}}
+                """), ctx("api-1")));
+        StackResource previous = committedRestApi("api-1");
+
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+
+        // The patch was already put back, so the restored resource owes no rollback.
+        assertFalse(previous.getAttributes().containsKey(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void restApiUpdatePutsThePatchBackWhenTheRootResourceIsMissing() throws Exception {
+        existingApi(restApi("api-1", "shop", "v1", "REGIONAL"));
+        when(api.findRootResourceId("us-east-1", "api-1")).thenReturn(Optional.empty());
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+
+        assertThrows(RuntimeException.class, () -> provisioner.provision(r, props("""
+                {"Name": "shop", "Description": "v2"}
+                """), ctx("api-1")));
+
+        verify(api).updateRestApi("us-east-1", "api-1", List.of(
+                op("replace", "/name", "shop"), op("replace", "/description", "v1")));
+        verify(api, never()).deleteRestApi(anyString(), anyString());
+    }
+
+    @Test
     void restApiUpdateRecreatesAnApiRemovedOutOfBandAndItsRollbackDeletesIt() throws Exception {
         when(api.getRestApi("us-east-1", "api-1"))
                 .thenThrow(new AwsException("NotFoundException", "Invalid API id specified", 404));
@@ -262,6 +363,25 @@ class ApiGatewayRestApiCfnProvisionerTest {
 
         // The failed update leaves the stack with its previous resource, so nothing else would delete it.
         verify(api).deleteRestApi("us-east-1", "api-2");
+    }
+
+    @Test
+    void restApiUpdateDeletesTheRecreatedApiWhenReapplyingItsNameFails() throws Exception {
+        when(api.getRestApi("us-east-1", "api-1"))
+                .thenThrow(new AwsException("NotFoundException", "Invalid API id specified", 404));
+        when(api.createRestApi(eq("us-east-1"), anyMap())).thenReturn(restApi("api-2", "shop", null, "REGIONAL"));
+        when(api.findRootResourceId("us-east-1", "api-2")).thenReturn(Optional.of("root-2"));
+        AwsException reapplyFailure = new AwsException("TooManyRequestsException", "Too Many Requests", 429);
+        when(api.updateRestApi(eq("us-east-1"), eq("api-2"), any())).thenThrow(reapplyFailure);
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"Name": "shop", "Body": {"openapi": "3.0.1", "paths": {}}}
+                """), ctx("api-1")));
+
+        assertSame(reapplyFailure, failure);
+        verify(api).deleteRestApi("us-east-1", "api-2");
+        assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
     }
 
     @Test
@@ -596,6 +716,37 @@ class ApiGatewayRestApiCfnProvisionerTest {
             return values;
         });
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
+    }
+
+    /**
+     * Runs an in-place update of api-1 that putRestApi accepts and whose re-applied name and
+     * description then fail, and returns the attempted resource it leaves.
+     */
+    private StackResource updateWhoseReapplyFailsAfterItsDocumentWasApplied() throws Exception {
+        RestApi existing = restApi("api-1", "shop", "v1", "REGIONAL");
+        existingApi(existing);
+        AwsException reapplyFailure = new AwsException("NotFoundException", "Invalid API id specified", 404);
+        // The update's patch, the re-apply that fails, then the restore of the patch.
+        when(api.updateRestApi(eq("us-east-1"), eq("api-1"), any()))
+                .thenReturn(existing).thenThrow(reapplyFailure).thenReturn(existing);
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"Name": "shop", "Description": "v2", "Body": {"openapi": "3.0.1", "info": {"title": "other"}, "paths": {}}}
+                """), ctx("api-1")));
+
+        assertSame(reapplyFailure, failure);
+        verify(api).putRestApi(eq("us-east-1"), eq("api-1"), eq("overwrite"), anyString());
+        return r;
+    }
+
+    /** The resource a stack held for api-1 before the update, as the engine restores it. */
+    private static StackResource committedRestApi(String apiId) {
+        StackResource r = resource("AWS::ApiGateway::RestApi", "Api");
+        r.setPhysicalId(apiId);
+        r.getAttributes().put("RestApiId", apiId);
+        r.getAttributes().put("RootResourceId", "root-1");
+        return r;
     }
 
     /** Stubs what an in-place update of {@code existing} looks up and patches. */

@@ -3272,6 +3272,30 @@ public interface EmulatorConfig {
              */
             Optional<List<String>> allowedPaths();
         }
+
+        ReactiveS3Sync reactiveS3Sync();
+
+        interface ReactiveS3Sync {
+            /**
+             * When true, uploading a new object to the S3 bucket and key a function was deployed
+             * from re-deploys that function's {@code $LATEST} and drains its warm containers. When
+             * false, the object is only stored, as in AWS.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ENABLED
+             */
+            @WithDefault("true")
+            boolean enabled();
+
+            /**
+             * When true, the re-deploy runs in the background so the S3 upload returns at once;
+             * the function reports {@code LastUpdateStatus=InProgress} until it finishes. When
+             * false, the upload returns only after the function has been re-deployed.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ASYNC
+             */
+            @WithDefault("false")
+            boolean async();
+        }
     }
 
     interface Ec2ServiceConfig {

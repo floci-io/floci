@@ -2058,6 +2058,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterValue",
                     "The CIDR '" + entry.getCidr() + "' does not match the address family " + addressFamily + ".", 400);
         }
+        if (!ipv6 && !CidrCanonicalizer.isCanonical(entry.getCidr())) {
+            throw new AwsException("InvalidParameterValue",
+                    "The specified CIDR (" + entry.getCidr() + ") is not valid. "
+                            + "For example, specify a CIDR in the following form: 10.0.0.0/16.", 400);
+        }
     }
 
     private String key(String region, String id) {

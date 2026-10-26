@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService.NamespaceUpdateSnapshot;
 import io.github.hectorvent.floci.services.redshiftserverless.WorkgroupSettings;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
@@ -32,9 +33,11 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -46,6 +49,9 @@ class RedshiftServerlessCfnProvisionerTest {
     private static final String WORKGROUP_TYPE = "AWS::RedshiftServerless::Workgroup";
     private static final String NAMESPACE_ARN = "arn:aws:redshift-serverless:us-east-1:000000000000:namespace/ns-id";
     private static final String WORKGROUP_ARN = "arn:aws:redshift-serverless:us-east-1:000000000000:workgroup/wg-id";
+    private static final String ADMIN_SECRET_ARN =
+            "arn:aws:secretsmanager:us-east-1:000000000000:secret:admin-abcdef";
+    private static final String ADMIN_SECRET_KEY = "arn:aws:kms:us-east-1:000000000000:key/admin-key";
 
     private final RedshiftServerlessService service = mock(RedshiftServerlessService.class);
     private final RedshiftServerlessCfnProvisioner provisioner = new RedshiftServerlessCfnProvisioner(service);
@@ -104,7 +110,8 @@ class RedshiftServerlessCfnProvisionerTest {
     @Test
     void createNamespaceSendsPropertiesAndRecordsEveryDottedAttribute() {
         when(service.createNamespace(eq("my-ns"), eq("admin"), eq("Secret123"), eq("analytics"), isNull(),
-                isNull(), anyList(), anyList(), anyMap(), eq(REGION))).thenReturn(namespace("my-ns"));
+                isNull(), anyList(), anyList(), anyMap(), isNull(), isNull(), eq(REGION)))
+                .thenReturn(namespace("my-ns"));
         ObjectNode props = mapper.createObjectNode();
         props.put("NamespaceName", "my-ns");
         props.put("AdminUsername", "admin");
@@ -131,14 +138,123 @@ class RedshiftServerlessCfnProvisionerTest {
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Map<String, String>> tags = ArgumentCaptor.forClass(Map.class);
         verify(service).createNamespace(eq("my-ns"), eq("admin"), eq("Secret123"), eq("analytics"), isNull(),
-                isNull(), anyList(), anyList(), tags.capture(), eq(REGION));
+                isNull(), anyList(), anyList(), tags.capture(), isNull(), isNull(), eq(REGION));
         assertEquals(Map.of("env", "dev"), tags.getValue());
+    }
+
+    @Test
+    void namespaceRollbackRetainsSnapshotOnFailureAndRestoresAttributesOnRetry() throws Exception {
+        Namespace previous = namespace("existing-ns");
+        previous.setAdminUserPassword("Original123!");
+        previous.setAdminPasswordSecretArn(ADMIN_SECRET_ARN);
+        NamespaceUpdateSnapshot snapshot = new NamespaceUpdateSnapshot(previous, null);
+        when(service.getNamespace("existing-ns", REGION)).thenReturn(previous);
+        when(service.snapshotNamespaceUpdate("existing-ns", REGION)).thenReturn(snapshot);
+        when(service.reconcileNamespace(eq("existing-ns"), any(), any(), any(), any(), anyList(), anyList(),
+                eq(false), any(), eq(REGION))).thenReturn(namespace("existing-ns"));
+        StackResource resource = resource(NAMESPACE_TYPE, "existing-ns");
+        resource.getAttributes().put("Namespace.NamespaceArn", NAMESPACE_ARN);
+        Map<String, String> previousAttributes = Map.copyOf(resource.getAttributes());
+        provisioner.provision(resource, mapper.readTree("""
+                {"NamespaceName":"existing-ns", "AdminUserPassword":"Changed123!", "ManageAdminPassword":false}
+                """), ctx("existing-ns"));
+
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
+        doThrow(new IllegalStateException("Backend unavailable")).when(service).restoreNamespaceUpdate(any(), eq(REGION));
+        assertThrows(IllegalStateException.class, () -> provisioner.rollbackUpdate(resource));
+        assertTrue(provisioner.retainsFailedUpdateState(resource));
+        doNothing().when(service).restoreNamespaceUpdate(any(), eq(REGION));
+
+        assertTrue(provisioner.rollbackUpdate(resource));
+        assertEquals(previousAttributes, resource.getAttributes());
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
+        ArgumentCaptor<NamespaceUpdateSnapshot> restored = ArgumentCaptor.forClass(NamespaceUpdateSnapshot.class);
+        verify(service, times(2)).restoreNamespaceUpdate(restored.capture(), eq(REGION));
+        assertEquals("Original123!", restored.getValue().namespace().getAdminUserPassword());
+        assertEquals(ADMIN_SECRET_ARN, restored.getValue().namespace().getAdminPasswordSecretArn());
+    }
+
+    @Test
+    void committedNamespaceUpdateClearsRollbackSnapshot() throws Exception {
+        Namespace previous = namespace("existing-ns");
+        when(service.getNamespace("existing-ns", REGION)).thenReturn(previous);
+        when(service.snapshotNamespaceUpdate("existing-ns", REGION))
+                .thenReturn(new NamespaceUpdateSnapshot(previous, null));
+        when(service.reconcileNamespace(eq("existing-ns"), any(), any(), any(), any(), anyList(), anyList(),
+                eq(false), any(), eq(REGION))).thenReturn(previous);
+        StackResource resource = resource(NAMESPACE_TYPE, "existing-ns");
+        provisioner.provision(resource, mapper.readTree("{\"NamespaceName\":\"existing-ns\"}"), ctx("existing-ns"));
+
+        assertTrue(provisioner.completeUpdate(resource).complete());
+        provisioner.clearUpdate(resource);
+
+        assertFalse(provisioner.retainsFailedUpdateState(resource));
+        assertFalse(provisioner.rollbackUpdate(resource));
+    }
+
+    @Test
+    void createNamespacePassesManagedCredentialPropertiesWithoutExposingSecretAttributes() {
+        Namespace namespace = namespace("managed-ns");
+        namespace.setAdminPasswordSecretArn(ADMIN_SECRET_ARN);
+        namespace.setAdminPasswordSecretKmsKeyId(ADMIN_SECRET_KEY);
+        when(service.createNamespace(eq("managed-ns"), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
+                anyList(), anyMap(), eq(true), eq(ADMIN_SECRET_KEY), eq(REGION))).thenReturn(namespace);
+        ObjectNode props = mapper.createObjectNode();
+        props.put("NamespaceName", "managed-ns");
+        props.put("ManageAdminPassword", true);
+        props.put("AdminPasswordSecretKmsKeyId", ADMIN_SECRET_KEY);
+        StackResource resource = resource(NAMESPACE_TYPE, null);
+
+        provisioner.provision(resource, props, ctx(null));
+
+        verify(service).createNamespace(eq("managed-ns"), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
+                anyList(), anyMap(), eq(true), eq(ADMIN_SECRET_KEY), eq(REGION));
+        assertFalse(resource.getAttributes().containsKey("Namespace.AdminPasswordSecretArn"));
+        assertFalse(resource.getAttributes().containsKey("Namespace.AdminPasswordSecretKmsKeyId"));
+    }
+
+    @Test
+    void updateNamespacePassesManagedCredentialPropertiesWithoutExposingSecretAttributes() {
+        Namespace namespace = namespace("managed-ns");
+        namespace.setAdminPasswordSecretArn(ADMIN_SECRET_ARN);
+        namespace.setAdminPasswordSecretKmsKeyId(ADMIN_SECRET_KEY);
+        when(service.getNamespace("managed-ns", REGION)).thenReturn(namespace);
+        when(service.reconcileNamespace(eq("managed-ns"), isNull(), isNull(), isNull(), isNull(), anyList(),
+                anyList(), eq(true), eq(ADMIN_SECRET_KEY), eq(REGION))).thenReturn(namespace);
+        when(service.listTagsForResource(NAMESPACE_ARN, REGION)).thenReturn(Map.of());
+        ObjectNode props = mapper.createObjectNode();
+        props.put("NamespaceName", "managed-ns");
+        props.put("ManageAdminPassword", true);
+        props.put("AdminPasswordSecretKmsKeyId", ADMIN_SECRET_KEY);
+        StackResource resource = resource(NAMESPACE_TYPE, "managed-ns");
+
+        provisioner.provision(resource, props, ctx("managed-ns"));
+
+        verify(service).reconcileNamespace(eq("managed-ns"), isNull(), isNull(), isNull(), isNull(), anyList(),
+                anyList(), eq(true), eq(ADMIN_SECRET_KEY), eq(REGION));
+        assertFalse(resource.getAttributes().containsKey("Namespace.AdminPasswordSecretArn"));
+        assertFalse(resource.getAttributes().containsKey("Namespace.AdminPasswordSecretKmsKeyId"));
+    }
+
+    @Test
+    void updateNamespaceDisablesManagementWithoutExposingSecretAttributes() {
+        Namespace namespace = namespace("managed-ns");
+        when(service.getNamespace("managed-ns", REGION)).thenReturn(namespace);
+        when(service.reconcileNamespace(eq("managed-ns"), isNull(), isNull(), isNull(), isNull(), anyList(),
+                anyList(), eq(false), isNull(), eq(REGION))).thenReturn(namespace);
+        when(service.listTagsForResource(NAMESPACE_ARN, REGION)).thenReturn(Map.of());
+        StackResource resource = resource(NAMESPACE_TYPE, "managed-ns");
+
+        provisioner.provision(resource, mapper.createObjectNode(), ctx("managed-ns"));
+
+        assertFalse(resource.getAttributes().containsKey("Namespace.AdminPasswordSecretArn"));
+        assertFalse(resource.getAttributes().containsKey("Namespace.AdminPasswordSecretKmsKeyId"));
     }
 
     @Test
     void anUnnamedNamespaceGetsALowercaseGeneratedNameThatIsStableAcrossUpdates() {
         when(service.createNamespace(any(), any(), any(), any(), any(), any(), anyList(), anyList(), anyMap(),
-                eq(REGION)))
+                isNull(), isNull(), eq(REGION)))
                 .thenAnswer(inv -> namespace(inv.getArgument(0)));
         StackResource created = resource(NAMESPACE_TYPE, null);
 
@@ -149,7 +265,8 @@ class RedshiftServerlessCfnProvisionerTest {
         assertEquals(generated, generated.toLowerCase());
 
         when(service.getNamespace(generated, REGION)).thenReturn(namespace(generated));
-        when(service.reconcileNamespace(eq(generated), any(), any(), any(), any(), anyList(), anyList(), eq(REGION)))
+        when(service.reconcileNamespace(eq(generated), any(), any(), any(), any(), anyList(), anyList(), eq(false),
+                isNull(), eq(REGION)))
                 .thenReturn(namespace(generated));
         when(service.listTagsForResource(NAMESPACE_ARN, REGION)).thenReturn(Map.of());
         StackResource updated = resource(NAMESPACE_TYPE, generated);
@@ -157,14 +274,15 @@ class RedshiftServerlessCfnProvisionerTest {
         provisioner.provision(updated, mapper.createObjectNode(), ctx(generated));
 
         assertEquals(generated, updated.getPhysicalId());
-        verify(service).reconcileNamespace(eq(generated), any(), any(), any(), any(), anyList(), anyList(), eq(REGION));
+        verify(service).reconcileNamespace(eq(generated), any(), any(), any(), any(), anyList(), anyList(), eq(false),
+                isNull(), eq(REGION));
     }
 
     @Test
     void updateNamespaceUpdatesInPlaceAndRemovesTagsTheTemplateDropped() {
         when(service.getNamespace("my-ns", REGION)).thenReturn(namespace("my-ns"));
         when(service.reconcileNamespace(eq("my-ns"), isNull(), isNull(), eq("custom-key"), isNull(), anyList(),
-                anyList(), eq(REGION))).thenReturn(namespace("my-ns"));
+                anyList(), eq(false), isNull(), eq(REGION))).thenReturn(namespace("my-ns"));
         when(service.listTagsForResource(NAMESPACE_ARN, REGION)).thenReturn(Map.of("old", "1", "keep", "2"));
         ObjectNode props = mapper.createObjectNode();
         props.put("NamespaceName", "my-ns");
@@ -175,7 +293,7 @@ class RedshiftServerlessCfnProvisionerTest {
         provisioner.provision(r, props, ctx("my-ns"));
 
         verify(service, never()).createNamespace(any(), any(), any(), any(), any(), any(), anyList(), anyList(),
-                anyMap(), any());
+                anyMap(), any(), any(), any());
         verify(service).untagResource(NAMESPACE_ARN, List.of("old"), REGION);
         verify(service).tagResource(NAMESPACE_ARN, Map.of("keep", "2"), REGION);
         assertEquals("my-ns", r.getPhysicalId());
@@ -192,14 +310,14 @@ class RedshiftServerlessCfnProvisionerTest {
         AwsException rejected = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx("my-ns")));
 
         assertEquals("ValidationException", rejected.getErrorCode());
-        verify(service, never()).reconcileNamespace(any(), any(), any(), any(), any(), any(), any(), any());
+        verify(service, never()).reconcileNamespace(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
     void updateNamespaceSendsOmittedKmsKeyAndDefaultRoleAsNullSoTheServiceResetsThem() {
         when(service.getNamespace("my-ns", REGION)).thenReturn(namespace("my-ns"));
         when(service.reconcileNamespace(eq("my-ns"), isNull(), isNull(), isNull(), isNull(), anyList(), anyList(),
-                eq(REGION))).thenReturn(namespace("my-ns"));
+                eq(false), isNull(), eq(REGION))).thenReturn(namespace("my-ns"));
         when(service.listTagsForResource(NAMESPACE_ARN, REGION)).thenReturn(Map.of());
         ObjectNode props = mapper.createObjectNode();
         props.put("NamespaceName", "my-ns");
@@ -209,14 +327,14 @@ class RedshiftServerlessCfnProvisionerTest {
         provisioner.provision(r, props, ctx("my-ns"));
 
         verify(service).reconcileNamespace(eq("my-ns"), isNull(), isNull(), isNull(), isNull(), anyList(),
-                anyList(), eq(REGION));
+                anyList(), eq(false), isNull(), eq(REGION));
     }
 
     @Test
     void updateNamespaceDropsTheDefaultRoleAttributeWhenTheTemplateNoLongerDeclaresIt() {
         when(service.getNamespace("my-ns", REGION)).thenReturn(namespace("my-ns"));
         when(service.reconcileNamespace(eq("my-ns"), isNull(), isNull(), isNull(), isNull(), anyList(), anyList(),
-                eq(REGION))).thenReturn(namespace("my-ns"));
+                eq(false), isNull(), eq(REGION))).thenReturn(namespace("my-ns"));
         when(service.listTagsForResource(NAMESPACE_ARN, REGION)).thenReturn(Map.of());
         ObjectNode props = mapper.createObjectNode();
         props.put("NamespaceName", "my-ns");

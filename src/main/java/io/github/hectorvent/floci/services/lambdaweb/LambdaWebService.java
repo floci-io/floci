@@ -440,13 +440,14 @@ public class LambdaWebService implements Resettable {
             WebFunctionRevision revision = buildRevision(fn, request);
             keepCode(region, fn, revision);
             fn.revisions.put(revision.revisionId, revision);
+            // Before the endpoints move, as AWS keeps the revision a LatestRevision endpoint leaves.
+            List<String> cleanedUp = revision.failureReason == null ? cleanUpRevisions(fn, revision) : List.of();
             for (WebFunctionEndpoint endpoint : fn.endpoints.values()) {
                 if ("LatestRevision".equals(endpoint.autoDeploymentMode) && revision.failureReason == null) {
                     endpoint.revisionWeights = List.of(weight(revision.revisionId, 100));
                     endpoint.updatedAt = now();
                 }
             }
-            List<String> cleanedUp = revision.failureReason == null ? cleanUpRevisions(fn, revision) : List.of();
             fn.updatedAt = now();
             persist(region, fn);
             String accountId = AwsArnUtils.parse(fn.functionArn).accountId();

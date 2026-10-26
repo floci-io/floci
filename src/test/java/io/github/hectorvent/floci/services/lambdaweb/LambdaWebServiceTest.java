@@ -1013,6 +1013,31 @@ class LambdaWebServiceTest {
         assertTrue(Files.exists(code.file(ACCOUNT_ID, REGION, "app", active.get(2))));
     }
 
+    @Test
+    void theRevisionALatestRevisionEndpointLeavesStaysUntilTheNextActiveOne() {
+        S3Service s3 = mock(S3Service.class);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
+        byte[] zip = LambdaWebZips.indexJs("");
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(zip));
+        String first = service.createFunction(REGION, createRequest("app")).revisions.keySet().iterator().next();
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(NOT_A_ZIP));
+        String failed = service.createRevision(REGION, "app", revisionConfig(30)).revisionId;
+        for (int i = 0; i < 48; i++) {
+            service.createRevision(REGION, "app", revisionConfig(30));
+        }
+        when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(zip));
+
+        String second = service.createRevision(REGION, "app", revisionConfig(30)).revisionId;
+        Set<String> kept = service.getFunction(REGION, "app").revisions.keySet();
+        assertTrue(kept.contains(first));
+        assertFalse(kept.contains(failed));
+
+        service.createRevision(REGION, "app", revisionConfig(30));
+        kept = service.getFunction(REGION, "app").revisions.keySet();
+        assertFalse(kept.contains(first));
+        assertTrue(kept.contains(second));
+    }
+
     private ObjectNode stateFilter(String state) {
         ObjectNode request = mapper.createObjectNode();
         request.putArray("filters").addObject().put("name", "state").putArray("values").add(state);

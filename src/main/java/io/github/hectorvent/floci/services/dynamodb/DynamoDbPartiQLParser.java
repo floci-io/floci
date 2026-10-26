@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
+import java.math.BigDecimal;
 import java.util.*;
 import java.util.stream.Stream;
 
@@ -223,6 +224,8 @@ public class DynamoDbPartiQLParser {
 
     // --- Tokenizer ---
 
+    private static final String NOT_WELL_FORMED = "Statement wasn't well formed, can't be processed: ";
+
     static List<Token> tokenize(String input) {
         List<Token> tokens = new ArrayList<>();
         int i = 0, n = input.length();
@@ -236,7 +239,7 @@ public class DynamoDbPartiQLParser {
             if (input.startsWith("/*", i)) {
                 int end = input.indexOf("*/", i + 2);
                 if (end < 0) {
-                    throw validationEx("Statement wasn't well formed, can't be processed: ");
+                    throw validationEx(NOT_WELL_FORMED);
                 }
                 i = end + 2;
                 continue;
@@ -285,16 +288,21 @@ public class DynamoDbPartiQLParser {
             if (c == ',') { tokens.add(new Token(TType.COMMA, ",")); i++; continue; }
             if (c == ':') { tokens.add(new Token(TType.COLON, ":")); i++; continue; }
             if (c == ';') { tokens.add(new Token(TType.SEMICOLON, ";")); i++; continue; }
-            if (c == '.') { tokens.add(new Token(TType.DOT, ".")); i++; continue; }
-            if (Character.isDigit(c)
-                    || (c == '-' && i + 1 < n && Character.isDigit(input.charAt(i + 1)) && !endsOperand(tokens))) {
+            if (startsNumber(input, i, tokens)) {
                 int start = i;
                 if (c == '-') i++;
-                while (i < n && (Character.isDigit(input.charAt(i)) || input.charAt(i) == '.')) i++;
+                boolean pointSeen = false;
+                while (i < n && (Character.isDigit(input.charAt(i)) || (input.charAt(i) == '.' && !pointSeen))) {
+                    pointSeen |= input.charAt(i) == '.';
+                    i++;
+                }
                 i = skipExponent(input, i);
-                tokens.add(new Token(TType.NUMBER, input.substring(start, i), start));
+                String number = input.substring(start, i);
+                requireRepresentable(number);
+                tokens.add(new Token(TType.NUMBER, number, start));
                 continue;
             }
+            if (c == '.') { tokens.add(new Token(TType.DOT, ".")); i++; continue; }
             if (c == '+') { tokens.add(new Token(TType.PLUS, "+")); i++; continue; }
             if (c == '-') { tokens.add(new Token(TType.MINUS, "-")); i++; continue; }
             if (Character.isLetter(c) || c == '_') {
@@ -357,6 +365,42 @@ public class DynamoDbPartiQLParser {
             digits++;
         }
         return digits;
+    }
+
+    // A literal may start with its point (.5) or its sign (-5, -.5). After an operand a
+    // point is a path step and a minus is an operator.
+    private static boolean startsNumber(String input, int i, List<Token> tokens) {
+        char c = input.charAt(i);
+        if (Character.isDigit(c)) {
+            return true;
+        }
+        if (endsOperand(tokens)) {
+            return false;
+        }
+        if (c == '-') {
+            return i + 1 < input.length() && startsUnsignedNumber(input, i + 1);
+        }
+        return startsUnsignedNumber(input, i);
+    }
+
+    private static boolean startsUnsignedNumber(String input, int i) {
+        char c = input.charAt(i);
+        return Character.isDigit(c)
+                || (c == '.' && i + 1 < input.length() && Character.isDigit(input.charAt(i + 1)));
+    }
+
+    // DynamoDB reads the exponent as a 32-bit integer and refuses a literal whose exponent,
+    // or whose scale once the exponent is applied, does not fit one.
+    private static void requireRepresentable(String number) {
+        int exponentAt = Math.max(number.indexOf('e'), number.indexOf('E'));
+        try {
+            if (exponentAt >= 0) {
+                Integer.parseInt(number.substring(exponentAt + 1));
+            }
+            new BigDecimal(number);
+        } catch (NumberFormatException expected) {
+            throw validationEx(NOT_WELL_FORMED);
+        }
     }
 
     // --- Recursive-descent parser ---

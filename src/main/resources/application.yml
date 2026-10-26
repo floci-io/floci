@@ -467,6 +467,9 @@ floci:
       #   init-image: busybox:1.36            # Init container image (needs sh, wget, unzip)
       hot-reload:
         enabled: false
+      reactive-s3-sync:
+        enabled: true                       # Re-deploy a function when the S3 object it was deployed from is overwritten
+        async: false                        # Re-deploy in the background so the S3 upload does not wait for it
     apigateway:
       enabled: true
       vtl-max-loops: 10000                 # Maximum #foreach iterations a VTL mapping template may execute (truncates the loop, does not fail the template)

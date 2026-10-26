@@ -168,6 +168,9 @@ floci:
       # aws-config-path:
       hot-reload:
         enabled: true
+      reactive-s3-sync:
+        enabled: true
+        async: false
     apigateway:
       enabled: true
       vtl-max-loops: 10000

@@ -6220,6 +6220,57 @@ class Ec2ServiceTest {
         assertEquals("corporate", list.currentEntries().getFirst().getDescription());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"192.0.2.19/24", "192.0.2.0/33", "example.com/24", "192.0.2.0"})
+    void createManagedPrefixListRejectsInvalidIpv4BeforeAllocation(String cidr) {
+        Ec2Service service = prefixListService();
+        AwsException error = assertThrows(AwsException.class, () -> service.createManagedPrefixList(
+                "us-east-1", "rejected-cidr", "IPv4", 2,
+                List.of(new PrefixListEntry("198.51.100.0/24", null), new PrefixListEntry(cidr, null)),
+                List.of(new Tag("source", "rejected-cidr"))));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals("The specified CIDR (" + cidr + ") is not valid. "
+                + "For example, specify a CIDR in the following form: 10.0.0.0/16.", error.getMessage());
+        assertTrue(service.describeManagedPrefixLists("us-east-1", List.of(), Map.of()).stream()
+                .allMatch(ManagedPrefixList::isAwsManaged));
+    }
+
+    @Test
+    void rejectedPrefixListCidrPreservesEntriesVersionAndMetadata() {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "original", "IPv4", 2,
+                List.of(new PrefixListEntry("192.0.2.0/24", "original")), List.of());
+        AwsException error = assertThrows(AwsException.class, () -> service.modifyManagedPrefixList(
+                "us-east-1", list.getPrefixListId(), 1L, "changed", 3,
+                List.of(new PrefixListEntry("198.51.100.19/24", null)), List.of("192.0.2.0/24")));
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals(1, list.getVersion());
+        assertEquals(2, list.getMaxEntries());
+        assertEquals("original", list.getPrefixListName());
+        assertEquals("create-complete", list.getState());
+        assertEquals("192.0.2.0/24", list.currentEntries().getFirst().getCidr());
+        assertEquals("original", list.currentEntries().getFirst().getDescription());
+        assertEquals(1, list.getEntriesByVersion().size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0.0.0.0/0", "192.0.2.0/24", "192.0.2.19/32"})
+    void createManagedPrefixListPreservesCanonicalIpv4(String cidr) {
+        Ec2Service service = prefixListService();
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "canonical", "IPv4", 1,
+                List.of(new PrefixListEntry(cidr, null)), List.of());
+        assertEquals(cidr, list.currentEntries().getFirst().getCidr());
+    }
+
+    @Test
+    void createManagedPrefixListPreservesAlternateIpv6Spelling() {
+        Ec2Service service = prefixListService();
+        String cidr = "2001:DB8:0000:0000:0000:0000:0000:0000/32";
+        ManagedPrefixList list = service.createManagedPrefixList("us-east-1", "ipv6", "IPv6", 1,
+                List.of(new PrefixListEntry(cidr, null)), List.of());
+        assertEquals(cidr, list.currentEntries().getFirst().getCidr());
+    }
+
     @Test
     void createManagedPrefixListRejectsMoreEntriesThanMaxEntries() {
         Ec2Service service = prefixListService();

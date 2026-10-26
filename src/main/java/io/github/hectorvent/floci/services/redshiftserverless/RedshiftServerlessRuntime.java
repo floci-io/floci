@@ -99,6 +99,12 @@ public class RedshiftServerlessRuntime {
      */
     public void restoreSnapshot(String accountId, String region, String workgroupName, String masterUsername,
                                 String dbName, Path dumpFile) {
+        restoreSnapshot(accountId, region, workgroupName, masterUsername, dbName, dumpFile, () -> { });
+    }
+
+    /** Keeps the safety dump until the namespace's credentials and metadata have also committed. */
+    public void restoreSnapshot(String accountId, String region, String workgroupName, String masterUsername,
+                                String dbName, Path dumpFile, Runnable afterRestore) {
         String backendId = backendId(region, workgroupName);
         Path safety;
         try {
@@ -112,6 +118,7 @@ public class RedshiftServerlessRuntime {
             try {
                 containerManager.resetUserSchemas(accountId, backendId, masterUsername, dbName);
                 containerManager.restoreSnapshot(accountId, backendId, masterUsername, dbName, dumpFile, true);
+                afterRestore.run();
             } catch (RuntimeException e) {
                 rollBackRestore(accountId, backendId, masterUsername, dbName, safety, e);
                 throw e;

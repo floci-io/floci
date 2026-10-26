@@ -47,7 +47,7 @@ public final class SesAddressLength {
         }
     }
 
-    static boolean exceedsLimit(String address) {
+    public static boolean exceedsLimit(String address) {
         String normalized = normalized(address);
         return normalized != null && normalized.length() > MAX_LENGTH;
     }

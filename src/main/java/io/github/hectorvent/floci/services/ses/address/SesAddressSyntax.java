@@ -227,6 +227,11 @@ public final class SesAddressSyntax {
         }
     }
 
+    /** Whether a present address passes the check every send applies; a blank one does not. */
+    public static boolean isWellFormed(String address) {
+        return address != null && !address.isBlank() && violation(address) == null;
+    }
+
     /**
      * Returns the message AWS answers for a malformed address, or null when the address passes or
      * is blank (a missing address is reported by the caller's own required-field check).
@@ -273,7 +278,8 @@ public final class SesAddressSyntax {
         return c <= ' ' || c >= 0x7f;
     }
 
-    private static String addrSpec(String mailbox) {
+    /** The bare address of a mailbox, without its display name, comments and angle brackets. */
+    public static String addrSpec(String mailbox) {
         String withoutComments = stripComments(mailbox).text().trim();
         int open = SesSendAddresses.lastUnquotedAngle(withoutComments);
         if (open >= 0 && withoutComments.endsWith(">")) {
