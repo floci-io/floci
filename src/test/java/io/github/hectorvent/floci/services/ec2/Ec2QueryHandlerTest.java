@@ -409,7 +409,7 @@ class Ec2QueryHandlerTest {
         Image image = new Image();
         image.setImageId("ami-0123456789abcdef2");
         image.setBlockDeviceMappings(List.of(deviceMapping("/dev/sda1", "snap-0123456789abcdef3")));
-        when(service.copyImage("us-east-1", "us-west-2", "ami-source", "name", null)).thenReturn(image);
+        when(service.copyImage("us-east-1", "us-west-2", "ami-source", "name", null, false)).thenReturn(image);
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("SourceRegion", "us-west-2");
         params.putSingle("SourceImageId", "ami-source");
