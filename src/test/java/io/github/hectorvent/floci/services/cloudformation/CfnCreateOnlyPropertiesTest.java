@@ -95,6 +95,19 @@ class CfnCreateOnlyPropertiesTest {
     }
 
     @Test
+    void isCreateOnly_appConfigReplacesOnlyOnItsSchemaProperties() {
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::Application", "Name"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::Environment", "ApplicationId"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::Environment", "Name"));
+        assertEquals(Set.of("ApplicationId", "LocationUri", "Type"),
+                CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::AppConfig::ConfigurationProfile"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::ConfigurationProfile", "Name"));
+        assertEquals(Set.of("Name", "ReplicateTo"),
+                CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::AppConfig::DeploymentStrategy"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::DeploymentStrategy", "GrowthFactor"));
+    }
+
+    @Test
     void isCreateOnly_treatsEmptySchemaListAsAuthoritative() {
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGateway::RestApi", "Name"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Cognito::UserPool", "UserPoolName"));

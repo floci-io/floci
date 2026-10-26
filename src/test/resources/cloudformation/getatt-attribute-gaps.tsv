@@ -1,3 +1,4 @@
+AWS::AppConfig::ConfigurationProfile	KmsKeyArn	Floci's AppConfig keeps no KMS key on a profile, so KmsKeyIdentifier is accepted and not stored
 AWS::AppSync::GraphQLApi	GraphQLEndpointArn	the private-endpoint ARN of the GraphQL endpoint; Floci serves one public endpoint and has no private-endpoint model
 AWS::BedrockAgentCore::Runtime	WorkloadIdentityDetails	the dotted WorkloadIdentityDetails.WorkloadIdentityArn is set instead, the form AWS's GetAtt exposes for the nested object
 AWS::CodeBuild::Project	Id	schema gives no description; AWS's Id may differ from the project name Floci uses

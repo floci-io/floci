@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -88,6 +89,21 @@ public class AppConfigService {
                 .ifPresent(application -> applicationStore.delete(application.getId()));
     }
 
+    /**
+     * Sets the name and description of the application whose ID is {@code applicationId}, as a
+     * CloudFormation update of {@code AWS::AppConfig::Application} does: both are written, so a null
+     * description clears it. Floci serves no UpdateApplication route; the CloudFormation provisioner
+     * is the only caller.
+     */
+    public Application updateApplication(String applicationId, String name, String description) {
+        Application app = applicationStore.get(applicationId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application not found", 404));
+        app.setName(name);
+        app.setDescription(description);
+        applicationStore.put(app.getId(), app);
+        return app;
+    }
+
     // ──────────────────────────── Environment ────────────────────────────
 
     public Environment createEnvironment(String applicationIdentifier, Map<String, Object> request) {
@@ -137,6 +153,31 @@ public class AppConfigService {
         return environmentStore.scan(k -> true).stream()
                 .filter(e -> e.getApplicationId().equals(appId))
                 .toList();
+    }
+
+    /** The environment whose ID is exactly {@code environmentId}, in whichever application holds it. */
+    public Optional<Environment> findEnvironment(String environmentId) {
+        return environmentStore.get(environmentId);
+    }
+
+    /**
+     * Sets the name, description and monitors of an environment, as a CloudFormation update of
+     * {@code AWS::AppConfig::Environment} does: all three are written, so a null description or
+     * monitor list clears it. The monitors are checked as CreateEnvironment checks them, before
+     * anything is written. Floci serves no UpdateEnvironment route; the CloudFormation provisioner
+     * is the only caller.
+     */
+    public Environment updateEnvironment(String applicationId, String environmentId, String name,
+                                         String description, Object monitors) {
+        List<Monitor> checked = monitors(monitors);
+        Environment env = environmentStore.get(environmentId)
+                .filter(e -> applicationId.equals(e.getApplicationId()))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Environment not found", 404));
+        env.setName(name);
+        env.setDescription(description);
+        env.setMonitors(checked);
+        environmentStore.put(env.getId(), env);
+        return env;
     }
 
     /** The request's Monitors, checked against the limits AWS documents for CreateEnvironment. */
@@ -198,6 +239,28 @@ public class AppConfigService {
         return profileStore.scan(k -> true).stream()
                 .filter(p -> p.getApplicationId().equals(appId))
                 .toList();
+    }
+
+    /** The configuration profile whose ID is exactly {@code profileId}, in whichever application holds it. */
+    public Optional<ConfigurationProfile> findConfigurationProfile(String profileId) {
+        return profileStore.get(profileId);
+    }
+
+    /**
+     * Sets the name and description of a configuration profile, as a CloudFormation update of
+     * {@code AWS::AppConfig::ConfigurationProfile} does: both are written, so a null description
+     * clears it. Floci serves no UpdateConfigurationProfile route; the CloudFormation provisioner is
+     * the only caller.
+     */
+    public ConfigurationProfile updateConfigurationProfile(String applicationId, String profileId, String name,
+                                                           String description) {
+        ConfigurationProfile profile = profileStore.get(profileId)
+                .filter(p -> applicationId.equals(p.getApplicationId()))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Configuration profile not found", 404));
+        profile.setName(name);
+        profile.setDescription(description);
+        profileStore.put(profile.getId(), profile);
+        return profile;
     }
 
     public void deleteConfigurationProfile(String applicationIdentifier, String profileIdentifier) {
@@ -325,6 +388,26 @@ public class AppConfigService {
                 builtinStrategy("AppConfig.Canary10Percent20Minutes")));
         result.addAll(strategyStore.scan(k -> true));
         return result;
+    }
+
+    /**
+     * Sets the mutable settings of a stored deployment strategy, as a CloudFormation update of
+     * {@code AWS::AppConfig::DeploymentStrategy} does; its name and {@code ReplicateTo} are
+     * create-only. The predefined strategies are not stored, so they are not found here. Floci
+     * serves no UpdateDeploymentStrategy route; the CloudFormation provisioner is the only caller.
+     */
+    public DeploymentStrategy updateDeploymentStrategy(String id, String description, int deploymentDurationInMinutes,
+                                                       int finalBakeTimeInMinutes, float growthFactor,
+                                                       String growthType) {
+        DeploymentStrategy strategy = strategyStore.get(id)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Deployment strategy not found", 404));
+        strategy.setDescription(description);
+        strategy.setDeploymentDurationInMinutes(deploymentDurationInMinutes);
+        strategy.setFinalBakeTimeInMinutes(finalBakeTimeInMinutes);
+        strategy.setGrowthFactor(growthFactor);
+        strategy.setGrowthType(growthType);
+        strategyStore.put(strategy.getId(), strategy);
+        return strategy;
     }
 
     public void deleteDeploymentStrategy(String id) {

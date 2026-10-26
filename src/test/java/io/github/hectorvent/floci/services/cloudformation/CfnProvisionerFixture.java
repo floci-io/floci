@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import io.github.hectorvent.floci.services.appconfig.AppConfigService;
 import io.github.hectorvent.floci.services.applicationautoscaling.ApplicationAutoScalingService;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
@@ -23,6 +24,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayUsagePlanCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayV2DomainCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.AppConfigCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AppSyncCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApplicationAutoScalingCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingGroupCfnProvisioner;
@@ -204,6 +206,7 @@ final class CfnProvisionerFixture {
         private DynamoDbService dynamoDbService;
         private LambdaService lambdaService;
         private AppSyncService appSyncService;
+        private AppConfigService appConfigService;
         private IamService iamService;
         private SsmService ssmService;
         private KmsService kmsService;
@@ -416,6 +419,9 @@ final class CfnProvisionerFixture {
             if (appSyncService != null) {
                 discovered.add(new AppSyncCfnProvisioner(appSyncService));
             }
+            if (appConfigService != null) {
+                discovered.add(new AppConfigCfnProvisioner(appConfigService));
+            }
             if (lambdaService != null) {
                 discovered.add(new LambdaAddressingCfnProvisioner(lambdaService));
                 discovered.add(new LambdaEventInvokeConfigCfnProvisioner(lambdaService));
@@ -559,6 +565,11 @@ final class CfnProvisionerFixture {
 
         public Builder appSync(AppSyncService v) {
             this.appSyncService = v;
+            return this;
+        }
+
+        public Builder appConfig(AppConfigService v) {
+            this.appConfigService = v;
             return this;
         }
 
