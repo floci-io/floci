@@ -83,6 +83,11 @@ public class AppConfigService {
         return applicationStore.scan(k -> true);
     }
 
+    /** The application whose ID is exactly {@code applicationId}; GetApplication also takes a name. */
+    public Optional<Application> findApplication(String applicationId) {
+        return applicationStore.get(applicationId);
+    }
+
     public void deleteApplication(String idOrName) {
         applicationStore.get(idOrName)
                 .or(() -> listApplications().stream().filter(a -> idOrName.equals(a.getName())).findFirst())
@@ -95,7 +100,7 @@ public class AppConfigService {
      * description clears it. Floci serves no UpdateApplication route; the CloudFormation provisioner
      * is the only caller.
      */
-    public Application updateApplication(String applicationId, String name, String description) {
+    public synchronized Application updateApplication(String applicationId, String name, String description) {
         Application app = applicationStore.get(applicationId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application not found", 404));
         app.setName(name);
@@ -134,8 +139,9 @@ public class AppConfigService {
     /**
      * Deletes the environment whose ID is exactly {@code environmentId}, with its deployments,
      * without resolving its application, which may already be deleted; nothing happens when there
-     * is no such environment. The CloudFormation provisioner deletes environments this way, since a
-     * stack can delete an application before an environment it displaced from it.
+     * is no such environment. The CloudFormation provisioner deletes environments this way: an
+     * update that moves an environment to another application and removes the old one deletes that
+     * application before the environment it displaced.
      */
     public synchronized void deleteEnvironmentById(String environmentId) {
         environmentStore.get(environmentId).ifPresent(env -> removeEnvironment(env.getApplicationId(), env.getId()));
@@ -178,8 +184,8 @@ public class AppConfigService {
      * anything is written. Floci serves no UpdateEnvironment route; the CloudFormation provisioner
      * is the only caller.
      */
-    public Environment updateEnvironment(String applicationId, String environmentId, String name,
-                                         String description, Object monitors) {
+    public synchronized Environment updateEnvironment(String applicationId, String environmentId, String name,
+                                                      String description, Object monitors) {
         List<Monitor> checked = monitors(monitors);
         Environment env = environmentStore.get(environmentId)
                 .filter(e -> applicationId.equals(e.getApplicationId()))
@@ -263,8 +269,8 @@ public class AppConfigService {
      * clears it. Floci serves no UpdateConfigurationProfile route; the CloudFormation provisioner is
      * the only caller.
      */
-    public ConfigurationProfile updateConfigurationProfile(String applicationId, String profileId, String name,
-                                                           String description) {
+    public synchronized ConfigurationProfile updateConfigurationProfile(String applicationId, String profileId,
+                                                                        String name, String description) {
         ConfigurationProfile profile = profileStore.get(profileId)
                 .filter(p -> applicationId.equals(p.getApplicationId()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Configuration profile not found", 404));
@@ -302,9 +308,10 @@ public class AppConfigService {
      * Deletes the configuration profile whose ID is exactly {@code profileId}, with its hosted
      * configuration versions, without resolving its application, which may already be deleted;
      * nothing happens when there is no such profile. The CloudFormation provisioner deletes profiles
-     * this way, since a stack can delete an application before a profile it displaced from it.
+     * this way: an update that moves a profile to another application and removes the old one
+     * deletes that application before the profile it displaced.
      */
-    public void deleteConfigurationProfileById(String profileId) {
+    public synchronized void deleteConfigurationProfileById(String profileId) {
         profileStore.get(profileId)
                 .ifPresent(profile -> removeConfigurationProfile(profile.getApplicationId(), profile.getId()));
     }
@@ -421,9 +428,10 @@ public class AppConfigService {
      * create-only. The predefined strategies are not stored, so they are not found here. Floci
      * serves no UpdateDeploymentStrategy route; the CloudFormation provisioner is the only caller.
      */
-    public DeploymentStrategy updateDeploymentStrategy(String id, String description, int deploymentDurationInMinutes,
-                                                       int finalBakeTimeInMinutes, float growthFactor,
-                                                       String growthType) {
+    public synchronized DeploymentStrategy updateDeploymentStrategy(String id, String description,
+                                                                    int deploymentDurationInMinutes,
+                                                                    int finalBakeTimeInMinutes, float growthFactor,
+                                                                    String growthType) {
         DeploymentStrategy strategy = strategyStore.get(id)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Deployment strategy not found", 404));
         strategy.setDescription(description);

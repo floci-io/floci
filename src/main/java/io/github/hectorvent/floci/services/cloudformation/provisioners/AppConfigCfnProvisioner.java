@@ -239,11 +239,8 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
 
     /** The application whose ID is exactly {@code id}: GetApplication also takes a name. */
     private Application application(String id) {
-        Application app = service.getApplication(id);
-        if (!id.equals(app.getId())) {
-            throw new AwsException("ResourceNotFoundException", "Application not found", 404);
-        }
-        return app;
+        return service.findApplication(id)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application not found", 404));
     }
 
     /** Drives an application's tags to {@code desired}; TagResource alone never removes one. */
@@ -392,8 +389,8 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
      * Deletes the entity whose ID is exactly {@code physicalId}, so a name AppConfig would also take
      * never selects another one, and the displaced entity of a replacement is found by its ID alone.
      * An environment or profile is deleted without looking up its application, which the stack may
-     * already have deleted: an update that moves them to a new application deletes the old one
-     * before the entities it displaced. One already gone counts as deleted. An environment takes its
+     * already have deleted: an update that moves them to a new application and removes the old one
+     * deletes that application before the entities it displaced. One already gone counts as deleted. An environment takes its
      * deployments with it, and a profile its hosted configuration versions.
      */
     @Override
@@ -403,7 +400,7 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
         }
         switch (resourceType) {
             case APPLICATION -> {
-                if (service.listApplications().stream().anyMatch(app -> physicalId.equals(app.getId()))) {
+                if (service.findApplication(physicalId).isPresent()) {
                     service.deleteApplication(physicalId);
                 }
             }

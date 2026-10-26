@@ -90,8 +90,6 @@ class CloudFormationAppConfigLifecycleTest {
         String oldProfile = stack.getResources().get("Profile").getPhysicalId();
         appConfig.createHostedConfigurationVersion(oldApp, oldProfile, "{}".getBytes(StandardCharsets.UTF_8),
                 "application/json", null);
-        appConfig.createDeploymentStrategy(Map.of("Name", "now", "DeploymentDurationInMinutes", 0,
-                "GrowthFactor", 100, "ReplicateTo", "NONE"));
         appConfig.startDeployment(oldApp, oldEnv, Map.of("ConfigurationProfileId", oldProfile,
                 "ConfigurationVersion", "1", "DeploymentStrategyId", "AppConfig.AllAtOnce"));
 

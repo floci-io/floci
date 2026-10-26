@@ -194,7 +194,9 @@ public final class CfnRollback {
      * Holds what an AppConfig application, environment, configuration profile or deployment
      * strategy carried before an in-place update changed it, with the IDs that address it, so a
      * failed stack update can put it back. Written by {@code AppConfigCfnProvisioner} before its
-     * update call and spent by its {@code rollbackUpdate}.
+     * update call and spent by its {@code rollbackUpdate}; when its own undo did not complete, the
+     * provisioner carries it onto the restored resource through
+     * {@code mergeFailedUpdateResourceTracking}.
      */
     public static final String APPCONFIG_UPDATE_SNAPSHOT_ATTR = "__FlociAppConfigUpdateSnapshot";
 
