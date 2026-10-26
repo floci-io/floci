@@ -90,8 +90,8 @@ metadata.
 | `ami-sles15sp6` | | `registry.suse.com/bci/bci-base:15.6` |
 | `ami-sles15sp7` | | `registry.suse.com/bci/bci-base:15.7` |
 | `ami-sles160` | | `registry.suse.com/bci/bci-base:16.0` |
-| `ami-rocky9` | | `public.ecr.aws/docker/library/rockylinux:9` |
-| `ami-rocky10` | | `quay.io/rockylinux/rockylinux:10` |
+| `ami-rocky9` | | `quay.io/rockylinux/rockylinux:9.6` |
+| `ami-rocky10` | | `quay.io/rockylinux/rockylinux:10.0` |
 | `ami-rhel8` | | `registry.access.redhat.com/ubi8/ubi:8.10` |
 | `ami-rhel9` | | `registry.access.redhat.com/ubi9/ubi:9.5` |
 
@@ -143,7 +143,7 @@ With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, Floci prepares a s
 
 Security-group permissions on a host-published port use the source visible inside Docker. Docker Desktop may replace the original external-client address. The legacy socat application publisher is disabled while enforcement is enabled because it obscures that source. SSH is published directly by the protected namespace. Application host ports remain available through the legacy publisher only when enforcement is explicitly disabled. Direct managed container traffic uses the logical ENI identity.
 
-When enforcement is disabled, an instance's security groups can open a TCP port to a CIDR source and Floci publishes that port on the host so you can reach the app from `localhost`. For each opened port Floci starts a small `alpine/socat` sidecar container that binds an allocated host port (default range 30000–30999) and forwards it to the instance container's IP. This works both for rules present at launch and for rules added later with `authorize-security-group-ingress`; revoking the rule removes the forward. The mapping (`app port -> host port`) is written to the logs:
+When enforcement is disabled, an instance's security groups can open a TCP port to a CIDR source and Floci publishes that port on the host so you can reach the app from `localhost`. For each opened port Floci starts a small `alpine/socat` sidecar container that binds an allocated host port (default range 30000–30999) and forwards it to the instance container's IP, with `TCP_NODELAY` on both sockets so a request the client sends as two small writes is not held for the first write's delayed ACK (about 40 ms per round trip otherwise). This works both for rules present at launch and for rules added later with `authorize-security-group-ingress`; revoking the rule removes the forward. The mapping (`app port -> host port`) is written to the logs:
 
 ```
 Published EC2 instance i-0abc... app port 80 on host port 30000 (socat -> 172.17.0.3:80)
@@ -299,6 +299,10 @@ naming different VPCs find nothing.
 | DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway or egress-only internet gateway, a transit gateway attachment, an Elastic Load Balancing v2 load balancer, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
+| CreateDhcpOptions | Creates a DHCP options set with the supplied configurations and optional tags. |
+| DescribeDhcpOptions | Lists DHCP options sets by ID or filters, with paginated results. |
+| AssociateDhcpOptions | Associates an options set with a VPC; `default` leaves the VPC with no DHCP options. |
+| DeleteDhcpOptions | Deletes an unassociated DHCP options set. |
 | DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
 | CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument` and the per-subnet IPv4 and IPv6 addresses named by `SubnetConfiguration.N`. `IpAddressType` defaults to `ipv4`. Interface and gateway address types are stored as metadata. Synthesized endpoint interfaces still carry IPv4 only; IPv6 networking is not emulated. An `Ipv4` value outside the named subnet's CIDR, or among the first four or the last address AWS reserves in it, is rejected with `InvalidParameterValue`. |
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints, including their IP address type. |
@@ -374,10 +378,10 @@ and `sk-ecdsa-sha2-nistp256@openssh.com`.
 
 | Action | Description |
 |--------|-------------|
-| CreateKeyPair | Creates an RSA or ED25519 key pair and returns its private key as PEM or as a PuTTY `.ppk` file. |
+| CreateKeyPair | Creates an RSA or ED25519 key pair and returns its private key as PEM or as a PuTTY `.ppk` file, with `key-pair` tags from `TagSpecification` returned in `tagSet`. |
 | DescribeKeyPairs | Lists or returns stored key pairs. |
 | DeleteKeyPair | Deletes a key pair from the local EC2 store. |
-| ImportKeyPair | Imports a public key as a local key pair. |
+| ImportKeyPair | Imports a public key as a local key pair, with `key-pair` tags from `TagSpecification` returned in `tagSet`. |
 
 `CreateKeyPair` creates a 2048-bit RSA key unless `KeyType=ed25519` asks for an ED25519 key, and
 returns its private key as PEM unless `KeyFormat=ppk` asks for a PuTTY key file, in the forms AWS
@@ -394,9 +398,9 @@ with `DryRunOperation` before any of these checks, and creates nothing either.
 | Action | Description |
 |--------|-------------|
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
-| CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
-| RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
-| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns. |
+| CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. Applies `image` and `snapshot` tags from `TagSpecification` to the AMI and its new snapshots. |
+| RegisterImage | Registers an AMI from supplied metadata and block device mappings, with `image` tags from `TagSpecification`. |
+| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns, applying `image` and `snapshot` tags from `TagSpecification` to the copy and its new snapshots. |
 | DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`, and a snapshot another AMI still uses is kept either way. |
 
 Every resource EC2 creates is owned by the account the request resolves to, the same account
@@ -527,7 +531,7 @@ matching how AWS itself responds.
 
 | Action | Description |
 |--------|-------------|
-| CreateNetworkAcl | Creates a network ACL in a VPC. |
+| CreateNetworkAcl | Creates a network ACL in a VPC, with `network-acl` tags from `TagSpecification`. |
 | DescribeNetworkAcls | Lists or returns stored network ACLs. |
 | DeleteNetworkAcl | Deletes a network ACL from the local EC2 store. |
 | CreateNetworkAclEntry | Adds an entry to a network ACL. |
@@ -551,6 +555,31 @@ Two AWS-managed prefix lists exist in every region without being created —
 (`pl-02cd2c6b`) — matching the gateway endpoint services on AWS. They are owned by `AWS`,
 read-only, and served by both `DescribePrefixLists` and `DescribeManagedPrefixLists`;
 modifying or deleting one returns `UnsupportedOperation`.
+
+Additional regional AWS-managed lists can be supplied through
+`FLOCI_SERVICES_EC2_MANAGED_PREFIX_LIST_CATALOG_PATH`. Set it to a readable JSON
+file inside the Floci container, for example:
+
+```json
+{
+  "eu-west-1": [{
+    "prefixListId": "pl-0123456789abcdef0",
+    "prefixListName": "example-managed-service",
+    "cidrs": ["192.0.2.0/24"]
+  }]
+}
+```
+
+The file is read once when EC2 starts. Each entry needs a unique ID and name
+within its region and at least one IPv4 CIDR. CIDRs are normalized to network
+blocks; repeated or equivalent blocks within one list are rejected. Entries
+cannot replace the built-in lists. Invalid or unreadable files prevent startup
+when EC2 is enabled; disabled EC2 does not read the catalog. Configured lists
+have the same AWS ownership, read-only behavior, security-group reference
+validation and describe/entry responses as the built-in lists. Both configured
+and built-in CIDRs participate in security-group policy evaluation and firewall
+rules when enforcement is enabled. They are available across accounts in their
+configured region. Leaving the setting unset keeps the built-in catalog.
 
 A customer-managed list may not take a name AWS reserves for its own: `com.amazonaws.`,
 `com.amazon.` or `com.aws.`, each including the trailing dot. `CreateManagedPrefixList`
@@ -737,6 +766,38 @@ through `payment-pending`/`assessing`. `DescribeCapacityReservations` supports t
 `instance-type`, `state` and `tenancy` filters alongside the shared `tag:`, `tag-key` and
 `tag-value` filters.
 
+On-demand launches consume matching open reservation capacity unless their preference is
+`none`. RunInstances also honors an explicit reservation target, including one supplied by
+its launch template. `capacity-reservations-only` requires matching reservation capacity and
+never falls back to On-Demand capacity when launching or restarting. It can accompany an
+explicit reservation target; without one, only matching open reservations are eligible.
+A matching targeted reservation with too few available slots returns
+`ReservationCapacityExceeded` on launch or restart.
+CreateFleet and AutoScaling retain the template's preference and target;
+CloudFormation launch templates preserve the same declaration. Creating an open reservation
+adopts matching, unassociated running instances with an `open` preference. DescribeInstances
+reports the acquired reservation. Stop, termination,
+cancellation and expiration release membership; a restart acquires capacity using the
+instance's retained launch preference and target. A failed membership write reports an error;
+subsequent access reconciles released membership from persisted instance state.
+
+Membership and available counts publish in one atomic storage batch. Older snapshots without
+membership remain readable.
+
+`CapacityReservationResourceGroupArn` targets the members of an existing capacity pool
+in the caller's account and region. Only members with matching instance type, platform,
+Availability Zone and tenancy are eligible. Both open and targeted member reservations
+can supply capacity. The default permits On-Demand fallback when the group has no
+matching available capacity; `capacity-reservations-only` forbids that fallback at launch
+and restart. A group target cannot accompany a reservation ID, `none`, or a Spot request.
+DescribeInstances retains the group target separately from the acquired reservation ID.
+Running group-targeted instances can acquire newly added matching members or move to
+another matching member after cancellation or expiration. Existing membership survives
+group deletion until the instance releases its reservation.
+
+
+Capacity reservation zone IDs must be among those returned by `DescribeAvailabilityZones`.
+
 ### Dedicated Hosts
 
 | Action | Description |
@@ -812,6 +873,9 @@ allocated address.
 | DescribeAvailabilityZones | Returns the configured local availability zones. |
 | DescribeRegions | Returns the regions known to the local EC2 service. |
 | DescribeAccountAttributes | Returns local account-level EC2 attributes. |
+
+The modeled zones are standard Availability Zones. Each reports `NetworkBorderGroup` as its
+Region, such as `eu-west-1`. Local Zones and Wavelength Zones are not modeled.
 
 A zone id has AWS's shape, a short region prefix and `-az<n>`: `use1-az1` in `us-east-1`, `apne1-az1`
 in `ap-northeast-1`, `usgw1-az1` in `us-gov-west-1`. On AWS the pairing of a zone name with a zone id
@@ -912,6 +976,12 @@ Two behaviours worth calling out, because they are what Terraform reads back:
   (`InvalidParameterCombination`); place the subnet on the primary network interface instead.
 
 #### Launch template versions
+
+For a specified template, `DescribeLaunchTemplateVersions` returns all stored versions in
+ascending numeric order by default. `LaunchTemplateVersion.N` selects explicit version numbers,
+`$Latest`, or `$Default`; the legacy `Versions.N` spelling is also accepted. Without an explicit
+version list, `MinVersion` is exclusive and `MaxVersion` inclusive. Explicit versions take
+precedence over the range. Filtering, pagination, and listing across all templates are unchanged.
 
 `CreateLaunchTemplateVersion` accepts two members outside `LaunchTemplateData` itself:
 
@@ -1154,6 +1224,10 @@ One network per **VPC**, not per subnet: subnets inside a VPC route to each othe
 network per subnet would manufacture a partition AWS does not have. Per-subnet addressing is kept
 anyway: the network's IPAM pool is the whole VPC CIDR and each subnet allocates static addresses
 out of its own slice of it.
+
+An address a subnet picks on its own is never one that an instance, network interface or NAT
+gateway in the subnet already holds. Default subnet ids are the same in every account, so those
+subnets share a network, and what any account holds there counts.
 
 The declared CIDR is used verbatim whenever it can be. It cannot be when it is absent, malformed,
 outside RFC 1918, or already claimed on the Docker daemon, including by another Floci VPC, since

@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.firehose;
 
 import io.github.hectorvent.floci.services.lambda.LambdaService;
-import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
@@ -9,24 +8,21 @@ import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
+import static io.github.hectorvent.floci.testing.FirehoseRequests.answerTransforms;
+import static io.github.hectorvent.floci.testing.FirehoseRequests.encode;
+import static io.github.hectorvent.floci.testing.FirehoseRequests.firstKey;
+import static io.github.hectorvent.floci.testing.FirehoseRequests.putRecordBatch;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 
 /**
  * End-to-end coverage of the Lambda transform on the real delivery path: what
@@ -54,7 +50,6 @@ class FirehoseLambdaTransformIntegrationTest {
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String TARGET_PREFIX = "Firehose_20150804.";
     private static final String FUNCTION_ARN = "arn:aws:lambda:us-east-1:000000000000:function:transform";
-    private static final Pattern KEY_PATTERN = Pattern.compile("<Key>([^<]+)</Key>");
 
     @InjectMock
     LambdaService lambdaService;
@@ -69,8 +64,8 @@ class FirehoseLambdaTransformIntegrationTest {
         String stream = "transform-ok-stream";
         String bucket = "transform-ok-archive";
         createDeliveryStream(stream, bucket);
-        respondWith((recordId, index) -> "{\"recordId\":\"" + recordId + "\",\"result\":\"Ok\",\"data\":\""
-                + encode("TRANSFORMED-" + index) + "\"}");
+        answerTransforms(lambdaService, (recordId, index) ->
+                "{\"recordId\":\"" + recordId + "\",\"result\":\"Ok\",\"data\":\"" + encode("TRANSFORMED-" + index) + "\"}");
 
         putRecordBatch(stream, "one", "two");
 
@@ -87,7 +82,7 @@ class FirehoseLambdaTransformIntegrationTest {
         String stream = "transform-failed-stream";
         String bucket = "transform-failed-archive";
         createDeliveryStream(stream, bucket);
-        respondWith((recordId, index) -> index == 0
+        answerTransforms(lambdaService, (recordId, index) -> index == 0
                 ? "{\"recordId\":\"" + recordId + "\",\"result\":\"ProcessingFailed\"}"
                 : "{\"recordId\":\"" + recordId + "\",\"result\":\"Ok\",\"data\":\"" + encode("kept") + "\"}");
 
@@ -116,7 +111,8 @@ class FirehoseLambdaTransformIntegrationTest {
         String stream = "transform-dropped-stream";
         String bucket = "transform-dropped-archive";
         createDeliveryStream(stream, bucket);
-        respondWith((recordId, index) -> "{\"recordId\":\"" + recordId + "\",\"result\":\"Dropped\"}");
+        answerTransforms(lambdaService, (recordId, index) ->
+                "{\"recordId\":\"" + recordId + "\",\"result\":\"Dropped\"}");
 
         putRecordBatch(stream, "one", "two");
 
@@ -126,7 +122,7 @@ class FirehoseLambdaTransformIntegrationTest {
             .then()
             .statusCode(200)
             .extract().asString();
-        assertFalse(KEY_PATTERN.matcher(listing).find(), "expected no delivered object, got: " + listing);
+        assertFalse(listing.contains("<Key>"), "expected no delivered object, got: " + listing);
     }
 
     @Test
@@ -134,7 +130,7 @@ class FirehoseLambdaTransformIntegrationTest {
         String stream = "transform-payload-stream";
         String bucket = "transform-payload-archive";
         createDeliveryStream(stream, bucket);
-        List<byte[]> payloads = respondWith((recordId, index) ->
+        List<byte[]> payloads = answerTransforms(lambdaService, (recordId, index) ->
                 "{\"recordId\":\"" + recordId + "\",\"result\":\"Dropped\"}");
 
         putRecordBatch(stream, "one", "two");
@@ -144,39 +140,6 @@ class FirehoseLambdaTransformIntegrationTest {
         assertTrue(payload.contains("\"deliveryStreamArn\":\"arn:aws:firehose:"), payload);
         assertTrue(payload.contains("\"data\":\"" + encode("one") + "\""), payload);
         assertTrue(payload.contains("\"data\":\"" + encode("two") + "\""), payload);
-    }
-
-    /**
-     * Answers each invocation from the record ids it actually carries, which the caller
-     * cannot name: they are minted per batch. Returns the payloads the mock received.
-     */
-    private List<byte[]> respondWith(RecordResponder responder) {
-        List<byte[]> payloads = new ArrayList<>();
-        Mockito.when(lambdaService.invokeArn(anyString(), any(), any())).thenAnswer(invocation -> {
-            byte[] payload = invocation.getArgument(1);
-            payloads.add(payload);
-            List<String> entries = new ArrayList<>();
-            Matcher recordIds = Pattern.compile("\"recordId\":\"([^\"]+)\"")
-                    .matcher(new String(payload, StandardCharsets.UTF_8));
-            for (int index = 0; recordIds.find(); index++) {
-                entries.add(responder.respond(recordIds.group(1), index));
-            }
-            InvokeResult result = new InvokeResult();
-            result.setStatusCode(200);
-            result.setPayload(("{\"records\":[" + String.join(",", entries) + "]}")
-                    .getBytes(StandardCharsets.UTF_8));
-            return result;
-        });
-        return payloads;
-    }
-
-    @FunctionalInterface
-    private interface RecordResponder {
-        String respond(String recordId, int index);
-    }
-
-    private static String encode(String body) {
-        return Base64.getEncoder().encodeToString(body.getBytes(StandardCharsets.UTF_8));
     }
 
     private void createDeliveryStream(String streamName, String bucket) {
@@ -209,38 +172,5 @@ class FirehoseLambdaTransformIntegrationTest {
         .then()
             .statusCode(200)
             .body("DeliveryStreamARN", notNullValue());
-    }
-
-    private void putRecordBatch(String streamName, String... bodies) {
-        List<String> records = new ArrayList<>();
-        for (String body : bodies) {
-            records.add("{\"Data\": \"" + encode(body) + "\"}");
-        }
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", TARGET_PREFIX + "PutRecordBatch")
-            .body("{ \"DeliveryStreamName\": \"" + streamName + "\", \"Records\": ["
-                    + String.join(",", records) + "] }")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body("FailedPutCount", equalTo(0));
-    }
-
-    private String firstKey(String bucket, String prefix) {
-        String listing = given()
-            .when()
-            .get("/" + bucket)
-            .then()
-            .statusCode(200)
-            .extract().asString();
-        Matcher key = KEY_PATTERN.matcher(listing);
-        while (key.find()) {
-            if (key.group(1).startsWith(prefix)) {
-                return key.group(1);
-            }
-        }
-        throw new AssertionError("expected an object under " + prefix + " in " + bucket + ", got: " + listing);
     }
 }

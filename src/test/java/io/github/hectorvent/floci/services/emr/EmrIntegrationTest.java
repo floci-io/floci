@@ -127,22 +127,23 @@ class EmrIntegrationTest {
                 .then().statusCode(200)
                 .body("Clusters.find { it.Id == '" + clusterId + "' }", nullValue());
 
-        EmrCluster cluster = emrService.describeCluster(clusterId);
+        EmrCluster cluster = storedCluster("floci-emr-pinned");
+        String pinnedId = cluster.getId();
         Instant originalCreationTime = cluster.getCreationDateTime();
         cluster.setCreationDateTime(Instant.ofEpochMilli(1_761_000_000_000L));
         try {
             emr("ListClusters", "{\"CreatedBefore\":1761000000.001}")
                     .then().statusCode(200)
-                    .body("Clusters.find { it.Id == '" + clusterId + "' }.Name", equalTo("floci-emr"));
+                    .body("Clusters.find { it.Id == '" + pinnedId + "' }.Name", equalTo("floci-emr-pinned"));
             emr("ListClusters", "{\"CreatedAfter\":1760999999.999}")
                     .then().statusCode(200)
-                    .body("Clusters.find { it.Id == '" + clusterId + "' }.Name", equalTo("floci-emr"));
+                    .body("Clusters.find { it.Id == '" + pinnedId + "' }.Name", equalTo("floci-emr-pinned"));
             emr("ListClusters", "{\"CreatedBefore\":1761000000.000000001}")
                     .then().statusCode(200)
-                    .body("Clusters.find { it.Id == '" + clusterId + "' }", nullValue());
+                    .body("Clusters.find { it.Id == '" + pinnedId + "' }", nullValue());
             emr("ListClusters", "{\"CreatedAfter\":1760999999.999999999}")
                     .then().statusCode(200)
-                    .body("Clusters.find { it.Id == '" + clusterId + "' }", nullValue());
+                    .body("Clusters.find { it.Id == '" + pinnedId + "' }", nullValue());
         } finally {
             cluster.setCreationDateTime(originalCreationTime);
         }
@@ -153,7 +154,7 @@ class EmrIntegrationTest {
                     .then().statusCode(200).extract().asString()).path("Clusters");
             JsonNode listedTime = null;
             for (JsonNode listed : clusters) {
-                if (clusterId.equals(listed.path("Id").asText())) {
+                if (pinnedId.equals(listed.path("Id").asText())) {
                     listedTime = listed.path("Status").path("Timeline").path("CreationDateTime");
                     break;
                 }
@@ -163,7 +164,7 @@ class EmrIntegrationTest {
             assertEquals(0, new BigDecimal("1761000000.123").compareTo(listedTime.decimalValue()));
 
             JsonNode describedTime = objectMapper.readTree(emr("DescribeCluster",
-                    "{\"ClusterId\":\"" + clusterId + "\"}")
+                    "{\"ClusterId\":\"" + pinnedId + "\"}")
                     .then().statusCode(200).extract().asString())
                     .path("Cluster").path("Status").path("Timeline").path("CreationDateTime");
             assertTrue(describedTime.isNumber());
@@ -171,10 +172,10 @@ class EmrIntegrationTest {
 
             emr("ListClusters", "{\"CreatedAfter\":" + listedTime.asText() + "}")
                     .then().statusCode(200)
-                    .body("Clusters.find { it.Id == '" + clusterId + "' }", nullValue());
+                    .body("Clusters.find { it.Id == '" + pinnedId + "' }", nullValue());
             emr("ListClusters", "{\"CreatedBefore\":" + listedTime.asText() + "}")
                     .then().statusCode(200)
-                    .body("Clusters.find { it.Id == '" + clusterId + "' }", nullValue());
+                    .body("Clusters.find { it.Id == '" + pinnedId + "' }", nullValue());
         } finally {
             cluster.setCreationDateTime(originalCreationTime);
         }
@@ -441,14 +442,9 @@ class EmrIntegrationTest {
     // Catches: a cluster stored before the DNS fix keeps reporting its old us-east-1 master name.
     @Test
     void storedClusterReportsTheRegionalMasterDnsName() {
-        String id = emr("RunJobFlow",
-                "{\"Name\":\"stale-dns\",\"ReleaseLabel\":\"emr-7.5.0\","
-                        + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
-                        + "\"InstanceGroups\":[{\"Name\":\"master\",\"InstanceRole\":\"MASTER\","
-                        + "\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
-                .then().statusCode(200)
-                .extract().path("JobFlowId");
-        emrService.describeCluster(id).setMasterPublicDnsName("ip-10-0-0-1.us-east-1.compute.internal");
+        EmrCluster stored = storedCluster("stale-dns");
+        stored.setMasterPublicDnsName("ip-10-0-0-1.us-east-1.compute.internal");
+        String id = stored.getId();
 
         emr("DescribeCluster", "{\"ClusterId\":\"" + id + "\"}")
                 .then().statusCode(200)
@@ -456,5 +452,16 @@ class EmrIntegrationTest {
 
         emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}")
                 .then().statusCode(200);
+    }
+
+    /**
+     * A kept-alive cluster as RunJobFlow stores it: the service's own object, which a test can change,
+     * unlike the copy DescribeCluster answers from.
+     */
+    private EmrCluster storedCluster(String name) {
+        EmrCluster cluster = new EmrCluster();
+        cluster.setName(name);
+        cluster.setKeepJobFlowAliveWhenNoSteps(true);
+        return emrService.runJobFlow(cluster, "us-east-1");
     }
 }

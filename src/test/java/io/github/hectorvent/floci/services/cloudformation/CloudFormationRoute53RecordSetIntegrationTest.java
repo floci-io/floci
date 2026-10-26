@@ -134,6 +134,13 @@ class CloudFormationRoute53RecordSetIntegrationTest {
         assertTrue(created.contains("<Name>" + firstName + ".</Name>"), "name not fully qualified: " + created);
         assertFalse(created.contains("<Name>" + firstName + "</Name>"), "name stored as written: " + created);
 
+        stackRequest("UpdateStack", stackName, template, "WWW." + zoneName, "10.0.0.3");
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+        String caseUpdated = listResourceRecordSets(zoneId);
+        assertTrue(caseUpdated.contains("<Name>" + firstName + ".</Name>"),
+                "case-only update lost its record: " + caseUpdated);
+        assertTrue(caseUpdated.contains("10.0.0.3"), "case-only update lost its value: " + caseUpdated);
+
         // A rename is a new record identity, so the update must also find and remove the old record.
         stackRequest("UpdateStack", stackName, template, secondName, "10.0.0.2");
         assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());

@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiConsumer;
 
 final class BackendResponseCoordinator {
 
@@ -25,6 +26,10 @@ final class BackendResponseCoordinator {
     }
 
     Ticket register(Operation operation, ExtendedQuerySession.Mutation mutation) {
+        return register(operation, mutation, null);
+    }
+
+    Ticket register(Operation operation, ExtendedQuerySession.Mutation mutation, BiConsumer<Character, byte[]> response) {
         lock.lock();
         try {
             Ticket ticket = new Ticket(nextSequence++, operation);
@@ -36,7 +41,7 @@ final class BackendResponseCoordinator {
                     resolvedGates.put(ticket.sequence(), GateResult.SKIPPED_AFTER_ERROR);
                 }
             } else {
-                pending.addLast(new PendingOperation(ticket, mutation));
+                pending.addLast(new PendingOperation(ticket, mutation, response));
             }
             changed.signalAll();
             return ticket;
@@ -124,6 +129,9 @@ final class BackendResponseCoordinator {
             }
 
             Operation operation = head.ticket().operation();
+            if (head.response() != null) {
+                head.response().accept(type, body);
+            }
             if (type == 'E') {
                 if (operation != Operation.SIMPLE_QUERY) {
                     pending.removeFirst();
@@ -316,6 +324,7 @@ final class BackendResponseCoordinator {
     record Ticket(long sequence, Operation operation) {
     }
 
-    private record PendingOperation(Ticket ticket, ExtendedQuerySession.Mutation mutation) {
+    private record PendingOperation(Ticket ticket, ExtendedQuerySession.Mutation mutation,
+                                    BiConsumer<Character, byte[]> response) {
     }
 }

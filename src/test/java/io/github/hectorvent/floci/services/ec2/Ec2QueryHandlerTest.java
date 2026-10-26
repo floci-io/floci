@@ -3,7 +3,11 @@ package io.github.hectorvent.floci.services.ec2;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
+import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -19,6 +23,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.stream.Stream;
@@ -35,9 +40,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -52,7 +59,10 @@ class Ec2QueryHandlerTest {
             "AllocateAddress,elastic-ip", "AuthorizeSecurityGroupIngress,security-group-rule",
             "AuthorizeSecurityGroupEgress,security-group-rule", "RunInstances,instance",
             "RunInstances,network-interface", "CreateVolume,volume",
-            "RequestSpotInstances,spot-instances-request", "RequestSpotInstances,instance"
+            "RequestSpotInstances,spot-instances-request", "RequestSpotInstances,instance",
+            "CreateKeyPair,key-pair", "ImportKeyPair,key-pair", "CreateNetworkAcl,network-acl",
+            "CreateImage,image", "CreateImage,snapshot", "RegisterImage,image",
+            "CopyImage,image", "CopyImage,snapshot"
     })
     void rejectsReservedCreationTagsBeforeAllocatingResources(String action, String resourceType) {
         for (String prefix : List.of("TagSpecification", "TagSpecifications")) {
@@ -62,6 +72,9 @@ class Ec2QueryHandlerTest {
             params.putSingle("GroupDescription", "test");
             params.putSingle("MinCount", "1");
             params.putSingle("MaxCount", "1");
+            params.putSingle("KeyName", "test");
+            params.putSingle("PublicKeyMaterial",
+                    Base64.getEncoder().encodeToString(ED25519_KEY.getBytes(StandardCharsets.UTF_8)));
             params.putSingle(prefix + ".1.ResourceType", resourceType);
             params.putSingle(prefix + ".1.Tag.1.Key", "Name");
             params.putSingle(prefix + ".1.Tag.1.Value", "valid");
@@ -78,6 +91,86 @@ class Ec2QueryHandlerTest {
             assertTrue(response.getEntity().toString().contains("reserved for internal use"));
             verifyNoInteractions(service);
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "CreateKeyPair,key-pair,key", "ImportKeyPair,key-pair,key",
+            "CreateNetworkAcl,network-acl,key", "RegisterImage,image,key",
+            "CreateImage,image,key", "CreateImage,snapshot,value",
+            "CopyImage,image,key", "CopyImage,snapshot,limit"
+    })
+    void rejectsInvalidCreationTagsBeforeAllocatingResources(String action, String resourceType,
+                                                             String violation) {
+        for (String prefix : List.of("TagSpecification", "TagSpecifications")) {
+            Ec2Service service = mock(Ec2Service.class);
+            MultivaluedMap<String, String> params = createSubnetParams("10.38.1.0/24");
+            params.putSingle("GroupName", "test");
+            params.putSingle("GroupDescription", "test");
+            params.putSingle("MinCount", "1");
+            params.putSingle("MaxCount", "1");
+            params.putSingle("KeyName", "test");
+            params.putSingle("PublicKeyMaterial",
+                    Base64.getEncoder().encodeToString(ED25519_KEY.getBytes(StandardCharsets.UTF_8)));
+            params.putSingle(prefix + ".1.ResourceType", resourceType);
+            switch (violation) {
+                case "key" -> {
+                    params.putSingle(prefix + ".1.Tag.1.Key", "k".repeat(129));
+                    params.putSingle(prefix + ".1.Tag.1.Value", "v");
+                }
+                case "value" -> {
+                    params.putSingle(prefix + ".1.Tag.1.Key", "k");
+                    params.putSingle(prefix + ".1.Tag.1.Value", "v".repeat(257));
+                }
+                case "limit" -> {
+                    for (int i = 1; i <= 51; i++) {
+                        params.putSingle(prefix + ".1.Tag." + i + ".Key", "k" + i);
+                    }
+                }
+                default -> throw new IllegalArgumentException(violation);
+            }
+
+            Response response = handler(service).handle(action, params, "us-east-1");
+
+            assertEquals(400, response.getStatus());
+            String body = response.getEntity().toString();
+            String code = "limit".equals(violation) ? "TagLimitExceeded" : "InvalidParameterValue";
+            String message = switch (violation) {
+                case "key" -> "Tag key exceeds the maximum length of 128 characters";
+                case "value" -> "Tag value exceeds the maximum length of 256 characters";
+                default -> "The maximum number of Tags for a resource has been reached.";
+            };
+            assertTrue(body.contains("<Code>" + code + "</Code>"), body);
+            assertTrue(body.contains(message), body);
+            verifyNoInteractions(service);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "RegisterImage,instance,The valid resource type is 'image'.",
+            "CreateImage,instance,The valid resource types are 'image' and 'snapshot'.",
+            "CopyImage,instance,The valid resource types are 'image' and 'snapshot'."
+    })
+    void rejectsTagSpecificationsForResourcesTheImageActionsDoNotCreate(String action, String resourceType,
+                                                                        String validResourceTypes) {
+        Ec2Service service = mock(Ec2Service.class);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Name", "wrong-resource-type");
+        params.putSingle("TagSpecification.1.ResourceType", resourceType);
+        params.putSingle("TagSpecification.1.Tag.1.Key", "Team");
+        params.putSingle("TagSpecification.1.Tag.1.Value", "images");
+
+        Response response = handler(service).handle(action, params, "us-east-1");
+
+        assertEquals(400, response.getStatus());
+        String body = response.getEntity().toString();
+        String message = ("Tag specification resource type '" + resourceType
+                + "' is not valid for this operation. " + validResourceTypes)
+                .replace("'", "&apos;");
+        assertTrue(body.contains("<Code>InvalidParameterValue</Code>"), body);
+        assertTrue(body.contains(message), body);
+        verifyNoInteractions(service);
     }
 
     @ParameterizedTest
@@ -178,6 +271,182 @@ class Ec2QueryHandlerTest {
         ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
         verify(service).createTags(eq("us-east-1"), eq(List.of("vpc-test")), tags.capture());
         assertEquals(List.of(""), tags.getValue().stream().map(Tag::getValue).toList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TagSpecification", "TagSpecifications"})
+    void createKeyPairAppliesItsTagSpecificationAndReturnsIt(String prefix) {
+        Ec2Service service = mock(Ec2Service.class);
+        KeyPair keyPair = new KeyPair();
+        keyPair.setKeyPairId("key-0123456789abcdef0");
+        keyPair.setKeyName("tagged");
+        when(service.createKeyPair("us-east-1", "tagged", null, null)).thenReturn(keyPair);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("KeyName", "tagged");
+        params.putSingle(prefix + ".1.ResourceType", "key-pair");
+        params.putSingle(prefix + ".1.Tag.1.Key", "Team");
+        params.putSingle(prefix + ".1.Tag.1.Value", "keys");
+
+        Response response = handler(service).handle("CreateKeyPair", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
+        verify(service).createTags(eq("us-east-1"), eq(List.of("key-0123456789abcdef0")), tags.capture());
+        assertEquals(List.of("Team=keys"), tags.getValue().stream()
+                .map(tag -> tag.getKey() + "=" + tag.getValue()).toList());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<tagSet><item><key>Team</key><value>keys</value></item></tagSet>"), body);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TagSpecification", "TagSpecifications"})
+    void importKeyPairAppliesItsTagSpecificationAndReturnsIt(String prefix) {
+        Ec2Service service = mock(Ec2Service.class);
+        KeyPair keyPair = new KeyPair();
+        keyPair.setKeyPairId("key-0123456789abcdef1");
+        keyPair.setKeyName("tagged");
+        when(service.importKeyPair(eq("us-east-1"), eq("tagged"), any())).thenReturn(keyPair);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("KeyName", "tagged");
+        params.putSingle("PublicKeyMaterial", Base64.getEncoder()
+                .encodeToString(ED25519_KEY.getBytes(StandardCharsets.UTF_8)));
+        params.putSingle(prefix + ".1.ResourceType", "key-pair");
+        params.putSingle(prefix + ".1.Tag.1.Key", "Team");
+        params.putSingle(prefix + ".1.Tag.1.Value", "keys");
+
+        Response response = handler(service).handle("ImportKeyPair", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
+        verify(service).createTags(eq("us-east-1"), eq(List.of("key-0123456789abcdef1")), tags.capture());
+        assertEquals(List.of("Team=keys"), tags.getValue().stream()
+                .map(tag -> tag.getKey() + "=" + tag.getValue()).toList());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<tagSet><item><key>Team</key><value>keys</value></item></tagSet>"), body);
+    }
+
+    @Test
+    void createNetworkAclAppliesItsTagSpecification() {
+        Ec2Service service = mock(Ec2Service.class);
+        NetworkAcl acl = new NetworkAcl();
+        acl.setNetworkAclId("acl-0123456789abcdef0");
+        when(service.createNetworkAcl("us-east-1", "vpc-test")).thenReturn(acl);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("VpcId", "vpc-test");
+        params.putSingle("TagSpecification.1.ResourceType", "network-acl");
+        params.putSingle("TagSpecification.1.Tag.1.Key", "Team");
+        params.putSingle("TagSpecification.1.Tag.1.Value", "net");
+
+        Response response = handler(service).handle("CreateNetworkAcl", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
+        verify(service).createTags(eq("us-east-1"), eq(List.of("acl-0123456789abcdef0")), tags.capture());
+        assertEquals(List.of("Team=net"), tags.getValue().stream()
+                .map(tag -> tag.getKey() + "=" + tag.getValue()).toList());
+    }
+
+    @Test
+    void createImageTagsTheAmiAndEachNewSnapshot() {
+        Ec2Service service = mock(Ec2Service.class);
+        Image image = new Image();
+        image.setImageId("ami-0123456789abcdef0");
+        image.setBlockDeviceMappings(new ArrayList<>(List.of(
+                deviceMapping("/dev/sda1", "snap-0123456789abcdef0"),
+                new BlockDeviceMapping(),
+                deviceMapping("/dev/sdb", "snap-0123456789abcdef1"))));
+        when(service.createImage("us-east-1", "i-test", "name", null, false)).thenReturn(image);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("InstanceId", "i-test");
+        params.putSingle("Name", "name");
+        params.putSingle("NoReboot", "false");
+        params.putSingle("TagSpecification.1.ResourceType", "image");
+        params.putSingle("TagSpecification.1.Tag.1.Key", "Team");
+        params.putSingle("TagSpecification.1.Tag.1.Value", "images");
+        params.putSingle("TagSpecification.2.ResourceType", "snapshot");
+        params.putSingle("TagSpecification.2.Tag.1.Key", "Team");
+        params.putSingle("TagSpecification.2.Tag.1.Value", "snapshots");
+
+        Response response = handler(service).handle("CreateImage", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        assertEquals(List.of("ami-0123456789abcdef0=Team=images"),
+                appliedTags(service, "ami-0123456789abcdef0"));
+        assertEquals(List.of("snap-0123456789abcdef0=Team=snapshots"),
+                appliedTags(service, "snap-0123456789abcdef0"));
+        assertEquals(List.of("snap-0123456789abcdef1=Team=snapshots"),
+                appliedTags(service, "snap-0123456789abcdef1"));
+    }
+
+    @Test
+    void registerImageTagsTheAmiAlone() {
+        Ec2Service service = mock(Ec2Service.class);
+        Image image = new Image();
+        image.setImageId("ami-0123456789abcdef1");
+        image.setBlockDeviceMappings(List.of(deviceMapping("/dev/sda1", "snap-0123456789abcdef2")));
+        when(service.registerImage(eq("us-east-1"), eq("name"), any(), any(), any(), anyList()))
+                .thenReturn(image);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Name", "name");
+        params.putSingle("TagSpecification.1.ResourceType", "image");
+        params.putSingle("TagSpecification.1.Tag.1.Key", "Team");
+        params.putSingle("TagSpecification.1.Tag.1.Value", "images");
+
+        Response response = handler(service).handle("RegisterImage", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        assertEquals(List.of("ami-0123456789abcdef1=Team=images"),
+                appliedTags(service, "ami-0123456789abcdef1"));
+        verify(service, never()).createTags(anyString(), eq(List.of("snap-0123456789abcdef2")), anyList());
+    }
+
+    @Test
+    void copyImageTagsTheCopyAndItsNewSnapshots() {
+        Ec2Service service = mock(Ec2Service.class);
+        Image image = new Image();
+        image.setImageId("ami-0123456789abcdef2");
+        image.setBlockDeviceMappings(List.of(deviceMapping("/dev/sda1", "snap-0123456789abcdef3")));
+        when(service.copyImage("us-east-1", "us-west-2", "ami-source", "name", null)).thenReturn(image);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("SourceRegion", "us-west-2");
+        params.putSingle("SourceImageId", "ami-source");
+        params.putSingle("Name", "name");
+        params.putSingle("TagSpecification.1.ResourceType", "image");
+        params.putSingle("TagSpecification.1.Tag.1.Key", "Team");
+        params.putSingle("TagSpecification.1.Tag.1.Value", "images");
+        params.putSingle("TagSpecification.2.ResourceType", "snapshot");
+        params.putSingle("TagSpecification.2.Tag.1.Key", "Team");
+        params.putSingle("TagSpecification.2.Tag.1.Value", "snapshots");
+
+        Response response = handler(service).handle("CopyImage", params, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        assertEquals(List.of("ami-0123456789abcdef2=Team=images"),
+                appliedTags(service, "ami-0123456789abcdef2"));
+        assertEquals(List.of("snap-0123456789abcdef3=Team=snapshots"),
+                appliedTags(service, "snap-0123456789abcdef3"));
+    }
+
+    /** The tags each createTags call applied to one resource, as {@code id=key=value} strings. */
+    private static List<String> appliedTags(Ec2Service service, String resourceId) {
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
+        verify(service).createTags(eq("us-east-1"), eq(List.of(resourceId)), tags.capture());
+        return tags.getValue().stream()
+                .map(tag -> resourceId + "=" + tag.getKey() + "=" + tag.getValue())
+                .toList();
+    }
+
+    private static BlockDeviceMapping deviceMapping(String deviceName, String snapshotId) {
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId(snapshotId);
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName(deviceName);
+        mapping.setEbs(ebs);
+        return mapping;
     }
 
     @ParameterizedTest

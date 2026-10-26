@@ -229,6 +229,8 @@ class Ec2Tests {
     void describeAvailabilityZones() {
         DescribeAvailabilityZonesResponse resp = ec2.describeAvailabilityZones();
         assertThat(resp.availabilityZones()).hasSize(3);
+        assertThat(resp.availabilityZones()).allSatisfy(zone ->
+                assertThat(zone.networkBorderGroup()).isEqualTo(TestFixtures.region().id()));
     }
 
     @Test

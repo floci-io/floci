@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -277,6 +279,18 @@ public class BackupService {
                 .filter(v -> byVaultType == null || byVaultType.equals(
                         v.getVaultType() == null ? "BACKUP_VAULT" : v.getVaultType()))
                 .toList();
+    }
+
+    public PaginatedResult<BackupVault> listBackupVaults(String region, String byVaultType,
+                                                        Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 1000)) {
+            throw new AwsException("InvalidParameterValueException", "maxResults must be between 1 and 1000", 400);
+        }
+        String namespace = "backup:ListBackupVaults:" + regionResolver.getAccountId() + ":" + region + ":"
+                + (byVaultType == null ? "all" : "type:" + byVaultType);
+        return Pagination.paginate(listBackupVaults(region, byVaultType), BackupVault::getBackupVaultName,
+                maxResults == null ? 1000 : maxResults, nextToken, namespace,
+                token -> new AwsException("InvalidParameterValueException", "Invalid nextToken.", 400));
     }
 
     private static void requireNotAirGapped(BackupVault vault, String action) {

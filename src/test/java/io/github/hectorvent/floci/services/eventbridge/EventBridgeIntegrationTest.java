@@ -276,4 +276,21 @@ class EventBridgeIntegrationTest {
                 .then().statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
+
+    @Test
+    @Order(9)
+    void listTagsForMissingResourceReturnsNotFound() {
+        for (String resource : new String[] {
+                "event-bus/missing-tags-bus", "rule/missing-tags-rule",
+                "archive/missing-tags-archive", "replay/unsupported-tags-resource"
+        }) {
+            given()
+                    .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                    .header("X-Amz-Target", "AWSEvents.ListTagsForResource")
+                    .body("{\"ResourceARN\":\"arn:aws:events:us-east-1:000000000000:" + resource + "\"}")
+                    .when().post("/")
+                    .then().statusCode(400)
+                    .body("__type", equalTo("ResourceNotFoundException"));
+        }
+    }
 }

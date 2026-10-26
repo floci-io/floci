@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
@@ -29,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.*;
 
 class RedshiftInterceptingBridgeTest {
 
@@ -61,6 +63,10 @@ class RedshiftInterceptingBridgeTest {
     }
 
     private void startBridge(SpectrumInterceptor spectrumInterceptor) throws IOException {
+        startBridge(spectrumInterceptor, null);
+    }
+
+    private void startBridge(SpectrumInterceptor spectrumInterceptor, RedshiftAuditLogPublisher audit) throws IOException {
         clientListener = new ServerSocket(0);
         testClientEnd = new Socket("localhost", clientListener.getLocalPort());
         bridgeClientEnd = clientListener.accept();
@@ -72,8 +78,143 @@ class RedshiftInterceptingBridgeTest {
         s3Stub = Mockito.mock(S3Service.class);
         RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(
                 bridgeClientEnd, bridgeBackendEnd, s3Stub, Mockito.mock(IamService.class), "000000000000", List.of(),
-                spectrumInterceptor, "000000000000:c", "dev");
+                spectrumInterceptor, "000000000000:c", "dev", null, audit, "analyst");
         bridgeThread = Thread.ofVirtual().name("bridge-under-test").start(bridge::run);
+    }
+
+    @Test
+    @Timeout(10)
+    void multiCommandQueryLogsEveryCommittedUserChange() throws Exception {
+        RedshiftAuditLogPublisher audit = mock(RedshiftAuditLogPublisher.class);
+        startBridge(null, audit);
+        sendAuditQuery("SELECT ';'; /* migration */ CREATE USER alice; ALTER USER alice RENAME TO bob",
+                "SELECT 1", "CREATE ROLE", "ALTER ROLE");
+        verify(audit, timeout(2000)).publishRegisteredUserChange("000000000000", "c", "dev", "alice", "Create", null);
+        verify(audit, timeout(2000)).publishRegisteredUserChange("000000000000", "c", "dev", "bob", "Rename", "alice");
+    }
+
+    @Test
+    @Timeout(10)
+    void emptyAndFailedQueriesDoNotMislabelLaterUserChanges() throws Exception {
+        RedshiftAuditLogPublisher audit = mock(RedshiftAuditLogPublisher.class);
+        startBridge(null, audit);
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeQuery("; -- empty"));
+        nextForwarded();
+        testBackendEnd.getOutputStream().write(concat(frame('I', new byte[0]), frame('Z', new byte[]{'I'})));
+        testBackendEnd.getOutputStream().flush();
+        sendAuditQuery("SELECT broken; CREATE USER skipped", new String[0]);
+        sendAuditQuery("CREATE USER actual", "CREATE ROLE");
+        verify(audit, timeout(2000)).publishRegisteredUserChange("000000000000", "c", "dev", "actual", "Create", null);
+        verify(audit, never()).publishRegisteredUserChange(anyString(), anyString(), anyString(), eq("skipped"), anyString(), any());
+    }
+
+    @Test
+    @Timeout(10)
+    void implicitTransactionFailureDiscardsEarlierSuccessfulUserChanges() throws Exception {
+        RedshiftAuditLogPublisher audit = mock(RedshiftAuditLogPublisher.class);
+        startBridge(null, audit);
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeQuery("CREATE USER rolledback; SELECT broken"));
+        nextForwarded();
+        testBackendEnd.getOutputStream().write(concat(frame('C', cString("CREATE ROLE")),
+                frame('E', cString("failed")), frame('Z', new byte[]{'I'})));
+        testBackendEnd.getOutputStream().flush();
+        sendAuditQuery("CREATE USER actual", "CREATE ROLE");
+        verify(audit, timeout(2000)).publishRegisteredUserChange("000000000000", "c", "dev", "actual", "Create", null);
+        verify(audit, never()).publishRegisteredUserChange(anyString(), anyString(), anyString(), eq("rolledback"), anyString(), any());
+    }
+
+    @Test
+    @Timeout(10)
+    void rollbackInsideAMultiCommandQueryDoesNotPublishDiscardedChanges() throws Exception {
+        RedshiftAuditLogPublisher audit = mock(RedshiftAuditLogPublisher.class);
+        startBridge(null, audit);
+        sendAuditQuery("BEGIN; CREATE USER rolledback; ROLLBACK; CREATE USER actual",
+                "BEGIN", "CREATE ROLE", "ROLLBACK", "CREATE ROLE");
+        verify(audit, timeout(2000)).publishRegisteredUserChange("000000000000", "c", "dev", "actual", "Create", null);
+        verify(audit, never()).publishRegisteredUserChange(anyString(), anyString(), anyString(), eq("rolledback"), anyString(), any());
+    }
+
+    @Test
+    @Timeout(10)
+    void rollbackToSavepointPreservesOnlyEarlierUserChanges() throws Exception {
+        RedshiftAuditLogPublisher audit = mock(RedshiftAuditLogPublisher.class);
+        startBridge(null, audit);
+        sendAuditQuery("BEGIN; CREATE USER kept; SAVEPOINT s; CREATE USER rolledback; ROLLBACK TO s; COMMIT",
+                "BEGIN", "CREATE ROLE", "SAVEPOINT", "CREATE ROLE", "ROLLBACK", "COMMIT");
+        verify(audit, timeout(2000)).publishRegisteredUserChange("000000000000", "c", "dev", "kept", "Create", null);
+        verify(audit, never()).publishRegisteredUserChange(anyString(), anyString(), anyString(), eq("rolledback"), anyString(), any());
+    }
+
+    @Test
+    @Timeout(10)
+    void suspendedPortalsDoNotConsumeLaterUserChangeCompletions() throws Exception {
+        RedshiftAuditLogPublisher audit = mock(RedshiftAuditLogPublisher.class);
+        startBridge(null, audit);
+        ByteArrayOutputStream pipeline = new ByteArrayOutputStream();
+        PostgresWireDecoder.ParseMessage parse = new PostgresWireDecoder.ParseMessage("select", "SELECT 1", List.of());
+        pipeline.write(PostgresWireDecoder.encodeParse(parse, parse.sql()));
+        pipeline.write(frame('B', concat(cString("portal"), cString("select"), new byte[6])));
+        pipeline.write(frame('E', concat(cString("portal"), new byte[]{0, 0, 0, 1})));
+        pipeline.write(frame('E', concat(cString("portal"), new byte[4])));
+        pipeline.write(frame('S', new byte[0]));
+        testClientEnd.getOutputStream().write(pipeline.toByteArray());
+        testClientEnd.getOutputStream().flush();
+        for (int i = 0; i < 5; i++) {
+            nextForwarded();
+        }
+        testBackendEnd.getOutputStream().write(concat(frame('1', new byte[0]), frame('2', new byte[0]),
+                frame('s', new byte[0]), frame('C', cString("SELECT 1")), frame('Z', new byte[]{'I'})));
+        testBackendEnd.getOutputStream().flush();
+        sendAuditQuery("CREATE USER actual", "CREATE ROLE");
+        verify(audit, timeout(2000)).publishRegisteredUserChange("000000000000", "c", "dev", "actual", "Create", null);
+    }
+
+    @Test
+    @Timeout(10)
+    void rejectedNamedParseDoesNotReplaceTheSqlUsedForUserAudit() throws Exception {
+        RedshiftAuditLogPublisher audit = mock(RedshiftAuditLogPublisher.class);
+        startBridge(null, audit);
+        PostgresWireDecoder.ParseMessage original = new PostgresWireDecoder.ParseMessage("s", "SELECT 1", List.of());
+        testClientEnd.getOutputStream().write(concat(PostgresWireDecoder.encodeParse(original, original.sql()), frame('S', new byte[0])));
+        nextForwarded();
+        nextForwarded();
+        testBackendEnd.getOutputStream().write(concat(frame('1', new byte[0]), frame('Z', new byte[]{'I'})));
+        testBackendEnd.getOutputStream().flush();
+        PostgresWireDecoder replies = new PostgresWireDecoder(testClientEnd.getInputStream());
+        assertEquals('1', replies.nextMessage().type());
+        assertEquals('Z', replies.nextMessage().type());
+        PostgresWireDecoder.ParseMessage rejected = new PostgresWireDecoder.ParseMessage("s", "CREATE USER phantom", List.of());
+        testClientEnd.getOutputStream().write(concat(PostgresWireDecoder.encodeParse(rejected, rejected.sql()), frame('S', new byte[0])));
+        nextForwarded();
+        nextForwarded();
+        testBackendEnd.getOutputStream().write(concat(frame('E', cString("duplicate name")), frame('Z', new byte[]{'I'})));
+        testBackendEnd.getOutputStream().flush();
+        assertEquals('E', replies.nextMessage().type());
+        assertEquals('Z', replies.nextMessage().type());
+        testClientEnd.getOutputStream().write(concat(frame('B', concat(cString("p"), cString("s"), new byte[6])),
+                frame('E', concat(cString("p"), new byte[4])), frame('S', new byte[0])));
+        for (int i = 0; i < 3; i++) {
+            nextForwarded();
+        }
+        testBackendEnd.getOutputStream().write(concat(frame('2', new byte[0]), frame('C', cString("SELECT 1")), frame('Z', new byte[]{'I'})));
+        testBackendEnd.getOutputStream().flush();
+        sendAuditQuery("CREATE USER actual", "CREATE ROLE");
+        verify(audit, timeout(2000)).publishRegisteredUserChange("000000000000", "c", "dev", "actual", "Create", null);
+        verify(audit, never()).publishRegisteredUserChange(anyString(), anyString(), anyString(), eq("phantom"), anyString(), any());
+    }
+
+    private void sendAuditQuery(String sql, String... tags) throws IOException {
+        testClientEnd.getOutputStream().write(PostgresWireDecoder.encodeQuery(sql));
+        testClientEnd.getOutputStream().flush();
+        nextForwarded();
+        for (String tag : tags) {
+            testBackendEnd.getOutputStream().write(frame('C', cString(tag)));
+        }
+        if (tags.length == 0) {
+            testBackendEnd.getOutputStream().write(frame('E', cString("failed")));
+        }
+        testBackendEnd.getOutputStream().write(frame('Z', new byte[]{'I'}));
+        testBackendEnd.getOutputStream().flush();
     }
 
     @AfterEach

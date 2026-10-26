@@ -64,6 +64,14 @@ public class ElastiCacheServerlessQueryHandler {
         return service.getServerlessCache(name).getTags();
     }
 
+    public Map<String, String> addTagsToResource(String resourceArn, Map<String, String> tags, String region) {
+        return service.addTagsToResource(resourceArn, tags, region);
+    }
+
+    public Map<String, String> removeTagsFromResource(String resourceArn, List<String> tagKeys, String region) {
+        return service.removeTagsFromResource(resourceArn, tagKeys, region);
+    }
+
     private static String cacheXml(ServerlessCache cache) {
         return new XmlBuilder().start("ServerlessCache").raw(cacheFields(cache)).end("ServerlessCache").build();
     }

@@ -747,6 +747,48 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("message", equalTo("Key attribute's data type should match its data type in table's schema: Key gsiPk"));
     }
 
+    @Test
+    @Order(32)
+    void liftsTheOverlapCheckWhenABranchTestsAKeyOutsideARange() {
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE ";
+        String overlapping = "Overlapping conditions with range keys are not supported in where clause";
+
+        for (String where : List.of("pk='ranges' AND NOT sk='1' OR pk='ranges' AND sk='2'",
+                "pk='ranges' AND (sk<>'1' OR flag='two') OR pk='ranges' AND sk='2'",
+                "pk IN ['ranges','ranges'] AND NOT sk='1'")) {
+            statement(select + where).statusCode(200).body("Items.sk.S", containsInAnyOrder("2"));
+        }
+        for (String where : List.of("pk='ranges' OR pk='ranges' AND NOT sk='1'",
+                "pk='ranges' AND attribute_exists(sk) OR pk='ranges' AND sk='2'",
+                "pk='ranges' AND size(sk) = 1 OR pk='ranges' AND sk='2'",
+                "pk='ranges' AND NOT pk='ranges-other' OR pk='ranges' AND sk='2'")) {
+            statement(select + where).statusCode(200).body("Items.sk.S", containsInAnyOrder("1", "2"));
+        }
+        for (String where : List.of("pk='ranges' AND sk='1' OR pk='ranges' AND sk='1' OR pk='ranges' AND NOT sk='2'",
+                "pk='ranges' AND sk='1' OR pk='ranges' AND sk='1' OR pk='ranges-other' AND NOT sk='2'")) {
+            statement(select + where).statusCode(200).body("Items.sk.S", containsInAnyOrder("1"));
+        }
+        for (String where : List.of("pk='ranges' AND NOT flag='one' OR pk='ranges' AND sk='2'",
+                "pk='ranges' AND NOT (sk='1' AND flag='one') OR pk='ranges' AND sk='2'",
+                "pk='ranges' AND NOT NOT sk='1' OR pk='ranges' AND sk='2'",
+                "pk='ranges' AND NOT size(sk) = 1 OR pk='ranges' AND sk='2'",
+                "pk='ranges' AND (NOT sk='1' OR flag='one') OR pk='ranges' AND sk='2'")) {
+            statement(select + where).statusCode(400).body("message", equalTo(overlapping));
+        }
+        transaction(select + "pk='ranges' AND NOT sk='1' OR pk='ranges' AND sk='2'")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: "
+                    + "Select statements within ExecuteTransaction must specify the primary key in the where clause."));
+
+        String index = "SELECT pk FROM \"partiql-edge-cases-index\".\"gsi-inc\" WHERE ";
+        statement(index + "gsiPk='y' AND NOT gsiPk='z' OR gsiPk='y'")
+            .statusCode(200)
+            .body("Items.pk.S", containsInAnyOrder("p"));
+        statement(index + "gsiPk='y' AND NOT pk='q' OR gsiPk='y'")
+            .statusCode(400)
+            .body("message", equalTo(overlapping));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

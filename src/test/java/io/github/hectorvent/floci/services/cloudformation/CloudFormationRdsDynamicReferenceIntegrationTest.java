@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RdsMockProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -12,6 +13,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static io.github.hectorvent.floci.testing.RdsRequests.rds;
@@ -109,8 +111,9 @@ class CloudFormationRdsDynamicReferenceIntegrationTest {
      * {@code CREATE_COMPLETE}. If the credential properties stop opting out of the general stage,
      * that stage rejects the reference and the stack rolls back instead.
      */
-    @Test
-    void createStack_rdsMasterPasswordResolvesSsmSecureDynamicReference() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"literal", "if", "select", "sub"})
+    void createStack_rdsMasterPasswordResolvesSsmSecureDynamicReference(String form) throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String parameterName = "/cfn-rds-dynref/secure-password-" + suffix;
         String stackName = "cfn-rds-dynref-secure-stack-" + suffix;
@@ -119,8 +122,19 @@ class CloudFormationRdsDynamicReferenceIntegrationTest {
         boolean stackCreated = false;
 
         try {
-            createStack(stackName, template(databaseId,
-                    "{{resolve:ssm-secure:" + parameterName + "}}"));
+            ObjectMapper mapper = new ObjectMapper();
+            String reference = "{{resolve:ssm-secure:" + parameterName + "}}";
+            Object password = switch (form) {
+                case "if" -> Map.of("Fn::If", List.of("Chosen", reference, "unused"));
+                case "select" -> Map.of("Fn::Select", List.of(0, List.of(reference)));
+                case "sub" -> Map.of("Fn::Sub", List.of("${Password}", Map.of("Password", reference)));
+                default -> reference;
+            };
+            ObjectNode document = (ObjectNode) mapper.readTree(template(databaseId, "placeholder"));
+            document.set("Conditions", mapper.valueToTree(Map.of("Chosen", Map.of("Fn::Equals", List.of("yes", "yes")))));
+            ((ObjectNode) document.path("Resources").path("Database").path("Properties"))
+                    .set("MasterUserPassword", mapper.valueToTree(password));
+            createStack(stackName, mapper.writeValueAsString(document));
             stackCreated = true;
 
             String describeXml = describeStack(stackName);

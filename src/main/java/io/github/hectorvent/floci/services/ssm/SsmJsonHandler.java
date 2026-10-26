@@ -36,6 +36,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 import static io.github.hectorvent.floci.services.ssm.SsmJsonDeserialization.serializationException;
@@ -229,17 +230,28 @@ public class SsmJsonHandler {
     }
 
     private Response handleGetParametersByPath(JsonNode request, String region) {
+        PageRequest pageRequest = pageRequest(request, GET_PARAMETERS_BY_PATH_MAX_RESULTS);
         String path = request.path("Path").asText();
         boolean recursive = request.path("Recursive").asBoolean(false);
 
-        List<Parameter> params = ssmService.getParametersByPath(path, recursive, parameterFilters(request), region);
+        List<ParameterStringFilter> filters = parameterFilters(request);
+        List<Parameter> params = ssmService.getParametersByPath(path, recursive, filters, region);
+        boolean labeledVersions = filters.stream().anyMatch(filter -> "Label".equals(filter.key()));
+        // A label query can return several versions of one name. The separator keeps name order,
+        // and the padded version lets the cursor resume inside that parameter's history.
+        Function<Parameter, String> cursor = labeledVersions
+                ? p -> p.getName() + "\0" + String.format("%019d", p.getVersion()) : Parameter::getName;
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
-        for (Parameter p : params) {
+        PaginatedResult<Parameter> page = page(pageRequest, params, cursor, ALL_ITEMS,
+                GET_PARAMETERS_BY_PATH_TOKEN + ssmService.accountId() + ":" + region + ":" + recursive + ":"
+                        + (path.endsWith("/") ? path : path + "/") + (labeledVersions ? ":labels" : ""));
+        for (Parameter p : page.items()) {
             parametersArray.add(parameterToNode(p));
         }
         response.set("Parameters", parametersArray);
+        putNextToken(response, page);
         return Response.ok(response).build();
     }
 
@@ -273,17 +285,25 @@ public class SsmJsonHandler {
     }
 
     private Response handleGetParameterHistory(JsonNode request, String region) {
+        PageRequest pageRequest = pageRequest(request, GET_PARAMETER_HISTORY_MAX_RESULTS);
         String name = request.path("Name").asText();
         List<ParameterHistory> history = ssmService.getParameterHistory(name, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode historyArray = objectMapper.createArrayNode();
-        for (ParameterHistory h : history) {
+        // Zero-padded so the cursor's string order is version order ("10" would sort before "9").
+        PaginatedResult<ParameterHistory> page = page(pageRequest, history,
+                h -> String.format("%019d", h.getVersion()), ALL_ITEMS,
+                GET_PARAMETER_HISTORY_TOKEN + ssmService.accountId() + ":" + region + ":" + name);
+        for (ParameterHistory h : page.items()) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", h.getName());
             node.put("Version", h.getVersion());
             node.put("Value", h.getValue());
             node.put("Type", h.getType());
+            if (h.getKeyId() != null) {
+                node.put("KeyId", h.getKeyId());
+            }
             node.put("LastModifiedDate", h.getLastModifiedDate().toEpochMilli() / 1000.0);
             if (h.getDescription() != null) {
                 node.put("Description", h.getDescription());
@@ -296,10 +316,57 @@ public class SsmJsonHandler {
             historyArray.add(node);
         }
         response.set("Parameters", historyArray);
+        putNextToken(response, page);
         return Response.ok(response).build();
     }
 
     private static final int DESCRIBE_PARAMETERS_MAX_RESULTS = 50;
+    private static final int GET_PARAMETERS_BY_PATH_MAX_RESULTS = 10;
+    private static final int GET_PARAMETER_HISTORY_MAX_RESULTS = 50;
+    private static final int ALL_ITEMS = Integer.MAX_VALUE;
+    private static final String DESCRIBE_PARAMETERS_TOKEN = "DescribeParameters:";
+    private static final String GET_PARAMETERS_BY_PATH_TOKEN = "GetParametersByPath:";
+    private static final String GET_PARAMETER_HISTORY_TOKEN = "GetParameterHistory:";
+
+    private record PageRequest(Integer maxResults, String nextToken) {
+    }
+
+    /**
+     * Reads {@code MaxResults}/{@code NextToken} before the operation runs, so a malformed field is
+     * reported as such rather than masked by, say, {@code ParameterNotFound}. A non-numeric
+     * {@code MaxResults} or non-string {@code NextToken} fails to deserialize, as on AWS.
+     */
+    private static PageRequest pageRequest(JsonNode request, int maxPage) {
+        Integer maxResults = request.hasNonNull("MaxResults")
+                ? SsmJsonDeserialization.optionalInteger(request.path("MaxResults"), 0) : null;
+        if (maxResults != null && (maxResults < 1 || maxResults > maxPage)) {
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + maxResults + "' at 'maxResults' failed to "
+                            + "satisfy constraint: Member must have value between 1 and " + maxPage);
+        }
+        return new PageRequest(maxResults, optionalString(request, "NextToken"));
+    }
+
+    /**
+     * Pages a listing, returning {@code defaultPage} items when {@code MaxResults} is omitted.
+     * GetParametersByPath and GetParameterHistory pass {@link #ALL_ITEMS} rather than AWS's single
+     * page, so callers that never follow {@code NextToken} still see every item. A token carries
+     * {@code namespace}, so one minted for another operation, account, region, path or parameter is refused
+     * instead of read as a position here.
+     */
+    private static <T> PaginatedResult<T> page(PageRequest pageRequest, List<T> items,
+                                               Function<T, String> cursorOf, int defaultPage, String namespace) {
+        Integer maxResults = pageRequest.maxResults();
+        return Pagination.paginate(items, cursorOf, maxResults != null ? maxResults : defaultPage,
+                pageRequest.nextToken(), namespace,
+                token -> new AwsException("InvalidNextToken", "The specified token isn't valid.", 400));
+    }
+
+    private static void putNextToken(ObjectNode response, PaginatedResult<?> page) {
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+    }
 
     private Response handleDescribeParameters(JsonNode request, String region) {
         List<ParameterStringFilter> filters = parameterFilters(request);
@@ -312,17 +379,10 @@ public class SsmJsonHandler {
             filters.add(new ParameterStringFilter(key, "Equals", textValues(f.path("Values"))));
         }
 
-        Integer maxResults = request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null;
-        if (maxResults != null && (maxResults < 1 || maxResults > DESCRIBE_PARAMETERS_MAX_RESULTS)) {
-            throw SmithyValidationErrors.validationException(
-                    "Value '" + maxResults + "' at 'maxResults' failed to "
-                            + "satisfy constraint: Member must have value between 1 and "
-                            + DESCRIBE_PARAMETERS_MAX_RESULTS);
-        }
-        PaginatedResult<Parameter> page = Pagination.paginate(
-                ssmService.describeParameters(filters, region), Parameter::getName,
-                maxResults, request.path("NextToken").asText(null),
-                DESCRIBE_PARAMETERS_MAX_RESULTS, "InvalidNextToken");
+        PageRequest pageRequest = pageRequest(request, DESCRIBE_PARAMETERS_MAX_RESULTS);
+        PaginatedResult<Parameter> page = page(pageRequest, ssmService.describeParameters(filters, region),
+                Parameter::getName, DESCRIBE_PARAMETERS_MAX_RESULTS,
+                DESCRIBE_PARAMETERS_TOKEN + ssmService.accountId() + ":" + region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
@@ -337,8 +397,9 @@ public class SsmJsonHandler {
                 node.put("Description", p.getDescription());
             }
             node.put("DataType", p.getDataType());
-            if (SsmService.keyIdOf(p) != null) {
-                node.put("KeyId", SsmService.keyIdOf(p));
+            String keyId = SsmService.keyIdOf(p);
+            if (keyId != null) {
+                node.put("KeyId", keyId);
             }
             if (p.getAllowedPattern() != null) {
                 node.put("AllowedPattern", p.getAllowedPattern());
@@ -356,9 +417,7 @@ public class SsmJsonHandler {
             parametersArray.add(node);
         }
         response.set("Parameters", parametersArray);
-        if (page.nextToken() != null) {
-            response.put("NextToken", page.nextToken());
-        }
+        putNextToken(response, page);
         return Response.ok(response).build();
     }
 
@@ -477,8 +536,7 @@ public class SsmJsonHandler {
         String permissionType = request.path("PermissionType").asText();
         if (permissionType == null || permissionType.isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'permissionType' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("permissionType"));
         }
         if (!"Share".equals(permissionType)) {
             throw new AwsException("InvalidPermissionType",
@@ -602,8 +660,7 @@ public class SsmJsonHandler {
         JsonNode contentNode = request.path("Content");
         if (!contentNode.isTextual() || contentNode.asText().isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'content' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("content"));
         }
         return contentNode.asText();
     }
@@ -769,7 +826,7 @@ public class SsmJsonHandler {
         JsonNode nameNode = request.path("Name");
         if (!nameNode.isTextual() || nameNode.asText().isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'name' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("name"));
         }
         String name = nameNode.asText();
 
@@ -802,7 +859,7 @@ public class SsmJsonHandler {
         String associationId = request.hasNonNull("AssociationId") ? request.path("AssociationId").asText() : null;
         if (associationId == null || associationId.isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'associationId' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("associationId"));
         }
 
         String associationName = request.hasNonNull("AssociationName") ? request.path("AssociationName").asText() : null;
@@ -1101,12 +1158,12 @@ public class SsmJsonHandler {
 
         List<String> violations = new ArrayList<>();
         if (name == null) {
-            violations.add("Value null at 'name' failed to satisfy constraint: Member must not be null");
+            violations.add(SmithyValidationErrors.notNull("name"));
         } else if (name.isEmpty()) {
             violations.add("Value '' at 'name' failed to satisfy constraint: Member must have length greater than or equal to 1");
         }
         if (parameterVersion == null) {
-            violations.add("Value null at 'parameterVersion' failed to satisfy constraint: Member must not be null");
+            violations.add(SmithyValidationErrors.notNull("parameterVersion"));
         }
         String labelViolation = SsmService.labelListViolation(labels);
         if (labelViolation != null) {
@@ -1199,8 +1256,7 @@ public class SsmJsonHandler {
         String settingId = request.path("SettingId").asText();
         if (settingId == null || settingId.isBlank()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'settingId' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("settingId"));
         }
         return settingId;
     }
@@ -1218,8 +1274,7 @@ public class SsmJsonHandler {
         String settingValue = valueNode.asText();
         if (!valueNode.isTextual() || settingValue.isEmpty()) {
             throw SmithyValidationErrors.validationException(
-                    "Value null at 'settingValue' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("settingValue"));
         }
         if (settingValue.length() > MAX_SETTING_VALUE_LENGTH) {
             throw SmithyValidationErrors.validationException(

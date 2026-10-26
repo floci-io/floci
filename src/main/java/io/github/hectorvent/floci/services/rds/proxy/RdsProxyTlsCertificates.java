@@ -4,9 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.CertificateMetadata;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.config.FlociVersion;
-import io.github.hectorvent.floci.core.common.Pem;
+import io.github.hectorvent.floci.config.ServerCertificateRenewal;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
-import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -16,13 +15,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.security.PrivateKey;
-import java.security.cert.X509Certificate;
 import java.time.Clock;
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -47,13 +41,12 @@ public class RdsProxyTlsCertificates {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private final FlociCertificateAuthority certificateAuthority;
-    private final CertificateGenerator certificateGenerator;
-    private final Clock clock;
+    private final ServerCertificateRenewal renewal;
     private final Object lock = new Object();
 
     private volatile ServerCertificate current;
 
-    private record ServerCertificate(SSLContext context, Set<String> sans, Instant notAfter) {
+    private record ServerCertificate(ServerCertificateRenewal.Leaf leaf, Set<String> sans) {
     }
 
     @Inject
@@ -64,8 +57,7 @@ public class RdsProxyTlsCertificates {
     RdsProxyTlsCertificates(FlociCertificateAuthority certificateAuthority, CertificateGenerator certificateGenerator,
                             Clock clock) {
         this.certificateAuthority = certificateAuthority;
-        this.certificateGenerator = certificateGenerator;
-        this.clock = clock;
+        this.renewal = new ServerCertificateRenewal(certificateAuthority, certificateGenerator, clock);
     }
 
     /**
@@ -96,7 +88,7 @@ public class RdsProxyTlsCertificates {
      */
     public SSLContext sslContext() {
         ensureInitialized();
-        return current.context();
+        return current.leaf().context();
     }
 
     private void ensureInitialized() {
@@ -153,22 +145,10 @@ public class RdsProxyTlsCertificates {
 
     private void regenerate(Set<String> sans) {
         try {
-            Path tlsDir = tlsDir();
             List<String> sanList = new ArrayList<>(sans);
-            Instant now = clock.instant();
-            certificateAuthority.certificate().checkValidity(Date.from(now));
-            Instant notAfter = now.plus(365, ChronoUnit.DAYS);
-            if (certificateAuthority.certificate().getNotAfter().toInstant().isBefore(notAfter)) {
-                notAfter = certificateAuthority.certificate().getNotAfter().toInstant();
-            }
-            CertificateGenerator.GeneratedCertificate generated = certificateGenerator.generateIssuedCertificate(
-                    "localhost", sanList, KeyAlgorithm.RSA_2048, null, certificateAuthority.issuer(),
-                    CertificateGenerator.LeafUsage.SERVER, notAfter);
-            X509Certificate certificate = Pem.parseCertificate(generated.certificatePem());
-            PrivateKey privateKey = Pem.parsePrivateKey(generated.privateKeyPem());
-            SSLContext context = certificateAuthority.serverSslContext(certificate, privateKey);
-            writeMetadata(tlsDir.resolve(METADATA_NAME), sanList);
-            current = new ServerCertificate(context, Set.copyOf(sans), generated.notAfter());
+            ServerCertificateRenewal.Leaf leaf = renewal.issue(sanList);
+            writeMetadata(tlsDir().resolve(METADATA_NAME), sanList);
+            current = new ServerCertificate(leaf, Set.copyOf(sans));
         } catch (Exception e) {
             throw new IllegalStateException("Failed to generate RDS proxy TLS certificate", e);
         }
@@ -176,15 +156,7 @@ public class RdsProxyTlsCertificates {
 
     private boolean needsRenewal() {
         ServerCertificate certificate = current;
-        if (certificate == null) {
-            return true;
-        }
-        Instant renewAt = certificate.notAfter();
-        // A leaf capped at CA expiry cannot be extended without replacing the trust anchor.
-        if (renewAt.isBefore(certificateAuthority.certificate().getNotAfter().toInstant())) {
-            renewAt = renewAt.minusSeconds(60);
-        }
-        return !renewAt.isAfter(clock.instant());
+        return renewal.due(certificate == null ? null : certificate.leaf());
     }
 
     private Path tlsDir() {

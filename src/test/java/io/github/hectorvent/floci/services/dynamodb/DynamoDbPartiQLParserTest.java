@@ -245,6 +245,49 @@ class DynamoDbPartiQLParserTest {
         assertEquals("ValidationException", e.getErrorCode());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            ".73e1,    .73e1",
+            "-.73e1,   -.73e1",
+            "+.73e1,   .73e1",
+            "5.,       5.",
+            "5.e1,     5.e1",
+            "7.31E+6,  7.31E+6",
+            "-7,       -7"
+    })
+    void readsANumberLiteralWithALeadingPointOrAnExponent(String literal, String value) {
+        Cond cond = firstCond(SELECT + "= " + literal);
+
+        PVal val = assertInstanceOf(Cond.Eq.class, cond).val();
+        assertEquals(value, assertInstanceOf(PVal.Num.class, val).v());
+    }
+
+    @Test
+    void keepsAPointAfterANameAsAPathStep() {
+        Cond cond = firstCond("SELECT pk FROM \"t\" WHERE a.b = 1");
+
+        Path path = assertInstanceOf(Cond.Eq.class, cond).path();
+        assertEquals(List.of(new Seg.Name("a"), new Seg.Name("b")), path.segments());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1e2147483648", "1e-2147483648", "1.5e-2147483647", "1e99999999999"})
+    void refusesAnExponentThatDoesNotFitAnInt(String literal) {
+        AwsException e = assertThrows(AwsException.class, () -> firstCond(SELECT + "= " + literal));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertEquals("Statement wasn't well formed, can't be processed: ", e.getMessage());
+    }
+
+    @Test
+    void readsASecondPointAsALeftoverToken() {
+        AwsException e = assertThrows(AwsException.class, () -> firstCond(SELECT + "= 1.2.3"));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertEquals("Statement wasn't well formed, can't be processed: Unexpected token after expression",
+                e.getMessage());
+    }
+
     @Test
     void rejectsAnInOperatorWithMoreThan100Operands() {
         AwsException e = assertThrows(AwsException.class,

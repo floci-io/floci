@@ -1,10 +1,16 @@
 package com.floci.test;
 
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.kafka.KafkaClient;
 import software.amazon.awssdk.services.kafka.model.*;
+import software.amazon.awssdk.services.kms.KmsClient;
+import software.amazon.awssdk.services.kms.model.CreateKeyRequest;
+import software.amazon.awssdk.services.kms.model.NotFoundException;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.CreateSecretResponse;
+import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundException;
 
-import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -13,8 +19,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class MskTest {
 
+    private static final Logger LOG = Logger.getLogger(MskTest.class);
     private static KafkaClient kafka;
     private static String clusterArn;
+    private static String scramSecretArn;
+    private static String scramKeyId;
     private static final String CLUSTER_NAME = TestFixtures.uniqueName("msk-cluster");
 
     @BeforeAll
@@ -31,6 +40,24 @@ class MskTest {
                 } catch (Exception ignored) {}
             }
             kafka.close();
+        }
+        if (scramSecretArn != null) {
+            try (SecretsManagerClient secrets = TestFixtures.secretsManagerClient()) {
+                secrets.deleteSecret(request -> request.secretId(scramSecretArn).forceDeleteWithoutRecovery(true));
+            } catch (ResourceNotFoundException expected) {
+                // An already-absent secret needs no further cleanup.
+            } catch (Exception e) {
+                LOG.warnv(e, "Failed to delete SCRAM secret {0} during test cleanup", scramSecretArn);
+            }
+        }
+        if (scramKeyId != null) {
+            try (KmsClient kms = TestFixtures.kmsClient()) {
+                kms.scheduleKeyDeletion(request -> request.keyId(scramKeyId).pendingWindowInDays(7));
+            } catch (NotFoundException expected) {
+                // An already-absent key needs no further cleanup.
+            } catch (Exception e) {
+                LOG.warnv(e, "Failed to schedule deletion of SCRAM KMS key {0} during test cleanup", scramKeyId);
+            }
         }
     }
 
@@ -143,6 +170,47 @@ class MskTest {
 
     @Test
     @Order(6)
+    void batchAssociateScramSecret() {
+        try (SecretsManagerClient secrets = TestFixtures.secretsManagerClient();
+             KmsClient kms = TestFixtures.kmsClient()) {
+            scramKeyId = kms.createKey(CreateKeyRequest.builder().build()).keyMetadata().keyId();
+            CreateSecretResponse secret = secrets.createSecret(request -> request
+                    .name("AmazonMSK_" + TestFixtures.uniqueName("scram"))
+                    .kmsKeyId(scramKeyId)
+                    .secretString("{\"username\":\"alice\",\"password\":\"password\"}"));
+            scramSecretArn = secret.arn();
+
+            BatchAssociateScramSecretResponse response = kafka.batchAssociateScramSecret(request -> request
+                    .clusterArn(clusterArn).secretArnList(scramSecretArn));
+
+            assertThat(response.clusterArn()).isEqualTo(clusterArn);
+            assertThat(response.sdkHttpResponse().statusCode()).isEqualTo(200);
+            assertThat(response.unprocessedScramSecrets()).isEmpty();
+        }
+    }
+
+    @Test
+    @Order(7)
+    void listScramSecrets() {
+        ListScramSecretsResponse response = kafka.listScramSecrets(request -> request.clusterArn(clusterArn));
+
+        assertThat(response.sdkHttpResponse().statusCode()).isEqualTo(200);
+        assertThat(response.secretArnList()).containsExactly(scramSecretArn);
+    }
+
+    @Test
+    @Order(8)
+    void batchDisassociateScramSecret() {
+        BatchDisassociateScramSecretResponse response = kafka.batchDisassociateScramSecret(request -> request
+                .clusterArn(clusterArn).secretArnList(scramSecretArn));
+
+        assertThat(response.clusterArn()).isEqualTo(clusterArn);
+        assertThat(response.sdkHttpResponse().statusCode()).isEqualTo(200);
+        assertThat(response.unprocessedScramSecrets()).isEmpty();
+    }
+
+    @Test
+    @Order(9)
     void deleteCluster() {
         DeleteClusterResponse response = kafka.deleteCluster(DeleteClusterRequest.builder()
                 .clusterArn(clusterArn)

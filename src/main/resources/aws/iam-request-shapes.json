@@ -1,0 +1,187 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_iam_shapes.py",
+    "botocore": "botocore 1.43.113 (installed package)"
+  },
+  "operations": {
+    "AttachGroupPolicy": "AttachGroupPolicyRequest",
+    "AttachRolePolicy": "AttachRolePolicyRequest",
+    "AttachUserPolicy": "AttachUserPolicyRequest",
+    "DetachGroupPolicy": "DetachGroupPolicyRequest",
+    "DetachRolePolicy": "DetachRolePolicyRequest",
+    "DetachUserPolicy": "DetachUserPolicyRequest",
+    "GetPolicy": "GetPolicyRequest",
+    "DeletePolicy": "DeletePolicyRequest",
+    "CreatePolicyVersion": "CreatePolicyVersionRequest",
+    "GetPolicyVersion": "GetPolicyVersionRequest",
+    "DeletePolicyVersion": "DeletePolicyVersionRequest",
+    "SetDefaultPolicyVersion": "SetDefaultPolicyVersionRequest"
+  },
+  "shapes": {
+    "AttachGroupPolicyRequest": {
+      "type": "structure",
+      "required": [
+        "GroupName",
+        "PolicyArn"
+      ],
+      "members": {
+        "GroupName": "groupNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "AttachRolePolicyRequest": {
+      "type": "structure",
+      "required": [
+        "RoleName",
+        "PolicyArn"
+      ],
+      "members": {
+        "RoleName": "roleNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "AttachUserPolicyRequest": {
+      "type": "structure",
+      "required": [
+        "UserName",
+        "PolicyArn"
+      ],
+      "members": {
+        "UserName": "userNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "CreatePolicyVersionRequest": {
+      "type": "structure",
+      "required": [
+        "PolicyArn",
+        "PolicyDocument"
+      ],
+      "members": {
+        "PolicyArn": "arnType",
+        "PolicyDocument": "policyDocumentType",
+        "SetAsDefault": "booleanType"
+      }
+    },
+    "DeletePolicyRequest": {
+      "type": "structure",
+      "required": [
+        "PolicyArn"
+      ],
+      "members": {
+        "PolicyArn": "arnType"
+      }
+    },
+    "DeletePolicyVersionRequest": {
+      "type": "structure",
+      "required": [
+        "PolicyArn",
+        "VersionId"
+      ],
+      "members": {
+        "PolicyArn": "arnType",
+        "VersionId": "policyVersionIdType"
+      }
+    },
+    "DetachGroupPolicyRequest": {
+      "type": "structure",
+      "required": [
+        "GroupName",
+        "PolicyArn"
+      ],
+      "members": {
+        "GroupName": "groupNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "DetachRolePolicyRequest": {
+      "type": "structure",
+      "required": [
+        "RoleName",
+        "PolicyArn"
+      ],
+      "members": {
+        "RoleName": "roleNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "DetachUserPolicyRequest": {
+      "type": "structure",
+      "required": [
+        "UserName",
+        "PolicyArn"
+      ],
+      "members": {
+        "UserName": "userNameType",
+        "PolicyArn": "arnType"
+      }
+    },
+    "GetPolicyRequest": {
+      "type": "structure",
+      "required": [
+        "PolicyArn"
+      ],
+      "members": {
+        "PolicyArn": "arnType"
+      }
+    },
+    "GetPolicyVersionRequest": {
+      "type": "structure",
+      "required": [
+        "PolicyArn",
+        "VersionId"
+      ],
+      "members": {
+        "PolicyArn": "arnType",
+        "VersionId": "policyVersionIdType"
+      }
+    },
+    "SetDefaultPolicyVersionRequest": {
+      "type": "structure",
+      "required": [
+        "PolicyArn",
+        "VersionId"
+      ],
+      "members": {
+        "PolicyArn": "arnType",
+        "VersionId": "policyVersionIdType"
+      }
+    },
+    "arnType": {
+      "type": "string",
+      "min": 20,
+      "max": 2048
+    },
+    "booleanType": {
+      "type": "boolean"
+    },
+    "groupNameType": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[\\w+=,.@-]+"
+    },
+    "policyDocumentType": {
+      "type": "string",
+      "min": 1,
+      "max": 131072,
+      "pattern": "[\\u0009\\u000A\\u000D\\u0020-\\u00FF]+"
+    },
+    "policyVersionIdType": {
+      "type": "string",
+      "pattern": "v[1-9][0-9]*(\\.[A-Za-z0-9-]*)?"
+    },
+    "roleNameType": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[\\w+=,.@-]+"
+    },
+    "userNameType": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[\\w+=,.@-]+"
+    }
+  }
+}

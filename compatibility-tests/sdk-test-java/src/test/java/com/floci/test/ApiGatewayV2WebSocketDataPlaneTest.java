@@ -65,7 +65,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ApiGatewayV2WebSocketDataPlaneTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String ROLE = "arn:aws:iam::000000000000:role/lambda-role";
+    private static final String ROLE = TestFixtures.globalArn("iam", "000000000000", "role/lambda-role");
     private static final String STAGE = "test";
 
     private static ApiGatewayV2Client gw;
@@ -218,7 +218,7 @@ class ApiGatewayV2WebSocketDataPlaneTest {
         CreateIntegrationResponse res = gw.createIntegration(CreateIntegrationRequest.builder()
                 .apiId(apiId)
                 .integrationType(IntegrationType.AWS_PROXY)
-                .integrationUri("arn:aws:lambda:us-east-1:000000000000:function:" + fnName)
+                .integrationUri(TestFixtures.arn("lambda", "000000000000", "function:" + fnName))
                 .build());
         return res.integrationId();
     }
@@ -250,7 +250,7 @@ class ApiGatewayV2WebSocketDataPlaneTest {
         URI mgmtEndpoint = URI.create(TestFixtures.endpoint() + "/execute-api/" + apiId + "/" + STAGE);
         return ApiGatewayManagementApiClient.builder()
                 .endpointOverride(mgmtEndpoint)
-                .region(software.amazon.awssdk.regions.Region.US_EAST_1)
+                .region(TestFixtures.region())
                 .credentialsProvider(software.amazon.awssdk.auth.credentials.StaticCredentialsProvider.create(
                         software.amazon.awssdk.auth.credentials.AwsBasicCredentials.create("test", "test")))
                 .build();
@@ -386,7 +386,7 @@ class ApiGatewayV2WebSocketDataPlaneTest {
                 .apiId(apiId)
                 .authorizerType(AuthorizerType.REQUEST)
                 .name("ws-auth")
-                .authorizerUri("arn:aws:lambda:us-east-1:000000000000:function:" + authFn)
+                .authorizerUri(TestFixtures.arn("lambda", "000000000000", "function:" + authFn))
                 .identitySource("route.request.querystring.token")
                 .build());
 
@@ -543,7 +543,7 @@ class ApiGatewayV2WebSocketDataPlaneTest {
         CreateIntegrationResponse integRes = gw.createIntegration(CreateIntegrationRequest.builder()
                 .apiId(apiId)
                 .integrationType(IntegrationType.AWS_PROXY)
-                .integrationUri("arn:aws:lambda:us-east-1:000000000000:function:${stageVariables.functionName}")
+                .integrationUri(TestFixtures.arn("lambda", "000000000000", "function:${stageVariables.functionName}"))
                 .build());
         String integId = integRes.integrationId();
 

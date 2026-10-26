@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eks;
 
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.services.iam.IamService;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -17,7 +18,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Locale;
@@ -118,7 +118,7 @@ class EksTokenValidator {
         if (encodedRequest.isBlank()) {
             return null;
         }
-        String decodedRequest = new String(Base64.getUrlDecoder().decode(encodedRequest), StandardCharsets.UTF_8);
+        String decodedRequest = Base64Url.decode(encodedRequest);
         URI request = URI.create(decodedRequest);
         if (!"http".equals(request.getScheme()) && !"https".equals(request.getScheme())) {
             return null;

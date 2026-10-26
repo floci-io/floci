@@ -36,6 +36,11 @@ import java.util.function.Consumer;
  * container and its SSH binding). The sidecar publishes an allocated host port and forwards
  * it to the instance container's IP, so {@code curl localhost:<hostPort>} reaches the app.
  *
+ * <p>Both socat addresses run with {@code nodelay} (TCP_NODELAY). With Nagle's algorithm left
+ * on, socat holds a client's second small write until the first is acknowledged, and a peer
+ * with delayed ACK stretches that to roughly 40 ms on the Docker network, so a request the
+ * client sends as two writes pays a visible stall on every round trip.
+ *
  * <p>Because each forward is a fresh container, ports opened <em>after</em> launch via
  * {@code authorize-security-group-ingress} are handled the same way as ports present at
  * launch. The instance container itself is never modified.
@@ -206,8 +211,8 @@ public class Ec2PortForwardManager {
                     .withName(name)
                     .withEntrypoint(List.of("socat"))
                     .withCmd(List.of(
-                            "TCP-LISTEN:" + appPort + ",fork,reuseaddr",
-                            "TCP:" + target.ip() + ":" + appPort))
+                            "TCP-LISTEN:" + appPort + ",fork,reuseaddr,nodelay",
+                            "TCP:" + target.ip() + ":" + appPort + ",nodelay"))
                     .withPortBinding(appPort, hostPort)
                     .withLogRotation();
             if (target.network() != null) {

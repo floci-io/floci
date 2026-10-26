@@ -104,6 +104,36 @@ class StreamBatchFailuresTest {
     }
 
     @Test
+    void onlyAFunctionErrorOnMoreThanOneRecordSplitsAndOnlyWhenBisecting() {
+        EventSourceMapping bisecting = esm(null, null);
+        bisecting.setBisectBatchOnFunctionError(true);
+        InvokeResult functionError = new InvokeResult(200, "Unhandled", new byte[0], null, "req-1");
+
+        assertTrue(StreamBatchFailures.splitsOnFunctionError(bisecting, functionError, 2));
+        assertFalse(StreamBatchFailures.splitsOnFunctionError(bisecting, functionError, 1), "a single record");
+        assertFalse(StreamBatchFailures.splitsOnFunctionError(bisecting, new InvokeResult(), 2), "batchItemFailures");
+        assertFalse(StreamBatchFailures.splitsOnFunctionError(esm(null, null), functionError, 2), "unset");
+    }
+
+    @Test
+    void aSplitBatchIsRefetchedAtItsFirstHalfRoundedUp() {
+        assertEquals(2, StreamBatchFailures.splitBatchSize(4));
+        assertEquals(3, StreamBatchFailures.splitBatchSize(5));
+        assertEquals(1, StreamBatchFailures.splitBatchSize(2));
+    }
+
+    @Test
+    void theSplitSizeLimitsTheFetchOnlyWhileBisecting() {
+        Map<String, Integer> splitSizes = Map.of("esm-1:shard:42", 3);
+        EventSourceMapping bisecting = esm(null, null);
+        bisecting.setBisectBatchOnFunctionError(true);
+
+        assertEquals(3, StreamBatchFailures.bisectLimit(bisecting, splitSizes, "esm-1:shard:42"));
+        assertEquals(Integer.MAX_VALUE, StreamBatchFailures.bisectLimit(bisecting, splitSizes, "esm-1:shard:43"));
+        assertEquals(Integer.MAX_VALUE, StreamBatchFailures.bisectLimit(esm(null, null), splitSizes, "esm-1:shard:42"));
+    }
+
+    @Test
     void sqsRecordFillsDefaultsWritesTheTimestampInMillisecondsAndDoesNotBuildTheEvent() throws Exception {
         EventSourceMapping esm = esm(0, null);
         esm.setDestinationConfig(destination("arn:aws:sqs:us-east-1:000000000000:dlq"));

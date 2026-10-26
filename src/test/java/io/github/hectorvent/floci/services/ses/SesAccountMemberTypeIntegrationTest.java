@@ -63,7 +63,8 @@ class SesAccountMemberTypeIntegrationTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("nonObjectBodyPaths")
     void nonObjectBody_isRejectedBeforeTheShapeCheck(String path) {
-        assertError("PUT", path, "[]", "BadRequestException", "Request body must be a JSON object.");
+        assertError("PUT", path, "[]", "SerializationException", LIST);
+        assertError("PUT", path, "\"x\"", "SerializationException", null);
     }
 
     static Stream<String> nonObjectBodyPaths() {

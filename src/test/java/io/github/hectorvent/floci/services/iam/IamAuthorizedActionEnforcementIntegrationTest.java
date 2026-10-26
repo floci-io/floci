@@ -151,6 +151,35 @@ class IamAuthorizedActionEnforcementIntegrationTest {
                 .body(containsString("dynamodb:GetItem"));
     }
 
+    @Test
+    void aBudgetIsChangedUnderModifyBudgetAndReadUnderViewBudget() {
+        String budget = "authorized-" + UUID.randomUUID().toString().substring(0, 8);
+        String create = """
+                {"AccountId": "%s", "Budget": {"BudgetName": "%s", "BudgetType": "COST", "TimeUnit": "MONTHLY",
+                 "BudgetLimit": {"Amount": "100", "Unit": "USD"}}}
+                """.formatted(ACCOUNT_ID, budget);
+        String named = """
+                {"AccountId": "%s", "BudgetName": "%s"}
+                """.formatted(ACCOUNT_ID, budget);
+
+        // CreateBudget is no IAM action, so a policy naming it grants nothing.
+        budgets(userAllowed("budgets:CreateBudget"), "CreateBudget", create)
+                .statusCode(400)
+                .body("__type", equalTo("AccessDeniedException"))
+                .body(containsString("budgets:ModifyBudget"));
+        budgets(userAllowed("budgets:ModifyBudget"), "CreateBudget", create).statusCode(200);
+        cleanup.register(() -> budgets(ACCOUNT_ID, "DeleteBudget", named).statusCode(200));
+
+        String reader = userAllowed("budgets:ViewBudget");
+        budgets(reader, "DescribeBudget", named)
+                .statusCode(200)
+                .body("Budget.BudgetName", equalTo(budget));
+        budgets(reader, "DeleteBudget", named)
+                .statusCode(400)
+                .body("__type", equalTo("AccessDeniedException"))
+                .body(containsString("budgets:ModifyBudget"));
+    }
+
     private String createTable() {
         String table = "authorized-" + UUID.randomUUID();
         dynamoDb(ACCOUNT_ID, "CreateTable", """
@@ -213,6 +242,17 @@ class IamAuthorizedActionEnforcementIntegrationTest {
                 .header("Authorization", auth(accessKeyId, "dynamodb"))
                 .header("X-Amz-Target", "DynamoDB_20120810." + operation)
                 .contentType("application/x-amz-json-1.0")
+                .body(body)
+        .when()
+                .post("/")
+        .then();
+    }
+
+    private static ValidatableResponse budgets(String accessKeyId, String operation, String body) {
+        return given()
+                .header("Authorization", auth(accessKeyId, "budgets"))
+                .header("X-Amz-Target", "AWSBudgetServiceGateway." + operation)
+                .contentType("application/x-amz-json-1.1")
                 .body(body)
         .when()
                 .post("/")

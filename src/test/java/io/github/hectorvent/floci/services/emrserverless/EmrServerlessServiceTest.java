@@ -73,10 +73,11 @@ class EmrServerlessServiceTest {
     }
 
     @Test
-    void applicationTimestampsSurviveAReload() {
+    void applicationTimestampsAndClientTokenSurviveAReload() {
         Path file = tempDir.resolve("emr-serverless-applications.json");
         Application app = new Application();
         app.setApplicationId("00abc");
+        app.setClientToken("create-00abc");
         app.setCreatedAt(Instant.parse("2026-10-21T12:00:00.123Z"));
         app.setUpdatedAt(Instant.parse("2026-10-21T12:01:00.456Z"));
         new PersistentStorage<>(file, APPLICATIONS).put("00abc", app);
@@ -87,5 +88,6 @@ class EmrServerlessServiceTest {
         Application reloaded = reader.get("00abc").orElseThrow();
         assertEquals(app.getCreatedAt(), reloaded.getCreatedAt());
         assertEquals(app.getUpdatedAt(), reloaded.getUpdatedAt());
+        assertEquals("create-00abc", reloaded.getClientToken());
     }
 }

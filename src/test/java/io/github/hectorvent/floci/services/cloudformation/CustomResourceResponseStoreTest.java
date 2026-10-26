@@ -7,7 +7,20 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongConsumer;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -15,25 +28,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
-/**
- * The await budget is an IDLE timeout, not a total one.
- *
- * <p>A CDK provider-framework waiter drives {@code framework.isComplete} on a fixed cadence and only
- * PUTs to the ResponseURL once the underlying work finishes. How long that takes is a function of
- * the work, not of the emulator: {@code Custom::CreateOrganizationAccounts} creates exactly one
- * account per poll, so a 15-account org needs ~15 polls where a 6-account org needs ~3. A total-time
- * budget therefore has to be re-tuned every time a config set grows, and when it is exceeded the
- * Lambda is guillotined mid-success — the accounts exist, but the resource reports CREATE_FAILED and
- * the stack rolls back.
- *
- * <p>Measuring idleness instead makes the budget proportional to the work without the CloudFormation
- * layer needing to know what the work IS: every poll is liveness, so progress buys unbounded
- * wall-clock while a genuinely hung resource still dies on schedule.
- */
+/** Exercises idle-time accounting without depending on thread scheduling or wall-clock delays. */
 class CustomResourceResponseStoreTest {
 
+    private static final Duration IDLE_TIMEOUT = Duration.ofMillis(300);
+    private final AtomicLong now = new AtomicLong();
+    private final ScriptedResponse response = new ScriptedResponse();
     private final CustomResourceResponseStore store = new CustomResourceResponseStore(
-            new ProviderFrameworkDetector(mock(LambdaService.class)));
+            new ProviderFrameworkDetector(mock(LambdaService.class)), now::get, () -> response);
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ObjectNode success() {
@@ -42,114 +44,96 @@ class CustomResourceResponseStoreTest {
         return node;
     }
 
-    /** Polls {@code count} times at 100ms, then optionally PUTs. Mirrors the waiter's cadence. */
-    private Thread waiterPolling(String token, int count, boolean thenComplete) {
-        Thread t = new Thread(() -> {
-            try {
-                for (int i = 0; i < count; i++) {
-                    Thread.sleep(100);
-                    store.touch(token);
-                }
-                if (thenComplete) {
-                    store.complete(token, success());
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+    private void heartbeatDuringWait(String token) {
+        response.onWait(remaining -> {
+            now.addAndGet(remaining - 1);
+            store.touch(token);
+            now.incrementAndGet();
         });
-        t.setDaemon(true);
-        t.start();
-        return t;
     }
 
     @Test
     void awaitOutlivesItsBudgetWhileTouchesKeepArriving() throws Exception {
         String token = store.register();
-        // ~900ms of polling against a 300ms budget: three times over, the way 15 accounts run three
-        // times past a budget sized for 6.
-        Thread waiter = waiterPolling(token, 9, true);
+        for (int i = 0; i < 4; i++) {
+            heartbeatDuringWait(token);
+        }
+        response.onWait(remaining -> store.complete(token, success()));
 
-        JsonNode response = store.await(token, Duration.ofMillis(300));
+        JsonNode result = store.await(token, IDLE_TIMEOUT);
 
-        assertEquals("SUCCESS", response.get("Status").asText());
-        waiter.join(2_000);
+        assertEquals("SUCCESS", result.get("Status").asText());
+        assertTrue(now.get() > IDLE_TIMEOUT.multipliedBy(3).toNanos());
+        assertEquals(List.of(IDLE_TIMEOUT.toNanos(), IDLE_TIMEOUT.toNanos() - 1,
+                IDLE_TIMEOUT.toNanos() - 1, IDLE_TIMEOUT.toNanos() - 1,
+                IDLE_TIMEOUT.toNanos() - 1), response.waits);
+        assertThrows(IllegalStateException.class, () -> store.await(token, IDLE_TIMEOUT));
     }
 
     @Test
-    void awaitStillTimesOutOnceTheTouchesStop() throws Exception {
+    void awaitStillTimesOutOnceTheTouchesStop() {
         String token = store.register();
-        // Three polls, then the resource hangs. The budget must still fire from the LAST poll.
-        Thread waiter = waiterPolling(token, 3, false);
+        heartbeatDuringWait(token);
+        heartbeatDuringWait(token);
+        response.onWait(now::addAndGet);
 
-        assertThrows(TimeoutException.class, () -> store.await(token, Duration.ofMillis(300)));
-        waiter.join(2_000);
+        assertThrows(TimeoutException.class, () -> store.await(token, IDLE_TIMEOUT));
+
+        assertEquals(3 * IDLE_TIMEOUT.toNanos() - 2, now.get());
+        assertEquals(3, response.waits.size());
+        assertThrows(IllegalStateException.class, () -> store.await(token, IDLE_TIMEOUT));
     }
 
     @Test
     void awaitTimesOutWhenNothingEverHappens() {
         String token = store.register();
+        response.onWait(now::addAndGet);
 
-        assertThrows(TimeoutException.class, () -> store.await(token, Duration.ofMillis(150)));
+        assertThrows(TimeoutException.class, () -> store.await(token, IDLE_TIMEOUT));
+
+        assertEquals(List.of(IDLE_TIMEOUT.toNanos()), response.waits);
+        assertEquals(IDLE_TIMEOUT.toNanos(), now.get());
     }
 
     @Test
     void awaitReturnsAResponseThatArrivedBeforeTheBudgetWasChecked() throws Exception {
-        // A synchronous handler PUTs from inside the invoke the provisioner is blocked on, so its
-        // response can already be here by the time await is entered. Whatever the clock says, a
-        // response that arrived is a response — the future outranks the budget.
         String token = store.register();
         store.complete(token, success());
 
-        JsonNode response = store.await(token, Duration.ZERO);
+        JsonNode result = store.await(token, Duration.ZERO);
 
-        assertEquals("SUCCESS", response.get("Status").asText());
+        assertEquals("SUCCESS", result.get("Status").asText());
+        assertTrue(response.waits.isEmpty());
     }
 
     @Test
     void awaitBudgetsIdlenessFromWhenTheCallerStartsWaitingNotFromRegistration() throws Exception {
         String token = store.register();
-        // The token is registered before the invoke, and a slow handler — a cold container start, or
-        // two of them nested — can burn longer than the whole budget before await is ever reached.
-        // That is the handler working, not the resource going idle, so it must not be charged here.
-        Thread.sleep(400);
-
-        Thread waiter = new Thread(() -> {
-            try {
-                Thread.sleep(100);
-                store.complete(token, success());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+        now.addAndGet(IDLE_TIMEOUT.multipliedBy(4).toNanos());
+        response.onWait(remaining -> {
+            now.addAndGet(remaining - 1);
+            store.complete(token, success());
         });
-        waiter.setDaemon(true);
-        waiter.start();
 
-        JsonNode response = store.await(token, Duration.ofMillis(300));
+        JsonNode result = store.await(token, IDLE_TIMEOUT);
 
-        assertEquals("SUCCESS", response.get("Status").asText());
-        waiter.join(2_000);
+        assertEquals("SUCCESS", result.get("Status").asText());
+        assertEquals(List.of(IDLE_TIMEOUT.toNanos()), response.waits);
     }
 
     @Test
     void touchForAnUnknownTokenIsIgnored() {
-        // Polls can outlive their await (timeout, rollback). Liveness for a token nobody is waiting
-        // on is not an error — it is the normal tail of a resource that already failed.
         assertDoesNotThrow(() -> store.touch("no-such-token"));
     }
 
     @Test
     void toleratedWaitSliceTimeoutIsLogged() throws Exception {
-        // Every slice of the poll loop below the outer budget hits an internal TimeoutException that
-        // is intentionally swallowed and retried. Per the repo's logging convention, a caught
-        // exception that is deliberately tolerated must still be logged (at trace level, since this
-        // is the normal, expected tail of every wait) rather than disappearing silently.
-        java.util.logging.Logger julLogger =
-                java.util.logging.Logger.getLogger(CustomResourceResponseStore.class.getName());
-        julLogger.setLevel(java.util.logging.Level.ALL);
-        java.util.List<java.util.logging.LogRecord> records = new java.util.ArrayList<>();
-        java.util.logging.Handler handler = new java.util.logging.Handler() {
+        Logger logger = Logger.getLogger(CustomResourceResponseStore.class.getName());
+        Level previousLevel = logger.getLevel();
+        List<LogRecord> records = new ArrayList<>();
+        Handler handler = new Handler() {
             @Override
-            public void publish(java.util.logging.LogRecord record) {
+            public void publish(LogRecord record) {
                 records.add(record);
             }
 
@@ -161,20 +145,42 @@ class CustomResourceResponseStoreTest {
             public void close() {
             }
         };
-        handler.setLevel(java.util.logging.Level.ALL);
-        julLogger.addHandler(handler);
+        handler.setLevel(Level.ALL);
+        logger.setLevel(Level.ALL);
+        logger.addHandler(handler);
         try {
             String token = store.register();
-            Thread waiter = waiterPolling(token, 9, true);
+            heartbeatDuringWait(token);
+            response.onWait(remaining -> store.complete(token, success()));
 
-            store.await(token, Duration.ofMillis(300));
-            waiter.join(2_000);
+            store.await(token, IDLE_TIMEOUT);
         } finally {
-            julLogger.removeHandler(handler);
+            logger.removeHandler(handler);
+            logger.setLevel(previousLevel);
         }
 
-        assertTrue(records.stream().anyMatch(r -> r.getMessage() != null
-                        && r.getMessage().toLowerCase().contains("wait slice")),
+        assertTrue(records.stream().anyMatch(record -> record.getMessage() != null
+                        && record.getMessage().contains("wait slice")),
                 "expected a log record for a tolerated wait-slice timeout, got: " + records);
+    }
+
+    private static final class ScriptedResponse extends CompletableFuture<JsonNode> {
+        private final Deque<LongConsumer> events = new ArrayDeque<>();
+        private final List<Long> waits = new ArrayList<>();
+
+        private void onWait(LongConsumer event) {
+            events.addLast(event);
+        }
+
+        @Override
+        public JsonNode get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException,
+                TimeoutException {
+            assertTrue(timeout > 0, "wait slices must have a positive timeout");
+            assertTrue(!events.isEmpty(), "unexpected additional wait slice");
+            long nanos = unit.toNanos(timeout);
+            waits.add(nanos);
+            events.removeFirst().accept(nanos);
+            return super.get(0, TimeUnit.NANOSECONDS);
+        }
     }
 }

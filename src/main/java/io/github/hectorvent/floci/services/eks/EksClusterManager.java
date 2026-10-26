@@ -69,6 +69,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.Inet4Address;
+import java.net.Inet6Address;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -94,6 +96,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -110,6 +113,9 @@ public class EksClusterManager
     static final String DEFAULT_NODE_INSTANCE_TYPE = "m5.large";
     private static final String NODE_CAPACITY_LABEL = "io.floci.eks.node-capacity";
     private static final String DEFAULT_STORAGE_CLASS_LABEL = "io.floci.eks.default-storage-class";
+    private static final String ENDPOINT_HOST_LABEL = "io.floci.eks.endpoint-host";
+    private static final Pattern HOSTNAME = Pattern.compile(
+            "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*");
 
     private static final String WEBHOOK_CONFIG_DIR = "/etc";
     private static final String WEBHOOK_CONFIG_FILE = "token-webhook.yaml";
@@ -595,6 +601,10 @@ public class EksClusterManager
                 defaultStorageClass,
                 serviceCidr,
                 clusterCidr);
+        String endpointHost = endpointHost();
+        if (!"localhost".equals(endpointHost)) {
+            serverArgs.add("--tls-san=" + endpointHost);
+        }
 
         EksNodeCapacity.Limits nodeLimits = resolveNodeCapacity(cluster);
         if (nodeLimits != null) {
@@ -644,6 +654,9 @@ public class EksClusterManager
                 "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
         labels.put(NODE_CAPACITY_LABEL, capacityLabel(cluster, nodeLimits));
         labels.put(DEFAULT_STORAGE_CLASS_LABEL, String.valueOf(defaultStorageClass));
+        if (!"localhost".equals(endpointHost)) {
+            labels.put(ENDPOINT_HOST_LABEL, endpointHost);
+        }
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
@@ -760,7 +773,7 @@ public class EksClusterManager
             throw e;
         }
 
-        applyEndpoints(cluster, containerName, hostPort, info);
+        applyEndpoints(cluster, containerName, hostPort, info, endpointHost);
         registerClusterNodeInstance(cluster, containerId);
         configureLinkLocalMetadataEndpoint(cluster, containerId);
         configurePodIdentityRelay(cluster, containerId);
@@ -783,6 +796,7 @@ public class EksClusterManager
      * server and re-extracts the certificate authority before marking it ACTIVE again.
      */
     public void restoreCluster(Cluster cluster) {
+        String endpointHost = endpointHost();
         if (cluster.getDockerName() == null) {
             cluster.setDockerName(resolveRestoredDockerName(cluster));
         }
@@ -814,11 +828,12 @@ public class EksClusterManager
             cluster.setDefaultStorageClass(true);
             LOG.infov("Adopting pre-upgrade EKS cluster {0} with local-storage enabled", cluster.getName());
         }
-        if (!adoptSurvivingCluster(cluster, existing.get().getId())) {
+        if (!adoptSurvivingCluster(cluster, existing.get().getId(), certificateHost(existingLabels))) {
             startCluster(cluster);
             return;
         }
-        if (capacityChanged || onAnotherNetwork(existing.get())) {
+        if (capacityChanged || onAnotherNetwork(existing.get())
+                || !endpointHost.equals(certificateHost(existingLabels))) {
             replaceClusterContainer(cluster, null);
         }
     }
@@ -842,7 +857,8 @@ public class EksClusterManager
         return moved;
     }
 
-    private boolean adoptSurvivingCluster(Cluster cluster, String containerId) {
+    /** An adopted container keeps advertising the host its certificate was created for. */
+    private boolean adoptSurvivingCluster(Cluster cluster, String containerId, String certificateHost) {
         if (config.services().eks().irsaSigningKey() && oidcService != null) {
             reinjectSigningKeys(containerId, cluster);
         }
@@ -869,7 +885,7 @@ public class EksClusterManager
         portAllocator.markReserved(hostPort);
         cluster.setContainerId(info.containerId());
         cluster.setHostPort(hostPort);
-        applyEndpoints(cluster, cluster.getDockerName(), hostPort, info);
+        applyEndpoints(cluster, cluster.getDockerName(), hostPort, info, certificateHost);
         registerClusterNodeInstance(cluster, info.containerId());
         configureLinkLocalMetadataEndpoint(cluster, info.containerId());
         configurePodIdentityRelay(cluster, info.containerId());
@@ -888,6 +904,8 @@ public class EksClusterManager
         int oldPort = cluster.getHostPort();
         String containerName = cluster.getDockerName();
         String backupName = capacityBackupName(cluster);
+        String oldCertificateHost = certificateHost(lifecycleManager.findByName(containerName)
+                .map(Container::getLabels).orElse(null));
         DockerClient docker = lifecycleManager.getDockerClient();
         try {
             lifecycleManager.removeIfExistsStrict(backupName);
@@ -917,7 +935,7 @@ public class EksClusterManager
             try {
                 lifecycleManager.removeIfExistsStrict(containerName);
                 docker.renameContainerCmd(oldId).withName(containerName).exec();
-                if (!adoptSurvivingCluster(cluster, oldId)) {
+                if (!adoptSurvivingCluster(cluster, oldId, oldCertificateHost)) {
                     throw new IllegalStateException("Could not adopt previous EKS container " + oldId);
                 }
             } catch (RuntimeException rollback) {
@@ -952,15 +970,17 @@ public class EksClusterManager
     /**
      * Sets the cluster's public and internal endpoints for a started or adopted container.
      * Public endpoint: see floci.services.eks.endpoint-mode. `host` (default) is the host-reachable
-     * published port (k3s cert carries `--tls-san=localhost`, so it verifies against the CA that
-     * describe-cluster returns); `network` is the container DNS name (pre-#1118 behaviour).
+     * published port on floci.services.eks.endpoint-host, or localhost (the k3s cert carries a SAN for
+     * either, so it verifies against the CA that describe-cluster returns); `network` is the container
+     * DNS name (pre-#1118 behaviour).
      * The internal endpoint uses the resolved container IP so the readiness poller works from inside
      * the Docker network (where localhost:<hostPort> would not reach the k3s container).
      */
-    private void applyEndpoints(Cluster cluster, String containerName, int hostPort, ContainerInfo info) {
+    private void applyEndpoints(Cluster cluster, String containerName, int hostPort, ContainerInfo info,
+                                String endpointHost) {
         cluster.setEndpoint(resolvePublicEndpoint(
                 containerDetector.isRunningInContainer(), config.services().eks().endpointMode(),
-                containerName, hostPort));
+                containerName, endpointHost, hostPort));
 
         if (containerDetector.isRunningInContainer()) {
             ContainerLifecycleManager.EndpointInfo ep = info.getEndpoint(K3S_API_SERVER_PORT);
@@ -1554,15 +1574,79 @@ public class EksClusterManager
 
     /**
      * Resolves the public {@code describe-cluster} endpoint. Returns the container DNS name only when
-     * Floci runs in a container and {@code endpoint-mode=network}; otherwise the host-reachable
-     * published port (the default, and the only usable value in native mode).
+     * Floci runs in a container and {@code endpoint-mode=network}; otherwise the published port on
+     * {@code endpointHost} (the default, and the only usable value in native mode).
      */
     static String resolvePublicEndpoint(boolean inContainer, String endpointMode,
-                                        String containerName, int hostPort) {
+                                        String containerName, String endpointHost, int hostPort) {
         if (inContainer && ENDPOINT_MODE_NETWORK.equalsIgnoreCase(endpointMode)) {
             return "https://" + containerName + ":" + K3S_API_SERVER_PORT;
         }
-        return "https://localhost:" + hostPort;
+        String host = endpointHost.indexOf(':') >= 0 ? "[" + endpointHost + "]" : endpointHost;
+        return "https://" + host + ":" + hostPort;
+    }
+
+    /**
+     * The host a container's certificate is made for and host-mode endpoints advertise. Network mode
+     * advertises the container name instead, so there the setting is ignored and this is localhost.
+     * {@link EksStartupValidator} has already refused an invalid value at boot.
+     */
+    private String endpointHost() {
+        if (containerDetector.isRunningInContainer()
+                && ENDPOINT_MODE_NETWORK.equalsIgnoreCase(config.services().eks().endpointMode())) {
+            return "localhost";
+        }
+        return endpointHostFrom(config.services().eks().endpointHost());
+    }
+
+    /**
+     * The configured endpoint host as a bare hostname or IP address, the form a {@code --tls-san} takes.
+     * A bracketed IPv6 literal is unbracketed; a scheme, port or path is refused, since the endpoint
+     * adds its own.
+     */
+    static String endpointHostFrom(Optional<String> configured) {
+        String host = configured.map(String::strip).filter(value -> !value.isEmpty()).orElse("localhost")
+                .toLowerCase(Locale.ROOT);
+        if (host.startsWith("[") && host.endsWith("]")) {
+            host = host.substring(1, host.length() - 1);
+        }
+        boolean numeric = host.chars().allMatch(c -> c == '.' || Character.isDigit(c));
+        if (numeric ? isIpv4Literal(host) : host.length() <= 253 && HOSTNAME.matcher(host).matches()
+                || isIpv6Literal(host)) {
+            return host;
+        }
+        throw new IllegalArgumentException("floci.services.eks.endpoint-host must be a hostname or IP address"
+                + " without scheme, port or path, got: " + configured.orElse(""));
+    }
+
+    /** The endpoint host a container's certificate carries, from the label {@link #startCluster} sets. */
+    private static String certificateHost(Map<String, String> labels) {
+        return labels == null ? "localhost" : labels.getOrDefault(ENDPOINT_HOST_LABEL, "localhost");
+    }
+
+    private static boolean isIpv4Literal(String host) {
+        // ofLiteral also takes BSD shorthand such as 1.2.3, which no URL or certificate means.
+        if (host.split("\\.", -1).length != 4) {
+            return false;
+        }
+        try {
+            Inet4Address.ofLiteral(host);
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    private static boolean isIpv6Literal(String host) {
+        if (host.indexOf(':') < 0 || host.indexOf('%') >= 0 || host.indexOf('[') >= 0 || host.indexOf(']') >= 0) {
+            return false;
+        }
+        try {
+            Inet6Address.ofLiteral(host);
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
     }
 
     /**
@@ -1866,11 +1950,9 @@ public class EksClusterManager
             if (cluster.getAccountId() != null && !cluster.getAccountId().isBlank()) {
                 return cluster.getAccountId();
             }
-            if (cluster.getArn() != null) {
-                String[] parts = cluster.getArn().split(":");
-                if (parts.length > 4 && !parts[4].isBlank()) {
-                    return parts[4];
-                }
+            String accountId = AwsArnUtils.accountOrDefault(cluster.getArn(), null);
+            if (accountId != null && !accountId.isBlank()) {
+                return accountId;
             }
         }
         if (regionResolver != null && regionResolver.getAccountId() != null && !regionResolver.getAccountId().isBlank()) {
@@ -2265,7 +2347,7 @@ public class EksClusterManager
         // client-go replaces a server URL query when constructing its TokenReview request.
         String accountId = cluster.getAccountId() != null && !cluster.getAccountId().isBlank()
                 ? cluster.getAccountId()
-                : (cluster.getArn() != null && cluster.getArn().split(":", 6).length > 4 ? cluster.getArn().split(":", 6)[4] : "000000000000");
+                : AwsArnUtils.accountOrDefault(cluster.getArn(), "000000000000");
         String region = AwsArnUtils.regionOrDefault(cluster.getArn(), defaultRegion);
         Instant createdAt = cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.EPOCH;
         return webhookPath(cluster.getName()) + "/scope/" + accountId
@@ -2562,11 +2644,9 @@ public class EksClusterManager
     }
 
     String clusterRegion(Cluster cluster) {
-        if (cluster != null && cluster.getArn() != null) {
-            String[] parts = cluster.getArn().split(":");
-            if (parts.length > 3 && !parts[3].isBlank()) {
-                return parts[3];
-            }
+        String region = cluster == null ? null : AwsArnUtils.regionOrDefault(cluster.getArn(), null);
+        if (region != null && !region.isBlank()) {
+            return region;
         }
         if (regionResolver != null && regionResolver.getDefaultRegion() != null && !regionResolver.getDefaultRegion().isBlank()) {
             return regionResolver.getDefaultRegion();

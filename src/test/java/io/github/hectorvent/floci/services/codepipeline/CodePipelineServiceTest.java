@@ -167,7 +167,11 @@ class CodePipelineServiceTest {
      * with "not an interface".
      */
     private static EmulatorConfig configWithPollInterval(long intervalMs) {
-        Map<String, Object> answers = Map.of("sourcePollIntervalMs", intervalMs, "workerPollIntervalMs", 1L);
+        return configWithPollIntervals(intervalMs, 1L);
+    }
+
+    private static EmulatorConfig configWithPollIntervals(long sourceMs, long workerMs) {
+        Map<String, Object> answers = Map.of("sourcePollIntervalMs", sourceMs, "workerPollIntervalMs", workerMs);
 
         InvocationHandler handler = new InvocationHandler() {
             @Override
@@ -188,6 +192,161 @@ class CodePipelineServiceTest {
         };
         return (EmulatorConfig) Proxy.newProxyInstance(EmulatorConfig.class.getClassLoader(),
                 new Class<?>[] {EmulatorConfig.class}, handler);
+    }
+
+    @Test
+    void nonPositiveWorkerIntervalsFallBackToTheDefault() {
+        for (boolean direct : new boolean[] {false, true}) {
+            for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
+                CodePipelineService pipelineService =
+                        workerPollingService(mock(CodeBuildService.class), interval, direct);
+                try {
+                    assertEquals(100L, pipelineService.workerPollIntervalMs,
+                            "interval " + interval + " (direct=" + direct + ") must fall back to 100ms");
+                } finally {
+                    pipelineService.shutdown();
+                }
+            }
+        }
+    }
+
+    @Test
+    void nonPositiveSourceIntervalsFallBackToTheDefault() {
+        for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
+            CodePipelineService pipelineService = new CodePipelineService(new InMemoryStorageFactory(), mapper,
+                    mock(CodeBuildService.class), mock(CodeDeployService.class), mock(LambdaService.class),
+                    mock(S3Service.class), configWithPollIntervals(interval, 739L));
+            try {
+                assertEquals(500L, pipelineService.sourcePollIntervalMs,
+                        "source interval " + interval + " must fall back to 500ms");
+                assertEquals(739L, pipelineService.workerPollIntervalMs,
+                        "a valid worker interval must not follow the source fallback");
+            } finally {
+                pipelineService.shutdown();
+            }
+        }
+    }
+
+    @Test
+    void resolvePollIntervalUsesTheFallbackOfEachKind() {
+        for (long interval : new long[] {0L, -1L, Long.MIN_VALUE}) {
+            assertEquals(500L, CodePipelineService.resolvePollInterval("source", interval, 500L));
+            assertEquals(100L, CodePipelineService.resolvePollInterval("worker", interval, 100L));
+        }
+        for (long interval : new long[] {1L, 739L, Long.MAX_VALUE}) {
+            assertEquals(interval, CodePipelineService.resolvePollInterval("source", interval, 500L));
+            assertEquals(interval, CodePipelineService.resolvePollInterval("worker", interval, 100L));
+        }
+    }
+
+    @Test
+    void positiveWorkerIntervalsArePreserved() {
+        for (boolean direct : new boolean[] {false, true}) {
+            for (long interval : new long[] {1L, 739L, Long.MAX_VALUE}) {
+                CodePipelineService pipelineService =
+                        workerPollingService(mock(CodeBuildService.class), interval, direct);
+                try {
+                    assertEquals(interval, pipelineService.workerPollIntervalMs,
+                            "interval " + interval + " (direct=" + direct + ") must not be replaced");
+                } finally {
+                    pipelineService.shutdown();
+                }
+            }
+        }
+    }
+
+    @Test
+    void invalidConfiguredWorkerIntervalKeepsPollingAndStopsAfterBuildCompletion() throws Exception {
+        assertWorkerPollingProgress(0L, false);
+    }
+
+    @Test
+    void invalidDirectWorkerIntervalKeepsPollingAndStopsAfterBuildCompletion() throws Exception {
+        assertWorkerPollingProgress(Long.MIN_VALUE, true);
+    }
+
+    private CodePipelineService workerPollingService(CodeBuildService codeBuild, long interval, boolean direct) {
+        if (direct) {
+            return new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild,
+                    mock(CodeDeployService.class), mock(LambdaService.class), mock(S3Service.class),
+                    new CodePipelineEventPublisher(null, null, mapper), 500L, interval,
+                    TimeUnit.SECONDS.toNanos(5), () -> { });
+        }
+        return new CodePipelineService(new InMemoryStorageFactory(), mapper, codeBuild,
+                mock(CodeDeployService.class), mock(LambdaService.class), mock(S3Service.class),
+                configWithPollIntervals(500L, interval));
+    }
+
+    private void assertWorkerPollingProgress(long interval, boolean direct) throws Exception {
+        CodeBuildService codeBuild = mock(CodeBuildService.class);
+        AtomicReference<Build> currentBuild = new AtomicReference<>(build("IN_PROGRESS", false));
+        CountDownLatch repeatedPolls = new CountDownLatch(3);
+        when(codeBuild.startBuild(anyString(), anyString(), anyString(),
+                any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -> currentBuild.get());
+        when(codeBuild.getBuild(anyString(), anyString(), anyString())).thenAnswer(invocation -> {
+            repeatedPolls.countDown();
+            return currentBuild.get();
+        });
+        CodePipelineService pipelineService = workerPollingService(codeBuild, interval, direct);
+        String pipeline = "worker-poll-guard";
+        try {
+            createExternalActionPipeline(pipelineService, pipeline, """
+                    {"name":"BuildAction","actionTypeId":{
+                      "category":"Build","owner":"AWS","provider":"CodeBuild","version":"1"},
+                     "configuration":{"ProjectName":"build-project"}}
+                    """);
+            String execution = startExecution(pipelineService, pipeline);
+            // The fallback interval itself is asserted directly; here only progress matters, so
+            // there is a generous deadline and no upper bound on how many polls happen meanwhile.
+            assertTrue(repeatedPolls.await(30, TimeUnit.SECONDS), "Worker must keep polling the build");
+            stopExecution(pipelineService, pipeline, execution, false);
+            waitForExecutionStatus(pipelineService, pipeline, execution, "Stopping");
+            currentBuild.set(build("SUCCEEDED", true));
+            waitForExecutionStatus(pipelineService, pipeline, execution, "Stopped");
+            await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofSeconds(3))
+                    .until(() -> !pipelineService.activeRuns.contains(ACCOUNT + ":" + execution));
+            assertEquals("Succeeded", pipelineState(pipelineService, pipeline).path("stageStates").path(0)
+                    .path("actionStates").path(0).path("latestExecution").path("status").asText());
+            verify(codeBuild, never()).stopBuild(anyString(), anyString(), anyString());
+        } finally {
+            pipelineService.shutdown();
+        }
+    }
+
+    @Test
+    void largePositiveWorkerIntervalIsPreservedAndShutdownInterruptsTheWorker() throws Exception {
+        for (boolean direct : new boolean[] {false, true}) {
+            CodeBuildService codeBuild = mock(CodeBuildService.class);
+            CountDownLatch started = new CountDownLatch(1);
+            AtomicReference<Thread> worker = new AtomicReference<>();
+            when(codeBuild.startBuild(anyString(), anyString(), anyString(),
+                    any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -> {
+                        worker.set(Thread.currentThread());
+                        started.countDown();
+                        return build("IN_PROGRESS", false);
+                    });
+            CodePipelineService pipelineService = workerPollingService(codeBuild, Long.MAX_VALUE, direct);
+            try {
+                createExternalActionPipeline(pipelineService, "large-worker-poll", """
+                        {"name":"BuildAction","actionTypeId":{
+                          "category":"Build","owner":"AWS","provider":"CodeBuild","version":"1"},
+                         "configuration":{"ProjectName":"build-project"}}
+                        """);
+                String execution = startExecution(pipelineService, "large-worker-poll");
+                assertTrue(started.await(30, TimeUnit.SECONDS));
+                await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofSeconds(30))
+                        .until(() -> worker.get().getState() == Thread.State.TIMED_WAITING);
+                pipelineService.shutdown();
+                // The pool can report termination while its thread is still unwinding, so join it.
+                worker.get().join(TimeUnit.SECONDS.toMillis(30));
+                assertFalse(worker.get().isAlive(), "Shutdown must interrupt the worker's long sleep");
+                // A preserved huge interval means the interrupted sleep was the first and only one.
+                verify(codeBuild, never()).getBuild(anyString(), anyString(), anyString());
+                assertFalse(pipelineService.activeRuns.contains(ACCOUNT + ":" + execution));
+            } finally {
+                pipelineService.shutdown();
+            }
+        }
     }
 
     @Test

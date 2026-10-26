@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -29,8 +30,8 @@ class ApsControllerIntegrationTest {
         return given()
             .contentType("application/json")
             .body("""
-                {"alias": "%s", "tags": {"team": "devops"}, "clientToken": "token-123"}
-                """.formatted(alias))
+                {"alias": "%s", "tags": {"team": "devops"}, "clientToken": "%s"}
+                """.formatted(alias, UUID.randomUUID()))
         .when()
             .post("/workspaces")
         .then()

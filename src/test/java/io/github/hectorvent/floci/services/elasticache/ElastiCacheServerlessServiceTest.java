@@ -468,4 +468,22 @@ class ElastiCacheServerlessServiceTest {
         error("TagQuotaPerResourceExceeded", () -> service.replaceTags("tag-cache", tooMany));
         assertEquals(Map.of("env", "dev"), service.getServerlessCache("tag-cache").getTags());
     }
+
+    @Test
+    void tagMutationsUseAwsInvalidArnWireCode() {
+        error("InvalidARN", () -> service.addTagsToResource("not-an-arn", Map.of("env", "test"), "us-east-1"));
+        error("InvalidARN", () -> service.removeTagsFromResource("not-an-arn", List.of("env"), "us-east-1"));
+        String wrongTypeAndRegion = "arn:aws:elasticache:eu-west-1:000000000000:cluster:test";
+        error("InvalidARN", () -> service.addTagsToResource(wrongTypeAndRegion, Map.of("env", "test"), "us-east-1"));
+    }
+
+    @Test
+    void tagMutationsKeepUsingTheServerlessCacheArn() {
+        ServerlessCache cache = service.createServerlessCache(create("arn-tags-cache", "valkey", null));
+
+        assertEquals(Map.of("team", "local", "env", "test"),
+                service.addTagsToResource(cache.getArn(), Map.of("env", "test"), "us-east-1"));
+        assertEquals(Map.of("team", "local"),
+                service.removeTagsFromResource(cache.getArn(), List.of("env"), "us-east-1"));
+    }
 }

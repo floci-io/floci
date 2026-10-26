@@ -10,9 +10,19 @@
     "PutReplicationConfiguration": "PutReplicationConfigurationRequest",
     "DescribeRegistry": "DescribeRegistryRequest",
     "PutRegistryScanningConfiguration": "PutRegistryScanningConfigurationRequest",
-    "GetRegistryScanningConfiguration": "GetRegistryScanningConfigurationRequest"
+    "GetRegistryScanningConfiguration": "GetRegistryScanningConfigurationRequest",
+    "BatchGetRepositoryScanningConfiguration": "BatchGetRepositoryScanningConfigurationRequest"
   },
   "shapes": {
+    "BatchGetRepositoryScanningConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "repositoryNames"
+      ],
+      "members": {
+        "repositoryNames": "ScanningConfigurationRepositoryNameList"
+      }
+    },
     "DeleteRegistryPolicyRequest": {
       "type": "structure",
       "members": {}
@@ -157,6 +167,12 @@
       "max": 256,
       "pattern": "^(?:[a-z0-9]+(?:[._-][a-z0-9]*)*/)*[a-z0-9]*(?:[._-][a-z0-9]*)*$"
     },
+    "RepositoryName": {
+      "type": "string",
+      "min": 2,
+      "max": 256,
+      "pattern": "[a-z0-9]+((\\.|_|__|-+)[a-z0-9]+)*(\\/[a-z0-9]+((\\.|_|__|-+)[a-z0-9]+)*)*"
+    },
     "ScanFrequency": {
       "type": "string",
       "enum": [
@@ -171,6 +187,12 @@
         "BASIC",
         "ENHANCED"
       ]
+    },
+    "ScanningConfigurationRepositoryNameList": {
+      "type": "list",
+      "min": 1,
+      "max": 25,
+      "member": "RepositoryName"
     },
     "ScanningRepositoryFilter": {
       "type": "structure",

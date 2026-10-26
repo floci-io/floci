@@ -173,7 +173,8 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
                                            String zoneId, String name, String type, String setIdentifier) {
         return ctx.isUpdate()
                 && zoneId.equals(priorAttributes.get(RECORD_ZONE_ATTR))
-                && Route53Service.normalizeName(name).equals(Route53Service.normalizeName(ctx.priorPhysicalId()))
+                && Route53Service.normalizeRecordName(name)
+                        .equals(Route53Service.normalizeRecordName(ctx.priorPhysicalId()))
                 && type.equals(priorAttributes.get(RECORD_TYPE_ATTR))
                 && Objects.equals(priorAttributes.get(RECORD_SET_ID_ATTR), setIdentifier);
     }

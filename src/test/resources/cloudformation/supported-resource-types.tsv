@@ -52,6 +52,7 @@ AWS::CloudFront::PublicKey	CloudFrontCfnProvisioner
 AWS::CloudFront::ResponseHeadersPolicy	CloudFrontCfnProvisioner
 AWS::CloudTrail::Trail	CloudTrailCfnProvisioner
 AWS::CloudWatch::Alarm	CloudWatchCfnProvisioner
+AWS::CloudWatch::CompositeAlarm	CloudWatchCompositeAlarmCfnProvisioner
 AWS::CloudWatch::Dashboard	CloudWatchDashboardCfnProvisioner
 AWS::CodeBuild::Project	CodeBuildCfnProvisioner
 AWS::CodePipeline::CustomActionType	CodePipelineCfnProvisioner
@@ -76,6 +77,7 @@ AWS::EC2::LaunchTemplate	Ec2LaunchTemplateCfnProvisioner
 AWS::EC2::NatGateway	Ec2NetworkCfnProvisioner
 AWS::EC2::NetworkAcl	Ec2NetworkAclCfnProvisioner
 AWS::EC2::NetworkAclEntry	Ec2NetworkAclCfnProvisioner
+AWS::EC2::PrefixList	Ec2NetworkCfnProvisioner
 AWS::EC2::Route	Ec2NetworkCfnProvisioner
 AWS::EC2::RouteTable	Ec2NetworkCfnProvisioner
 AWS::EC2::SecurityGroup	Ec2SecurityGroupCfnProvisioner

@@ -153,6 +153,20 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     }
 
     public ContainerHandle launch(LambdaFunction fn) {
+        return launch(fn, false);
+    }
+
+    @Override
+    public boolean supportsProvisionedConcurrency() {
+        return true;
+    }
+
+    @Override
+    public ContainerHandle launchProvisioned(LambdaFunction fn) {
+        return launch(fn, true);
+    }
+
+    private ContainerHandle launch(LambdaFunction fn, boolean provisioned) {
         LOG.infov("Launching container for function: {0}", fn.getFunctionName());
 
         // For Zip functions, verify code exists before allocating any resources.
@@ -266,6 +280,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
         env.removeIf(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION="));
         env.add("AWS_LAMBDA_FUNCTION_VERSION=" + fn.getVersion());
+        if (provisioned) {
+            env.removeIf(value -> value.startsWith("AWS_LAMBDA_INITIALIZATION_TYPE="));
+            env.add("AWS_LAMBDA_INITIALIZATION_TYPE=provisioned-concurrency");
+        }
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
@@ -391,6 +409,11 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             for (String layerArn : fn.getLayers()) {
                 LambdaLayerVersion layer = layerService.resolveLayerByArnForAccount(
                         layerArn, lambdaAccountId, lambdaRegion);
+                if (provisioned && (layer == null || layer.getCodeLocalPath() == null
+                        || !Files.isDirectory(Path.of(layer.getCodeLocalPath())))) {
+                    throw new IllegalStateException("Configured layer is unavailable for provisioned initialization: "
+                            + layerArn);
+                }
                 if (layer != null && layer.getCodeLocalPath() != null) {
                     Path layerPath = Path.of(layer.getCodeLocalPath());
                     if (Files.exists(layerPath)) {
@@ -416,6 +439,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
+        runtimeApiServer.markContainerStarted();
         watchForUnexpectedExit(dockerClient, containerId, runtimeApiServer);
 
         // Extensions can log as soon as they start, which is before the container's own log stream
@@ -432,7 +456,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // (e.g. aws-lambda-web-adapter) never start without this. Best-effort: an extension
         // launch failure shouldn't fail the whole container launch, since a function with no
         // extensions is the common case and this must be a no-op for it.
-        launchExtensions(dockerClient, containerId, fn.getFunctionName(), runtimeApiServer, logDestination);
+        launchExtensions(dockerClient, containerId, fn.getFunctionName(), runtimeApiServer, logDestination, provisioned);
 
         // Init-readiness barrier: the execs above are detached, so without waiting here the caller
         // could enqueue the first invocation before an extension is ready to receive it — the
@@ -441,7 +465,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // /extension/event/next rather than its register call. A no-extensions function (the
         // common case) does not wait at all; a timeout is non-fatal, since a container that serves
         // invocations without a slow extension is strictly better than failing the launch.
-        awaitExtensionReadiness(runtimeApiServer, fn.getFunctionName());
+        if (!provisioned) {
+            awaitExtensionReadiness(runtimeApiServer, fn.getFunctionName());
+        }
 
         ContainerHandle handle = new ContainerHandle(
                 containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload(),
@@ -617,8 +643,13 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // extension shutdown work — only that we will not preempt PID 1 for at least
         // that long if it happens to be slow.
         int stopTimeoutSeconds = server.hasRegisteredExtensions() ? 2 : 1;
-        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream(),
-                stopTimeoutSeconds);
+        try {
+            lifecycleManager.stopAndRemoveStrict(handle.getContainerId(), handle.getLogStream(),
+                    stopTimeoutSeconds);
+        } finally {
+            executionRoleCredentials.unregister(
+                    handle.getExecutionRoleSessionAccountId(), handle.getExecutionRoleAccessKeyId());
+        }
 
         // Only now close the runtime API socket. Any pollers that were still parked when
         // the container exited get terminated by their end of the connection closing;
@@ -633,16 +664,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             LOG.warnv(e, "RuntimeApiServer did not close cleanly for container {0}",
                     handle.getContainerId());
         } finally {
-            try {
-                runtimeApiServerFactory.release(server);
-            } finally {
-                // The session is only reachable while the container is alive, so it is retired
-                // here rather than on the launch path's failure branch alone. Runs even if the
-                // release above throws, otherwise a failed release strands the registration and
-                // its credentials stay authorizable for the rest of the process lifetime.
-                executionRoleCredentials.unregister(
-                        handle.getExecutionRoleSessionAccountId(), handle.getExecutionRoleAccessKeyId());
-            }
+            runtimeApiServerFactory.release(server);
         }
     }
 
@@ -1376,8 +1398,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     }
 
     private void launchExtensions(DockerClient dockerClient, String containerId, String functionName,
-                                  RuntimeApiServer runtimeApiServer, LogDestination logDestination) {
-        List<String> extensionNames = listExtensionBinaries(dockerClient, containerId, functionName);
+                                  RuntimeApiServer runtimeApiServer, LogDestination logDestination, boolean strict) {
+        List<String> extensionNames = listExtensionBinaries(dockerClient, containerId, functionName, strict);
         // Arm the readiness barrier before starting any extension process, so the latch already
         // exists when the first one starts polling /extension/event/next — otherwise a
         // fast-starting extension could become ready before there is anything to count it down.
@@ -1406,6 +1428,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 LOG.infov("Launched extension {0} for function {1} (container {2})",
                         name, functionName, containerId);
             } catch (Exception e) {
+                if (strict) {
+                    throw new IllegalStateException("Could not launch a provisioned Lambda extension", e);
+                }
                 LOG.warnv(e, "Failed to launch extension {0} for function {1}; continuing without it",
                         name, functionName);
             }
@@ -1446,7 +1471,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * those utilities present, which would silently look like "no extensions" to a shell-based probe.
      * The archive API only talks to the Docker daemon, so it works regardless of the image contents.
      */
-    private List<String> listExtensionBinaries(DockerClient dockerClient, String containerId, String functionName) {
+    private List<String> listExtensionBinaries(DockerClient dockerClient, String containerId,
+                                             String functionName, boolean strict) {
         try (InputStream tarStream = dockerClient.copyArchiveFromContainerCmd(containerId, EXTENSIONS_DIR).exec();
              TarArchiveInputStream tar = new TarArchiveInputStream(tarStream)) {
 
@@ -1473,6 +1499,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         } catch (NotFoundException e) {
             return List.of();
         } catch (Exception e) {
+            if (strict) {
+                throw new IllegalStateException("Could not discover provisioned Lambda extensions", e);
+            }
             LOG.debugv("Could not list {0} for function {1} ({2}); assuming no extensions",
                     EXTENSIONS_DIR, functionName, e.getMessage());
             return List.of();

@@ -25,7 +25,6 @@ import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.*;
-import java.util.Base64;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -1380,8 +1379,7 @@ public class AppSyncService {
             return 0;
         }
         try {
-            byte[] decoded = Base64.getUrlDecoder().decode(token);
-            return Integer.parseInt(new String(decoded, java.nio.charset.StandardCharsets.UTF_8));
+            return Integer.parseInt(Base64Url.decode(token));
         } catch (IllegalArgumentException e) {
             return -1;
         }

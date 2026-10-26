@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.services.swf;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.swf.model.SwfConstants;
+
+import java.util.List;
 
 /**
  * Factory for SWF faults.
@@ -123,8 +126,7 @@ final class SwfFaults {
     }
 
     static AwsException missingRequired(String field) {
-        return validation("1 validation error detected: Value null at '" + field
-                + "' failed to satisfy constraint: Member must not be null");
+        return validation(SmithyValidationErrors.message(List.of(SmithyValidationErrors.notNull(field))));
     }
 
     static AwsException fault(String code, String message) {

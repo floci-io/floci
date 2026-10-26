@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.AwsCanonicalUserId;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -351,15 +352,15 @@ class S3GlobalBucketNamespaceTest {
 
         String defaultAcl = globalNs.getObjectAcl(
                 "shared-metadata-bucket", "object.txt", versionId);
-        assertTrue(defaultAcl.contains(ACCOUNT_A));
-        assertFalse(defaultAcl.contains(ACCOUNT_B));
+        assertTrue(defaultAcl.contains(AwsCanonicalUserId.forAccount(ACCOUNT_A)));
+        assertFalse(defaultAcl.contains(AwsCanonicalUserId.forAccount(ACCOUNT_B)));
         globalNs.putObjectAcl(
                 "shared-metadata-bucket", "object.txt", versionId,
                 "", "public-read", null, null, null, null, null);
         String storedAcl = globalNs.getObjectAcl(
                 "shared-metadata-bucket", "object.txt", versionId);
-        assertTrue(storedAcl.contains(ACCOUNT_A));
-        assertFalse(storedAcl.contains(ACCOUNT_B));
+        assertTrue(storedAcl.contains(AwsCanonicalUserId.forAccount(ACCOUNT_A)));
+        assertFalse(storedAcl.contains(AwsCanonicalUserId.forAccount(ACCOUNT_B)));
 
         globalNs.deleteObjectTagging("shared-metadata-bucket", "object.txt");
         assertTrue(globalNs.getObjectTagging("shared-metadata-bucket", "object.txt").isEmpty());

@@ -3,12 +3,15 @@ package io.github.hectorvent.floci.services.s3;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -229,15 +232,10 @@ class S3MultipartBucketDeletionRaceTest {
         assertNotNull(service.getObject("race-bucket", "object"));
     }
 
-    private static void awaitWaiting(Thread thread) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (System.nanoTime() < deadline && thread.getState() != Thread.State.WAITING) {
-            if (!thread.isAlive()) {
-                break;
-            }
-            Thread.sleep(10);
-        }
-        assertEquals(Thread.State.WAITING, thread.getState(), "operation should wait for the multipart lock");
+    private static void awaitWaiting(Thread thread) {
+        Thread.State state = ThreadStates.awaitState(thread, EnumSet.of(Thread.State.WAITING, Thread.State.TERMINATED),
+                Duration.ofSeconds(5), "the operation");
+        assertEquals(Thread.State.WAITING, state, "operation should wait for the multipart lock");
     }
 
     private static final class BlockingService extends S3Service {

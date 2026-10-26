@@ -198,7 +198,8 @@ class DsqlDataPlaneIntegrationTest {
     /**
      * Before TLS, DSQL reads no more of a packet than its length and code (measured): a startup
      * packet is refused as not TLS whatever length it claims, after a GSSENCRequest too, and one
-     * under 8 bytes ends the connection without a word.
+     * under 8 bytes ends the connection without a word. A length whose first byte is TLS's is read
+     * as TLS (see {@link #tlsWithNoSslRequestFirstIsTakenForTheAlpnProtocolPostgresql}).
      */
     @Test
     void aPacketBeforeTlsIsRefusedAsNotTlsWhateverItsLength() throws Exception {
@@ -223,7 +224,6 @@ class DsqlDataPlaneIntegrationTest {
         }
         try (Socket socket = new Socket("127.0.0.1", endpoint.port())) {
             socket.getOutputStream().write(PostgresWire.int32(7));
-            socket.getOutputStream().write(new byte[3]);
             assertEquals(-1, socket.getInputStream().read());
         }
     }
@@ -232,7 +232,8 @@ class DsqlDataPlaneIntegrationTest {
      * DSQL takes TLS started at once, with no SSLRequest, from a client offering the ALPN protocol
      * postgresql, as libpq's and pgjdbc's direct negotiation do, and picks postgresql whenever a
      * client offers it; a direct handshake without it completes and the connection closes without a
-     * word (measured).
+     * word. A connection is told apart by its first byte alone: a startup packet claiming a length
+     * that starts with 0x16 is read as TLS, and answered with a TLS alert (measured).
      */
     @Test
     void tlsWithNoSslRequestFirstIsTakenForTheAlpnProtocolPostgresql() throws Exception {
@@ -253,7 +254,7 @@ class DsqlDataPlaneIntegrationTest {
         for (String[] alpn : new String[][] {{}, {"http/1.1"}}) {
             try (DsqlWireClient client = DsqlWireClient.direct(endpoint.port(), cluster.host(), alpn)) {
                 assertEquals("", client.applicationProtocol(), List.of(alpn).toString());
-                // The endpoint's 10 s handshake timeout would close it too, later: only a close at once is this quick.
+                // The endpoint's 30 s handshake timeout would close it too, later: only a close at once is this quick.
                 assertThrows(EOFException.class, () -> assertTimeoutPreemptively(Duration.ofSeconds(5), client::next),
                         List.of(alpn).toString());
             }
@@ -265,6 +266,14 @@ class DsqlDataPlaneIntegrationTest {
         try (DsqlWireClient client = DsqlWireClient.tls(endpoint.port(), cluster.host(), "http/1.1")) {
             assertEquals("", client.applicationProtocol());
             client.signIn("admin", cluster.adminToken());
+        }
+        try (Socket socket = new Socket("127.0.0.1", endpoint.port())) {
+            byte[] startup = startupOfLength(100);
+            System.arraycopy(PostgresWire.int32(0x16000000), 0, startup, 0, 4);
+            socket.getOutputStream().write(startup);
+            socket.setSoTimeout(5_000);
+            byte[] answer = socket.getInputStream().readAllBytes();
+            assertEquals(0x15, answer[0], "a TLS alert record, not a PostgreSQL message");
         }
     }
 

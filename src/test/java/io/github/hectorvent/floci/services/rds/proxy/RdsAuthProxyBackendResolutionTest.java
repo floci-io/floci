@@ -18,9 +18,11 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -159,6 +161,35 @@ class RdsAuthProxyBackendResolutionTest {
         }
     }
 
+    @Test
+    void onlyADatabaseEndpointForwardsACancelRequest() throws Exception {
+        assertTrue(cancelReachesBackend(RdsAuthProxy.EndpointKind.DATABASE));
+        assertFalse(cancelReachesBackend(RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY));
+    }
+
+    private boolean cancelReachesBackend(RdsAuthProxy.EndpointKind endpointKind) throws Exception {
+        ServerSocket backend = backendAt(0);
+        AtomicInteger resolved = new AtomicInteger();
+        int proxyPort = FreePorts.anyInterfacePort();
+        proxy("db-a", backend.getLocalPort(), () -> {
+            resolved.incrementAndGet();
+            return endpoint(backend.getLocalPort());
+        }, DatabaseEngine.POSTGRES, endpointKind).start(proxyPort);
+
+        try (Socket client = new Socket("127.0.0.1", proxyPort)) {
+            client.setSoTimeout(5000);
+            DataOutputStream request = new DataOutputStream(client.getOutputStream());
+            request.writeInt(16);
+            request.writeInt(80877102);
+            request.writeInt(4242);
+            request.writeInt(0x5eed);
+            request.flush();
+            // The proxy closes the client only after it has forwarded or dropped the cancel.
+            assertEquals(-1, client.getInputStream().read());
+        }
+        return resolved.get() > 0;
+    }
+
     private RdsAuthProxy proxy(String id, int initialBackendPort,
                                RdsAuthProxy.BackendEndpointResolver endpointResolver) {
         return proxy(id, initialBackendPort, endpointResolver, DatabaseEngine.SQLSERVER);
@@ -167,12 +198,18 @@ class RdsAuthProxyBackendResolutionTest {
     private RdsAuthProxy proxy(String id, int initialBackendPort,
                                RdsAuthProxy.BackendEndpointResolver endpointResolver,
                                DatabaseEngine engine) {
+        return proxy(id, initialBackendPort, endpointResolver, engine, RdsAuthProxy.EndpointKind.DATABASE);
+    }
+
+    private RdsAuthProxy proxy(String id, int initialBackendPort,
+                               RdsAuthProxy.BackendEndpointResolver endpointResolver,
+                               DatabaseEngine engine, RdsAuthProxy.EndpointKind endpointKind) {
         RdsAuthProxy proxy = new RdsAuthProxy(
                 id, "127.0.0.1", initialBackendPort, endpointResolver, "runtime:" + id,
                 engine, false, "sa", "Secret123", null,
                 mock(RdsSigV4Validator.class), mock(RdsProxyTlsCertificates.class),
                 (user, password) -> true, 5000, 5000, 100, null,
-                username -> false, RdsBackendGate.OPEN, RdsAuthProxy.EndpointKind.DATABASE);
+                username -> false, RdsBackendGate.OPEN, endpointKind);
         proxies.add(proxy);
         return proxy;
     }

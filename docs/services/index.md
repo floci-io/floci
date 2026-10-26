@@ -23,14 +23,14 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Lambda Web Functions](lambda-web-functions.md) | `/2025-03-07/web-functions/...` | REST JSON | 20 |
 | [API Gateway v1](api-gateway.md) | `/restapis/...` | REST JSON | 80 |
 | [API Gateway v2](api-gateway.md#v2) | `/v2/apis/...` | REST JSON | 53 + data-plane |
-| [IAM](iam.md) | `POST /` with `Action=` param | Query | 176 |
-| [STS](sts.md) | `POST /` with `Action=` param | Query | 10 |
+| [IAM](iam.md) | `POST /` with `Action=` param | Query | 180 |
+| [STS](sts.md) | `POST /` with `Action=` param | Query | 11 |
 | [AWS Sign-In](iam.md#aws-sign-in-login-credentials) | `/v1/authorize`, `/v1/token` | REST JSON | 2 |
 | [Organizations](organizations.md) | `POST /` + `X-Amz-Target: AWSOrganizationsV20161128.*` | JSON 1.1 | 56 |
 | [Cognito](cognito.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityProviderService.*` | JSON 1.1 | 90 |
 | [Cognito Identity](cognitoidentity.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityService.*` | JSON 1.1 | 12 |
 | [Global Accelerator](globalaccelerator.md) | `POST /` + `X-Amz-Target: GlobalAccelerator_V20180706.*` | JSON 1.1 | 22 |
-| [KMS](kms.md) | `POST /` + `X-Amz-Target: TrentService.*` | JSON 1.1 | 42 |
+| [KMS](kms.md) | `POST /` + `X-Amz-Target: TrentService.*` | JSON 1.1 | 44 |
 | [CloudHSM v2](cloudhsmv2.md) | `POST /` + `X-Amz-Target: BaldrApiService.*` | JSON 1.1 | 18 |
 | [Kinesis](kinesis.md) | `POST /` + `X-Amz-Target: Kinesis_20131202.*` | JSON 1.1 | 29 |
 | [Managed Service for Apache Flink](kinesisanalytics.md) | `POST /` + `X-Amz-Target: KinesisAnalytics_20180523.*` | JSON 1.1 | 15 |
@@ -61,7 +61,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Amazon Connect](connect.md) | `/instance`, `/instance/{instanceId}/*`, `/tags/*` | REST JSON | 15 |
 | [Amazon AppIntegrations](appintegrations.md) | `/eventIntegrations/*`, `/dataIntegrations/*`, `/tags/*` | REST JSON | 14 |
 | [Amazon Data Lifecycle Manager](dlm.md) | `/policies`, `/policies/{policyId}`, `/tags/{resourceArn}` | REST JSON | 8 |
-| [ElastiCache](elasticache.md) | `POST /` with `Action=` param + TCP proxy | Query + RESP | 30 |
+| [ElastiCache](elasticache.md) | `POST /` with `Action=` param + TCP proxy | Query + RESP | 32 |
 | [MemoryDB](memorydb.md) | `POST /` + `X-Amz-Target: AmazonMemoryDB.*` + TCP proxy | JSON 1.1 + RESP | 13 |
 | [Aurora DSQL](dsql.md) | `/cluster`, `/cluster/{identifier}`, `/cluster/{identifier}/policy` + TLS endpoint | REST JSON + wire | 9 |
 | [RDS](rds.md) | `POST /` with `Action=` param + TCP proxy | Query + wire | 109 |
@@ -80,11 +80,11 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Redshift Data API](redshift-data.md) | `POST /` + `X-Amz-Target: RedshiftData.*` | JSON 1.1 | 11 |
 | [Redshift Serverless](redshift-serverless.md) | `POST /` + `X-Amz-Target: RedshiftServerless.*` | JSON 1.1 | 55 |
 | [EMR](emr.md) | `POST /` + `X-Amz-Target: ElasticMapReduce.*` | JSON 1.1 | 40 |
-| [EMR Serverless](emr-serverless.md) | `/applications/*`, `/tags/*` | REST JSON | 14 |
+| [EMR Serverless](emr-serverless.md) | `/applications/*`, `/tags/*` | REST JSON | 15 |
 | [Data Firehose](firehose.md) | `POST /` + `X-Amz-Target: Firehose_20150804.*` | JSON 1.1 | 12 |
 | [ECS](ecs.md) | `POST /` + `X-Amz-Target: AmazonEC2ContainerServiceV20141113.*` | JSON 1.1 | 59 |
 | [EFS](efs.md) | `/2015-02-01/...` | REST JSON | 26 |
-| [EC2](ec2.md) | `POST /` with `Action=` param | EC2 Query | 198 |
+| [EC2](ec2.md) | `POST /` with `Action=` param | EC2 Query | 202 |
 | [Lightsail](lightsail.md) | `POST /` + `X-Amz-Target: Lightsail_20161128.*` | JSON 1.1 | 79 local responses; 161 recognized actions |
 | [ACM](acm.md) | `POST /` + `X-Amz-Target: CertificateManager.*` | JSON 1.1 | 16 |
 | [ECR](ecr.md) | `POST /` + `X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.*` (control plane) and `/v2/...` (data plane proxied to `registry:2`) | JSON 1.1 + OCI Distribution | 30 |
@@ -116,7 +116,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [AWS Service Catalog](service-catalog.md) | `POST /` + `X-Amz-Target: AWS242ServiceCatalogService.*` | JSON 1.1 | 89 |
 | [Service Quotas](servicequotas.md) | `POST /` + `X-Amz-Target: ServiceQuotasV20190624.*` | JSON 1.1 | 7 |
 | [AWS Budgets](budgets.md) | `POST /` + `X-Amz-Target: AWSBudgetServiceGateway.*` | JSON 1.1 | 26 |
-| [AWS RAM](ram.md) | `POST /{operationname}` (lowercase), `DELETE /deleteresourceshare` | REST JSON | 15 |
+| [AWS RAM](ram.md) | `POST /{operationname}` (lowercase), `DELETE /deleteresourceshare` | REST JSON | 16 |
 | [Control Catalog](controlcatalog.md) | `/get-control`, `/list-controls` | REST JSON | 2 |
 | [AWS Marketplace](marketplace.md) | Marketplace Catalog API | REST JSON | 56 |
 | [Control Tower](controltower.md) | `/list-landingzones`, `/get-landingzone`, `/create-landingzone`, `/*-baseline*` | REST JSON | 15 |
@@ -124,7 +124,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [AWS Backup](backup.md) | `/backup-vaults/*`, `/logically-air-gapped-backup-vaults/*`, `/backup/plans/*`, `/backup-jobs/*`, `/supported-resource-types` | REST JSON | 35 |
 | [AWS FIS](fis.md) | `/experimentTemplates/*`, `/experiments/*`, `/actions/*`, `/targetResourceTypes/*`, `/safetyLevers/*`, `/tags/*` | REST JSON | 26 |
 | [CodeGuru Reviewer](codegurureviewer.md) | `/associations`, `/associations/{associationArn}`, `/tags/*` | REST JSON | 7 |
-| [CodeArtifact](codeartifact.md) | `/v1/domain*`, `/v1/repository*`, `/v1/package`, `/v1/package/version*`, `/v1/tag*`, `/v1/authorization-token`, `/codeartifact/maven/*`, `/codeartifact/npm/*`, `/codeartifact/pypi/*` | REST JSON | 33 |
+| [CodeArtifact](codeartifact.md) | `/v1/domain*`, `/v1/repository*`, `/v1/package`, `/v1/package/version*`, `/v1/tag*`, `/v1/authorization-token`, `/codeartifact/maven/*`, `/codeartifact/npm/*`, `/codeartifact/pypi/*` | REST JSON | 36 |
 | [CloudFront](cloudfront.md) | `/2020-05-31/distribution/*`, `/2020-05-31/cache-policy/*`, `/2020-05-31/function/*` | REST XML | 50 |
 | [Route53](route53.md) | `/2013-04-01/hostedzone/*`, `/2013-04-01/healthcheck/*`, `/2013-04-01/change/*` | REST XML | 27 |
 | [Route 53 Resolver](route53resolver.md) | `POST /` + `X-Amz-Target: Route53Resolver.*` | JSON 1.1 | 22 |

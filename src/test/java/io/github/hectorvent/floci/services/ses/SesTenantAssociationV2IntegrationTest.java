@@ -178,11 +178,11 @@ class SesTenantAssociationV2IntegrationTest {
         v2().body("{\"TenantName\":\"" + TENANT + "\",\"NextToken\":\"garbage-token\"}")
                 .when().post("/v2/email/tenants/resources/list").then().statusCode(400)
                 .body("message", equalTo("Invalid Next Token"));
-        // An integral value outside the int range must be rejected, not silently truncated
-        // (4294967296 would truncate to 0 and produce the wrong Smithy message).
+        // A value outside the int range saturates, as AWS reads it, rather than truncating to 0.
         v2().body("{\"TenantName\":\"" + TENANT + "\",\"PageSize\":4294967296}")
                 .when().post("/v2/email/tenants/resources/list").then().statusCode(400)
-                .body("__type", equalTo("SerializationException"));
+                .body("message", equalTo("1 validation error detected: Value '2147483647' at 'pageSize' failed "
+                        + "to satisfy constraint: Member must have value less than or equal to 100"));
         v2().body("{\"TenantName\":\"ghost-tenant\"}")
                 .when().post("/v2/email/tenants/resources/list").then().statusCode(404)
                 .body("__type", equalTo("NotFoundException"));

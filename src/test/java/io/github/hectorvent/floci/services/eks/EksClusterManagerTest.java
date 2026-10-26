@@ -157,27 +157,71 @@ class EksClusterManagerTest {
     @Test
     void hostModeAlwaysReturnsHostReachableEndpoint() {
         assertEquals("https://localhost:6500",
-                EksClusterManager.resolvePublicEndpoint(true, "host", "floci-eks-demo", 6500));
+                EksClusterManager.resolvePublicEndpoint(true, "host", "floci-eks-demo", "localhost", 6500));
         assertEquals("https://localhost:6500",
-                EksClusterManager.resolvePublicEndpoint(false, "host", "floci-eks-demo", 6500));
+                EksClusterManager.resolvePublicEndpoint(false, "host", "floci-eks-demo", "localhost", 6500));
+    }
+
+    @Test
+    void hostModeAdvertisesAnIpv4EndpointHostAsIs() {
+        assertEquals("https://192.168.8.24:6500",
+                EksClusterManager.resolvePublicEndpoint(false, "host", "floci-eks-demo", "192.168.8.24", 6500));
+    }
+
+    @Test
+    void hostModeBracketsAnIpv6EndpointHost() {
+        assertEquals("https://[fd00::24]:6500",
+                EksClusterManager.resolvePublicEndpoint(false, "host", "floci-eks-demo", "fd00::24", 6500));
+    }
+
+    @Test
+    void endpointHostAcceptsHostnamesAndIpAddresses() {
+        assertEquals("localhost", EksClusterManager.endpointHostFrom(Optional.empty()));
+        assertEquals("localhost", EksClusterManager.endpointHostFrom(Optional.of("  ")));
+        assertEquals("aws.example.test", EksClusterManager.endpointHostFrom(Optional.of(" aws.example.test ")));
+        assertEquals("192.168.8.24", EksClusterManager.endpointHostFrom(Optional.of("192.168.8.24")));
+        assertEquals("fd00::24", EksClusterManager.endpointHostFrom(Optional.of("fd00::24")));
+        assertEquals("fd00::24", EksClusterManager.endpointHostFrom(Optional.of("[fd00::24]")));
+        assertEquals("localhost", EksClusterManager.endpointHostFrom(Optional.of("LOCALHOST")));
+        assertEquals("a".repeat(63) + ".test", EksClusterManager.endpointHostFrom(Optional.of("a".repeat(63) + ".test")));
+        assertEquals("aws-1.example.test", EksClusterManager.endpointHostFrom(Optional.of("AWS-1.Example.Test")));
+    }
+
+    @Test
+    void endpointHostRejectsAUrlOrAPort() {
+        for (String value : List.of("https://aws.example.test", "aws.example.test:443", "aws.example.test/eks",
+                "aws example.test", "[fd00::24]:6443", "a.example.test,b.example.test", "[fd00::24", "fd00::24%eth0",
+                "user@aws.example.test", "aws.example.test?x", "aws.example.test#x", "-aws.example.test", "[[::1]]",
+                "999.1.1.1", "1.2.3", "my_host", "a".repeat(64) + ".example.test",
+                ("a".repeat(60) + ".").repeat(5) + "test")) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                    () -> EksClusterManager.endpointHostFrom(Optional.of(value)), value);
+            assertTrue(e.getMessage().contains("floci.services.eks.endpoint-host"), e.getMessage());
+        }
+    }
+
+    @Test
+    void hostModeAdvertisesTheConfiguredEndpointHost() {
+        assertEquals("https://aws.example.test:6500",
+                EksClusterManager.resolvePublicEndpoint(false, "host", "floci-eks-demo", "aws.example.test", 6500));
     }
 
     @Test
     void networkModeReturnsContainerDnsOnlyInContainer() {
         assertEquals("https://floci-eks-demo:6443",
-                EksClusterManager.resolvePublicEndpoint(true, "network", "floci-eks-demo", 6500));
+                EksClusterManager.resolvePublicEndpoint(true, "network", "floci-eks-demo", "localhost", 6500));
         // Native mode has no usable container DNS name — falls back to the host endpoint.
         assertEquals("https://localhost:6500",
-                EksClusterManager.resolvePublicEndpoint(false, "network", "floci-eks-demo", 6500));
+                EksClusterManager.resolvePublicEndpoint(false, "network", "floci-eks-demo", "localhost", 6500));
     }
 
     @Test
     void endpointModeIsCaseInsensitiveAndDefaultsToHost() {
         assertEquals("https://floci-eks-demo:6443",
-                EksClusterManager.resolvePublicEndpoint(true, "NETWORK", "floci-eks-demo", 6500));
+                EksClusterManager.resolvePublicEndpoint(true, "NETWORK", "floci-eks-demo", "localhost", 6500));
         // Unknown / unset modes behave as host.
         assertEquals("https://localhost:6500",
-                EksClusterManager.resolvePublicEndpoint(true, "bogus", "floci-eks-demo", 6500));
+                EksClusterManager.resolvePublicEndpoint(true, "bogus", "floci-eks-demo", "localhost", 6500));
     }
 
     @Test
@@ -700,6 +744,108 @@ class EksClusterManagerTest {
                             + "\"NetworkSettings\":{\"Networks\":{" + networks + "}}}")));
             when(lifecycleManager.adopt(eq("cid-old"), eq(List.of(6443)), any()))
                     .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+        }
+
+        @Test
+        void recreatesASurvivorWhoseCertificateLacksTheEndpointHost() {
+            when(config.services().eks().endpointHost()).thenReturn(Optional.of("aws.example.test"));
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-old")));
+            when(lifecycleManager.adopt(eq("cid-old"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals("https://aws.example.test:6440", cluster.getEndpoint());
+            verify(dockerClient).stopContainerCmd("cid-old");
+        }
+
+        @Test
+        void adoptsASurvivorCreatedForTheConfiguredEndpointHost() {
+            when(config.services().eks().endpointHost()).thenReturn(Optional.of("aws.example.test"));
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
+                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\","
+                            + "\"io.floci.eks.endpoint-host\":\"aws.example.test\"}}")));
+            when(lifecycleManager.adopt(eq("cid-1"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6512)));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-1", cluster.getContainerId());
+            assertEquals("https://aws.example.test:6512", cluster.getEndpoint());
+            verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void recreatesASurvivorCreatedForAnotherEndpointHostWhenTheHostIsUnset() {
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
+                    "{\"Id\":\"cid-old\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\","
+                            + "\"io.floci.eks.endpoint-host\":\"aws.example.test\"}}")));
+            when(lifecycleManager.adopt(eq("cid-old"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals("https://localhost:6440", cluster.getEndpoint());
+        }
+
+        @Test
+        void aFailedReplacementKeepsAdvertisingTheHostTheOldCertificateCarries() {
+            when(config.services().eks().endpointHost()).thenReturn(Optional.of("aws.example.test"));
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-old")));
+            when(lifecycleManager.adopt(eq("cid-old"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            when(lifecycleManager.create(any())).thenReturn("cid-new");
+            when(lifecycleManager.startCreated(any(), any()))
+                    .thenThrow(new RuntimeException("replacement failed"));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-old", cluster.getContainerId());
+            assertEquals("https://localhost:6440", cluster.getEndpoint());
+        }
+
+        @Test
+        void replacesASurvivorMadeForTheEndpointHostWhenItsCapacityChanged() {
+            when(config.services().eks().endpointHost()).thenReturn(Optional.of("aws.example.test"));
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
+                    "{\"Id\":\"cid-old\",\"Labels\":{\"io.floci.eks.node-capacity\":\"t3.small:unbounded\","
+                            + "\"io.floci.eks.endpoint-host\":\"aws.example.test\"}}")));
+            when(lifecycleManager.adopt(eq("cid-old"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals("https://aws.example.test:6440", cluster.getEndpoint());
+        }
+
+        @Test
+        void networkModeIgnoresTheEndpointHost() {
+            when(containerDetector.isRunningInContainer()).thenReturn(true);
+            when(config.services().eks().endpointMode()).thenReturn("network");
+            when(config.services().eks().endpointHost()).thenReturn(Optional.of("aws.example.test"));
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
+                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\"}}")));
+            when(lifecycleManager.adopt(eq("cid-1"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6512)));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-1", cluster.getContainerId());
+            verify(lifecycleManager, never()).create(any());
         }
 
         @Test
@@ -2229,6 +2375,87 @@ class EksClusterManagerTest {
             verify(copyCmd).withHostResource(pubFile.toString());
             verify(copyCmd, atLeastOnce()).withRemotePath("/etc");
             verify(copyCmd, atLeastOnce()).exec();
+        }
+
+        @Test
+        void startClusterAddsTheConfiguredEndpointHostToTheCertificate(@TempDir Path tempDir) {
+            when(eks.irsaSigningKey()).thenReturn(false);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+            when(eks.endpointHost()).thenReturn(Optional.of("aws.example.test"));
+
+            Cluster cluster = new Cluster();
+            cluster.setName("my-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertTrue(cmd.contains("--tls-san=localhost"));
+            assertTrue(cmd.contains("--tls-san=aws.example.test"));
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.forClass(Map.class);
+            verify(builder).withLabels(labels.capture());
+            assertEquals("aws.example.test", labels.getValue().get("io.floci.eks.endpoint-host"));
+        }
+
+        @Test
+        void startClusterAddsABareIpv6EndpointHostToTheCertificate(@TempDir Path tempDir) {
+            when(eks.irsaSigningKey()).thenReturn(false);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+            when(eks.endpointHost()).thenReturn(Optional.of("[fd00::24]"));
+
+            Cluster cluster = new Cluster();
+            cluster.setName("my-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+
+            assertTrue(cmdCaptor.getValue().contains("--tls-san=fd00::24"), cmdCaptor.getValue()::toString);
+        }
+
+        @Test
+        void startClusterAddsLocalhostOnceWhenItIsTheConfiguredEndpointHost(@TempDir Path tempDir) {
+            when(eks.irsaSigningKey()).thenReturn(false);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+            when(eks.endpointHost()).thenReturn(Optional.of("LOCALHOST"));
+
+            Cluster cluster = new Cluster();
+            cluster.setName("my-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+
+            assertEquals(List.of("--tls-san=localhost"),
+                    cmdCaptor.getValue().stream().filter(a -> a.startsWith("--tls-san=")).toList());
+        }
+
+        @Test
+        void startClusterAddsNoExtraCertificateNameWithoutAnEndpointHost(@TempDir Path tempDir) {
+            when(eks.irsaSigningKey()).thenReturn(false);
+            when(eks.dataPath()).thenReturn(tempDir.toString());
+
+            Cluster cluster = new Cluster();
+            cluster.setName("my-cluster");
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertEquals(List.of("--tls-san=localhost"),
+                    cmd.stream().filter(a -> a.startsWith("--tls-san=")).toList());
         }
 
         @Test

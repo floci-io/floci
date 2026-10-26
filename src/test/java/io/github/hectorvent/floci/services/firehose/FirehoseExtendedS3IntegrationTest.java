@@ -54,6 +54,11 @@ class FirehoseExtendedS3IntegrationTest {
                         "Prefix": "events/data/",
                         "ErrorOutputPrefix": "events/errors/",
                         "CompressionFormat": "GZIP",
+                        "CloudWatchLoggingOptions": {
+                          "Enabled": true,
+                          "LogGroupName": "/aws/kinesisfirehose/extended",
+                          "LogStreamName": "DestinationDelivery"
+                        },
                         "BufferingHints": { "SizeInMBs": 64, "IntervalInSeconds": 120 }
                       }
                     }
@@ -88,6 +93,10 @@ class FirehoseExtendedS3IntegrationTest {
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.SizeInMBs", equalTo(64))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.IntervalInSeconds", equalTo(120))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.EncryptionConfiguration.NoEncryptionConfig", equalTo("NoEncryption"))
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CloudWatchLoggingOptions.Enabled", equalTo(true))
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CloudWatchLoggingOptions.LogGroupName", equalTo("/aws/kinesisfirehose/extended"))
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CloudWatchLoggingOptions.LogStreamName", equalTo("DestinationDelivery"))
+            .body("DeliveryStreamDescription.Destinations[0].S3DestinationDescription.CloudWatchLoggingOptions.LogGroupName", equalTo("/aws/kinesisfirehose/extended"))
             .body("DeliveryStreamDescription.Destinations[0].S3DestinationDescription.BucketARN", equalTo(BUCKET_ARN))
             .body("DeliveryStreamDescription.Destinations[0].S3DestinationDescription.RoleARN", equalTo(ROLE_ARN));
     }
@@ -124,6 +133,8 @@ class FirehoseExtendedS3IntegrationTest {
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.SizeInMBs", equalTo(5))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.IntervalInSeconds", equalTo(300))
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.EncryptionConfiguration.NoEncryptionConfig", equalTo("NoEncryption"))
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CloudWatchLoggingOptions.Enabled", equalTo(false))
+            .body("DeliveryStreamDescription.Destinations[0].S3DestinationDescription.CloudWatchLoggingOptions.Enabled", equalTo(false))
             // #2200: a create response that omits S3BackupMode, followed by a later describe
             // that fills it in, applied cleanly and then re-planned dirty forever in Terraform.
             .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.S3BackupMode", equalTo("Disabled"));
@@ -433,6 +444,30 @@ class FirehoseExtendedS3IntegrationTest {
         putFiveRecordsAndFlush(stream);
         String key = firstDeliveredKey(bucket, "events/");
         assertTrue(key.matches("events/" + TIME_PREFIX_REGEX + stream + SUFFIX_REGEX), key);
+    }
+
+    @Test
+    @Order(17)
+    void createDeliveryStreamRefusesEnabledLoggingWithoutAStreamName() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateDeliveryStream")
+            .body("""
+                    {
+                      "DeliveryStreamName": "logging-without-stream-name",
+                      "ExtendedS3DestinationConfiguration": {
+                        "RoleARN": "%s",
+                        "BucketARN": "%s",
+                        "CloudWatchLoggingOptions": { "Enabled": true, "LogGroupName": "g" }
+                      }
+                    }
+                    """.formatted(ROLE_ARN, BUCKET_ARN))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"))
+            .body("message", equalTo("CloudWatch Log Stream Name is required if CloudWatch Logging is enabled"));
     }
 
     private void createDeliveryStream(String streamName, String bucket, String extraDestinationJson) {

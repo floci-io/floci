@@ -15,7 +15,6 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -70,7 +69,7 @@ class CloudWatchLogsQueryIdentifiersIntegrationTest {
 
         startQuery(List.of(group + ":")).then().statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"))
-                .body("message", containsString(group + ":"));
+                .body("message", equalTo("The specified log group does not exist."));
     }
 
     @Test
@@ -79,7 +78,7 @@ class CloudWatchLogsQueryIdentifiersIntegrationTest {
 
         startQuery(List.of("not-an-arn:log-group:" + group + ":")).then().statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"))
-                .body("message", containsString(group + ":"));
+                .body("message", equalTo("The specified log group does not exist."));
     }
 
     @ParameterizedTest

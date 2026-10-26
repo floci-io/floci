@@ -15,6 +15,7 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -30,9 +31,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -353,6 +359,159 @@ class CodeArtifactPypiControllerTest {
         assertTrue(receivedBody.get().contains("new content"));
     }
 
+    /**
+     * Qodo review finding: a real twine upload that republishes a coordinate an earlier
+     * updatePackageVersionsStatus/disposePackageVersions call left Archived or Disposed must not
+     * leave that override standing over the fresh content this upload just forwarded.
+     */
+    @Test
+    void uploadWithAVersionFieldClearsAnyStaleStatusOverrideAfterForwardingSucceeds() {
+        backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 404, "text/plain", ""));
+        backend.createContext("/", exchange -> respond(exchange, 200, "text/plain", ""));
+        byte[] body = multipartWithFileAndVersion("boundary123", "my-pkg", "1.0.0", "my_pkg-1.0.0.tar.gz",
+                "new content");
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(200, response.getStatus());
+        verify(service).forgetContainerBackedStatusOverrideIfUnchanged(any(), eq(DOMAIN), any(), eq(REPOSITORY),
+                eq("pypi"), isNull(), eq("my-pkg"), eq("1.0.0"), isNull());
+    }
+
+    /**
+     * Raised by Greptile's review: pypiserver files an upload under the identity its own filename
+     * embeds, never under whatever the form's own name/version fields say. A version field naming
+     * an unrelated coordinate (one that is not Archived/Disposed) while the real filename embeds
+     * a different version must be refused outright, not let the guard check the harmless
+     * coordinate while the real upload lands under the mismatched one regardless.
+     */
+    @Test
+    void uploadRejectsAVersionFieldThatDoesNotMatchTheFilename() {
+        AtomicBoolean uploadReceived = new AtomicBoolean();
+        backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 404, "text/plain", ""));
+        backend.createContext("/", exchange -> {
+            uploadReceived.set(true);
+            respond(exchange, 200, "text/plain", "");
+        });
+        byte[] body = multipartWithFileAndVersion("boundary123", "my-pkg", "9.9.9", "my_pkg-1.0.0.tar.gz",
+                "new content");
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(400, response.getStatus());
+        assertEquals(false, uploadReceived.get());
+        verify(service, never()).requireContainerBackedVersionNotArchivedOrDisposed(any(), any(), any(), any(),
+                any(), any(), any(), any());
+    }
+
+    /**
+     * hectorvent's review of this PR: the fix above only cleared a stale Archived/Disposed
+     * override after the sidecar had already accepted the republished content, which the User
+     * Guide rules out unconditionally for both statuses. The upload must now be refused before it
+     * ever reaches pypiserver.
+     */
+    @Test
+    void uploadRejectsAnArchivedOrDisposedVersionWithoutForwarding() {
+        AtomicBoolean uploadReceived = new AtomicBoolean();
+        backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 404, "text/plain", ""));
+        backend.createContext("/", exchange -> {
+            uploadReceived.set(true);
+            respond(exchange, 200, "text/plain", "");
+        });
+        doThrow(new AwsException("ConflictException", "Package version '1.0.0' of package 'my-pkg' is Disposed "
+                + "and cannot be republished.", 409))
+                .when(service).requireContainerBackedVersionNotArchivedOrDisposed(any(), eq(DOMAIN), any(),
+                        eq(REPOSITORY), eq("pypi"), isNull(), eq("my-pkg"), eq("1.0.0"));
+        byte[] body = multipartWithFileAndVersion("boundary123", "my-pkg", "1.0.0", "my_pkg-1.0.0.tar.gz",
+                "new content");
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(409, response.getStatus());
+        assertEquals(false, uploadReceived.get());
+        verify(service, never()).recordContainerBackedAssetBytes(any(), any(), any(), any(), any(), any(), any(),
+                anyLong(), anyLong());
+    }
+
+    /**
+     * hectorvent's follow-up on this PR: a missing version field must not let an upload of an
+     * Archived/Disposed version through just because there is no explicit coordinate to check.
+     * The uploaded filename itself names version 1.0.0, which this package's only override marks
+     * Disposed, so the guard must still fire even though the form carries no version field at all.
+     */
+    @Test
+    void uploadWithNoVersionFieldStillRejectsAFilenameNamingAnArchivedOrDisposedVersion() {
+        AtomicBoolean uploadReceived = new AtomicBoolean();
+        backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 404, "text/plain", ""));
+        backend.createContext("/", exchange -> {
+            uploadReceived.set(true);
+            respond(exchange, 200, "text/plain", "");
+        });
+        when(service.containerBackedOverriddenVersionStatusesByRepository(any(), eq(DOMAIN), any(), eq(REPOSITORY),
+                eq("pypi"))).thenReturn(Map.of("my-pkg", Map.of("1.0.0", "Disposed")));
+        doThrow(new AwsException("ConflictException", "Package version '1.0.0' of package 'my-pkg' is Disposed "
+                + "and cannot be republished.", 409))
+                .when(service).requireContainerBackedVersionNotArchivedOrDisposed(any(), eq(DOMAIN), any(),
+                        eq(REPOSITORY), eq("pypi"), isNull(), eq("my-pkg"), eq("1.0.0"));
+        byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.0.tar.gz", "new content");
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(409, response.getStatus());
+        assertEquals(false, uploadReceived.get());
+    }
+
+    /**
+     * Greptile's follow-up review of this PR: the form's own {@code name} field is no more
+     * trustworthy than its missing {@code version} field, since pypiserver indexes a real upload
+     * by the filename, never the form. {@code other-pkg}'s own overrides (there are none) must not
+     * be the only ones checked: the filename actually names {@code my-pkg} version {@code 1.0.0},
+     * which is Disposed, so the guard must still fire even though the form's {@code name} claims
+     * an unrelated package.
+     */
+    @Test
+    void uploadWithNoVersionFieldStillRejectsAFilenameNamingADifferentArchivedOrDisposedPackage() {
+        AtomicBoolean uploadReceived = new AtomicBoolean();
+        backend.createContext("/simple/other-pkg/", exchange -> respond(exchange, 404, "text/plain", ""));
+        backend.createContext("/", exchange -> {
+            uploadReceived.set(true);
+            respond(exchange, 200, "text/plain", "");
+        });
+        when(service.containerBackedOverriddenVersionStatusesByRepository(any(), eq(DOMAIN), any(), eq(REPOSITORY),
+                eq("pypi"))).thenReturn(Map.of("my-pkg", Map.of("1.0.0", "Disposed")));
+        doThrow(new AwsException("ConflictException", "Package version '1.0.0' of package 'my-pkg' is Disposed "
+                + "and cannot be republished.", 409))
+                .when(service).requireContainerBackedVersionNotArchivedOrDisposed(any(), eq(DOMAIN), any(),
+                        eq(REPOSITORY), eq("pypi"), isNull(), eq("my-pkg"), eq("1.0.0"));
+        byte[] body = multipartWithFile("boundary123", "other-pkg", "my_pkg-1.0.0.tar.gz", "new content");
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(409, response.getStatus());
+        assertEquals(false, uploadReceived.get());
+    }
+
+    /** A missing version field, same as the readme capture right below it, has no coordinate to clear. */
+    @Test
+    void uploadWithNoVersionFieldNeverClearsAnyStatusOverride() {
+        backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 404, "text/plain", ""));
+        backend.createContext("/", exchange -> respond(exchange, 200, "text/plain", ""));
+        byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", "new content");
+
+        controller.upload(headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY,
+                body);
+
+        verify(service, never()).forgetContainerBackedStatusOverrideIfUnchanged(any(), any(), any(), any(), any(),
+                any(), any(), any(), any());
+        verify(service, never()).requireContainerBackedVersionNotArchivedOrDisposed(any(), any(), any(), any(),
+                any(), any(), any(), any());
+    }
+
     @Test
     void uploadFailsClosedWhenTheExistenceCheckCannotReachTheBackend() {
         // Nothing listens on this port: the existence check's own connect attempt fails, which
@@ -443,6 +602,22 @@ class CodeArtifactPypiControllerTest {
         String body = "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"name\"\r\n\r\n"
                 + packageName + "\r\n"
+                + "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"content\"; filename=\"" + filename + "\"\r\n"
+                + "Content-Type: application/octet-stream\r\n\r\n"
+                + content + "\r\n"
+                + "--" + boundary + "--\r\n";
+        return body.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static byte[] multipartWithFileAndVersion(String boundary, String packageName, String version,
+            String filename, String content) {
+        String body = "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"name\"\r\n\r\n"
+                + packageName + "\r\n"
+                + "--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"version\"\r\n\r\n"
+                + version + "\r\n"
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"content\"; filename=\"" + filename + "\"\r\n"
                 + "Content-Type: application/octet-stream\r\n\r\n"

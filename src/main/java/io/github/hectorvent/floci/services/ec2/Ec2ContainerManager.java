@@ -52,6 +52,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
@@ -153,6 +154,7 @@ public class Ec2ContainerManager {
     private final Ec2InstanceTypeCatalog instanceTypeCatalog;
     private SecurityGroupFirewallManager firewallManager;
     private final ExecutorService executor;
+    private final Map<String, CompletableFuture<Void>> lifecycleOperations = new ConcurrentHashMap<>();
     private final Duration userDataExecutionTimeout;
     private final Set<ResultCallback<Frame>> activeUserDataCallbacks = ConcurrentHashMap.newKeySet();
 
@@ -916,6 +918,31 @@ public class Ec2ContainerManager {
         }
     }
 
+    private void submitLifecycleOperation(String containerId, Runnable operation) {
+        synchronized (lifecycleOperations) {
+            CompletableFuture<Void> previous = lifecycleOperations.getOrDefault(containerId,
+                    CompletableFuture.completedFuture(null));
+            CompletableFuture<Void> completed = new CompletableFuture<>();
+            lifecycleOperations.put(containerId, completed);
+            previous.whenComplete((ignored, priorFailure) -> {
+                try {
+                    executor.submit(() -> {
+                        try {
+                            operation.run();
+                        } finally {
+                            lifecycleOperations.remove(containerId, completed);
+                            completed.complete(null);
+                        }
+                    });
+                } catch (RuntimeException failure) {
+                    lifecycleOperations.remove(containerId, completed);
+                    completed.completeExceptionally(failure);
+                    LOG.warnv(failure, "Could not schedule lifecycle operation for EC2 container {0}", containerId);
+                }
+            });
+        }
+    }
+
     /**
      * Gracefully stops a running container (30 second timeout then SIGKILL).
      * Updates instance state through stopping → stopped.
@@ -926,19 +953,20 @@ public class Ec2ContainerManager {
             instance.setState(InstanceState.stopped());
             return;
         }
-        instance.setState(InstanceState.stopping());
-        executor.submit(() -> {
+        InstanceState stopping = InstanceState.stopping();
+        instance.setState(stopping);
+        submitLifecycleOperation(containerId, () -> {
             // Sidecars forward to the container's current IP, which Docker reassigns on the
             // next start; tear them down so no forward is left pointing at a stale address.
             portForwardManager.unpublishAll(instance);
             try {
                 dockerClient.stopContainerCmd(containerId).withTimeout(30).exec();
-            } catch (NotFoundException e) {
-                // already gone
+            } catch (NotFoundException ignored) {
+                // An already removed container needs no further stop.
             } catch (Exception e) {
                 LOG.warnv("Error stopping EC2 container {0}: {1}", containerId, e.getMessage());
             }
-            instance.setState(InstanceState.stopped());
+            instance.compareAndSetState(stopping, InstanceState.stopped());
         });
     }
 
@@ -962,8 +990,9 @@ public class Ec2ContainerManager {
             }
             return;
         }
-        instance.setState(InstanceState.pending());
-        executor.submit(() -> {
+        InstanceState pending = InstanceState.pending();
+        instance.setState(pending);
+        submitLifecycleOperation(containerId, () -> {
             try {
                 dockerClient.startContainerCmd(containerId).exec();
                 boolean running = false;
@@ -1000,14 +1029,16 @@ public class Ec2ContainerManager {
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                instance.setState(InstanceState.stopped());
+                instance.compareAndSetState(pending, InstanceState.stopped());
                 return;
             } catch (Exception e) {
                 LOG.warnv("Error starting EC2 container {0}: {1}", containerId, e.getMessage());
-                instance.setState(InstanceState.stopped());
+                instance.compareAndSetState(pending, InstanceState.stopped());
                 return;
             }
-            instance.setState(InstanceState.running());
+            if (!instance.compareAndSetState(pending, InstanceState.running())) {
+                return;
+            }
             if (postStart != null) {
                 try {
                     postStart.run();
@@ -1306,12 +1337,15 @@ public class Ec2ContainerManager {
         String containerId;
         String containerIp;
         String imdsSourceIp;
+        String firewallEniId;
         int sshHostPort;
         synchronized (instance) {
             containerId = instance.getDockerContainerId();
             containerIp = instance.getContainerBridgeIp();
             imdsSourceIp = instance.getImdsSourceIp();
             sshHostPort = instance.getSshHostPort();
+            firewallEniId = instance.getNetworkInterfaces() == null || instance.getNetworkInterfaces().isEmpty()
+                    ? null : instance.getNetworkInterfaces().getFirst().getNetworkInterfaceId();
             instance.setState(InstanceState.shuttingDown());
         }
         executor.submit(() -> {
@@ -1340,9 +1374,8 @@ public class Ec2ContainerManager {
                         Thread.currentThread().interrupt();
                     }
                 }
-                if (firewallManager != null && firewallManager.enabled()
-                        && instance.getNetworkInterfaces() != null && !instance.getNetworkInterfaces().isEmpty()) {
-                    firewallManager.unregister(instance.getNetworkInterfaces().getFirst().getNetworkInterfaceId());
+                if (firewallManager != null && firewallManager.enabled() && firewallEniId != null) {
+                    firewallManager.unregister(firewallEniId);
                 }
                 if (sshHostPort > 0) {
                     portAllocator.release(sshHostPort);

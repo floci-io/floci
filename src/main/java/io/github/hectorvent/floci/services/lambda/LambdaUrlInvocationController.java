@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -44,10 +45,14 @@ import java.util.UUID;
  *
  * Supports host-based routing if possible, but also path-based routing:
  * /lambda-url/{urlId}/{proxy: .*}
+ *
+ * Requests run on virtual threads: an invocation waits for its function to finish, and that wait
+ * must not hold one of the shared request workers.
  */
 @Path("/lambda-url/{urlId}")
 @Produces(MediaType.WILDCARD)
 @Consumes(MediaType.WILDCARD)
+@RunOnVirtualThread
 public class LambdaUrlInvocationController {
 
     private static final Logger LOG = Logger.getLogger(LambdaUrlInvocationController.class);

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.testing.MainSources;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -114,8 +115,7 @@ class CfnProvisionerFixtureTest {
      */
     @Test
     void everyProvisionerIsReachableThroughThePublicBuilderOrExplicitlyExempt() throws Exception {
-        Path provisioners = Path.of(
-                "src/main/java/io/github/hectorvent/floci/services/cloudformation/provisioners");
+        Path provisioners = MainSources.packageDir(CfnResourceProvisioner.class);
         Set<String> onDisk;
         try (Stream<Path> files = Files.list(provisioners)) {
             onDisk = files.map(f -> f.getFileName().toString())

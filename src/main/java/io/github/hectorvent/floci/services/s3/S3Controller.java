@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsCanonicalUserId;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -15,6 +16,7 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
@@ -244,20 +246,26 @@ public class S3Controller {
             return Response.ok(uiPages.landingHtml(), MediaType.TEXT_HTML).build();
         }
         try {
+            boolean includeRegion = List.of("bucket-region", "continuation-token", "max-buckets", "prefix")
+                    .stream().anyMatch(queryParams::containsKey);
             List<Bucket> buckets = s3Service.listBuckets();
             XmlBuilder xml = new XmlBuilder()
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                     .start("ListAllMyBucketsResult", AwsNamespaces.S3)
                     .start("Owner")
-                    .elem("ID", regionResolver.getAccountId())
+                    .elem("ID", AwsCanonicalUserId.forAccount(regionResolver.getAccountId()))
                     .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
                     .end("Owner")
                     .start("Buckets");
             for (Bucket b : buckets) {
                 xml.start("Bucket")
                    .elem("Name", b.getName())
-                   .elem("CreationDate", ISO_FORMAT.format(b.getCreationDate()))
-                   .end("Bucket");
+                   .elem("CreationDate", ISO_FORMAT.format(b.getCreationDate()));
+                if (includeRegion) {
+                    String region = b.getRegion();
+                    xml.elem("BucketRegion", region == null || region.isBlank() ? regionResolver.getDefaultRegion() : region);
+                }
+                xml.end("Bucket");
             }
             xml.end("Buckets").end("ListAllMyBucketsResult");
             return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
@@ -476,8 +484,7 @@ public class S3Controller {
             }
             String lockEnabled = httpHeaders.getHeaderString("x-amz-bucket-object-lock-enabled");
             if ("true".equalsIgnoreCase(lockEnabled)) {
-                s3Service.putBucketVersioning(bucket, "Enabled");
-                s3Service.setBucketObjectLockEnabled(bucket);
+                s3Service.enableObjectLockOnCreate(bucket);
             }
             return Response.ok()
                     .header("Location", "/" + bucket)
@@ -638,6 +645,15 @@ public class S3Controller {
                 return Response.ok(s3Service.getBucketLogging(bucket))
                         .type("application/xml")
                         .build();
+            }
+            if (hasQueryParam(uriInfo, "policyStatus")) {
+                s3Service.authorizeBucketRead(bucket, "s3:GetBucketPolicyStatus", authorization);
+                XmlBuilder xml = new XmlBuilder()
+                        .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                        .start("PolicyStatus")
+                        .elem("IsPublic", s3Service.isBucketPolicyPublic(bucket))
+                        .end("PolicyStatus");
+                return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
             }
             if (hasQueryParam(uriInfo, "policy")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketPolicy", authorization);
@@ -1491,11 +1507,8 @@ public class S3Controller {
         if (cors.maxAgeSeconds() > 0) {
             builder.header("Access-Control-Max-Age", cors.maxAgeSeconds());
         }
-        if (!cors.allowedHeaders().isEmpty()) {
-            String hdrs = cors.allowedHeaders().contains("*")
-                    ? "*"
-                    : String.join(", ", cors.allowedHeaders());
-            builder.header("Access-Control-Allow-Headers", hdrs);
+        if (cors.allowHeaders() != null) {
+            builder.header("Access-Control-Allow-Headers", cors.allowHeaders());
         }
         if (!cors.exposeHeaders().isEmpty()) {
             builder.header("Access-Control-Expose-Headers", String.join(", ", cors.exposeHeaders()));
@@ -1975,11 +1988,11 @@ public class S3Controller {
         String initiatorAccountId = upload.getInitiatorAccountId() != null
                 ? upload.getInitiatorAccountId() : ownerAccountId;
         xml.start("Initiator")
-           .elem("ID", initiatorAccountId)
+           .elem("ID", AwsCanonicalUserId.forAccount(initiatorAccountId))
            .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
            .end("Initiator")
            .start("Owner")
-           .elem("ID", ownerAccountId)
+           .elem("ID", AwsCanonicalUserId.forAccount(ownerAccountId))
            .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
            .end("Owner")
            .elem("StorageClass", upload.getStorageClass());
@@ -4511,8 +4524,10 @@ public class S3Controller {
         }
         String credential = iamCredential(httpHeaders, uriInfo);
         String resource = S3PublicAccessEvaluator.bucketArn(AwsRegions.partitionFor(region), bucket);
+        ResourcePolicyDecision policyDecision = s3Service.ownsBucket(bucket) ? null : ResourcePolicyDecision.NEUTRAL;
         for (String action : actions) {
-            iamEnforcementFilter.authorizeAdditionalResource(credential, action, resource);
+            iamEnforcementFilter.authorizeAdditionalResource(
+                    credential, action, resource, policyDecision);
         }
     }
 

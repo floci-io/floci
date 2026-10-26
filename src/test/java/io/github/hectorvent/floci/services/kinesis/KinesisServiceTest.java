@@ -80,14 +80,15 @@ class KinesisServiceTest {
     }
 
     @Test
-    void listStreams() {
-        kinesisService.createStream("stream-a", 1, REGION);
+    void listStreamDetails() {
         kinesisService.createStream("stream-b", 1, REGION);
+        kinesisService.createStream("stream-a", 1, REGION);
         kinesisService.createStream("other", 1, "eu-west-1");
 
-        List<String> names = kinesisService.listStreams(REGION);
-        assertEquals(2, names.size());
-        assertTrue(names.containsAll(List.of("stream-a", "stream-b")));
+        List<String> names = kinesisService.listStreamDetails(REGION).stream()
+                .map(KinesisStream::getStreamName)
+                .toList();
+        assertEquals(List.of("stream-a", "stream-b"), names);
     }
 
     @Test
@@ -101,7 +102,7 @@ class KinesisServiceTest {
         kinesisService.createStream("to-delete", 1, REGION);
         kinesisService.deleteStream("to-delete", REGION);
 
-        assertTrue(kinesisService.listStreams(REGION).isEmpty());
+        assertTrue(kinesisService.listStreamDetails(REGION).isEmpty());
     }
 
     @Test
@@ -1007,7 +1008,7 @@ class KinesisServiceTest {
 
         // The delete ran after the producer's persist, so the stream must be gone, not resurrected
         // by a stale trailing store.put.
-        assertTrue(kinesisService.listStreams(REGION).isEmpty(),
+        assertTrue(kinesisService.listStreamDetails(REGION).isEmpty(),
                 "a deleted stream must not be resurrected by an overlapping append");
         assertThrows(AwsException.class, () -> kinesisService.describeStream("res", REGION),
                 "the resurrected stream must not be describable");
@@ -1074,7 +1075,7 @@ class KinesisServiceTest {
         assertEquals("ResourceNotFoundException", ((AwsException) t).getErrorCode(),
                 "a delete-before-append must surface the same missing-stream error as any absent stream");
 
-        assertTrue(kinesisService.listStreams(REGION).isEmpty(),
+        assertTrue(kinesisService.listStreamDetails(REGION).isEmpty(),
                 "the deleted stream must not be resurrected by the failed append");
     }
 
@@ -1270,7 +1271,7 @@ class KinesisServiceTest {
             pool.shutdownNow();
         }
 
-        assertTrue(service.listStreams(REGION).isEmpty(),
+        assertTrue(service.listStreamDetails(REGION).isEmpty(),
                 () -> label + " must not resurrect a concurrently deleted stream");
         AwsException notFound = assertThrows(AwsException.class,
                 () -> service.describeStream(META_STREAM, REGION),

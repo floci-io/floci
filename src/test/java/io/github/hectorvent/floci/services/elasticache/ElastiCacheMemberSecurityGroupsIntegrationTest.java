@@ -111,6 +111,69 @@ class ElastiCacheMemberSecurityGroupsIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void sdkModifyReplacesSecurityGroupsOnEveryMember(boolean clusterEnabled) {
+        String groupId = groupId();
+        try (ElastiCacheClient client = client()) {
+            try {
+                client.createReplicationGroup(createRequest(groupId, clusterEnabled)
+                        .securityGroupIds(SECURITY_GROUP_IDS).build());
+
+                client.modifyReplicationGroup(request -> request.replicationGroupId(groupId)
+                        .securityGroupIds(List.of("sg-modified")));
+
+                assertMemberSecurityGroups(client, groupId, clusterEnabled ? 4 : 1, List.of("sg-modified"));
+            } finally {
+                deleteGroup(client, groupId);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void modifyThatNamesNoSecurityGroupsKeepsTheMemberships(boolean clusterEnabled) {
+        String groupId = groupId();
+        try (ElastiCacheClient client = client()) {
+            try {
+                client.createReplicationGroup(createRequest(groupId, clusterEnabled)
+                        .securityGroupIds(SECURITY_GROUP_IDS).build());
+
+                client.modifyReplicationGroup(request -> request.replicationGroupId(groupId));
+
+                assertMemberSecurityGroups(client, groupId, clusterEnabled ? 4 : 1, SECURITY_GROUP_IDS);
+            } finally {
+                deleteGroup(client, groupId);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SecurityGroupIds.SecurityGroupId", "SecurityGroupIds.member"})
+    void queryModifyReplacesTheWholeListOnEveryMember(String prefix) {
+        String groupId = groupId();
+        try (ElastiCacheClient client = client()) {
+            try {
+                client.createReplicationGroup(createRequest(groupId, false)
+                        .securityGroupIds(SECURITY_GROUP_IDS).build());
+
+                given()
+                        .port(endpoint.getPort())
+                        .header("Authorization", AUTH_HEADER)
+                        .formParam("Action", "ModifyReplicationGroup")
+                        .formParam("Version", "2015-02-02")
+                        .formParam("ReplicationGroupId", groupId)
+                        .formParam(prefix + ".1", "sg-replaced")
+                .when().post("/")
+                .then().statusCode(200);
+
+                assertMemberSecurityGroups(client, groupId, 1, List.of("sg-replaced"));
+            } finally {
+                deleteGroup(client, groupId);
+            }
+        }
+    }
+
     private ElastiCacheClient client() {
         return ElastiCacheClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))

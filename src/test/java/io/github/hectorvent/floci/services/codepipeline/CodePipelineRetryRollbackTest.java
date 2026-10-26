@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -86,7 +87,7 @@ class CodePipelineRetryRollbackTest {
                                            EventBridgeService eventBridge) {
         return new CodePipelineService(storage, mapper, mock(CodeBuildService.class),
                 mock(CodeDeployService.class), lambda, s3,
-                new CodePipelineEventPublisher(eventBridge, null, mapper), 500L,
+                new CodePipelineEventPublisher(eventBridge, null, mapper), 500L, 100L,
                 TimeUnit.SECONDS.toNanos(5), () -> { });
     }
 
@@ -315,7 +316,9 @@ class CodePipelineRetryRollbackTest {
                 REGION, ACCOUNT).path("pipelineExecutionId").asText();
         awaitStatus("started-event", rollbackId, "Succeeded");
 
-        assertEquals(List.of("STARTED", "SUCCEEDED"), pipelineStates(eventBridge, rollbackId));
+        // The terminal status becomes visible before the runner publishes its final event.
+        await().atMost(10, TimeUnit.SECONDS).untilAsserted(() ->
+                assertEquals(List.of("STARTED", "SUCCEEDED"), pipelineStates(eventBridge, rollbackId)));
     }
 
     // Catches: a rollback whose scheduling is rejected leaving the STARTED event without a FAILED one.

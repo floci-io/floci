@@ -556,6 +556,14 @@ public class SnsService implements Resettable, ResourceProvider {
 
     public Topic createTopic(String name, Map<String, String> attributes,
                              Map<String, String> tags, String region) {
+        return createTopicWithStatus(name, attributes, tags, region).topic();
+    }
+
+    public record TopicCreation(Topic topic, boolean created) {
+    }
+
+    public synchronized TopicCreation createTopicWithStatus(String name, Map<String, String> attributes,
+                                                            Map<String, String> tags, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameter", "Topic name is required.", 400);
         }
@@ -566,7 +574,7 @@ public class SnsService implements Resettable, ResourceProvider {
         String key = topicKey(region, topicArn);
 
         Topic existing = topicStore.get(key).orElse(null);
-        if (existing != null) return existing;
+        if (existing != null) return new TopicCreation(existing, false);
 
         Topic topic = new Topic(name, topicArn);
         if (attributes != null) topic.getAttributes().putAll(attributes);
@@ -583,7 +591,7 @@ public class SnsService implements Resettable, ResourceProvider {
 
         topicStore.put(key, topic);
         LOG.infov("Created SNS topic: {0} in region {1}", name, region);
-        return topic;
+        return new TopicCreation(topic, true);
     }
 
     public void deleteTopic(String topicArn, String region) {
@@ -911,7 +919,17 @@ public class SnsService implements Resettable, ResourceProvider {
         }
     }
 
-    public Subscription subscribe(String topicArn, String protocol, String endpoint, String region, Map<String, String> attributes) {
+    public Subscription subscribe(String topicArn, String protocol, String endpoint, String region,
+                                  Map<String, String> attributes) {
+        return subscribeWithStatus(topicArn, protocol, endpoint, region, attributes).subscription();
+    }
+
+    public record SubscriptionCreation(Subscription subscription, boolean created) {
+    }
+
+    public SubscriptionCreation subscribeWithStatus(String topicArn, String protocol,
+                                                    String endpoint, String region,
+                                                    Map<String, String> attributes) {
         String topicKey = topicKey(region, topicArn);
         if (topicStore.get(topicKey).isEmpty() && !ensureControlTowerManagedTopic(topicArn, region)) {
             throw new AwsException("NotFound", "Topic does not exist.", 404);
@@ -934,29 +952,32 @@ public class SnsService implements Resettable, ResourceProvider {
             requireLargePayloadProtocol(protocol);
         }
 
-        for (Subscription existing : subscriptionsByTopic(topicArn, region)) {
-            if (protocol.equals(existing.getProtocol())
-                    && Objects.equals(endpoint, existing.getEndpoint())) {
-                return existing;
+        Subscription subscription;
+        synchronized (this) {
+            for (Subscription existing : subscriptionsByTopic(topicArn, region)) {
+                if (protocol.equals(existing.getProtocol())
+                        && Objects.equals(endpoint, existing.getEndpoint())) {
+                    return new SubscriptionCreation(existing, false);
+                }
             }
+
+            String subscriptionArn = topicArn + ":" + UUID.randomUUID().toString();
+            subscription = new Subscription(subscriptionArn, topicArn, protocol, endpoint,
+                    regionResolver.getAccountId());
+            subscription.setAccountId(regionResolver.getAccountId());
+            if (attributes != null) subscription.getAttributes().putAll(attributes);
+
+            if (PENDING_CONFIRMATION_PROTOCOLS.contains(protocol)) {
+                String token = UUID.randomUUID().toString().replace("-", "")
+                        + UUID.randomUUID().toString().replace("-", "");
+                subscription.getAttributes().put("PendingConfirmation", "true");
+                subscription.getAttributes().put("ConfirmationToken", token);
+                LOG.infov("Subscription pending confirmation for {0} ({1}) to topic {2} in {3}",
+                        endpoint, protocol, topicArn, region);
+            }
+
+            subscriptionStore.put(subKey(region, subscriptionArn), subscription);
         }
-
-        String subscriptionArn = topicArn + ":" + UUID.randomUUID().toString();
-        Subscription subscription = new Subscription(subscriptionArn, topicArn, protocol, endpoint,
-                regionResolver.getAccountId());
-        subscription.setAccountId(regionResolver.getAccountId());
-        if (attributes != null) subscription.getAttributes().putAll(attributes);
-
-        if (PENDING_CONFIRMATION_PROTOCOLS.contains(protocol)) {
-            String token = UUID.randomUUID().toString().replace("-", "")
-                    + UUID.randomUUID().toString().replace("-", "");
-            subscription.getAttributes().put("PendingConfirmation", "true");
-            subscription.getAttributes().put("ConfirmationToken", token);
-            LOG.infov("Subscription pending confirmation for {0} ({1}) to topic {2} in {3}",
-                    endpoint, protocol, topicArn, region);
-        }
-
-        subscriptionStore.put(subKey(region, subscriptionArn), subscription);
         if (attributes == null || attributes.isEmpty()) {
             LOG.infov("Subscribed {0} ({1}) to topic {2} in {3}", endpoint, protocol, topicArn, region);
         } else {
@@ -967,7 +988,7 @@ public class SnsService implements Resettable, ResourceProvider {
             sendSubscriptionConfirmation(subscription, topicArn, region);
         }
 
-        return subscription;
+        return new SubscriptionCreation(subscription, true);
     }
 
     private boolean ensureControlTowerManagedTopic(String topicArn, String region) {
@@ -1477,7 +1498,13 @@ public class SnsService implements Resettable, ResourceProvider {
         attrs.put("RawMessageDelivery", attrs.getOrDefault("RawMessageDelivery", "false"));
         attrs.putIfAbsent("PendingConfirmation", "false");
         attrs.putIfAbsent("ConfirmationWasAuthenticated", "false");
-        attrs.putIfAbsent("FilterPolicyScope", "MessageAttributes");
+        // AWS reports FilterPolicyScope, stored or default, only alongside a filter policy.
+        String filterPolicy = attrs.get("FilterPolicy");
+        if (filterPolicy == null || filterPolicy.isEmpty()) {
+            attrs.remove("FilterPolicyScope");
+        } else {
+            attrs.putIfAbsent("FilterPolicyScope", "MessageAttributes");
+        }
         attrs.remove("ConfirmationToken");
         return attrs;
     }

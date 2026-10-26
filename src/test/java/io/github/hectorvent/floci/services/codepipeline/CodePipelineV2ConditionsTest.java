@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -279,7 +280,7 @@ class CodePipelineV2ConditionsTest {
         EventBridgeService eventBridge = mock(EventBridgeService.class);
         service = new CodePipelineService(storageFactory, mapper, mock(CodeBuildService.class),
                 mock(CodeDeployService.class), lambdaService, s3Service,
-                new CodePipelineEventPublisher(eventBridge, null, mapper), 500L,
+                new CodePipelineEventPublisher(eventBridge, null, mapper), 500L, 100L,
                 TimeUnit.SECONDS.toNanos(5), () -> { });
         ObjectNode deploy = lambdaStage("Deploy");
         addRule(deploy, "beforeEntry", "SKIP", "VariableCheck")
@@ -436,7 +437,7 @@ class CodePipelineV2ConditionsTest {
         AtomicReference<ObjectNode> pendingOverride = new AtomicReference<>();
         service = new CodePipelineService(storageFactory, mapper, mock(CodeBuildService.class),
                 mock(CodeDeployService.class), lambdaService, s3Service,
-                new CodePipelineEventPublisher(null, null, mapper), 500L,
+                new CodePipelineEventPublisher(null, null, mapper), 500L, 100L,
                 TimeUnit.MILLISECONDS.toNanos(200), () -> {
                     if (cleanupProbed.compareAndSet(false, true)) {
                         ObjectNode request = pendingOverride.get();
@@ -455,8 +456,12 @@ class CodePipelineV2ConditionsTest {
                 .put("pipelineExecutionId", executionId).put("stageName", "Deploy")
                 .put("conditionType", "ON_SUCCESS");
         pendingOverride.set(override);
-        // The run looks like it is still finishing, so the first override waits and then times out.
+        // The run marks itself Failed before it leaves activeRuns. Wait for it to leave, or its own
+        // removal can erase the synthetic marker below and let the first override resume the run.
         String runKey = ACCOUNT + ":" + executionId;
+        await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofSeconds(30))
+                .until(() -> !service.activeRuns.contains(runKey));
+        // The run looks like it is still finishing, so the first override waits and then times out.
         service.activeRuns.add(runKey);
 
         AwsException thrown = assertThrows(AwsException.class,

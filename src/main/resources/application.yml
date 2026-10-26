@@ -43,6 +43,12 @@ quarkus:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
     delay-enabled: true
+  virtual-threads:
+    # AWS JSON 1.0, CBOR, Query, Invoke and function URL requests run on virtual threads (see
+    # AwsJsonController), long polls among them. At shutdown, interrupt any still running after
+    # 10 s, the interval Quarkus uses for worker threads, instead of its default minute.
+    # Fixed at build time.
+    shutdown-timeout: 10s
   index-dependency:
     swagger-models-v2:
       group-id: io.swagger
@@ -201,14 +207,23 @@ floci:
       # mount-user:           # run mounting containers as "uid[:gid]" (access point PosixUser)
       # mount-group-add:      # supplementary gid added to mounting containers
     wal:
-      # Also the cadence at which journaled stores under persistent mode (CloudWatch Logs events,
-      # the S3 object index) fold their .wal file into the store's JSON file.
+      # Also the cadence at which journaled stores under persistent mode (CloudWatch Logs events and
+      # metric datapoints, the S3 object index) fold their .wal file into the store's JSON file.
       compaction-interval-ms: 30000
     services:
       ssm:
         flush-interval-ms: 5000
       dynamodb:
         flush-interval-ms: 5000
+        # single-file: every table in dynamodb-items.json, rewritten on any item change.
+        # per-table: files per table under dynamodb-items/, rewritten only where an item changed
+        # (persistent: on the write, hybrid: on the flush interval; wal: each write appends one
+        # record to dynamodb-items/journal.wal and changed files are rewritten on the WAL
+        # compaction interval). An existing single-file store is migrated on first start.
+        item-layout: single-file          # FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_LAYOUT
+        # per-table only: files per table. A write rewrites only its item's file; changing the
+        # count rewrites the files on the next start.
+        item-shards: 1                    # FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_SHARDS
       sns:
         flush-interval-ms: 5000
       lambda:
@@ -368,6 +383,11 @@ floci:
     # attempt: a control-plane request that is safe to repeat is tried up to six times. Keep in step with
     # the @WithDefault on EmulatorConfig.DockerConfig.apiTimeoutSeconds: a value set here WINS over the annotation.
     api-timeout-seconds: 300
+    # FLOCI_DOCKER_IMAGE_PULL_TIMEOUT_SECONDS: how long each attempt at an image pull may take; a pull
+    # still downloading when it passes is tried again, three attempts in all.
+    # Keep in step with the @WithDefault on EmulatorConfig.DockerConfig.imagePullTimeoutSeconds: a value
+    # set here WINS over the annotation.
+    image-pull-timeout-seconds: 300
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
@@ -386,6 +406,7 @@ floci:
       max-message-size: 1048576
       clear-fifo-deduplication-cache-on-purge: false
       receipt-handle-secret: local-emulator-secret
+      cloudwatch-metrics-enabled: true   # FLOCI_SERVICES_SQS_CLOUDWATCH_METRICS_ENABLED - publish AWS/SQS queue metrics to CloudWatch once a minute
       # QueueUrl shape. floci is <base-url>/<account>/<name>,
       # aws is https://sqs.<region>.<partition dns suffix>/<account>/<name>
       endpoint-strategy: floci
@@ -430,6 +451,8 @@ floci:
       poll-interval-ms: 1000
       async-retry-delay-seconds: 60           # FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS - a failed Event invocation waits this before its first retry and twice this before its second (AWS: 1 min, then 2); 0 retries back to back
       container-idle-timeout-seconds: 300
+      init-timeout-seconds: 10                # FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS - time a cold runtime has to request its first invocation; the function's Timeout wins when longer
+      container-drain-timeout-seconds: 15      # FLOCI_SERVICES_LAMBDA_CONTAINER_DRAIN_TIMEOUT_SECONDS - shared shutdown budget for both Lambda pools
       # warm-pool-max-per-function:           # FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION - idle containers kept per function (default max(4, cpus))
       warm-pool-max-total: 0                  # FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL - idle containers kept across all functions, LRU evicted beyond it; 0 = unbounded
       region-concurrency-limit: 1000
@@ -450,6 +473,9 @@ floci:
       #   init-image: busybox:1.36            # Init container image (needs sh, wget, unzip)
       hot-reload:
         enabled: false
+      reactive-s3-sync:
+        enabled: true                       # Re-deploy a function when the S3 object it was deployed from is overwritten
+        async: false                        # Re-deploy in the background so the S3 upload does not wait for it
     apigateway:
       enabled: true
       vtl-max-loops: 10000                 # Maximum #foreach iterations a VTL mapping template may execute (truncates the loop, does not fail the template)
@@ -467,6 +493,7 @@ floci:
     msk:
       enabled: true
       mock: false
+      scram-reconciliation-interval-ms: 5000
       default-image: "redpandadata/redpanda:latest"
       kafka-host-port-base: 9300
       kafka-host-port-max: 9399
@@ -515,7 +542,7 @@ floci:
       # endpoint-host: localhost                 # Hostname clients use; empty -> DockerHostResolver
       proxy-handshake-timeout-millis: 10000       # Max time a client has to complete the startup/auth handshake
       proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
-      proxy-max-connections: 100                  # Max concurrent proxy connections before new ones are refused
+      proxy-max-connections: 2000                 # Max concurrent proxy connections before new ones are refused
       spectrum-max-rows: 1000000                  # FLOCI_SERVICES_REDSHIFT_SPECTRUM_MAX_ROWS; rows loaded per external table per query
     rds:
       enabled: true
@@ -566,6 +593,15 @@ floci:
       enabled: true
     emr:
       enabled: true
+      cluster-startup-delay-seconds: 0      # 0 = a cluster is ready as soon as it is created
+      step-duration-seconds: 0              # 0 = a step completes as soon as it starts
+      cluster-termination-delay-seconds: 0  # 0 = a cluster is TERMINATED as soon as it is TERMINATING
+      runner-mode: immediate                # docker = run each Spark step's spark-submit in a container
+      # docker-network: floci-network
+      # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
+      # Remove the step drivers a previous run of this deployment left on the daemon when the EMR
+      # service starts. Scoped to this deployment's own containers.
+      reconcile-containers-on-startup: true
     wafv2:
       enabled: true
     scheduler:
@@ -665,6 +701,7 @@ floci:
       enforce-vcpu-quotas: false
       # Optional complete catalog override for locally built guest images.
       image-catalog-path: ${FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH:}
+      managed-prefix-list-catalog-path: ${FLOCI_SERVICES_EC2_MANAGED_PREFIX_LIST_CATALOG_PATH:}
       enabled: true
       imds-port: 9169
       # Sweep EC2 containers left on the daemon by a previous run that died mid-launch or
@@ -711,6 +748,8 @@ floci:
       enabled: true
       mock: false
       publish-awsvpc-ports-to-host: false
+      dynamic-awsvpc-host-ports: false
+      host-port-bind-address: "127.0.0.1"
       host-volume-roots: []
       allow-unsafe-host-volumes: false
       # Remove the ECS containers a previous run of this deployment left on the daemon before
@@ -788,6 +827,7 @@ floci:
       data-path: ./data/eks
       keep-running-on-shutdown: false
       endpoint-mode: host          # host = https://localhost:<hostPort> (host-reachable); network = container DNS name
+      # endpoint-host: aws.example.test  # host mode advertises this instead of localhost; added to the k3s cert
       iam-auth-webhook: true       # validate `aws eks get-token` SigV4 tokens through a k3s webhook
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
@@ -955,6 +995,12 @@ floci:
     emrserverless:
       enabled: true
       job-run-duration-seconds: 0   # 0 = BATCH job runs succeed as soon as they start
+      runner-mode: immediate        # docker = run each Spark job run's spark-submit in a container
+      # docker-network: floci-network
+      # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
+      # Remove the drivers a previous run of this deployment left on the daemon before the first
+      # job run starts. Scoped to this deployment's own containers.
+      reconcile-containers-on-startup: true
     ssoadmin:
       enabled: true
     ssooidc:

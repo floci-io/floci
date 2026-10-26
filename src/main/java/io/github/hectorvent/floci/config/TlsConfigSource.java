@@ -85,6 +85,11 @@ public class TlsConfigSource implements ConfigSource {
         return List.copyOf(sans);
     }
 
+    /** Default endpoint names shared by HTTP and service-specific TLS listeners. */
+    public static List<String> defaultEndpointHostnames() {
+        return DEFAULT_SAN_HOSTNAMES.stream().filter(host -> !host.contains("*")).toList();
+    }
+
     private static volatile Path resolvedTlsDir;
 
     private final Map<String, String> properties = new HashMap<>();

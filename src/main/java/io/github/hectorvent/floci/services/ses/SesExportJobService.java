@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -136,11 +137,12 @@ public class SesExportJobService implements Resettable {
             throw new AwsException("BadRequestException", "One data source must be provided", 400);
         }
         if (!exportDestination.isObject()) {
-            throw notNull("exportDestination");
+            throw SmithyValidationErrors.badRequest(SmithyValidationErrors.notNullWithoutValue("exportDestination"));
         }
         String dataFormat = exportDestination.path("DataFormat").textValue();
         if (dataFormat == null) {
-            throw notNull("exportDestination.dataFormat");
+            throw SmithyValidationErrors.badRequest(
+                    SmithyValidationErrors.notNullWithoutValue("exportDestination.dataFormat"));
         }
         if (!DATA_FORMATS.contains(dataFormat)) {
             throw SmithyValidationErrors.badRequest(
@@ -539,17 +541,13 @@ public class SesExportJobService implements Resettable {
         return ExportJob.FORMAT_CSV.equals(dataFormat) ? "text/csv" : "application/json";
     }
 
-    private static AwsException notNull(String member) {
-        return SmithyValidationErrors.badRequest(
-                "Value at '" + member + "' failed to satisfy constraint: Member must not be null");
-    }
-
     /**
      * The model bounds {@code MaxResults} at 1 to 10000. An unchecked negative value reached
-     * {@code subList} inside the filter and surfaced as a 500.
+     * {@code subList} inside the filter and surfaced as a 500. The value is stored as the int it
+     * was checked as, so a job created with 1.5 is described and filtered with 1.
      */
     private static void requireMaxResults(JsonNode insights) {
-        // intMemberOrAbsent answers SerializationException for a value that is not an integer, so
+        // intMemberOrAbsent answers SerializationException for a value that is not a number, so
         // a wrong type is not reported as a value out of range.
         Integer maxResults = intMemberOrAbsent(insights, "MaxResults");
         if (maxResults == null) {
@@ -562,15 +560,16 @@ public class SesExportJobService implements Resettable {
                             + "satisfy constraint: Member must be between 1 and " + MAX_RESULTS
                             + ", inclusive");
         }
+        if (insights instanceof ObjectNode node) {
+            node.put("MaxResults", maxResults);
+        }
     }
 
     private static Instant requireDate(JsonNode source, String field) {
         Instant value = date(source, field);
         if (value == null) {
-            throw SmithyValidationErrors.badRequest(
-                    "Value at '" + field.substring(0, 1).toLowerCase(Locale.ROOT)
-                            + field.substring(1) + "' failed to satisfy constraint: "
-                            + "Member must not be null");
+            throw SmithyValidationErrors.badRequest(SmithyValidationErrors.notNullWithoutValue(
+                    field.substring(0, 1).toLowerCase(Locale.ROOT) + field.substring(1)));
         }
         return value;
     }

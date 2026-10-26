@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.AwsQueryLists;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -90,15 +91,13 @@ public class RedshiftQueryHandler {
             List<String> iamRoleArns = memberList(params, "IamRoles");
 
             String region = regionResolver.resolveRegionFromAuth(authorizationHeader);
+            String defaultIamRoleArn = params.getFirst("DefaultIamRoleArn");
             Cluster cluster = manageMasterPassword
                     ? service.createClusterWithManagedMasterPassword(identifier, nodeType, masterUsername,
                             clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns,
-                            params.getFirst("MasterPasswordSecretKmsKeyId"), region)
-                    : iamRoleArns.isEmpty()
-                    ? service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                            clusterSubnetGroupName, vpcSecurityGroupIds)
+                            params.getFirst("MasterPasswordSecretKmsKeyId"), region, defaultIamRoleArn)
                     : service.createCluster(identifier, nodeType, masterUsername, masterUserPassword,
-                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns);
+                            clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn);
             String parameterGroupName = params.getFirst("ClusterParameterGroupName");
             String multiAz = params.getFirst("MultiAZ");
             boolean hasParameterGroup = parameterGroupName != null && !parameterGroupName.isBlank();
@@ -140,7 +139,12 @@ public class RedshiftQueryHandler {
         }
         case "DeleteCluster" -> {
             String identifier = params.getFirst("ClusterIdentifier");
-            Cluster cluster = service.deleteCluster(identifier);
+            String rawSkip = params.getFirst("SkipFinalClusterSnapshot");
+            if (rawSkip != null && !"true".equalsIgnoreCase(rawSkip) && !"false".equalsIgnoreCase(rawSkip)) {
+                throw new AwsException("InvalidParameterValue", "SkipFinalClusterSnapshot must be a boolean.", 400);
+            }
+            Cluster cluster = service.deleteCluster(identifier, rawSkip == null ? null : Boolean.valueOf(rawSkip),
+                    params.getFirst("FinalClusterSnapshotIdentifier"), intParam(params, "FinalClusterSnapshotRetentionPeriod"));
             String xml = new XmlBuilder()
                     .start("DeleteClusterResponse")
                       .start("DeleteClusterResult")
@@ -747,7 +751,8 @@ public class RedshiftQueryHandler {
                 throw new AwsException("InvalidParameterValue", "ClusterIdentifier is required", 400);
             }
             Cluster cluster = service.modifyClusterIamRoles(clusterIdentifier,
-                    memberList(params, "AddIamRoles"), memberList(params, "RemoveIamRoles"));
+                    memberList(params, "AddIamRoles"), memberList(params, "RemoveIamRoles"),
+                    params.getFirst("DefaultIamRoleArn"));
             String xml = new XmlBuilder()
                     .start("ModifyClusterIamRolesResponse")
                       .start("ModifyClusterIamRolesResult")
@@ -940,6 +945,9 @@ public class RedshiftQueryHandler {
             builder.end("VpcSecurityGroups");
         }
 
+        if (cluster.getDefaultIamRoleArn() != null) {
+            builder.elem("DefaultIamRoleArn", cluster.getDefaultIamRoleArn());
+        }
         if (cluster.getIamRoleArns() != null && !cluster.getIamRoleArns().isEmpty()) {
             builder.start("IamRoles");
             for (String iamRoleArn : cluster.getIamRoleArns()) {
@@ -1055,6 +1063,7 @@ public class RedshiftQueryHandler {
             .elem("ClusterIdentifier", snapshot.getClusterIdentifier())
             .elem("SnapshotArn", snapshot.getSnapshotArn())
             .elem("SnapshotCreateTime", createTime)
+            .elem("ManualSnapshotRetentionPeriod", snapshot.getManualSnapshotRetentionPeriod().toString())
             .elem("Status", snapshot.getStatus())
             .elem("Port", String.valueOf(snapshot.getPort()))
             .elem("MasterUsername", snapshot.getMasterUsername());
@@ -1332,7 +1341,7 @@ public class RedshiftQueryHandler {
             List<String> values = params.keySet().stream()
                     .filter(candidate -> candidate.matches(
                             "Filters\\.DescribeIntegrationsFilter\\." + index + "\\.Values\\.Value\\.\\d+"))
-                    .sorted(Comparator.comparingInt(RedshiftQueryHandler::numericSuffix))
+                    .sorted(Comparator.comparingInt(AwsQueryLists::memberIndex))
                     .map(params::getFirst)
                     .toList();
             byIndex.put(index, new RedshiftService.IntegrationFilter(name, values));
@@ -1353,44 +1362,24 @@ public class RedshiftQueryHandler {
     }
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {
-        return params.keySet().stream()
-                .filter(key -> key.matches(memberKeyRegex(baseName)))
-                .sorted(Comparator.comparingInt(RedshiftQueryHandler::numericSuffix))
-                .map(params::getFirst)
-                .filter(value -> value != null && !value.isBlank())
-                .toList();
+        return AwsQueryLists.values(params, baseName, memberName(baseName));
     }
 
     /**
-     * The keys of the numbered members of the list {@code baseName}. The AWS Query protocol accepts both
-     * the generic ".member.N" form and each shape's own locationName (e.g. the real Redshift SDK sends
-     * "SubnetIds.SubnetIdentifier.N", not "SubnetIds.member.N"). The {@code iam:PassRole} check reads a
-     * cluster's roles through it, so it reads the same keys.
+     * The name the list {@code baseName}'s shape gives its members, which the real Redshift SDK sends
+     * ("SubnetIds.SubnetIdentifier.N", not "SubnetIds.member.N"), or null for a list whose shape names none.
      */
-    public static String memberKeyRegex(String baseName) {
-        String quoted = Pattern.quote(baseName);
+    private static String memberName(String baseName) {
         return switch (baseName) {
-            case "SubnetIds" -> quoted + "(\\.member|\\.SubnetIdentifier)?\\.\\d+";
-            case "VpcSecurityGroupIds" -> quoted + "(\\.member|\\.VpcSecurityGroupId)?\\.\\d+";
-            case "IamRoles", "AddIamRoles", "RemoveIamRoles" -> quoted + "(\\.member|\\.IamRoleArn)?\\.\\d+";
-            case "TagKeys" -> quoted + "(\\.member|\\.TagKey)?\\.\\d+";
-            case "TagValues" -> quoted + "(\\.member|\\.TagValue)?\\.\\d+";
-            case "ScheduleDefinitions" -> quoted + "(\\.member|\\.ScheduleDefinition)?\\.\\d+";
-            case "DbGroups" -> quoted + "(\\.member|\\.DbGroup)?\\.\\d+";
-            default -> quoted + "(\\.member)?\\.\\d+";
+            case "SubnetIds" -> "SubnetIdentifier";
+            case "VpcSecurityGroupIds" -> "VpcSecurityGroupId";
+            case "IamRoles", "AddIamRoles", "RemoveIamRoles" -> "IamRoleArn";
+            case "TagKeys" -> "TagKey";
+            case "TagValues" -> "TagValue";
+            case "ScheduleDefinitions" -> "ScheduleDefinition";
+            case "DbGroups" -> "DbGroup";
+            default -> null;
         };
-    }
-
-    private static int numericSuffix(String key) {
-        int lastDot = key.lastIndexOf('.');
-        if (lastDot < 0 || lastDot == key.length() - 1) {
-            return Integer.MAX_VALUE;
-        }
-        try {
-            return Integer.parseInt(key.substring(lastDot + 1));
-        } catch (NumberFormatException e) {
-            return Integer.MAX_VALUE;
-        }
     }
 
     private static List<Parameter> parseParameters(MultivaluedMap<String, String> params) {
@@ -1416,7 +1405,7 @@ public class RedshiftQueryHandler {
             parsed.putIfAbsent(prefix, new Parameter(name, params.getFirst(prefix + ".ParameterValue")));
         }
         return parsed.entrySet().stream()
-                .sorted(Comparator.comparingInt(entry -> numericSuffix(entry.getKey())))
+                .sorted(Comparator.comparingInt(entry -> AwsQueryLists.memberIndex(entry.getKey())))
                 .map(Map.Entry::getValue).toList();
     }
 

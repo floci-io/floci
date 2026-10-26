@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -94,7 +95,7 @@ final class DynamoDbPartiQLKeyPlan {
     }
 
     void requireNoOverlap() {
-        if (!keyed()) {
+        if (!keyed() || branches.stream().anyMatch(this::testsAKeyOutsideARange)) {
             return;
         }
         Map<Key, List<Range>> rangesByPartition = new TreeMap<>();
@@ -113,6 +114,21 @@ final class DynamoDbPartiQLKeyPlan {
                 }
             }
         }
+    }
+
+    // DynamoDB drops the overlap check once a branch tests a key in a way no key condition can
+    // hold, such as sk <> 'a', attribute_exists(sk) or NOT sk = 'a'. A NOT counts only when it
+    // sits right on the test, and a NOT over size() never counts.
+    private boolean testsAKeyOutsideARange(Branch branch) {
+        return branch.filters().stream().anyMatch(filter -> switch (filter) {
+            case Cond.Not not -> not.operand() instanceof Cond.Leaf leaf
+                    && !(leaf instanceof Cond.SizeCmp) && namesAKey(leaf);
+            default -> anyLeaf(filter, this::namesAKey);
+        });
+    }
+
+    private boolean namesAKey(Cond.Leaf leaf) {
+        return leaf.bareAttribute().filter(name -> name.equals(partitionKey) || name.equals(sortKey)).isPresent();
     }
 
     List<String> unprojectedFilterAttributes(Set<String> projected) {
@@ -198,7 +214,7 @@ final class DynamoDbPartiQLKeyPlan {
                 }
                 yield spread;
             }
-            case Cond.Or or when namesKey(or) -> {
+            case Cond.Or or when anyLeaf(or, this::isKeyCondition) -> {
                 List<Spread> spread = or.operands().stream().flatMap(operand -> spread(operand).stream()).toList();
                 tooManyBranches |= spread.size() > MAX_BRANCHES;
                 yield spread;
@@ -215,11 +231,11 @@ final class DynamoDbPartiQLKeyPlan {
         return left.stream().flatMap(l -> right.stream().map(l::and)).toList();
     }
 
-    private boolean namesKey(Cond cond) {
+    private static boolean anyLeaf(Cond cond, Predicate<Cond.Leaf> test) {
         return switch (cond) {
-            case Cond.Leaf leaf -> isKeyCondition(leaf);
-            case Cond.And and   -> and.operands().stream().anyMatch(this::namesKey);
-            case Cond.Or or     -> or.operands().stream().anyMatch(this::namesKey);
+            case Cond.Leaf leaf -> test.test(leaf);
+            case Cond.And and   -> and.operands().stream().anyMatch(operand -> anyLeaf(operand, test));
+            case Cond.Or or     -> or.operands().stream().anyMatch(operand -> anyLeaf(operand, test));
             case Cond.Not ignored -> false;
         };
     }

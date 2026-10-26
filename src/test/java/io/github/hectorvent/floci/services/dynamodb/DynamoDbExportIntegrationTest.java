@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
@@ -14,7 +17,9 @@ import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.zip.GZIPInputStream;
 
@@ -94,12 +99,15 @@ class DynamoDbExportIntegrationTest {
             .when().post("/")
             .then()
             .statusCode(200)
-            .body("ExportDescription.ExportArn", notNullValue())
+            .body("ExportDescription.ExportArn", matchesPattern(TABLE_ARN + "/export/\\d{14}-[0-9a-f]{8}"))
             .body("ExportDescription.ExportStatus", equalTo("IN_PROGRESS"))
             .body("ExportDescription.TableArn", equalTo(TABLE_ARN))
             .body("ExportDescription.S3Bucket", equalTo(BUCKET_NAME))
             .body("ExportDescription.ExportFormat", equalTo("DYNAMODB_JSON"))
-            .body("ExportDescription.ExportType", equalTo("FULL_EXPORT"))
+            .body("ExportDescription", not(hasKey("ExportType")))
+            .body("ExportDescription.DestinationType", equalTo("S3"))
+            .body("ExportDescription.S3SseAlgorithm", equalTo("AES256"))
+            .body("ExportDescription.TableId", equalTo(tableId(TABLE_NAME)))
             .extract().path("ExportDescription.ExportArn");
 
         assertNotNull(exportArn);
@@ -145,43 +153,73 @@ class DynamoDbExportIntegrationTest {
             .body("ExportSummaries", hasSize(greaterThanOrEqualTo(1)))
             .body("ExportSummaries[0].ExportArn", notNullValue())
             .body("ExportSummaries[0].ExportStatus", notNullValue())
-            .body("ExportSummaries[0].ExportType", equalTo("FULL_EXPORT"));
+            .body("ExportSummaries[0].ExportType", equalTo("FULL_EXPORT"))
+            .body("ExportSummaries[0].DestinationType", equalTo("S3"));
     }
 
     @Test
-    void exportTableToPointInTime_unsupportedExportType_returnsValidationException() {
-        given()
-            .header("X-Amz-Target", "DynamoDB_20120810.ExportTableToPointInTime")
-            .contentType(DYNAMODB_CONTENT_TYPE)
-            .body("""
-                {
-                    "TableArn": "%s",
-                    "S3Bucket": "%s",
-                    "ExportType": "INCREMENTAL_EXPORT"
-                }
-                """.formatted(TABLE_ARN, BUCKET_NAME))
-            .when().post("/")
-            .then()
-            .statusCode(400)
-            .body("__type", containsString("ValidationException"));
+    void incrementalExportRequestIsCheckedAsAwsChecksIt() {
+        String over1024 = "a".repeat(1025);
+        String enumSet = "' failed to satisfy constraint: Member must satisfy enum value set: ";
+        expectError(ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "S3SseAlgorithm": "BAD", "S3Prefix": "%s", "ExportType": "BAD",
+             "IncrementalExportSpecification": {"ExportViewType": "BAD"}, "ExportFormat": "BAD"}
+            """.formatted(TABLE_ARN_PREFIX + "IncrementalMissing", BUCKET_NAME, over1024)), "ValidationException",
+                "5 validation errors detected: Value 'BAD' at 's3SseAlgorithm" + enumSet + "[AES256, KMS]; Value '"
+                + over1024 + "' at 's3Prefix' failed to satisfy constraint: Member must have length less than or equal to 1024; "
+                + "Value 'BAD' at 'exportType" + enumSet + "[FULL_EXPORT, INCREMENTAL_EXPORT]; "
+                + "Value 'BAD' at 'incrementalExportSpecification.exportViewType" + enumSet + "[NEW_AND_OLD_IMAGES, NEW_IMAGE]; "
+                + "Value 'BAD' at 'exportFormat" + enumSet + "[ION, DYNAMODB_JSON]");
+        expectError(incrementalExport("IncrementalMissing", "inc", null), "TableNotFoundException",
+                "Table not found: " + TABLE_ARN_PREFIX + "IncrementalMissing");
+
+        String tooLong = "a".repeat(949);
+        expectError(incrementalExport(TABLE_NAME, tooLong, null), "ValidationException",
+                "Invalid Request: Incremental Export Specification expected when export type is set as Incremental Export");
+        expectError(ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "%s", "ExportType": "FULL_EXPORT",
+             "IncrementalExportSpecification": {"ExportFromTime": 1}}
+            """.formatted(TABLE_ARN, BUCKET_NAME, tooLong)), "ValidationException",
+                "Invalid Request: When Export Type is Full Export , Incremental Export Specification should not be provided");
+        expectError(ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "%s", "IncrementalExportSpecification": {"ExportFromTime": 1}}
+            """.formatted(TABLE_ARN, BUCKET_NAME, tooLong)), "ValidationException",
+                "Invalid Request: Export Type expected to be Incremental Export when incremental export specification is provided");
+        expectError(incrementalExport(TABLE_NAME, tooLong, "{\"ExportToTime\": 1}"), "ValidationException",
+                "Invalid Request: ExportFromTime must be provided in IncrementalExportSpecification");
+        expectError(incrementalExport(TABLE_NAME, tooLong, "{\"ExportFromTime\": 1}"), "ValidationException",
+                "Invalid Request: S3 Prefix is too long");
+        expectError(incrementalExport(TABLE_NAME, "inc", "{\"ExportFromTime\": 1000000000.5, \"ExportToTime\": 1}"),
+                "InvalidExportTimeException",
+                "Incremental export period from time cannot be less than the table creation time : 2001-09-09T01:46:40.500Z");
+        long now = System.currentTimeMillis() / 1000;
+        expectError(incrementalExport(TABLE_NAME, "inc", "{\"ExportFromTime\": %d, \"ExportToTime\": %d}"
+                .formatted(now, now + 3600)), "InvalidExportTimeException",
+                "Incremental export period to time cannot be greater than the current time : "
+                + Instant.ofEpochSecond(now + 3600));
+        expectError(incrementalExport(TABLE_NAME, "inc", "{\"ExportFromTime\": %d}".formatted(now + 60)),
+                "InvalidExportTimeException",
+                "Incremental export period from time should not be greater or equal to incremental export period to time");
     }
 
     @Test
-    void exportTableToPointInTime_ionFormat_returnsValidationException() {
-        given()
-            .header("X-Amz-Target", "DynamoDB_20120810.ExportTableToPointInTime")
-            .contentType(DYNAMODB_CONTENT_TYPE)
-            .body("""
-                {
-                    "TableArn": "%s",
-                    "S3Bucket": "%s",
-                    "ExportFormat": "ION"
-                }
-                """.formatted(TABLE_ARN, BUCKET_NAME))
-            .when().post("/")
-            .then()
-            .statusCode(400)
-            .body("__type", containsString("ValidationException"));
+    void exportFormatIsCheckedAsAwsChecksIt() {
+        String enumSet = "' at 'exportFormat' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [ION, DYNAMODB_JSON]";
+        expectError(ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "ExportFormat": "ion", "S3Prefix": "x"}
+            """.formatted(TABLE_ARN_PREFIX + "ExportFormatMissing", BUCKET_NAME)), "ValidationException",
+                "1 validation error detected: Value 'ion" + enumSet);
+        String over1024 = "a".repeat(1025);
+        expectError(ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "ExportFormat": "", "S3Prefix": "%s"}
+            """.formatted(TABLE_ARN, BUCKET_NAME, over1024)), "ValidationException",
+                "2 validation errors detected: Value '" + over1024 + "' at 's3Prefix' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 1024; Value '" + enumSet);
+        ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "exports-ion", "ExportFormat": "ION"}
+            """.formatted(TABLE_ARN, BUCKET_NAME)).statusCode(200)
+            .body("ExportDescription.ExportFormat", equalTo("ION"));
     }
 
     @Test
@@ -220,36 +258,46 @@ class DynamoDbExportIntegrationTest {
         String exportArn = startExport("exports-data");
         pollUntilCompleted(exportArn, 10_000);
 
-        String manifestKey = given()
-            .header("X-Amz-Target", "DynamoDB_20120810.DescribeExport")
-            .contentType(DYNAMODB_CONTENT_TYPE)
-            .body("{\"ExportArn\": \"" + exportArn + "\"}")
-            .when().post("/")
-            .then().statusCode(200)
-            .extract().path("ExportDescription.ExportManifest");
-
-        assertNotNull(manifestKey, "ExportManifest key should be set");
-
-        // Extract bucket prefix from the manifest key
-        // manifestKey is like: exports-data/AWSDynamoDB/<exportId>/manifest-summary.json
+        ValidatableResponse describe = ddb("DescribeExport", "{\"ExportArn\": \"" + exportArn + "\"}").statusCode(200);
+        JsonPath described = describe.extract().jsonPath();
         String exportId = exportArn.substring(exportArn.lastIndexOf('/') + 1);
-        String manifestFilesKey = "exports-data/AWSDynamoDB/" + exportId + "/manifest-files.json";
+        String dir = "exports-data/AWSDynamoDB/" + exportId + "/";
+        assertEquals(dir + "manifest-summary.json", described.getString("ExportDescription.ExportManifest"));
 
-        // Download manifest-files.json and find the data key
-        byte[] manifestFiles = given()
-            .when().get("/" + BUCKET_NAME + "/" + manifestFilesKey)
+        assertEquals(0, s3Object(dir + "_started").length);
+        byte[] manifestFiles = s3Object(dir + "manifest-files.json");
+        assertEquals(md5Base64(manifestFiles), new String(s3Object(dir + "manifest-files.md5"), StandardCharsets.UTF_8));
+        String manifestLine = new String(manifestFiles, StandardCharsets.UTF_8);
+        assertTrue(manifestLine.endsWith("}\n"), manifestLine);
+        JsonPath dataFile = JsonPath.from(manifestLine);
+        String dataKey = dataFile.getString("dataFileS3Key");
+        assertTrue(dataKey.matches(dir + "data/[a-z2-7]{26}\\.json\\.gz"), dataKey);
+        byte[] gzipData = s3Object(dataKey);
+        assertEquals(3, dataFile.getInt("itemCount"));
+        assertEquals(md5Base64(gzipData), dataFile.getString("md5Checksum"));
+        given().when().head("/" + BUCKET_NAME + "/" + dataKey)
             .then().statusCode(200)
-            .extract().asByteArray();
+            .header("ETag", equalTo("\"" + dataFile.getString("etag") + "\""))
+            .header("ETag", endsWith("-1\""))
+            .header("Content-Type", equalTo("application/octet-stream"));
 
-        String dataKey = new String(manifestFiles, StandardCharsets.UTF_8).trim();
-        assertFalse(dataKey.isEmpty(), "manifest-files.json should contain the data file key");
-        assertTrue(dataKey.endsWith(".json.gz"), "Data file should be a .json.gz file");
-
-        // Download and decompress the data file
-        byte[] gzipData = given()
-            .when().get("/" + BUCKET_NAME + "/" + dataKey)
-            .then().statusCode(200)
-            .extract().asByteArray();
+        byte[] summaryBytes = s3Object(dir + "manifest-summary.json");
+        assertEquals(md5Base64(summaryBytes), new String(s3Object(dir + "manifest-summary.md5"), StandardCharsets.UTF_8));
+        JsonNode summary = new ObjectMapper().readTree(summaryBytes);
+        List<String> fields = new ArrayList<>();
+        summary.fieldNames().forEachRemaining(fields::add);
+        assertEquals(List.of("version", "exportArn", "startTime", "endTime", "tableArn", "tableId", "exportTime",
+                "s3Bucket", "s3Prefix", "s3SseAlgorithm", "s3SseKmsKeyId", "manifestFilesS3Key", "billedSizeBytes",
+                "itemCount", "outputFormat"), fields);
+        assertEquals("2020-06-30", summary.get("version").asText());
+        assertEquals(manifestTime(decimalAt(describe, "/ExportDescription/StartTime")), summary.get("startTime").asText());
+        assertEquals(manifestTime(decimalAt(describe, "/ExportDescription/EndTime")), summary.get("endTime").asText());
+        assertEquals(tableId(TABLE_NAME), summary.get("tableId").asText());
+        assertEquals("exports-data", summary.get("s3Prefix").asText());
+        assertTrue(summary.get("s3SseKmsKeyId").isNull());
+        assertEquals(dir + "manifest-files.json", summary.get("manifestFilesS3Key").asText());
+        assertEquals(3, summary.get("itemCount").asInt());
+        assertEquals("DYNAMODB_JSON", summary.get("outputFormat").asText());
 
         String ndjson = decompressGzip(gzipData);
         String[] lines = ndjson.split("\n");
@@ -289,6 +337,7 @@ class DynamoDbExportIntegrationTest {
         assertEquals("COMPLETED", pollUntilCompleted(atT1Arn, 10_000));
         assertEquals(List.of("k1=v1"), exportedItems(atT1Arn, "export-time-t1"));
         String noTimeArn = noTime.extract().path("ExportDescription.ExportArn");
+        assertTrue(noTimeArn.contains("/export/" + String.format("%014d", startMillis) + "-"), noTimeArn);
         assertEquals("COMPLETED", pollUntilCompleted(noTimeArn, 10_000));
         assertEquals(List.of("k1=v2", "k2=v1"), exportedItems(noTimeArn, "export-time-now"));
     }
@@ -339,7 +388,60 @@ class DynamoDbExportIntegrationTest {
                 "InvalidExportTimeException", "Export Time is invalid");
     }
 
+    @Test
+    void s3PrefixIsCheckedAsAwsChecksIt() {
+        String atLeast3 = "' at 's3Prefix' failed to satisfy constraint: Member must have length greater than or equal to 3";
+        expectError(exportWithPrefix("ExportPrefixMissing", ""), "ValidationException",
+                "Invalid Request: 1 validation error detected: Value '" + atLeast3);
+        expectError(exportWithPrefix("ExportPrefixMissing", "éé"), "ValidationException",
+                "Invalid Request: 1 validation error detected: Value 'éé" + atLeast3);
+        String over1024 = "a".repeat(1025);
+        expectError(exportWithPrefix(TABLE_NAME, over1024), "ValidationException", "1 validation error detected: Value '"
+                + over1024 + "' at 's3Prefix' failed to satisfy constraint: Member must have length less than or equal to 1024");
+        expectError(exportWithPrefix("ExportPrefixMissing", "a".repeat(949)), "TableNotFoundException",
+                "Table not found: " + TABLE_ARN_PREFIX + "ExportPrefixMissing");
+        expectError(exportWithPrefix(TABLE_NAME, "é".repeat(475)), "ValidationException",
+                "Invalid Request: S3 Prefix is too long");
+        expectError(exportWithPrefix(TABLE_NAME, "a".repeat(949)), "ValidationException",
+                "Invalid Request: S3 Prefix is too long");
+        exportWithPrefix(TABLE_NAME, "ends-with/").statusCode(200)
+            .body("ExportDescription.S3Prefix", equalTo("ends-with/"));
+    }
+
+    @Test
+    void s3PrefixLengthCountsSupplementaryCharactersOnce() {
+        String scalar = "\uD83D\uDE00";
+        String shortPrefix = scalar.repeat(2);
+        expectError(exportWithPrefix("ExportPrefixMissing", shortPrefix), "ValidationException",
+                "Invalid Request: 1 validation error detected: Value '" + shortPrefix
+                        + "' at 's3Prefix' failed to satisfy constraint: Member must have length greater than or equal to 3");
+        expectError(exportWithPrefix("ExportPrefixMissing", scalar.repeat(1024)), "TableNotFoundException",
+                "Table not found: " + TABLE_ARN_PREFIX + "ExportPrefixMissing");
+        String longPrefix = scalar.repeat(1025);
+        expectError(exportWithPrefix("ExportPrefixMissing", longPrefix), "ValidationException",
+                "1 validation error detected: Value '" + longPrefix
+                        + "' at 's3Prefix' failed to satisfy constraint: Member must have length less than or equal to 1024");
+    }
+
     // --- Helpers ---
+
+    private static ValidatableResponse incrementalExport(String table, String prefix, String specification) {
+        return ddb("ExportTableToPointInTime", """
+            {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "%s", "ExportType": "INCREMENTAL_EXPORT"%s}
+            """.formatted(TABLE_ARN_PREFIX + table, BUCKET_NAME, prefix,
+                specification != null ? ", \"IncrementalExportSpecification\": " + specification : ""));
+    }
+
+    private static ValidatableResponse exportWithPrefix(String table, String prefix) {
+        return given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExportTableToPointInTime")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableArn": "%s", "S3Bucket": "%s", "S3Prefix": "%s"}
+                """.formatted(TABLE_ARN_PREFIX + table, BUCKET_NAME, prefix).getBytes(StandardCharsets.UTF_8))
+            .when().post("/")
+            .then();
+    }
 
     /** Returns a time between the writes before and after the call, in epoch seconds with milliseconds. */
     private static BigDecimal pause() {
@@ -372,20 +474,37 @@ class DynamoDbExportIntegrationTest {
 
     private List<String> exportedItems(String exportArn, String prefix) throws Exception {
         String exportId = exportArn.substring(exportArn.lastIndexOf('/') + 1);
-        String dataKey = given()
-            .when().get("/" + BUCKET_NAME + "/" + prefix + "/AWSDynamoDB/" + exportId + "/manifest-files.json")
-            .then().statusCode(200)
-            .extract().asString().trim();
-        byte[] gzipData = given()
-            .when().get("/" + BUCKET_NAME + "/" + dataKey)
-            .then().statusCode(200)
-            .extract().asByteArray();
+        String dataKey = JsonPath.from(new String(s3Object(prefix + "/AWSDynamoDB/" + exportId + "/manifest-files.json"),
+                StandardCharsets.UTF_8)).getString("dataFileS3Key");
+        byte[] gzipData = s3Object(dataKey);
         List<String> items = new ArrayList<>();
         for (String line : decompressGzip(gzipData).split("\n")) {
             JsonPath item = JsonPath.from(line);
             items.add(item.getString("Item.pk.S") + "=" + item.getString("Item.v.S"));
         }
         return items.stream().sorted().toList();
+    }
+
+    private static byte[] s3Object(String key) {
+        return given().when().get("/" + BUCKET_NAME + "/" + key)
+            .then().statusCode(200)
+            .extract().asByteArray();
+    }
+
+    private static String md5Base64(byte[] data) {
+        return Base64.getEncoder().encodeToString(Digests.md5(data));
+    }
+
+    /** A DescribeExport time in epoch seconds, as the manifest writes it. */
+    private static String manifestTime(BigDecimal epochSeconds) {
+        return Instant.ofEpochMilli(epochSeconds.movePointRight(3).longValueExact()).toString()
+                .replaceFirst("(:\\d{2})Z$", "$1.000Z");
+    }
+
+    private static String tableId(String table) {
+        return ddb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(200)
+            .extract().path("Table.TableId");
     }
 
     private static void expectError(ValidatableResponse response, String type, String message) {

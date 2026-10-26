@@ -476,7 +476,8 @@ public class VpcNetworkManager {
      *
      * <p>Unlike {@link #reservePrivateIp}, it leaves the allocation cursor where it is, so the
      * addresses the subnet picks on its own keep their order, and it logs no refusal: the caller
-     * has already found the address free, so a lease it meets is one its holder never returned.
+     * has already found the address free, so a lease it meets is one its holder never returned,
+     * or one a failed launch returns only once its container is detached.
      *
      * @return true when the address is now leased; false when the subnet has no Docker-backed
      *         range, the address is unparseable or outside that range, or it is already leased

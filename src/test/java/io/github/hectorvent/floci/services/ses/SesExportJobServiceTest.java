@@ -12,15 +12,18 @@ import io.github.hectorvent.floci.services.ses.model.EmailInsights;
 import io.github.hectorvent.floci.services.ses.model.ExportJob;
 import io.github.hectorvent.floci.services.ses.model.InsightsEvent;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -314,15 +317,8 @@ class SesExportJobServiceTest {
 
     /** Both waits here park in {@code Object.wait(timeout)}, so the state is timed, not WAITING. */
     private static void awaitParked(Thread thread, String what) {
-        long deadline = System.currentTimeMillis() + 5_000;
-        while (System.currentTimeMillis() < deadline) {
-            Thread.State state = thread.getState();
-            if (state == Thread.State.TIMED_WAITING || state == Thread.State.WAITING) {
-                return;
-            }
-            Thread.onSpinWait();
-        }
-        throw new AssertionError(what + " never parked, it was " + thread.getState());
+        ThreadStates.awaitState(thread, EnumSet.of(Thread.State.TIMED_WAITING, Thread.State.WAITING),
+                Duration.ofSeconds(5), what);
     }
 
     @Test

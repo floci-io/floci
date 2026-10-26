@@ -4,12 +4,14 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver.CertificateMaterial;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
 import io.github.hectorvent.floci.services.elbv2.model.LoadBalancer;
 import io.github.hectorvent.floci.services.elbv2.model.Rule;
+import io.github.hectorvent.floci.testing.InlineMocks;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Promise;
@@ -18,7 +20,6 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
-import io.vertx.core.net.PemKeyCertOptions;
 import io.vertx.core.net.SSLOptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -26,14 +27,15 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntConsumer;
 
 import static io.github.hectorvent.floci.services.elbv2.ElbV2PublicationTestSupport.publishRuntime;
 import static io.github.hectorvent.floci.services.elbv2.ElbV2PublicationTestSupport.removeRuntime;
+import static io.github.hectorvent.floci.services.elbv2.ElbV2PublicationTestSupport.servedCertificate;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -161,7 +163,7 @@ class ElbV2ReservedPortTest {
         assertFalse(dataPlane.isReservedByFloci(8080));
     }
     @Test
-    void identicalRestartRetriesAFailedTlsRefresh() {
+    void identicalRestartRetriesAFailedTlsRefresh() throws Exception {
         ElbV2DataPlane dataPlane = dataPlaneWith(4566, false, 0);
         EmulatorConfig.ElbV2ServiceConfig elbv2 = mock(EmulatorConfig.ElbV2ServiceConfig.class);
         when(elbv2.mock()).thenReturn(false);
@@ -175,9 +177,6 @@ class ElbV2ReservedPortTest {
         when(server.requestHandler(any())).thenReturn(server);
         when(server.listen()).thenReturn(Future.succeededFuture(server));
         when(server.close()).thenReturn(Future.succeededFuture());
-        when(server.updateSSLOptions(any(SSLOptions.class), eq(true)))
-                .thenReturn(Future.failedFuture(new IllegalStateException("controlled TLS refresh failure")),
-                        Future.succeededFuture(true));
         when(dataPlane.vertx.createHttpServer(any(HttpServerOptions.class))).thenReturn(server);
         String region = "us-west-2";
         String owner = "arn:aws:elasticloadbalancing:us-west-2:000000000000:listener/app/lb/1/2";
@@ -199,29 +198,30 @@ class ElbV2ReservedPortTest {
         CertificateMaterial first = new CertificateMaterial(certificateArn, old.certificatePem(), old.privateKeyPem(), null);
         CertificateMaterial next = new CertificateMaterial(certificateArn,
                 replacement.certificatePem(), replacement.privateKeyPem(), null);
-        when(dataPlane.certificateResolver.publishedMaterial(owner, region, certificateArn)).thenReturn(first, next, next);
+        CertificateMaterial invalid = InlineMocks.inlineSpy(next);
+        // Let pair validation succeed, then fail the key-manager load.
+        AtomicInteger keyReads = new AtomicInteger();
+        doAnswer(ignored -> keyReads.incrementAndGet() == 1 ? replacement.privateKeyPem() : "not a PEM private key")
+                .when(invalid).privateKey();
+        when(dataPlane.certificateResolver.publishedMaterial(owner, region, certificateArn)).thenReturn(first, first, invalid, invalid, next, next);
         try {
             publishRuntime(dataPlane, listener, region, listener.getPort(), List.of());
+            ArgumentCaptor<HttpServerOptions> options = ArgumentCaptor.forClass(HttpServerOptions.class);
+            verify(dataPlane.vertx).createHttpServer(options.capture());
             publishRuntime(dataPlane, listener, region, listener.getPort(), List.of());
-            verify(server).updateSSLOptions(any(SSLOptions.class), eq(true));
+            assertEquals(Pem.parseCertificate(old.certificatePem()),
+                    servedCertificate(options.getValue(), "tls.example.test"));
             publishRuntime(dataPlane, listener, region, listener.getPort(), List.of());
-            ArgumentCaptor<SSLOptions> options = ArgumentCaptor.forClass(SSLOptions.class);
-            verify(server, times(2)).updateSSLOptions(options.capture(), eq(true));
-            for (SSLOptions attempt : options.getAllValues()) {
-                PemKeyCertOptions material = assertInstanceOf(PemKeyCertOptions.class, attempt.getKeyCertOptions());
-                assertEquals(1, material.getCertValues().size());
-                assertEquals(replacement.certificatePem().stripTrailing() + "\n",
-                        material.getCertValues().getFirst().toString());
-                assertEquals(1, material.getKeyValues().size());
-                assertEquals(replacement.privateKeyPem(), material.getKeyValues().getFirst().toString());
-            }
+            assertEquals(Pem.parseCertificate(replacement.certificatePem()),
+                    servedCertificate(options.getValue(), "tls.example.test"));
+            verify(server, never()).updateSSLOptions(any(SSLOptions.class), eq(true));
         } finally {
             dataPlane.shutdown();
         }
     }
 
     @Test
-    void movingSecureListenerRefreshesTheSurvivingOldPort() {
+    void movingSecureListenerRefreshesTheSurvivingOldPort() throws Exception {
         ElbV2DataPlane dataPlane = dataPlaneWith(4566, false, 0);
         EmulatorConfig.ElbV2ServiceConfig elbv2 = mock(EmulatorConfig.ElbV2ServiceConfig.class);
         when(elbv2.mock()).thenReturn(false);
@@ -238,8 +238,6 @@ class ElbV2ReservedPortTest {
             when(server.listen()).thenReturn(Future.succeededFuture(server));
             when(server.close()).thenReturn(Future.succeededFuture());
         }
-        when(oldServer.updateSSLOptions(any(SSLOptions.class), eq(true)))
-                .thenReturn(Future.succeededFuture(true));
         when(dataPlane.vertx.createHttpServer(any(HttpServerOptions.class)))
                 .thenAnswer(invocation -> ((HttpServerOptions) invocation.getArgument(0)).getPort() == 8443
                         ? oldServer : newServer);
@@ -271,22 +269,21 @@ class ElbV2ReservedPortTest {
         try {
             publishRuntime(dataPlane, survivor, "us-west-2", survivor.getPort(), List.of());
             publishRuntime(dataPlane, moved, "us-west-2", moved.getPort(), List.of());
-            ArgumentCaptor<SSLOptions> initial = ArgumentCaptor.forClass(SSLOptions.class);
-            verify(oldServer).updateSSLOptions(initial.capture(), eq(true));
-            assertEquals(2, assertInstanceOf(PemKeyCertOptions.class,
-                    initial.getValue().getKeyCertOptions()).getCertValues().size());
+            ArgumentCaptor<HttpServerOptions> initial = ArgumentCaptor.forClass(HttpServerOptions.class);
+            verify(dataPlane.vertx).createHttpServer(initial.capture());
+            assertEquals(Pem.parseCertificate(survivorCertificate.certificatePem()),
+                    servedCertificate(initial.getValue(), "survivor.example.test"));
+            assertFalse(servedCertificate(initial.getValue(), "moved.example.test")
+                    .equals(Pem.parseCertificate(survivorCertificate.certificatePem())));
 
             moved.setPort(9443);
             publishRuntime(dataPlane, moved, "us-west-2", moved.getPort(), List.of());
 
-            ArgumentCaptor<SSLOptions> refreshed = ArgumentCaptor.forClass(SSLOptions.class);
-            verify(oldServer, times(2)).updateSSLOptions(refreshed.capture(), eq(true));
-            PemKeyCertOptions retained = assertInstanceOf(PemKeyCertOptions.class,
-                    refreshed.getAllValues().getLast().getKeyCertOptions());
-            assertEquals(List.of(survivorCertificate.certificatePem().stripTrailing() + "\n"),
-                    retained.getCertValues().stream().map(value -> value.toString()).toList());
-            assertEquals(List.of(survivorCertificate.privateKeyPem()),
-                    retained.getKeyValues().stream().map(value -> value.toString()).toList());
+            assertEquals(Pem.parseCertificate(survivorCertificate.certificatePem()),
+                    servedCertificate(initial.getValue(), "survivor.example.test"));
+            assertEquals(Pem.parseCertificate(survivorCertificate.certificatePem()),
+                    servedCertificate(initial.getValue(), "moved.example.test"),
+                    "the old port must fall back to its survivor after the other certificate moves away");
             verify(newServer).listen();
             verify(oldServer, never()).close();
         } finally {

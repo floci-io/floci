@@ -4,3 +4,8 @@
 # missing from this list, or an entry that no longer fails, fails the run. Delete an entry
 # as soon as its test passes. Measured 2026-10-13 on main 367ae0b2d, JVM image; failures
 # that also occur in the commercial control run are environmental and not listed.
+
+# The Resource Groups model cannot name an EUSC resource: GroupStringV2 and ResourceArn both
+# require the region to be `[a-z]{2}(-[a-z]+)+-\d`, which `eusc-de-east-1` never matches, so
+# GroupResources rejects the capacity reservation's own ARN. Floci enforces the model as published.
+ResourceGroupsTest#capacityPoolLifecycle

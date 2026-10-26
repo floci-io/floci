@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RequestShapeCheck.ByPosition;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -22,10 +23,10 @@ class RequestShapeCheckTest {
 
     private static final RequestShapeModel MODEL = parse("""
             {
-              "operations": {},
+              "operations": {"Put": "Request"},
               "shapes": {
                 "Request": {"type": "structure", "members": {
-                  "Name": "Text", "Count": "Number", "On": "Flag", "Data": "Bytes", "When": "Time",
+                  "Name": "Text", "Count": "Number", "On": "Flag", "Data": "Bytes", "When": "Time", "Rate": "Fraction",
                   "Nested": "Request", "Items": "Requests", "Names": "Texts", "Labels": "Labelled"}},
                 "Requests": {"type": "list", "member": "Request"},
                 "Texts": {"type": "list", "member": "Text"},
@@ -34,7 +35,8 @@ class RequestShapeCheckTest {
                 "Number": {"type": "integer"},
                 "Flag": {"type": "boolean"},
                 "Bytes": {"type": "blob"},
-                "Time": {"type": "timestamp"}
+                "Time": {"type": "timestamp"},
+                "Fraction": {"type": "double"}
               }
             }
             """);
@@ -98,16 +100,108 @@ class RequestShapeCheckTest {
         assertEquals("NUMBER_VALUE as Blob", blob.getMessage());
     }
 
-    private static void assertRefused(String body, String message) {
+    @Test
+    void aScalarNameReplacesTheTokenItIsGivenForAndOnlyThatToken() {
+        RequestShapeCheck.Messages named = new RequestShapeCheck.Messages("Refused", "object", "list",
+                ByPosition.same("structure"), ByPosition.same("list"), ByPosition.same("map"), "%s as %s", true,
+                "boolean text", "blob", Set.of("string", "integer"),
+                Map.of("NUMBER_VALUE", "a number", "TRUE_VALUE", "a boolean"), Map.of(), false);
+        assertRefused("{\"Name\": 5}", named, "a number as String");
+        assertRefused("{\"Name\": true}", named, "a boolean as String");
+        assertRefused("{\"Name\": 5.5}", named, "DECIMAL_VALUE as String");
+        assertRefused("{\"Name\": false}", named, "FALSE_VALUE as String");
+        assertRefused("{\"Count\": \"5\"}", named, "STRING_VALUE as Integer");
+    }
+
+    @Test
+    void aTypeWithItsOwnWordingReplacesTheConversionForThatTypeOnly() {
+        RequestShapeCheck.Messages worded = new RequestShapeCheck.Messages("Refused", "object", "list",
+                ByPosition.same("structure"), ByPosition.same("list"), ByPosition.same("map"), "%s as %s", false,
+                "boolean text", "blob", Set.of("string", "integer", "double"), Map.of("TRUE_VALUE", "a boolean"),
+                Map.of("double", "%s is no %s here", "integer", "%s is not a count"), false);
+        assertRefused("{\"Rate\": \"5.5\"}", worded, "STRING_VALUE is no Double here");
+        assertRefused("{\"Rate\": true}", worded, "a boolean is no Double here");
+        assertRefused("{\"Count\": \"5\"}", worded, "STRING_VALUE is not a count");
+        assertRefused("{\"Name\": 5}", worded, "NUMBER_VALUE as String");
+        assertAccepted("{\"Rate\": 5.5, \"Count\": 1.5}", worded);
+    }
+
+    @Test
+    void sortedMembersReportTheFirstBadMemberInNameOrderRatherThanBodyOrder() {
+        RequestShapeCheck.Messages sorted = new RequestShapeCheck.Messages("Refused", "object", "list",
+                new ByPosition("structure member", "structure element"), new ByPosition("list member", "list element"),
+                new ByPosition("map member", "map element"), "%s as %s", true, "boolean text", "blob",
+                Set.of("string", "integer", "boolean", "blob"), Map.of(), Map.of(), true);
+        String body = "{\"Name\": 5, \"Count\": \"5\"}";
+        assertRefused(body, "NUMBER_VALUE as String");
+        assertRefused(body, sorted, "STRING_VALUE as Integer");
+        String nested = "{\"Nested\": {\"Name\": 5, \"Count\": \"5\"}, \"Items\": [{\"On\": 0, \"Data\": 5}]}";
+        assertRefused(nested, "NUMBER_VALUE as String");
+        assertRefused(nested, sorted, "blob");
+    }
+
+    @Test
+    void sortedMembersReadAMapsEntriesInKeyOrderAndAListInItsOwnOrder() {
+        RequestShapeCheck.Messages sorted = new RequestShapeCheck.Messages("Refused", "object", "list",
+                ByPosition.same("structure"), ByPosition.same("list"), ByPosition.same("map"), "%s as %s", true,
+                "boolean text", "blob", Set.of("string", "integer"), Map.of(), Map.of(), true);
+        String map = "{\"Labels\": {\"z\": {\"Name\": 5}, \"a\": {\"Count\": \"5\"}}}";
+        assertRefused(map, "NUMBER_VALUE as String");
+        assertRefused(map, sorted, "STRING_VALUE as Integer");
+        String list = "{\"Names\": [true, 5]}";
+        assertRefused(list, "TRUE_VALUE as String");
+        assertRefused(list, sorted, "TRUE_VALUE as String");
+    }
+
+    @Test
+    void operationsWalkTheInputShapeOfAKnownOperation() throws Exception {
+        RequestShapeCheck.Operations operations =
+                new RequestShapeCheck.Operations("aws/fixture-request-shapes.json", "fixture request shapes", MESSAGES);
         AwsException e = assertThrows(AwsException.class,
-                () -> RequestShapeCheck.check(MODEL, "Request", MAPPER.readTree(body), MESSAGES), body);
+                () -> operations.check(MODEL, "Put", MAPPER.readTree("{\"Name\": 5}")));
+        assertEquals("Refused", e.getErrorCode());
+        assertEquals("NUMBER_VALUE as String", e.getMessage());
+        operations.check(MODEL, "Put", MAPPER.readTree("{\"Name\": \"n\"}"));
+    }
+
+    @Test
+    void operationsAnswerAnUnknownOperationAsAnInternalFailure() {
+        RequestShapeCheck.Operations operations =
+                new RequestShapeCheck.Operations("aws/fixture-request-shapes.json", "fixture request shapes", MESSAGES);
+        AwsException e = assertThrows(AwsException.class,
+                () -> operations.check(MODEL, "NoSuchOperation", MAPPER.readTree("{}")));
+        assertEquals("InternalFailure", e.getErrorCode());
+        assertEquals(500, e.getHttpStatus());
+        assertEquals("The request processing has failed because of an unknown error.", e.getMessage());
+    }
+
+    @Test
+    void operationsLoadTheVendoredModelOnFirstCheckNotWhenBuilt() {
+        RequestShapeCheck.Operations missing =
+                new RequestShapeCheck.Operations("aws/no-such-request-shapes.json", "missing request shapes", MESSAGES);
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> missing.check("Put", MAPPER.readTree("{}")));
+        assertEquals("missing request shapes resource not found: aws/no-such-request-shapes.json", e.getMessage());
+    }
+
+    private static void assertRefused(String body, String message) {
+        assertRefused(body, MESSAGES, message);
+    }
+
+    private static void assertRefused(String body, RequestShapeCheck.Messages messages, String message) {
+        AwsException e = assertThrows(AwsException.class,
+                () -> RequestShapeCheck.check(MODEL, "Request", MAPPER.readTree(body), messages), body);
         assertEquals("Refused", e.getErrorCode(), body);
         assertEquals(400, e.getHttpStatus(), body);
         assertEquals(message, e.getMessage(), body);
     }
 
     private static void assertAccepted(String body) {
-        assertDoesNotThrow(() -> RequestShapeCheck.check(MODEL, "Request", MAPPER.readTree(body), MESSAGES), body);
+        assertAccepted(body, MESSAGES);
+    }
+
+    private static void assertAccepted(String body, RequestShapeCheck.Messages messages) {
+        assertDoesNotThrow(() -> RequestShapeCheck.check(MODEL, "Request", MAPPER.readTree(body), messages), body);
     }
 
     private static RequestShapeModel parse(String json) {

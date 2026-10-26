@@ -104,6 +104,7 @@ class RedshiftOperationsTest {
                 try {
                     client.deleteCluster(DeleteClusterRequest.builder()
                             .clusterIdentifier(clusterId)
+                            .skipFinalClusterSnapshot(true)
                             .build());
                 } catch (Exception e) {
                     LOG.log(Level.WARNING, "Failed to clean up Redshift cluster " + clusterId, e);
@@ -151,15 +152,17 @@ class RedshiftOperationsTest {
 
     @Test
     @Order(1)
-    @DisplayName("Create cluster, insert data, snapshot, restore to new cluster, verify data")
+    @DisplayName("Create cluster, insert data, take final snapshot on deletion, restore and verify data")
     void testSnapshotAndRestoreLifecycle() throws Exception {
         String sourceClusterId = TestFixtures.uniqueName("rs-source");
         String restoredClusterId = TestFixtures.uniqueName("rs-restored");
         String snapshotId = TestFixtures.uniqueName("rs-snap");
+        String finalSnapshotId = TestFixtures.uniqueName("rs-final");
 
         clustersToCleanup.add(sourceClusterId);
         clustersToCleanup.add(restoredClusterId);
         snapshotsToCleanup.add(snapshotId);
+        snapshotsToCleanup.add(finalSnapshotId);
 
         // 1. Create source cluster
         CreateClusterResponse createRes = client.createCluster(CreateClusterRequest.builder()
@@ -205,17 +208,23 @@ class RedshiftOperationsTest {
         assertThat(descSnapRes.snapshots()).isNotEmpty();
         assertThat(descSnapRes.snapshots().get(0).snapshotIdentifier()).isEqualTo(snapshotId);
 
-        // 4. Delete source cluster
+        // 4. Delete source cluster with a separate final snapshot.
         client.deleteCluster(DeleteClusterRequest.builder()
                 .clusterIdentifier(sourceClusterId)
+                .finalClusterSnapshotIdentifier(finalSnapshotId)
+                .finalClusterSnapshotRetentionPeriod(7)
                 .build());
         clustersToCleanup.remove(sourceClusterId);
+        Snapshot finalSnapshot = client.describeClusterSnapshots(request -> request.snapshotIdentifier(finalSnapshotId))
+                .snapshots().get(0);
+        assertThat(finalSnapshot.manualSnapshotRetentionPeriod()).isEqualTo(7);
+        assertThat(finalSnapshot.clusterIdentifier()).isEqualTo(sourceClusterId);
 
         // 5. Restore from snapshot to a new cluster identifier
         RestoreFromClusterSnapshotResponse restoreRes = client.restoreFromClusterSnapshot(
                 RestoreFromClusterSnapshotRequest.builder()
                         .clusterIdentifier(restoredClusterId)
-                        .snapshotIdentifier(snapshotId)
+                        .snapshotIdentifier(finalSnapshotId)
                         .nodeType("dc2.large")
                         .build());
 
@@ -238,6 +247,7 @@ class RedshiftOperationsTest {
         // Cleanup restored cluster and snapshot
         client.deleteCluster(DeleteClusterRequest.builder()
                 .clusterIdentifier(restoredClusterId)
+                .skipFinalClusterSnapshot(true)
                 .build());
         clustersToCleanup.remove(restoredClusterId);
 
@@ -355,7 +365,7 @@ class RedshiftOperationsTest {
                 .masterUserPassword(PASSWORD)
                 .build());
         clustersToCleanup.add(clusterId);
-        String arn = "arn:aws:redshift:us-east-1:000000000000:cluster:" + clusterId;
+        String arn = TestFixtures.arn("redshift", "000000000000", "cluster:" + clusterId);
 
         client.createTags(CreateTagsRequest.builder()
                 .resourceName(arn)
@@ -378,7 +388,7 @@ class RedshiftOperationsTest {
                 .build());
         assertThat(modified.cluster().nodeType()).isEqualTo("ra3.xlplus");
 
-        String roleArn = "arn:aws:iam::000000000000:role/rs-copy-role";
+        String roleArn = TestFixtures.globalArn("iam", "000000000000", "role/rs-copy-role");
         ModifyClusterIamRolesResponse withRole = client.modifyClusterIamRoles(ModifyClusterIamRolesRequest.builder()
                 .clusterIdentifier(clusterId)
                 .addIamRoles(roleArn)

@@ -207,6 +207,20 @@ class ContainerLifecycleManagerVolumeTest {
         manager.stopAndRemoveStrict("container-id", () -> operations.add("logs"));
 
         assertEquals(List.of("stop", "remove", "logs"), operations);
+        verify(stop).withTimeout(5);
+    }
+
+    @Test
+    void strictContainerCleanupUsesTheCallersStopTimeout() {
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("container-id")).thenReturn(stop);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(remove);
+
+        manager.stopAndRemoveStrict("container-id", null, 2);
+
+        verify(stop).withTimeout(2);
+        verify(remove).exec();
     }
 
     @Test

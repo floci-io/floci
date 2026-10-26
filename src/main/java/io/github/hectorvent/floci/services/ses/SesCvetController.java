@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.ses;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -26,8 +25,8 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 
 /**
  * SES V2 custom verification email template endpoints
@@ -63,7 +62,7 @@ public class SesCvetController {
     public Response createCustomVerificationEmailTemplate(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = objectMapper.readTree(body);
+            JsonNode request = readOptionBody(objectMapper, body);
             CustomVerificationEmailTemplate t = parseCvet(request);
             // Tags exist only on the create request; UpdateCustomVerificationEmailTemplate has no
             // Tags member and preserves the stored ones.
@@ -72,8 +71,6 @@ public class SesCvetController {
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -115,14 +112,12 @@ public class SesCvetController {
                                                           @PathParam("templateName") String templateName, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            CustomVerificationEmailTemplate t = parseCvet(objectMapper.readTree(body));
+            CustomVerificationEmailTemplate t = parseCvet(readOptionBody(objectMapper, body));
             t.setTemplateName(templateName);
             sesService.updateCustomVerificationEmailTemplate(t, region);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -140,7 +135,6 @@ public class SesCvetController {
     }
 
     private CustomVerificationEmailTemplate parseCvet(JsonNode request) {
-        requireJsonObject(request);
         CustomVerificationEmailTemplate t = new CustomVerificationEmailTemplate();
         t.setTemplateName(request.path("TemplateName").asText(null));
         t.setFromEmailAddress(request.path("FromEmailAddress").asText(null));

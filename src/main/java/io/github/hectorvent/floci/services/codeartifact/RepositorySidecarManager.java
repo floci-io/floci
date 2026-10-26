@@ -218,6 +218,38 @@ public interface RepositorySidecarManager {
     }
 
     /**
+     * Marks that {@code repositoryContainerId} is about to be used for {@link
+     * #listPackageVersions}, called by {@code CodeArtifactService} right after it resolves that
+     * id and before it does anything else with it. Resolving the id and entering {@link
+     * #listPackageVersions} are two separate statements there, with a concurrent repository
+     * delete's cleanup able to run in between them; pairing this with {@link #endUse} in a
+     * {@code try}/{@code finally} around the whole {@link #listPackageVersions} call closes that
+     * window the same way {@code PypiserverSidecarClient} already closes the narrower one inside
+     * the call itself. Default is a no-op: only a sidecar whose own concurrency bookkeeping dies
+     * with the container (pypiserver) has anything here to protect; one with no such bookkeeping,
+     * or (Maven) a container that is never torn down, does not.
+     */
+    default void beginUse(String repositoryContainerId) {
+    }
+
+    /** Marks the end of one {@link #beginUse}. Default is a no-op, for the same reason. */
+    default void endUse(String repositoryContainerId) {
+    }
+
+    /**
+     * Called once per version, after every one of its assets has already been removed through
+     * {@link #deletePackageVersionAsset}, for a sidecar whose own native listing can name a
+     * version somewhere other than the per-version assets {@link #listPackageVersionAssetNames}
+     * already enumerates: Maven's artifact-level {@code maven-metadata.xml}, which {@code
+     * ReposiliteSidecarClient} overrides this to rewrite. Default is a no-op: a sidecar with no
+     * such separate listing (every format {@code DisposePackageVersions} supports besides Maven)
+     * already has nothing left to say the version ever existed once its assets are gone.
+     */
+    default void recordVersionDisposed(String repositoryContainerId, String namespace, String packageName,
+            String version) {
+    }
+
+    /**
      * This format's own preferred "default display" version for a package, independent of publish
      * recency, for {@code ListPackageVersions}' {@code defaultDisplayVersion}. {@code empty()} by
      * default: every sidecar Floci currently backs besides npm has no such separate preference of

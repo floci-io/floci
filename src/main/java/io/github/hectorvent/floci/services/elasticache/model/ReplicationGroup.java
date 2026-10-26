@@ -110,6 +110,14 @@ public class ReplicationGroup {
         return transitEncryptionEnabled != null ? transitEncryptionEnabled : authMode != AuthMode.NO_AUTH;
     }
 
+    /** An encrypted group takes TLS only unless its mode is preferred, the mode clients migrate to TLS under. */
+    public TransitEncryption transitEncryption() {
+        if (!isEncryptedInTransit()) {
+            return TransitEncryption.NONE;
+        }
+        return "preferred".equals(transitEncryptionMode) ? TransitEncryption.PREFERRED : TransitEncryption.REQUIRED;
+    }
+
     public Set<String> getAssociatedUserIds() { return associatedUserIds; }
     public void setAssociatedUserIds(Set<String> associatedUserIds) {
         this.associatedUserIds = associatedUserIds != null ? associatedUserIds : new HashSet<>();

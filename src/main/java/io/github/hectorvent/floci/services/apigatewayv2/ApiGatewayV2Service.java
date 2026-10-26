@@ -797,6 +797,25 @@ public class ApiGatewayV2Service {
         return integration;
     }
 
+    /**
+     * Sets the method, template selection expression, timeout and the two mapping tables exactly as
+     * given, null included. A timeout of 0 is the unset value. UpdateIntegration keeps a field the
+     * request leaves out, so it cannot remove one that CloudFormation dropped.
+     */
+    public Integration replaceIntegrationSettings(String region, String apiId, String integrationId,
+                                                  String integrationMethod, String templateSelectionExpression,
+                                                  int timeoutInMillis, Map<String, String> requestParameters,
+                                                  Map<String, String> requestTemplates) {
+        Integration integration = getIntegration(region, apiId, integrationId);
+        integration.setIntegrationMethod(integrationMethod);
+        integration.setTemplateSelectionExpression(templateSelectionExpression);
+        integration.setTimeoutInMillis(timeoutInMillis);
+        integration.setRequestParameters(requestParameters);
+        integration.setRequestTemplates(requestTemplates);
+        integrationStore.put(integrationKey(region, apiId, integrationId), integration);
+        return integration;
+    }
+
     // ──────────────────────────── Stage CRUD ────────────────────────────
 
     public Stage createStage(String region, String apiId, Map<String, Object> request) {

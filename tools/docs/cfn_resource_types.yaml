@@ -187,6 +187,7 @@ notes:
   AWS::Lambda::WebFunctionEndpoint: '`RegionalEndpoints` is not exposed to `Fn::GetAtt` yet'
   AWS::EC2::VPC: 'deleted on stack teardown; a VPC with dependents outside the stack, including anything still holding a network interface in its subnets (an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone interface, an interface endpoint), fails the delete with `DependencyViolation`, as on AWS'
   AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
+  AWS::EC2::PrefixList: 'updated in place; an update that changes `AddressFamily`, or `MaxEntries` together with `Entries`, fails'
   AWS::ApplicationAutoScaling::ScalableTarget: '`ScheduledActions` are accepted and not run; Floci has no scheduled scaling'
   AWS::RDS::DBInstance: starts a real container
   AWS::RDS::DBCluster: starts a real container
@@ -196,7 +197,7 @@ notes:
   AWS::ElastiCache::ServerlessCache: 'GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form'
   AWS::Redshift::ClusterSecurityGroup: accepted; no EC2-Classic security group model
   AWS::Redshift::Cluster: single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported
-  AWS::RedshiftServerless::Namespace: 'ManageAdminPassword is accepted and not applied; GetAtt uses the dotted Namespace.* form'
+  AWS::RedshiftServerless::Namespace: 'Managed admin credentials use Secrets Manager; GetAtt uses the dotted Namespace.* form'
   AWS::RedshiftServerless::Workgroup: 'starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form'
   AWS::CDK::Metadata: accepted; no-op
   AWS::Transfer::Server: 'management plane only; Ref returns the server ARN; Arn, ServerId and State attributes supported; AS2 managed egress IPs are not modeled; Domain replacement and IdentityProviderType changes are not supported'
@@ -214,10 +215,14 @@ notes:
   AWS::BedrockAgentCore::Runtime: 'Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored'
   AWS::BedrockAgentCore::RuntimeEndpoint: 'Ref returns the endpoint ARN; Tags are accepted and not stored'
   AWS::BedrockAgentCore::Memory: 'Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored'
+  AWS::KinesisFirehose::DeliveryStream: '`DeliveryStreamName`, `Tags` and, from an S3 destination, `BucketARN`, `RoleARN`, `Prefix`, `ErrorOutputPrefix`, `CompressionFormat`, `BufferingHints`, `CloudWatchLoggingOptions` and `ProcessingConfiguration` are applied; other properties are ignored, and a destination member the template drops on update keeps its stored value, as on AWS'
 
 # Trailing prose appended to a row after its type list, for behaviour that belongs to the service
 # rather than to one type.
 row_notes:
+  AWS::CloudWatch: >-
+    Composite alarms have backing definitions with name Ref and Arn GetAtt, rollback, and
+    replacement cleanup. Composite actions are stored only; suppression properties are rejected.
   AWS::AppSync: >-
     `Ref` on `GraphQLApi` and `ApiKey` returns the id where AWS returns the ARN. See
     [AppSync](appsync.md#cloudformation) for `Ref` and `Fn::GetAtt` compared with AWS.

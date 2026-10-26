@@ -407,6 +407,38 @@ func TestIoT(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("IoTDataRetainedMessages", func(t *testing.T) {
+		dataSvc := testutil.IoTDataClient()
+		topic := "devices/go-iot-retained/status"
+
+		_, err := dataSvc.Publish(ctx, &iotdataplane.PublishInput{
+			Topic: aws.String(topic), Payload: []byte("online"), Qos: 1, Retain: true,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			dataSvc.Publish(ctx, &iotdataplane.PublishInput{Topic: aws.String(topic), Retain: true})
+		})
+
+		// lastModifiedTime is epoch milliseconds; the delta tolerates clock skew to a containerised emulator.
+		retained, err := dataSvc.GetRetainedMessage(ctx, &iotdataplane.GetRetainedMessageInput{Topic: aws.String(topic)})
+		require.NoError(t, err)
+		assert.Equal(t, []byte("online"), retained.Payload)
+		assert.InDelta(t, time.Now().UnixMilli(), retained.LastModifiedTime, float64(time.Minute.Milliseconds()))
+
+		var listed int64
+		paginator := iotdataplane.NewListRetainedMessagesPaginator(dataSvc, &iotdataplane.ListRetainedMessagesInput{})
+		for paginator.HasMorePages() && listed == 0 {
+			page, err := paginator.NextPage(ctx)
+			require.NoError(t, err)
+			for _, summary := range page.RetainedTopics {
+				if aws.ToString(summary.Topic) == topic {
+					listed = summary.LastModifiedTime
+				}
+			}
+		}
+		assert.Equal(t, retained.LastModifiedTime, listed)
+	})
+
 	t.Run("TopicRuleCrudAndRuleActions", func(t *testing.T) {
 		dataSvc := testutil.IoTDataClient()
 		dynamoSvc := testutil.DynamoDBClient()

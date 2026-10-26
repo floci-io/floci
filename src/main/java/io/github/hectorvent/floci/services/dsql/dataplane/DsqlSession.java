@@ -206,7 +206,8 @@ final class DsqlSession {
             return;
         }
         String token = PostgresWire.cString(password.body(), 0).value();
-        DsqlEndpoint.Admission admission = endpoint.admit(token, user, serverName[0]);
+        DsqlEndpoint.Admission admission = endpoint.admit(token, user, serverName[0],
+                socket.getInetAddress().getHostAddress());
         if (!admission.allowed()) {
             refuse(out, admission.state(), ACCESS_DENIED, admission.hint());
             return;

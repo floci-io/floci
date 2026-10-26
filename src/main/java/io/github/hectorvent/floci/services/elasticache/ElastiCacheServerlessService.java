@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheTagResourceArn.TagResourceRef;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.ServerlessCache;
@@ -243,6 +244,32 @@ public class ElastiCacheServerlessService implements Resettable {
         }
     }
 
+    public Map<String, String> addTagsToResource(String resourceArn, Map<String, String> tags, String region) {
+        TagResourceRef ref = parseTagResourceArn(resourceArn, region);
+        synchronized (lockFor(ref.id())) {
+            ServerlessCache cache = requireCache(ref.id());
+            requireResourceArn(cache.getArn(), ref.resourceArn(), ref.id());
+            Map<String, String> updatedTags = cache.getTags();
+            updatedTags.putAll(tags);
+            cache.setTags(updatedTags);
+            caches.put(key(ref.id()), cache);
+            return cache.getTags();
+        }
+    }
+
+    public Map<String, String> removeTagsFromResource(String resourceArn, List<String> tagKeys, String region) {
+        TagResourceRef ref = parseTagResourceArn(resourceArn, region);
+        synchronized (lockFor(ref.id())) {
+            ServerlessCache cache = requireCache(ref.id());
+            requireResourceArn(cache.getArn(), ref.resourceArn(), ref.id());
+            Map<String, String> updatedTags = cache.getTags();
+            tagKeys.forEach(updatedTags::remove);
+            cache.setTags(updatedTags);
+            caches.put(key(ref.id()), cache);
+            return cache.getTags();
+        }
+    }
+
     private static void validateTagCount(Map<String, String> tags) {
         if (tags != null && tags.size() > 50) {
             throw new AwsException("TagQuotaPerResourceExceeded", "At most 50 tags are supported.", 400);
@@ -311,6 +338,17 @@ public class ElastiCacheServerlessService implements Resettable {
     private ServerlessCache requireCache(String name) {
         return caches.get(key(name)).orElseThrow(() -> new AwsException("ServerlessCacheNotFoundFault",
                 "Serverless cache " + name + " not found.", 404));
+    }
+
+    private TagResourceRef parseTagResourceArn(String resourceArn, String region) {
+        return ElastiCacheTagResourceArn.parse(resourceArn, region, resolver, "serverlesscache");
+    }
+
+    private static void requireResourceArn(String actualArn, String requestedArn, String id) {
+        if (actualArn == null || !actualArn.equalsIgnoreCase(requestedArn)) {
+            throw new AwsException("ServerlessCacheNotFoundFault",
+                    "Serverless cache " + id + " not found.", 404);
+        }
     }
 
     private String key(String name) {

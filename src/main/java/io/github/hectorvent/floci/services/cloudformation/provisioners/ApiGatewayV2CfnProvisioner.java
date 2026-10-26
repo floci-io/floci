@@ -867,6 +867,27 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         String connectionId = ctx.resolveOptional(props, "ConnectionId");
         req.put("connectionType", connectionType);
         req.put("connectionId", connectionId);
+        req.put("integrationMethod", ctx.resolveOrDefault(props, "IntegrationMethod", null));
+        req.put("templateSelectionExpression",
+                ctx.resolveOrDefault(props, "TemplateSelectionExpression", null));
+        String timeout = ctx.resolveOrDefault(props, "TimeoutInMillis", null);
+        int timeoutInMillis = 0;
+        if (timeout != null) {
+            try {
+                timeoutInMillis = Integer.parseInt(timeout);
+                req.put("timeoutInMillis", timeoutInMillis);
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationError", "TimeoutInMillis must be an integer", 400);
+            }
+        }
+        Map<String, String> requestParameters = resolveStringMap(props, "RequestParameters", ctx.engine());
+        if (requestParameters != null) {
+            req.put("requestParameters", requestParameters);
+        }
+        Map<String, String> requestTemplates = resolveStringMap(props, "RequestTemplates", ctx.engine());
+        if (requestTemplates != null) {
+            req.put("requestTemplates", requestTemplates);
+        }
         // A snapshot describes the update in flight; one an earlier update left behind is stale.
         r.getAttributes().remove(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
 
@@ -883,6 +904,12 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                 // A connection removed from the template is removed here too. INTERNET is the AWS default.
                 apiGatewayV2Service.replaceIntegrationConnection(region, apiId, r.getPhysicalId(),
                         connectionType != null ? connectionType : "INTERNET", connectionId);
+                // These fields are exactly what the template says: one it dropped is removed, and a
+                // dropped TimeoutInMillis is 0, the value CreateIntegration stores when it is absent.
+                apiGatewayV2Service.replaceIntegrationSettings(region, apiId, r.getPhysicalId(),
+                        (String) req.get("integrationMethod"),
+                        (String) req.get("templateSelectionExpression"), timeoutInMillis,
+                        requestParameters, requestTemplates);
                 integration = apiGatewayV2Service.updateIntegration(region, apiId, r.getPhysicalId(), req);
             } catch (RuntimeException failure) {
                 // The stack skips rollbackUpdate for a resource whose own update failed, so undo it here.
@@ -890,7 +917,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                     rollbackIntegrationConnection(r);
                 } catch (RuntimeException restoreFailure) {
                     r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
-                            "Could not roll back the connection of integration " + r.getPhysicalId() + ": "
+                            "Could not roll back integration " + r.getPhysicalId() + ": "
                                     + restoreFailure.getMessage());
                     if (restoreFailure != failure) {
                         failure.addSuppressed(restoreFailure);
@@ -904,9 +931,9 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * The connection the integration had before this update, and whether the update also changes
-     * another field. UpdateIntegration keeps a field the request leaves out, so only a value that
-     * is set and differs counts as a change.
+     * The connection and the five settings the integration had before this update, and whether the
+     * update also changes another field. UpdateIntegration keeps a field the request leaves out, so
+     * only a value that is set and differs counts as a change.
      */
     private String integrationConnectionSnapshot(String region, String apiId, Integration prior,
                                                  Map<String, Object> req) {
@@ -918,6 +945,11 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         snapshot.put("apiId", apiId);
         snapshot.put("connectionType", prior.getConnectionType());
         snapshot.put("connectionId", prior.getConnectionId());
+        snapshot.put("integrationMethod", prior.getIntegrationMethod());
+        snapshot.put("templateSelectionExpression", prior.getTemplateSelectionExpression());
+        snapshot.put("timeoutInMillis", prior.getTimeoutInMillis());
+        snapshot.set("requestParameters", objectMapper.valueToTree(prior.getRequestParameters()));
+        snapshot.set("requestTemplates", objectMapper.valueToTree(prior.getRequestTemplates()));
         snapshot.put("otherFieldChanged", otherFieldChanged);
         return snapshot.toString();
     }
@@ -927,9 +959,9 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Puts the connection back from the snapshot taken before the update. Answers true only when the
-     * update changed nothing else: this provisioner keeps no copy of the other fields, so the stack
-     * must still report that their rollback is not implemented.
+     * Puts the connection and the settings back from the snapshot taken before the update. Answers
+     * true only when the update changed nothing else: this provisioner keeps no copy of the other
+     * fields, so the stack must still report that their rollback is not implemented.
      */
     private boolean rollbackIntegrationConnection(StackResource resource) {
         String raw = resource.getAttributes().get(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
@@ -947,9 +979,23 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         apiGatewayV2Service.replaceIntegrationConnection(snapshot.path("region").asText(),
                 snapshot.path("apiId").asText(), resource.getPhysicalId(),
                 textOrNull(snapshot, "connectionType"), textOrNull(snapshot, "connectionId"));
+        apiGatewayV2Service.replaceIntegrationSettings(snapshot.path("region").asText(),
+                snapshot.path("apiId").asText(), resource.getPhysicalId(),
+                textOrNull(snapshot, "integrationMethod"), textOrNull(snapshot, "templateSelectionExpression"),
+                snapshot.path("timeoutInMillis").asInt(), stringMapOrNull(snapshot.path("requestParameters")),
+                stringMapOrNull(snapshot.path("requestTemplates")));
         // Spent only once the restore succeeded, so a restore that throws can be tried again.
         resource.getAttributes().remove(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
         return !snapshot.path("otherFieldChanged").asBoolean();
+    }
+
+    private static Map<String, String> stringMapOrNull(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        node.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
+        return out;
     }
 
     // ── Stage ────────────────────────────────────────────────────────────────
@@ -1155,10 +1201,19 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     private Map<String, String> parseStageVariables(JsonNode props, CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has("StageVariables") || props.get("StageVariables").isNull()) {
+        return resolveStringMap(props, "StageVariables", engine);
+    }
+
+    /**
+     * Resolves an object property to a string map in template order, or null when absent or not an
+     * object. An entry whose value is a selected {@code AWS::NoValue} is left out.
+     */
+    private static Map<String, String> resolveStringMap(JsonNode props, String name,
+                                                        CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(name) || props.get(name).isNull()) {
             return null;
         }
-        JsonNode resolved = engine.resolveNode(props.get("StageVariables"));
+        JsonNode resolved = engine.resolveNodeOmittingNoValue(props.get(name));
         if (resolved == null || !resolved.isObject()) {
             return null;
         }

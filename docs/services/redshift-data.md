@@ -43,6 +43,76 @@ A request identifies its target cluster or serverless workgroup one of three way
 
 A statement run against a workgroup reports `WorkgroupName` and omits `ClusterIdentifier`, and the reverse holds for a cluster statement. `ListDatabases`, `ListSchemas`, `ListTables` and `DescribeTable` accept `WorkgroupName` the same way.
 
+## Session reuse
+
+`ExecuteStatement` and `BatchExecuteStatement` accept `SessionKeepAliveSeconds`, an integer from
+0 to 86400. A positive value retains the JDBC connection after the statement completes and
+returns its `SessionId`. Subsequent execute or batch calls can send just that `SessionId` and
+their SQL. The database, cluster or workgroup, database user and secret are inherited from the
+first request. Optional target fields on a reuse request must match the original session.
+Temporary tables and session settings survive between calls, and Execute and Batch can share
+the same session. Metadata operations such as `ListTables` still open independent connections.
+
+`BEGIN` or `START TRANSACTION` opens an explicit transaction for later Execute calls;
+`COMMIT`/`END` commits it, and `ROLLBACK`/`ABORT` rolls it back. SQL errors and accepted running cancellation
+leave an explicit transaction aborted: later Execute calls fail until COMMIT or ROLLBACK ends
+the block, rolling back its changes. A batch remains a transaction boundary: its success commits the
+connection and its failure rolls it back, including any transaction opened by earlier Execute
+calls on that session. Transaction-control modifiers beyond optional `WORK` or `TRANSACTION`
+are rejected before execution. These cross-call transaction details have not been verified against live AWS.
+
+Batch audit records track successful user changes through transaction boundaries and savepoints.
+`ROLLBACK TO` discards changes after the named savepoint, while `RELEASE` keeps them pending until
+commit. A full rollback discards pending changes; changes committed earlier in the batch retain
+their audit records if a later statement fails. Batch entries support transaction-control commands
+and multiple SQL statements. Audit state advances after each successful command, while an entry's
+result metadata preserves its first command's result and its original SQL text.
+
+An omitted keep-alive on a reuse request preserves the previous idle timeout. A supplied value
+replaces it after successful admission, and the idle deadline starts when the query completes.
+Sending 0 with an existing `SessionId` closes the connection after that query. Omitting both
+fields, or sending 0 without a session id, keeps the existing connection-per-request behavior.
+
+Only one query can be admitted to a session at a time, including while that query waits for a
+worker. A different query against a busy session returns `ValidationException`; it is not queued
+behind the first query. Retrying the first query's `ClientToken` returns its original statement
+and session ids. Queue or admission-storage failures release their reservation without changing
+an existing session's idle deadline. Each cluster or workgroup supports up to 500 retained
+sessions, shared across callers and database names.
+
+Sessions are scoped to the signing account, Region and caller independently of `WithEvent`.
+Floci resolves the caller's IAM ARN when possible and otherwise uses the access key identity;
+an internal caller can supply its captured principal. A foreign, expired or reset session returns
+`ResourceNotFoundException`. These exact error choices and optional-field matching rules have
+not been compared with live AWS. A running session lasts at most 24 hours from creation;
+a one-second sweep cancels active work and closes connections at that deadline.
+
+Session ids appear in Execute, Batch, DescribeStatement and ListStatements responses. The id
+is saved with statement metadata and idempotency receipts, but live connections are runtime-only:
+reset and shutdown close them, and restarting Floci never reopens a session. A session request
+with an existing receipt can still replay its original response after the connection expires or
+after restart, subject to the normal receipt lifetime and caller ownership. `ListSessions` is
+not implemented.
+
+Unexpected synchronous connection-cleanup failures are reported to the affected operation.
+Reset still attempts to close the remaining sessions and clear statement and receipt state before
+reporting cleanup errors. Background expiration failures are logged without stopping later sweeps.
+An already-closed connection (`SQLSTATE 08003`) is a benign cleanup outcome.
+
+```python
+created = data.execute_statement(
+    WorkgroupName="analytics", Database="dev", SessionKeepAliveSeconds=60,
+    Sql="CREATE TEMP TABLE staging(id integer)")
+# Poll DescribeStatement until FINISHED before submitting another query in this session.
+session_id = created["SessionId"]
+inserted = data.execute_statement(SessionId=session_id, Sql="INSERT INTO staging VALUES (42)")
+# Poll inserted["Id"] before the next call.
+selected = data.execute_statement(SessionId=session_id, Sql="SELECT * FROM staging")
+```
+
+See [AWS session reuse guidance](https://docs.aws.amazon.com/redshift/latest/mgmt/data-api.html)
+for the idle timeout, 24-hour lifetime and single-query constraints.
+
 ## Compatibility Notes
 
 - **Execution is asynchronous.** `ExecuteStatement` and `BatchExecuteStatement` return an `Id` after admission to the shared bounded worker pool. `DescribeStatement` progresses through `SUBMITTED`, `STARTED`, and `FINISHED`, `FAILED` or `ABORTED`. Poll before reading results. Optional `WaitTimeSeconds` accepts integers from 1 to 30 and waits up to that duration. HTTP, Step Functions and Scheduler use the same executor. Saturation returns `ActiveStatementsExceededException`.
@@ -53,10 +123,55 @@ A statement run against a workgroup reports `WorkgroupName` and omits `ClusterId
 - **`GetStatementResult` and `GetStatementResultV2`** return the typed `Records` shape. `GetStatementResultV2` also returns `ResultFormat`, and when the statement was run with `ResultFormat=CSV` it returns `Records` as `CSVRecords` strings. A statement that produced no result set (an `INSERT`, `UPDATE`, `DELETE`, or DDL statement) returns `ValidationException` with the message `Statement has no result set`.
 - **Paging.** The page size is 1000 rows. `NextToken` is an opaque base64 row offset; there is no server-side cursor.
 - **`SqlParameters` / `Parameters`** are bound into a `PreparedStatement`. Named `:placeholder` markers are rewritten to positional JDBC bind parameters. Colons inside string literals, quoted identifiers, comments, PostgreSQL `::` casts, and dollar-quoted strings are left untouched. Redshift Data API parameter values are always strings on the wire; PostgreSQL coerces each bound value to the column type.
+- **Batch `Parameters`** are shared by every entry in `Sqls`. Each statement can use a subset of the supplied parameters, and every supplied parameter must be referenced by at least one statement. Missing, unused, duplicate or malformed parameters are rejected with `ValidationException` before executing the batch. Parameter names can contain letters, digits and underscores, including names consisting only of digits. Values must be non-empty strings. `DescribeStatement` and `ListStatements` return the original batch parameters in `QueryParameters`; SQL text retains its named placeholders.
 - **`CancelStatement`** returns `{ "Status": true }` when cancellation is accepted for queued or running work. Running transactional SQL receives JDBC cancellation and rolls back before reaching `ABORTED`; cancelling a batch rolls back its earlier writes. Cancelling a statement that is already terminal returns `ValidationException` ("Could not cancel a query that is already in ABORTED state with ID: <id>"), as AWS does. Repeated cancellation and statements that already own commit return `false` in Floci. Commands requiring auto-commit, including Spectrum external DDL and `VACUUM`, own completion before performing irreversible work and reject cancellation during that work. An unknown statement id returns `ResourceNotFoundException`.
 - **`WithEvent=true`** publishes one terminal status event per parent statement to the default EventBridge bus in the captured account and region. Batch children do not emit events. False or omitted `WithEvent` emits none. Delivery occurs after terminal metadata is stored, on a separate bounded pool; disabled EventBridge, rejected delivery or target failures do not change the SQL outcome. Delivery is best effort, with no durable outbox or restart replay.
 - **`ExecuteSql` and `BatchExecuteSql`** (the deprecated pre-2020 operations) return `ValidationException`.
 - **Type mapping.** JDBC `BOOLEAN` and `BIT` map to `booleanValue`; integer types to `longValue`; floating-point types to `doubleValue`; `NUMERIC` and `DECIMAL` to `stringValue` (as AWS does); binary types to `blobValue`; everything else, including dates, timestamps, and uuid, to `stringValue`. A SQL `NULL` maps to `isNull`. A result column of type `line`, `json`, or `jsonb` fails the statement with the Redshift error text.
+
+## Client token retries
+
+`ExecuteStatement` and `BatchExecuteStatement` accept an optional `ClientToken`, a case-sensitive
+string of 1 to 64 characters. Repeating an admitted request with the same token returns the
+original statement `Id` and `CreatedAt` without running SQL or publishing its terminal event
+again. This applies while the statement is queued or running and after it finishes, fails or is
+cancelled. Omit the token, or use a new one, to submit independent work. AWS SDKs normally generate
+the token automatically and keep it for their retries.
+
+Tokens expire 8 hours after first admission. Retries do not extend this deadline. Validation,
+reported storage errors and queue-admission failures do not consume the token. An SQL execution failure after
+admission does consume it. `WaitTimeSeconds` on a retry can wait for the original execution without
+submitting another one.
+
+Request validation and database-target resolution run before admission coordination for new connections. Only requests
+sharing an account, region, execute operation and token share an admission lock; tokenless requests
+use no token lock. The executor reserves queue capacity before writing admission state, so a full
+queue cannot create a receipt that reappears after restart. Workers run SQL only after admission
+writes succeed. Reset still signals cancellation if clearing either storage backend reports an
+error. Expired receipts are removed in one atomic batch per sweep, with concurrently replaced
+receipts retained.
+
+Receipts use the configured storage mode. Persistent, hybrid and WAL modes retain them across a
+normal restart; memory mode loses them. Interrupted statements keep the existing recovery behavior:
+they become `FAILED`, and SQL is never replayed automatically. This does not provide a distributed
+transaction between PostgreSQL and Floci storage or an exactly-once guarantee after a host crash.
+Persistent and WAL modes use atomic admission writes that report write failures before enqueueing
+SQL. Hybrid mode retains its write-behind behavior: disk flush failures are logged while the live
+in-memory state remains available.
+The token deadline is independent of result retention: if a configured result TTL shorter than
+8 hours removes the statement, its receipt still returns the original admission response until
+the token expires, without restoring results.
+
+Floci scopes tokens by account, region and execute operation. Requests for new connections validate
+and resolve the database target before looking up a receipt, including on retries. SessionId-only
+retries check an existing receipt first so a closed connection does not prevent replay; receipts
+for retained sessions additionally check caller ownership. Within that scope, reusing
+a token with changed SQL, parameters or event settings replays the original operation; it does not
+change that operation. The precise AWS behavior for changed payloads, different IAM principals,
+cross-operation reuse and responses after result eviction has not been verified against a live
+AWS cluster. These are explicit Floci policies. See the
+[AWS Data API guide](https://docs.aws.amazon.com/redshift/latest/mgmt/data-api.html) for the documented
+8-hour token window and SDK retry behavior.
 
 ## Statement status events
 
@@ -79,8 +194,7 @@ failure rolls back the batch. External read or preparation failures are stored a
 reported by `DescribeStatement`, as other SQL execution failures are.
 Create external schemas and tables outside a batch: `CREATE EXTERNAL TABLE` cannot run inside a transaction block on AWS, and a batch runs as one transaction, so both statements are rejected there.
 
-Data API session reuse is not supported. The legacy Phase 1 catalog
-is not the Glue-backed relational path.
+The legacy Phase 1 catalog is not the Glue-backed relational path.
 
 ## Configuration
 

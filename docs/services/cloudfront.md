@@ -6,10 +6,10 @@ access identities, public keys, trusted key groups, CloudFront Functions, invali
 viewer delivery from S3 or custom origins for every CloudFront viewer method (GET, HEAD, OPTIONS, POST,
 PUT, PATCH and DELETE).
 
-**Protocol:** REST XML  
-**API version:** `2020-05-31`  
-**Endpoint prefix:** `cloudfront`  
-**Namespace:** `http://cloudfront.amazonaws.com/doc/2020-05-31/`  
+**Protocol:** REST XML
+**API version:** `2020-05-31`
+**Endpoint prefix:** `cloudfront`
+**Namespace:** `http://cloudfront.amazonaws.com/doc/2020-05-31/`
 **Global service** — ARNs contain no region segment.
 
 ## Supported Operations
@@ -246,6 +246,19 @@ PUT, PATCH and DELETE).
   whole. A custom error page is served whole, whatever the `Range` of the request it replaces.
 - Origin `Set-Cookie` headers always reach the viewer. With legacy `Forward=none`, AWS strips them
   from the response; Floci does not.
+- Custom-origin requests honor the origin's connection settings. `Origin.ConnectionAttempts` (1 to 3,
+  default 3) is how many times CloudFront tries to reach the origin, and `Origin.ConnectionTimeout`
+  (1 to 10 seconds, default 10) how long it waits for the connection. `CustomOriginConfig.OriginReadTimeout`
+  (1 to 120 seconds, default 30) bounds the wait for the origin's response, and a read timeout on a
+  GET or HEAD is retried up to the connection attempts, as CloudFront does, while a POST, PUT, PATCH
+  or DELETE is not retried. `Origin.ResponseCompletionTimeout` bounds the time the origin takes,
+  connecting, answering and streaming the body included, over every attempt, and ends the connection
+  when it expires; unset, or 0, leaves the origin as long as it wants to take, and a set value must
+  be at least the read timeout. The time a slow viewer takes to read what the origin already sent is
+  not part of it: the origin answered in time, so the response is not expired.
+  `CustomOriginConfig.OriginKeepaliveTimeout` (1 to 300 seconds, default 5) is how long CloudFront
+  keeps a connection to the origin after the last packet of a response. An origin that does not
+  answer in time is answered 504, "The origin didn't respond before the request expired", as on AWS.
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
 - A custom origin whose domain is a [Lambda Web Function](lambda-web-functions.md) endpoint of this Floci is
   served by Floci itself, at the address the viewer reached. The origin names the endpoint's

@@ -125,17 +125,27 @@ class S3ObjectLockVersionedWriteTest {
     }
 
     @Test
-    void writesOverLockedPreVersioningObjectAreStillDenied() {
-        s3Service.createBucket("pre-versioning-bucket", "us-east-1");
-        s3Service.setBucketObjectLockEnabled("pre-versioning-bucket");
-        s3Service.putObject("pre-versioning-bucket", "held.txt", BODY, "text/plain", null,
-                new PutObjectOptions().withLegalHoldStatus("ON"));
-        s3Service.putBucketVersioning("pre-versioning-bucket", "Enabled");
+    void writesOverLockedPreVersioningObjectsPreserveTheNullVersion() {
+        String bucket = "pre-versioning-bucket";
+        s3Service.createBucket(bucket, "us-east-1");
+        s3Service.setBucketObjectLockEnabled(bucket);
+        for (String key : List.of("put", "copy", "marker", "multipart")) {
+            s3Service.putObject(bucket, key, BODY, "text/plain", null,
+                    new PutObjectOptions().withLegalHoldStatus("ON"));
+        }
+        s3Service.putBucketVersioning(bucket, "Enabled");
 
-        assertAccessDenied(() -> s3Service.putObject("pre-versioning-bucket", "held.txt", BODY, "text/plain", null));
-        assertAccessDenied(() -> s3Service.copyObject(BUCKET, "source.txt", "pre-versioning-bucket", "held.txt"));
-        assertAccessDenied(() -> s3Service.deleteObject("pre-versioning-bucket", "held.txt", null, false));
-        assertEquals("ON", s3Service.getObject("pre-versioning-bucket", "held.txt").getLegalHoldStatus());
+        assertNotNull(s3Service.putObject(bucket, "put", BODY, "text/plain", null).getVersionId());
+        assertNotNull(s3Service.copyObject(BUCKET, "source.txt", bucket, "copy").getVersionId());
+        assertTrue(s3Service.deleteObject(bucket, "marker", null, false).isDeleteMarker());
+        MultipartUpload upload = s3Service.initiateMultipartUpload(bucket, "multipart", "text/plain");
+        s3Service.uploadPart(bucket, "multipart", upload.getUploadId(), 1, BODY);
+        assertNotNull(s3Service.completeMultipartUpload(bucket, "multipart", upload.getUploadId(),
+                List.of(1), null, null).getVersionId());
+        for (String key : List.of("put", "copy", "marker", "multipart")) {
+            assertEquals("ON", s3Service.getObject(bucket, key, "null").getLegalHoldStatus());
+            assertAccessDenied(() -> s3Service.deleteObject(bucket, key, "null", true));
+        }
     }
 
     private S3Object putLegalHold(String key) {

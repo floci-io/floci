@@ -279,6 +279,7 @@
     "RuleNumber",
     "NetworkAclId"
   ],
+  "AWS::EC2::PrefixList": [],
   "AWS::EC2::Route": [
     "RouteTableId",
     "DestinationCidrBlock",

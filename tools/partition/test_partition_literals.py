@@ -238,6 +238,70 @@ def test_blank_region_arn_is_a_code_category_and_never_matches_literals(tmp_path
     assert counted == Counter({("blank-region-arn", "a/A.java"): 1})
 
 
+@pytest.mark.parametrize("code, expected", [
+    ('return "arn:" + partition + ":eks:" + region;', True),
+    ('String prefix = "arn:"+AwsRegions.partitionFor(region) + ":ses:";', True),
+    ('Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::\\\\d{12}:root")', False),
+    ('Pattern.compile("arn:" + PARTITION_REGEX + ":sso:::instance/.+")', False),
+    ('Pattern.compile("arn:"\n            + AwsArnUtils.PARTITION_REGEX + ":logs:")', False),
+    ('String partitionRegexName = "arn:" + PARTITION_REGEX_NAME;', True),
+    ('String s = "arn:aws:" + name;', False),
+    ('String s = prefix + "arn:";', False),
+])
+def test_arn_concat_matches_a_concatenated_arn_but_not_a_partition_regex(code, expected):
+    category = p.CATEGORY_BY_NAME["arn-concat"]
+    assert (category.regex.search(code) is not None) is expected
+
+
+@pytest.mark.parametrize("code, expected", [
+    ('if (value.startsWith("arn:")) {', True),
+    ('id != null && id . startsWith( "arn:" )', True),
+    ('value.startsWith("arn:aws:")', False),
+    ('value.startsWith("arn")', False),
+    ('AwsArnUtils.isArn(value)', False),
+])
+def test_arn_probe_matches_a_bare_arn_prefix_check(code, expected):
+    category = p.CATEGORY_BY_NAME["arn-probe"]
+    assert (category.regex.search(code) is not None) is expected
+
+
+@pytest.mark.parametrize("code, expected", [
+    ('String[] parts = arn.split(":");', True),
+    ('String[] parts = roleArn.split(":", 6);', True),
+    ('String account = role.getArn().split(":", 6)[4];', True),
+    ('String[] p = arnParts . split( ":" , -1);', True),
+    ('String[] parts = fn.getFunctionArn().split(":");', True),
+    ('String[] parts = arn.split("/");', False),
+    ('String[] parts = warning.split(":");', False),
+    ('String[] parts = learnerId.split(":");', False),
+    ('String[] parts = value.split(":");', False),
+])
+def test_arn_split_matches_a_colon_split_of_an_arn_named_value(code, expected):
+    category = p.CATEGORY_BY_NAME["arn-split"]
+    assert (category.regex.search(code) is not None) is expected
+
+
+def test_arn_shape_categories_count_code_only_and_honour_an_escape(tmp_path):
+    write_java(tmp_path, "a/A.java", (
+        'class A {\n'
+        '    String arn = "arn:" + partition + ":sqs:" + region;\n'
+        '    boolean probe = value.startsWith("arn:");\n'
+        '    String[] parts = arn.split(":", 6);\n'
+        '    // "arn:" + partition, value.startsWith("arn:"), arn.split(":") in a comment never count\n'
+        '    String doc = "arn.split(\\":\\")";\n'
+        '    String[] kept = arn.split(":", 6); // partition-literal: the one ARN parser\n'
+        '}\n'
+    ))
+    findings = p.collect_findings(tmp_path, [])
+    assert p.count(findings) == Counter({
+        ("arn-concat", "a/A.java"): 1,
+        ("arn-probe", "a/A.java"): 1,
+        ("arn-split", "a/A.java"): 1,
+    })
+    assert [(f.category, f.line, f.counted) for f in findings if f.category == "arn-split"] == [
+        ("arn-split", 4, True), ("arn-split", 7, False)]
+
+
 def test_every_category_is_gated():
     assert {c.name for c in p.CATEGORIES if c.gated} == {c.name for c in p.CATEGORIES}
 

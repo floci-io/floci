@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.core.storage;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -14,11 +14,18 @@ import java.util.function.Predicate;
  */
 public class InMemoryStorage<K, V> implements StorageBackend<K, V> {
 
-    private final ConcurrentHashMap<K, V> store = new ConcurrentHashMap<>();
+    private volatile ConcurrentHashMap<K, V> store = new ConcurrentHashMap<>();
 
     @Override
-    public void put(K key, V value) {
+    public synchronized void put(K key, V value) {
         store.put(key, value);
+    }
+
+    @Override
+    public synchronized void putAllAtomically(Map<K, V> entries) {
+        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
+        candidate.putAll(Map.copyOf(entries));
+        store = candidate;
     }
 
     @Override
@@ -27,8 +34,18 @@ public class InMemoryStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void delete(K key) {
+    public synchronized void delete(K key) {
         store.remove(key);
+    }
+
+    @Override
+    public synchronized void deleteAllAtomically(Set<K> keys) {
+        if (keys.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
+        candidate.keySet().removeAll(Set.copyOf(keys));
+        store = candidate;
     }
 
     @Override
@@ -44,7 +61,7 @@ public class InMemoryStorage<K, V> implements StorageBackend<K, V> {
 
     @Override
     public Set<K> keys() {
-        return Collections.unmodifiableSet(store.keySet());
+        return Set.copyOf(store.keySet());
     }
 
     @Override
@@ -53,12 +70,12 @@ public class InMemoryStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void load() {
+    public synchronized void load() {
         // No-op for in-memory storage
     }
 
     @Override
-    public void clear() {
+    public synchronized void clear() {
         store.clear();
     }
 }

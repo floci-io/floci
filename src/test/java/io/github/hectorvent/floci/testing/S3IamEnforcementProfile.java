@@ -15,6 +15,7 @@ import java.util.Map;
  *   <li>{@code floci.services.s3.enforce-auth=true} makes S3 verify every signature and run its own
  *   access checks, bucket policies among them, beside IAM's.
  *   {@code S3BucketPolicyEnforcementIntegrationTest},
+ *   {@code S3BucketCollisionIamEnforcementIntegrationTest},
  *   {@code S3CopyObjectSourcePermissionIntegrationTest},
  *   {@code S3DeleteObjectsSignedIamEnforcementIntegrationTest} and
  *   {@code S3PresignedPostAuthEnforcementIntegrationTest} rely on it.</li>
@@ -26,6 +27,7 @@ import java.util.Map;
  *   account that owns it, whoever calls.
  *   {@code ResourcePolicyPrincipalTypeEnforcementIntegrationTest},
  *   {@code S3BucketPolicyEnforcementIntegrationTest},
+ *   {@code S3BucketCollisionIamEnforcementIntegrationTest},
  *   {@code S3CopyObjectSourcePermissionIntegrationTest} and
  *   {@code S3DeleteObjectsSignedIamEnforcementIntegrationTest} call another account's bucket, and
  *   {@code StsIssuedSessionEnforcementIntegrationTest} reads one anonymously, which Floci serves as

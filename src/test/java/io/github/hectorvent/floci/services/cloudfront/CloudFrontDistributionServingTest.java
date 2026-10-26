@@ -1182,6 +1182,48 @@ class CloudFrontDistributionServingTest {
     }
 
     @Test
+    void listsRequestedHeadersForS3CorsPreflightMatchedByPattern() {
+        String suffix = suffix();
+        String bucket = "cf-pattern-header-preflight-" + suffix;
+        createBucket(bucket);
+        s3Service.putBucketCors(bucket, """
+                <CORSConfiguration>
+                  <CORSRule>
+                    <AllowedOrigin>https://viewer.example</AllowedOrigin>
+                    <AllowedMethod>GET</AllowedMethod>
+                    <AllowedHeader>x-amz-*</AllowedHeader>
+                  </CORSRule>
+                </CORSConfiguration>
+                """);
+
+        Origin origin = s3Origin("s3-origin", bucket);
+        DefaultCacheBehavior behavior = defaultBehavior(origin.getId());
+        behavior.setAllowedMethods(List.of("GET", "HEAD", "OPTIONS"));
+        DistributionConfig config = new DistributionConfig();
+        config.setEnabled(true);
+        config.setOrigins(List.of(origin));
+        config.setDefaultCacheBehavior(behavior);
+        Distribution distribution =
+                cloudFrontService.createDistribution(distribution(config), Map.of());
+
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Origin", "https://viewer.example")
+                .header("Access-Control-Request-Method", "GET")
+                .header("Access-Control-Request-Headers", "x-amz-meta-owner,x-amz-date")
+                .when().options("/asset.txt")
+                .then().statusCode(200)
+                .header("Access-Control-Allow-Headers", equalTo("x-amz-meta-owner, x-amz-date"));
+        given()
+                .header("Host", distribution.getDomainName())
+                .header("Origin", "https://viewer.example")
+                .header("Access-Control-Request-Method", "GET")
+                .when().options("/asset.txt")
+                .then().statusCode(200)
+                .header("Access-Control-Allow-Headers", nullValue());
+    }
+
+    @Test
     void appliesConfiguredOriginHeaderToS3CorsPreflight() {
         String suffix = suffix();
         String bucket = "cf-origin-header-preflight-" + suffix;

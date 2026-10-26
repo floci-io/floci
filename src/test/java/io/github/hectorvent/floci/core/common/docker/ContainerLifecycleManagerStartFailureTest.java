@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.core.common.docker;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.CreateContainerCmd;
+import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
@@ -17,7 +19,9 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -44,7 +48,7 @@ class ContainerLifecycleManagerStartFailureTest {
     @Mock
     private ContainerDetector containerDetector;
 
-    @Mock
+    @Mock(answer = RETURNS_DEEP_STUBS)
     private EmulatorConfig config;
 
     private ContainerLifecycleManager manager;
@@ -60,7 +64,7 @@ class ContainerLifecycleManagerStartFailureTest {
     void createAndStartRemovesCreatedContainerWhenStartFails() {
         RuntimeException startFailure =
                 new RuntimeException("Bind for 0.0.0.0:80 failed: port is already allocated");
-        doReturn("container-id").when(manager).create(spec);
+        stubCreate();
         doThrow(startFailure).when(manager).startCreated("container-id", spec);
 
         RemoveContainerCmd removeCmd = mock(RemoveContainerCmd.class);
@@ -78,12 +82,21 @@ class ContainerLifecycleManagerStartFailureTest {
     void createAndStartDoesNotRemoveContainerOnSuccess() {
         ContainerLifecycleManager.ContainerInfo info =
                 new ContainerLifecycleManager.ContainerInfo("container-id", Map.of());
-        doReturn("container-id").when(manager).create(spec);
+        stubCreate();
         doReturn(info).when(manager).startCreated("container-id", spec);
 
         assertSame(info, manager.createAndStart(spec));
 
         verify(dockerClient, never()).removeContainerCmd(any(String.class));
+    }
+
+    private void stubCreate() {
+        when(imageCacheService.ensureImageExists(spec.image())).thenReturn("image-id");
+        CreateContainerCmd create = mock(CreateContainerCmd.class, RETURNS_SELF);
+        CreateContainerResponse response = new CreateContainerResponse();
+        response.setId("container-id");
+        when(create.exec()).thenReturn(response);
+        when(dockerClient.createContainerCmd("image-id")).thenReturn(create);
     }
 
     @Test

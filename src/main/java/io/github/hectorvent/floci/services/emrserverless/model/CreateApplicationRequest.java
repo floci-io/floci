@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.emrserverless.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -10,12 +11,19 @@ public class CreateApplicationRequest {
     private AutoStartConfiguration autoStartConfiguration;
     private AutoStopConfiguration autoStopConfiguration;
     private String clientToken;
+    private DiskEncryptionConfiguration diskEncryptionConfiguration;
+    private IdentityCenterConfiguration identityCenterConfiguration;
     private ImageConfiguration imageConfiguration;
     private Map<String, InitialCapacityConfig> initialCapacity;
+    private InteractiveConfiguration interactiveConfiguration;
+    private JobLevelCostAllocationConfiguration jobLevelCostAllocationConfiguration;
     private MaximumCapacity maximumCapacity;
+    private MonitoringConfiguration monitoringConfiguration;
     private String name;
     private NetworkConfiguration networkConfiguration;
     private String releaseLabel;
+    private List<RuntimeConfiguration> runtimeConfiguration;
+    private SchedulerConfiguration schedulerConfiguration;
     private Map<String, String> tags;
     private String type;
     private Map<String, WorkerTypeSpecification> workerTypeSpecifications;
@@ -28,18 +36,32 @@ public class CreateApplicationRequest {
     public void setAutoStopConfiguration(AutoStopConfiguration autoStopConfiguration) { this.autoStopConfiguration = autoStopConfiguration; }
     public String getClientToken() { return clientToken; }
     public void setClientToken(String clientToken) { this.clientToken = clientToken; }
+    public DiskEncryptionConfiguration getDiskEncryptionConfiguration() { return diskEncryptionConfiguration; }
+    public void setDiskEncryptionConfiguration(DiskEncryptionConfiguration diskEncryptionConfiguration) { this.diskEncryptionConfiguration = diskEncryptionConfiguration; }
+    public IdentityCenterConfiguration getIdentityCenterConfiguration() { return identityCenterConfiguration; }
+    public void setIdentityCenterConfiguration(IdentityCenterConfiguration identityCenterConfiguration) { this.identityCenterConfiguration = identityCenterConfiguration; }
     public ImageConfiguration getImageConfiguration() { return imageConfiguration; }
     public void setImageConfiguration(ImageConfiguration imageConfiguration) { this.imageConfiguration = imageConfiguration; }
     public Map<String, InitialCapacityConfig> getInitialCapacity() { return initialCapacity; }
     public void setInitialCapacity(Map<String, InitialCapacityConfig> initialCapacity) { this.initialCapacity = initialCapacity; }
+    public InteractiveConfiguration getInteractiveConfiguration() { return interactiveConfiguration; }
+    public void setInteractiveConfiguration(InteractiveConfiguration interactiveConfiguration) { this.interactiveConfiguration = interactiveConfiguration; }
+    public JobLevelCostAllocationConfiguration getJobLevelCostAllocationConfiguration() { return jobLevelCostAllocationConfiguration; }
+    public void setJobLevelCostAllocationConfiguration(JobLevelCostAllocationConfiguration jobLevelCostAllocationConfiguration) { this.jobLevelCostAllocationConfiguration = jobLevelCostAllocationConfiguration; }
     public MaximumCapacity getMaximumCapacity() { return maximumCapacity; }
     public void setMaximumCapacity(MaximumCapacity maximumCapacity) { this.maximumCapacity = maximumCapacity; }
+    public MonitoringConfiguration getMonitoringConfiguration() { return monitoringConfiguration; }
+    public void setMonitoringConfiguration(MonitoringConfiguration monitoringConfiguration) { this.monitoringConfiguration = monitoringConfiguration; }
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
     public NetworkConfiguration getNetworkConfiguration() { return networkConfiguration; }
     public void setNetworkConfiguration(NetworkConfiguration networkConfiguration) { this.networkConfiguration = networkConfiguration; }
     public String getReleaseLabel() { return releaseLabel; }
     public void setReleaseLabel(String releaseLabel) { this.releaseLabel = releaseLabel; }
+    public List<RuntimeConfiguration> getRuntimeConfiguration() { return runtimeConfiguration; }
+    public void setRuntimeConfiguration(List<RuntimeConfiguration> runtimeConfiguration) { this.runtimeConfiguration = runtimeConfiguration; }
+    public SchedulerConfiguration getSchedulerConfiguration() { return schedulerConfiguration; }
+    public void setSchedulerConfiguration(SchedulerConfiguration schedulerConfiguration) { this.schedulerConfiguration = schedulerConfiguration; }
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
     public String getType() { return type; }

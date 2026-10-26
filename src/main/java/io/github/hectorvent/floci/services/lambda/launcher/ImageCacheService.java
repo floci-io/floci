@@ -11,6 +11,7 @@ import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.PullResponseItem;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
+import io.github.hectorvent.floci.core.common.docker.DockerClientProducer;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -44,6 +45,8 @@ public class ImageCacheService {
 
     private final DockerClient dockerClient;
     private final List<EmulatorConfig.DockerConfig.RegistryCredential> registryCredentials;
+    // floci.docker.image-pull-timeout-seconds: how long each pull attempt may take.
+    private final int pullTimeoutSeconds;
     private final Map<ImageKey, String> resolvedImages = new ConcurrentHashMap<>();
     private final Set<ImageKey> pulledImages = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
@@ -53,6 +56,8 @@ public class ImageCacheService {
     public ImageCacheService(DockerClient dockerClient, EmulatorConfig config) {
         this.dockerClient = dockerClient;
         this.registryCredentials = config.docker().registryCredentials();
+        this.pullTimeoutSeconds = DockerClientProducer.validateImagePullTimeoutSeconds(
+                config.docker().imagePullTimeoutSeconds());
     }
 
     public String ensureImageExists(String imageUri) {
@@ -186,8 +191,10 @@ public class ImageCacheService {
                 }
                 ManifestDigestCallback callback = new ManifestDigestCallback();
                 lastAttempt.set(callback);
-                if (!pullImage.<PullImageResultCallback>exec(callback).awaitCompletion(5, TimeUnit.MINUTES)) {
-                    throw new DockerClientException("Timed out pulling image " + imageUri + " after 5 minutes");
+                if (!pullImage.<PullImageResultCallback>exec(callback)
+                        .awaitCompletion(pullTimeoutSeconds, TimeUnit.SECONDS)) {
+                    throw new DockerClientException("Timed out pulling image " + imageUri + " after "
+                            + pullTimeoutSeconds + " seconds");
                 }
             });
         } catch (InterruptedException e) {

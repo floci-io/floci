@@ -29,6 +29,6 @@ class RedshiftProxyConfigTest {
     void redshiftProxyBoundsHaveDefaults() {
         assertEquals(10000, config.services().redshift().proxyHandshakeTimeoutMillis());
         assertEquals(5000, config.services().redshift().proxyBackendConnectTimeoutMillis());
-        assertEquals(100, config.services().redshift().proxyMaxConnections());
+        assertEquals(2000, config.services().redshift().proxyMaxConnections());
     }
 }

@@ -36,12 +36,18 @@ public sealed interface EmailContent {
         }
     }
 
+    /**
+     * The two template variants, the only content a bulk send's default content can be.
+     */
+    sealed interface TemplateContent extends EmailContent {
+    }
+
     record Template(String templateName, JsonNode templateData, List<MessageHeader> headers)
-            implements EmailContent {
+            implements TemplateContent {
     }
 
     record InlineTemplate(String subject, String textPart, String htmlPart, JsonNode templateData,
-                          List<MessageHeader> headers) implements EmailContent {
+                          List<MessageHeader> headers) implements TemplateContent {
     }
 
     /**

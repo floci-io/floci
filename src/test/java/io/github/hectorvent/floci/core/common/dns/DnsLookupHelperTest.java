@@ -12,6 +12,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DnsLookupHelperTest {
 
     @Test
+    void normalizeTargetTrimsAndDropsOneFinalDotKeepingCase() {
+        assertEquals("", DnsLookupHelper.normalizeTarget(null));
+        assertEquals("", DnsLookupHelper.normalizeTarget(""));
+        assertEquals("", DnsLookupHelper.normalizeTarget(" \t "));
+        assertEquals("", DnsLookupHelper.normalizeTarget("."));
+        assertEquals("a.example", DnsLookupHelper.normalizeTarget("a.example"));
+        assertEquals("a.example", DnsLookupHelper.normalizeTarget("a.example."));
+        assertEquals("a.example", DnsLookupHelper.normalizeTarget("\t a.example.\r\n"));
+        assertEquals("a.example.", DnsLookupHelper.normalizeTarget("a.example.."));
+        assertEquals("A.Example", DnsLookupHelper.normalizeTarget("A.Example."));
+        assertEquals("a.example.\u2003", DnsLookupHelper.normalizeTarget("a.example.\u2003"));
+    }
+
+    @Test
     void parseARecordsRejectsMismatchedTxId() {
         byte[] resp = buildSyntheticDnsResponse((short) 100, "example.com", "93.184.216.34");
         List<String> result = DnsLookupHelper.parseARecordsFromDnsResponse(

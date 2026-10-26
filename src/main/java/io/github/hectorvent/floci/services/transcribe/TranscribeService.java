@@ -257,8 +257,7 @@ public class TranscribeService implements Resettable {
     private void requireNonBlank(String value, String fieldName) {
         if (value == null || value.isBlank()) {
             throw SmithyValidationErrors.badRequest(
-                    "Value null at '" + fieldName
-                            + "' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(fieldName));
         }
     }
 

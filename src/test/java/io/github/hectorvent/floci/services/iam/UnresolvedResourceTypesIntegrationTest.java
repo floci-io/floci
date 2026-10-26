@@ -22,6 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
  * <p>It matters because the failure is silent and fail-open. Dispatching such an action without
  * teaching the resolver its type leaves the action evaluated against {@code *}, so a policy
  * statement naming the resource never applies, which is the gap this builder exists to close.
+ *
+ * <p>The map is empty since {@code GetRoleTemplateVersion} was dispatched, so the first test
+ * holds nothing today and the second holds what emptied it: the type that used to be declared is
+ * resolved from the ARN the request carries. That one is the regression worth a test, since an
+ * empty map asserts nothing and dropping the parameter would put the action back on {@code *}.
  */
 @QuarkusTest
 class UnresolvedResourceTypesIntegrationTest {
@@ -31,8 +36,6 @@ class UnresolvedResourceTypesIntegrationTest {
 
     @Test
     void everyTypeDeclaredUnresolvedIsCarriedOnlyByActionsNobodyDispatches() {
-        assertFalse(ResourceArnBuilder.UNRESOLVED_TYPES.isEmpty(),
-                "nothing is declared unresolved any more, so this test has nothing to hold");
         for (Map.Entry<String, String> declared : ResourceArnBuilder.UNRESOLVED_TYPES.entrySet()) {
             Set<String> actions = actionsCarrying(declared.getKey());
             assertFalse(actions.isEmpty(), declared.getKey()
@@ -53,6 +56,33 @@ class UnresolvedResourceTypesIntegrationTest {
                         reason(declared, action));
             }
         }
+    }
+
+    /**
+     * {@code role-template} was the last declared-unresolved type, and dispatching
+     * {@code GetRoleTemplateVersion} is what took it out: the action carries the template's ARN,
+     * so the type resolves like any other the request names. Held over the wire as well as in the
+     * table, because the action being dispatched is half of the claim.
+     */
+    @Test
+    void theTypeThatWasDeclaredUnresolvedIsResolvedFromTheArnTheRequestCarries() {
+        assertEquals("TemplateArn",
+                ResourceArnBuilder.IAM_ARN_PARAMETERS.get("GetRoleTemplateVersion"),
+                "GetRoleTemplateVersion no longer resolves its template from the ARN it carries, "
+                        + "so role-template is back to * unless it is declared unresolved again");
+        assertEquals(List.of("role-template"),
+                IamActionResources.typesOf("GetRoleTemplateVersion"),
+                "AWS has changed which resource type GetRoleTemplateVersion is authorized "
+                        + "against, so the parameter above may name the wrong thing");
+
+        Response response = given().header("Authorization", IAM_AUTH)
+                .formParam("Action", "GetRoleTemplateVersion")
+                .formParam("TemplateArn", "arn:aws:iam::aws:role-template/ec2.amazonaws.com/X:1")
+            .when().post("/");
+        assertEquals(404, response.statusCode(),
+                "GetRoleTemplateVersion is not dispatched any more, so role-template belongs in "
+                        + "UNRESOLVED_TYPES again rather than being resolved here");
+        assertEquals("NoSuchEntity", response.xmlPath().getString("ErrorResponse.Error.Code"));
     }
 
     private static String reason(Map.Entry<String, String> declared, String action) {

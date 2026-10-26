@@ -225,6 +225,66 @@ class RedshiftServerlessRuntimeIntegrationTest {
         assertFalse(isListening(port), "the endpoint must be closed once the workgroup is deleted");
     }
 
+    @Test
+    void secretLoginSurvivesAdminUsernameRenameAndLateManagementEnablement() {
+        String namespace = "rt-it-secret-ns";
+        String workgroup = "rt-it-secret-wg";
+        RestAssuredJsonUtils.awsAction("RedshiftServerless", "CreateNamespace", """
+                {"namespaceName":"%s","adminUsername":"initial_admin","adminUserPassword":"%s","dbName":"dev"}
+                """.formatted(namespace, ADMIN_PASSWORD)).then().statusCode(200);
+        RestAssuredJsonUtils.awsAction("RedshiftServerless", "CreateWorkgroup", """
+                {"workgroupName":"%s","namespaceName":"%s"}
+                """.formatted(workgroup, namespace)).then().statusCode(200);
+
+        try {
+            // Case 1: Rename username while unmanaged, then enable management.
+            RestAssuredJsonUtils.awsAction("RedshiftServerless", "UpdateNamespace", """
+                    {"namespaceName":"%s","adminUsername":"pre_managed_admin"}
+                    """.formatted(namespace)).then().statusCode(200);
+            String secretArn = RestAssuredJsonUtils.awsAction("RedshiftServerless", "UpdateNamespace", """
+                    {"namespaceName":"%s","manageAdminPassword":true}
+                    """.formatted(namespace)).then().statusCode(200)
+                    .extract().path("namespace.adminPasswordSecretArn");
+            assertNotNull(secretArn);
+
+            String id1 = executeWithSecretAndWait("SELECT 1 AS answer", workgroup, secretArn);
+            ExtractableResponse<Response> result1 = RestAssuredJsonUtils.awsAction("RedshiftData", "GetStatementResult",
+                    "{\"Id\":\"" + id1 + "\"}").then().statusCode(200).extract();
+            assertEquals(1, ((Number) result1.path("Records[0][0].longValue")).intValue());
+
+            // Case 2: Rename admin username on already-managed namespace.
+            RestAssuredJsonUtils.awsAction("RedshiftServerless", "UpdateNamespace", """
+                    {"namespaceName":"%s","adminUsername":"post_managed_admin"}
+                    """.formatted(namespace)).then().statusCode(200);
+
+            String id2 = executeWithSecretAndWait("SELECT 2 AS answer", workgroup, secretArn);
+            ExtractableResponse<Response> result2 = RestAssuredJsonUtils.awsAction("RedshiftData", "GetStatementResult",
+                    "{\"Id\":\"" + id2 + "\"}").then().statusCode(200).extract();
+            assertEquals(2, ((Number) result2.path("Records[0][0].longValue")).intValue());
+        } finally {
+            RestAssuredJsonUtils.awsAction("RedshiftServerless", "DeleteWorkgroup",
+                    "{\"workgroupName\":\"" + workgroup + "\"}").then().statusCode(200);
+            RestAssuredJsonUtils.awsAction("RedshiftServerless", "DeleteNamespace",
+                    "{\"namespaceName\":\"" + namespace + "\"}").then().statusCode(200);
+        }
+    }
+
+    private String executeWithSecretAndWait(String sql, String workgroup, String secretArn) {
+        String id = RestAssuredJsonUtils.awsAction("RedshiftData", "ExecuteStatement", """
+                {"Sql": "%s", "WorkgroupName": "%s", "Database": "dev", "SecretArn": "%s"}
+                """.formatted(sql, workgroup, secretArn)).then().statusCode(200)
+                .extract().path("Id");
+        Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
+                .pollInterval(Duration.ofMillis(250)).until(() -> {
+                    String status = RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
+                            "{\"Id\":\"" + id + "\"}").then().statusCode(200).extract().path("Status");
+                    assertFalse("FAILED".equals(status) || "ABORTED".equals(status),
+                            () -> "statement " + id + " ended " + status);
+                    return "FINISHED".equals(status);
+                });
+        return id;
+    }
+
     private static boolean isListening(int port) {
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress("127.0.0.1", port), 1000);

@@ -78,6 +78,7 @@ class AcmInUseByTest {
         AwsException failure = assertThrows(AwsException.class, () -> service.deleteCertificate(arn, REGION));
 
         assertEquals("ResourceInUseException", failure.getErrorCode());
+        assertEquals(400, failure.getHttpStatus());
         assertEquals(List.of(CONSUMER), service.describeCertificate(arn, REGION).getInUseBy());
     }
 

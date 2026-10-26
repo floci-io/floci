@@ -218,6 +218,39 @@ class LambdaExecutorServiceTest {
     }
 
     @Test
+    void dispatchWait_coldRuntimeGetsTheInitBudget() {
+        LambdaExecutorService withBudget = new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, 10);
+        try {
+            assertEquals(10_000, withBudget.dispatchWaitMs(1, true, 50_000, 50_000));
+        } finally {
+            withBudget.shutdown();
+        }
+    }
+
+    @Test
+    void dispatchWait_warmRuntimeGetsTheTimeoutPlusGraceNotTheInitBudget() {
+        LambdaExecutorService withBudget = new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, 10);
+        try {
+            assertEquals(3_000, withBudget.dispatchWaitMs(1, false, 50_000, 50_000));
+        } finally {
+            withBudget.shutdown();
+        }
+    }
+
+    @Test
+    void dispatchWait_lateStartedRuntimeGetsWhatIsLeftOfTheInitBudget() {
+        LambdaExecutorService withBudget = new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, 10);
+        try {
+            // The launcher spent 4 of the 10 seconds after the start (extensions, log attach).
+            assertEquals(6_000, withBudget.dispatchWaitMs(1, true, 50_000, 54_000));
+            // Once less is left than Timeout plus grace, that wait applies instead.
+            assertEquals(3_000, withBudget.dispatchWaitMs(1, true, 50_000, 59_000));
+        } finally {
+            withBudget.shutdown();
+        }
+    }
+
+    @Test
     void resultAfterConfiguredDeadline_timesOutAndDestroysHandle() {
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("cid-late", "test-fn", rtas, ContainerState.WARM);

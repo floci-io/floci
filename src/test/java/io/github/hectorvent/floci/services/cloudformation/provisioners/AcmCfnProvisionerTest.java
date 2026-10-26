@@ -422,7 +422,7 @@ class AcmCfnProvisionerTest {
         stored.setKeyAlgorithm(KeyAlgorithm.RSA_2048);
         when(acm.describeCertificate(ARN, REGION)).thenReturn(stored);
         stubRequestCertificate("new.example.com", certificate(NEW_ARN, "new.example.com"));
-        doThrow(new AwsException("ResourceInUseException", "in use", 409))
+        doThrow(new AwsException("ResourceInUseException", "in use", 400))
                 .when(acm).deleteCertificate(ARN, REGION);
         StackResource r = resource();
 
@@ -491,7 +491,7 @@ class AcmCfnProvisionerTest {
 
     @Test
     void deletePropagatesACertificateStillInUse() {
-        doThrow(new AwsException("ResourceInUseException", "in use", 409))
+        doThrow(new AwsException("ResourceInUseException", "in use", 400))
                 .when(acm).deleteCertificate(ARN, REGION);
 
         assertThrows(AwsException.class,

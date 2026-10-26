@@ -187,11 +187,14 @@ class SesImportJobV2IntegrationTest {
                  "ImportDestination":{"SuppressionListDestination":{"SuppressionListImportAction":"PUT"}}} garbage
                 """.formatted(BUCKET);
 
-        for (String body : new String[] {badFormat, bothDestinations, noDataSource, trailingTokens}) {
+        for (String body : new String[] {badFormat, bothDestinations, noDataSource}) {
             given().contentType("application/json").header("Authorization", AUTH).body(body)
             .when().post("/v2/email/import-jobs").then().statusCode(400)
                     .body("__type", equalTo("BadRequestException"));
         }
+        given().contentType("application/json").header("Authorization", AUTH).body(trailingTokens)
+        .when().post("/v2/email/import-jobs").then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
         given().contentType("application/json").header("Authorization", AUTH)
         .when().post("/v2/email/import-jobs").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"));

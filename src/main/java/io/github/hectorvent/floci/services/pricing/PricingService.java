@@ -19,7 +19,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -377,8 +376,7 @@ public class PricingService {
             return 0;
         }
         try {
-            byte[] decoded = Base64.getUrlDecoder().decode(token);
-            return Integer.parseInt(new String(decoded, java.nio.charset.StandardCharsets.UTF_8));
+            return Integer.parseInt(Base64Url.decode(token));
         } catch (IllegalArgumentException e) {
             return -1;
         }

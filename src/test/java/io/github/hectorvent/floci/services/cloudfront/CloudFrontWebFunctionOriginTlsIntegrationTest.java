@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.config.SelfSignedTlsProfile;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
@@ -31,12 +32,15 @@ class CloudFrontWebFunctionOriginTlsIntegrationTest {
     @Inject
     S3Service s3Service;
 
+    @Inject
+    IamService iamService;
+
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
     @Test
     void aViewerOverTlsReachesAnEndpointOrigin() {
-        String domain = createFunction(s3Service, cleanup, "cf-tls-" + Long.toString(System.nanoTime(), 36), "IamAuth");
+        String domain = createFunction(s3Service, iamService, cleanup, "cf-tls-" + Long.toString(System.nanoTime(), 36), "IamAuth");
         Distribution created = createDistribution(cloudFrontService, cleanup, domain,
                 CloudFrontService.MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID);
 

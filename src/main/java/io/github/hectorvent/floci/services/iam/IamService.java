@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CertificateMaterialException;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SessionAccountLookup;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
@@ -1219,6 +1220,44 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return aware.getForAccount(accountId, roleName);
         }
         return roles.get(roleName);
+    }
+
+    /**
+     * Creates the account access role AWS Organizations preconfigures in a member account it
+     * just created ({@code CreateAccount}'s {@code RoleName}, default
+     * {@code OrganizationAccountAccessRole}), in that account's own namespace: the
+     * management account is the caller here, so the whole creation runs inside
+     * {@link RequestScopes#callAs(String, Supplier)} as the new account, and
+     * {@link #createRole} and {@link #attachRolePolicy} validate the name, mint the ARN
+     * and store the role the way every other IAM role goes.
+     *
+     * <p>The role matches the one AWS creates: it trusts the management account, through the
+     * account-root principal AWS's generated trust policy names, and carries the
+     * {@code AdministratorAccess} AWS-managed policy. The account is fresh, so the name
+     * cannot collide; a role that is there anyway is returned rather than failing an account
+     * creation AWS would have completed: {@link #createRole} answers
+     * {@code EntityAlreadyExists} for it, that one error is caught here, and anything
+     * else propagates.
+     */
+    public IamRole provisionAccountAccessRole(String accountId, String roleName, String managementAccountId) {
+        String trustPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"" + regionResolver.buildGlobalArn("iam", managementAccountId, "root")
+                + "\"},\"Action\":\"sts:AssumeRole\"}]}";
+        String administratorAccess = AwsManagedPolicies.arnPrefix(regionResolver.getPartition())
+                + "/AdministratorAccess";
+        return RequestScopes.callAs(accountId, () -> {
+            try {
+                IamRole role = createRole(roleName, "/", trustPolicy, null, 0, null);
+                attachRolePolicy(roleName, administratorAccess);
+                LOG.infov("Created account access role {0} in account {1}", roleName, accountId);
+                return role;
+            } catch (AwsException alreadyExists) {
+                if (!"EntityAlreadyExists".equals(alreadyExists.getErrorCode())) {
+                    throw alreadyExists;
+                }
+                return getRole(roleName);
+            }
+        });
     }
 
     /**
@@ -2858,8 +2897,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static void validatePassword(String password, String member) {
         if (password == null) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at '" + member
-                            + "' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull(member));
         }
         if (!LOGIN_PROFILE_PASSWORD_PATTERN.matcher(password).matches()) {
             throw SmithyValidationErrors.validationError(
@@ -2932,8 +2970,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at 'properties' failed to "
-                            + "satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNull("properties"));
         }
         String namespace = null;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -3052,6 +3089,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             state.setEnabled(false);
             outboundFederation.put(OUTBOUND_FEDERATION_KEY, state);
             LOG.info("Disabled outbound web identity federation");
+        }
+    }
+
+    /**
+     * The account's federation state while the feature is on, for a caller that answers its own
+     * refusal rather than IAM's: STS turns a token request down with
+     * {@code OutboundWebIdentityFederationDisabledException}, not with {@code FeatureDisabled}.
+     */
+    public Optional<OutboundWebIdentityFederation> findEnabledOutboundWebIdentityFederation() {
+        synchronized (outboundFederationLock) {
+            return outboundFederation.get(OUTBOUND_FEDERATION_KEY)
+                    .filter(OutboundWebIdentityFederation::isEnabled);
         }
     }
 
@@ -3941,19 +3990,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * that matches nothing gets {@code NoSuchEntity}. Different mistakes, different answers.
      *
      * <p>The API Reference publishes a length of 20 to 128 as well as the pattern, so both are
-     * checked, and both are reported when both are broken, in the order it prints them. The
-     * pattern message is the one recorded against AWS; the length wording is the form AWS uses for
-     * a member carrying both bounds, which {@link #validatePassword} spells the same
-     * way.
+     * checked, and both are reported when both are broken, in the order it prints them.
+     *
+     * <p>Each message names the one bound the value broke, rather than both at once: every
+     * recorded IAM length violation reads that way, "Member must have length less than or equal to
+     * 64" for a user name over 64 and "Member must have length greater than or equal to 20" for an
+     * ARN under 20, and a short id told about a 128-character ceiling it is nowhere near would be
+     * reporting a constraint it did not break. The pattern message is the one recorded against
+     * AWS.
      */
     private void requireCredentialIdFormat(String credentialId) {
         String id = credentialId == null ? "" : credentialId;
         List<String> violations = new ArrayList<>();
-        if (id.length() < SERVICE_CREDENTIAL_ID_MIN_LENGTH
-                || id.length() > SERVICE_CREDENTIAL_ID_MAX_LENGTH) {
-            violations.add("Member must have length less than or equal to "
-                    + SERVICE_CREDENTIAL_ID_MAX_LENGTH + " and greater than or equal to "
+        if (id.length() < SERVICE_CREDENTIAL_ID_MIN_LENGTH) {
+            violations.add("Member must have length greater than or equal to "
                     + SERVICE_CREDENTIAL_ID_MIN_LENGTH);
+        } else if (id.length() > SERVICE_CREDENTIAL_ID_MAX_LENGTH) {
+            violations.add("Member must have length less than or equal to "
+                    + SERVICE_CREDENTIAL_ID_MAX_LENGTH);
         }
         if (!SERVICE_CREDENTIAL_ID_PATTERN.matcher(id).matches()) {
             violations.add("Member must satisfy regular expression pattern: [\\w]+");
@@ -4489,6 +4543,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return currentSession(accessKeyId)
                 .map(SessionCredential::getSessionToken)
                 .filter(token -> !token.isBlank());
+    }
+
+    /**
+     * When the session a temporary access key belongs to expires, for callers that must not hand
+     * out something outliving it. Empty for a long-term key, which names no session, and for a
+     * session already expired, which no longer resolves.
+     */
+    public Optional<Instant> findSessionExpiration(String accessKeyId) {
+        return currentSession(accessKeyId).map(SessionCredential::getExpiration);
     }
 
     /** Whether an access key ID identifies Floci's documented public deployer credential. */

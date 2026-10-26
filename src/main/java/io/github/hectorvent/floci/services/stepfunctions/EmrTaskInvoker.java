@@ -15,6 +15,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
+import static io.github.hectorvent.floci.services.stepfunctions.OptimizedIntegrations.failed;
+import static io.github.hectorvent.floci.services.stepfunctions.OptimizedIntegrations.refused;
+import static io.github.hectorvent.floci.services.stepfunctions.OptimizedIntegrations.required;
+import static io.github.hectorvent.floci.services.stepfunctions.OptimizedIntegrations.unsupported;
+
 /**
  * The optimized {@code arn:<partition>:states:::elasticmapreduce:*} integrations. Each one is an EMR
  * API under renamed fields, as the Step Functions guide's "Optimized Amazon EMR APIs" table lists
@@ -232,27 +237,5 @@ public class EmrTaskInvoker {
             throw new AslExecutor.FailStateException("EMR." + name, error.path("message").asText());
         }
         return response.getEntity() instanceof ObjectNode body ? body : objectMapper.createObjectNode();
-    }
-
-    /** A job that ended without succeeding: the cause is its describe response, as a JSON string. */
-    private static AslExecutor.FailStateException failed(JsonNode described) {
-        return new AslExecutor.FailStateException("States.TaskFailed", described.toString());
-    }
-
-    /** A field the integration's request names a cluster, step or member by, as a non-blank string. */
-    private static String required(JsonNode request, String field) {
-        JsonNode value = request.path(field);
-        if (!value.isTextual() || value.asText().isBlank()) {
-            throw refused("The field " + field + " is required.");
-        }
-        return value.asText();
-    }
-
-    private static AslExecutor.FailStateException refused(String cause) {
-        return new AslExecutor.FailStateException("States.TaskFailed", cause);
-    }
-
-    private static AslExecutor.FailStateException unsupported(StatesIntegration integration) {
-        return new AslExecutor.FailStateException("States.TaskFailed", "Unsupported resource: " + integration);
     }
 }

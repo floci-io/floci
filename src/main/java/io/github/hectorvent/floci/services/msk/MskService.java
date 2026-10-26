@@ -38,6 +38,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -645,6 +646,13 @@ public class MskService implements ResourceProvider {
             return aware.scanAllAccounts();
         }
         return storage.scan(k -> true);
+    }
+
+    public Optional<MskCluster> getClusterForAccount(String accountId, String clusterArn) {
+        if (storage instanceof AccountAwareStorageBackend<MskCluster> aware) {
+            return aware.getForAccount(accountId, clusterArn);
+        }
+        return storage.get(clusterArn);
     }
 
     private void putCluster(MskCluster cluster) {

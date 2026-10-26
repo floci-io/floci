@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -12,6 +13,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -110,6 +112,29 @@ class ProvisionContextTest {
         assertEquals("WEBSOCKET", ctx.resolveOrDefault(props("{\"ProtocolType\":\"\"}"), "ProtocolType", "WEBSOCKET"),
                 "blank falls back");
         assertEquals("WEBSOCKET", ctx.resolveOrDefault(null, "ProtocolType", "WEBSOCKET"), "null props falls back");
+    }
+
+    @Test
+    void resolveOptionalIntReadsAnIntegerAndLeavesWhatTheTemplateOmitsUnset() {
+        ProvisionContext ctx = context(null);
+        JsonNode size = props("{\"Ref\": \"Size\"}");
+        when(engine.resolve(size)).thenReturn("3");
+
+        assertEquals(42, ctx.resolveOptionalInt(props("{\"Port\": 42}"), "Port"), "a number");
+        assertEquals(42, ctx.resolveOptionalInt(props("{\"Port\": \"42\"}"), "Port"), "a numeric string");
+        assertEquals(7, ctx.resolveOptionalInt(props("{\"Port\": \" 7 \"}"), "Port"), "surrounding blanks are trimmed");
+        assertEquals(3, ctx.resolveOptionalInt(props("{\"Port\": {\"Ref\": \"Size\"}}"), "Port"), "an intrinsic's result");
+        assertNull(ctx.resolveOptionalInt(props("{}"), "Port"), "absent");
+        assertNull(ctx.resolveOptionalInt(props("{\"Port\": null}"), "Port"), "explicitly null");
+        assertNull(ctx.resolveOptionalInt(null, "Port"), "no properties at all");
+        assertNull(ctx.resolveOptionalInt(props("{\"Port\": {\"Ref\": \"AWS::NoValue\"}}"), "Port"),
+                "an intrinsic that resolves to blank, as AWS::NoValue does");
+        for (String literal : List.of("\"\"", "\"ten\"", "\"4.5\"", "4.5", "true")) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> ctx.resolveOptionalInt(props("{\"Port\": " + literal + "}"), "Port"), literal);
+            assertEquals("ValidationError", e.getErrorCode(), literal);
+            assertEquals("Value of property Port must be an integer.", e.getMessage(), literal);
+        }
     }
 
     @Test

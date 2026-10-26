@@ -10,7 +10,8 @@ import java.util.Map;
 
 /**
  * An EMR cluster (job flow). State machine:
- * STARTING → BOOTSTRAPPING → RUNNING → WAITING, then → TERMINATING → TERMINATED.
+ * STARTING → BOOTSTRAPPING → RUNNING → WAITING (and back to RUNNING for added steps), then
+ * → TERMINATING → TERMINATED, or TERMINATED_WITH_ERRORS when a failed step ended it.
  * Steps, instance groups and fleets are stored as nested lists. Complex sub-structures
  * (ec2 attributes, applications, configurations) are stored as raw JSON strings.
  */
@@ -53,6 +54,8 @@ public class EmrCluster {
     private Instant creationDateTime;
     private Instant readyDateTime;
     private Instant endDateTime;
+    // When the cluster began TERMINATING; Floci's own, as the API's Timeline has no such time.
+    private Instant terminatingDateTime;
     private Map<String, String> tags = new LinkedHashMap<>();
     private List<EmrStep> steps = new ArrayList<>();
     private List<EmrInstanceGroup> instanceGroups = new ArrayList<>();
@@ -179,6 +182,9 @@ public class EmrCluster {
 
     public Instant getEndDateTime() { return endDateTime; }
     public void setEndDateTime(Instant endDateTime) { this.endDateTime = endDateTime; }
+
+    public Instant getTerminatingDateTime() { return terminatingDateTime; }
+    public void setTerminatingDateTime(Instant terminatingDateTime) { this.terminatingDateTime = terminatingDateTime; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

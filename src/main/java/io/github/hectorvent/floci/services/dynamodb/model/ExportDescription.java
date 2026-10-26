@@ -39,6 +39,9 @@ public class ExportDescription {
     @JsonProperty("ExportTime")
     private BigDecimal exportTime;
 
+    @JsonProperty("IncrementalExportSpecification")
+    private IncrementalExportSpecification incrementalExportSpecification;
+
     @JsonProperty("StartTime")
     private BigDecimal startTime;
 
@@ -69,6 +72,9 @@ public class ExportDescription {
     @JsonProperty("FailureMessage")
     private String failureMessage;
 
+    @JsonProperty("DestinationType")
+    private String destinationType = "S3";
+
     public String getExportArn() { return exportArn; }
     public void setExportArn(String exportArn) { this.exportArn = exportArn; }
 
@@ -95,6 +101,11 @@ public class ExportDescription {
 
     public BigDecimal getExportTime() { return exportTime; }
     public void setExportTime(BigDecimal exportTime) { this.exportTime = exportTime; }
+
+    public IncrementalExportSpecification getIncrementalExportSpecification() { return incrementalExportSpecification; }
+    public void setIncrementalExportSpecification(IncrementalExportSpecification incrementalExportSpecification) {
+        this.incrementalExportSpecification = incrementalExportSpecification;
+    }
 
     public BigDecimal getStartTime() { return startTime; }
     public void setStartTime(BigDecimal startTime) { this.startTime = startTime; }
@@ -125,4 +136,7 @@ public class ExportDescription {
 
     public String getFailureMessage() { return failureMessage; }
     public void setFailureMessage(String failureMessage) { this.failureMessage = failureMessage; }
+
+    public String getDestinationType() { return destinationType; }
+    public void setDestinationType(String destinationType) { this.destinationType = destinationType; }
 }

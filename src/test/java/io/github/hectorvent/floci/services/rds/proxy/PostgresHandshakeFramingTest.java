@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -20,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PostgresHandshakeFramingTest {
 
@@ -62,6 +65,81 @@ class PostgresHandshakeFramingTest {
                 }, output.writes.get(1));
             }
         }
+    }
+
+    @Test
+    void cancelRequestIsForwardedToTheBackendUnchanged() throws Exception {
+        byte[] cancel = cancelRequest(16, 4242, 0x5eed);
+        RecordingOutputStream clientOutput = new RecordingOutputStream();
+        RecordingOutputStream backendOutput = new RecordingOutputStream();
+        Socket client = new MemorySocket(cancel, clientOutput);
+        Socket backend = new MemorySocket(new byte[0], backendOutput);
+        AtomicInteger backendConnections = new AtomicInteger();
+        try (client; backend) {
+            PostgresProtocolHandler.AuthenticatedSession session = authenticate(client, () -> {
+                backendConnections.incrementAndGet();
+                return backend;
+            });
+
+            assertNull(session);
+            assertEquals(1, backendConnections.get());
+            assertArrayEquals(cancel, backendOutput.toByteArray());
+            assertEquals(0, clientOutput.size());
+            assertTrue(backend.isClosed());
+        }
+    }
+
+    @Test
+    void cancelRequestToADbProxyEndpointReachesNoBackend() throws Exception {
+        Socket client = new MemorySocket(cancelRequest(16, 4242, 0x5eed), new RecordingOutputStream());
+        AtomicInteger backendConnections = new AtomicInteger();
+        try (client) {
+            assertNull(PostgresProtocolHandler.authenticate(client, () -> {
+                backendConnections.incrementAndGet();
+                return new MemorySocket(new byte[0], new RecordingOutputStream());
+            }, "master", "password", "appdb", false, null, null, null,
+                    (user, password) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000, true, false));
+            assertEquals(0, backendConnections.get());
+        }
+    }
+
+    @Test
+    void cancelRequestOfTheWrongLengthReachesNoBackend() throws Exception {
+        Socket client = new MemorySocket(cancelRequest(20, 4242, 0x5eed), new RecordingOutputStream());
+        AtomicInteger backendConnections = new AtomicInteger();
+        try (client) {
+            assertNull(authenticate(client, () -> {
+                backendConnections.incrementAndGet();
+                return new MemorySocket(new byte[0], new RecordingOutputStream());
+            }));
+            assertEquals(0, backendConnections.get());
+        }
+    }
+
+    @Test
+    void truncatedCancelRequestReachesNoBackend() throws Exception {
+        Socket client = new MemorySocket(Arrays.copyOf(cancelRequest(16, 4242, 0x5eed), 12),
+                new RecordingOutputStream());
+        AtomicInteger backendConnections = new AtomicInteger();
+        try (client) {
+            assertThrows(IOException.class, () -> authenticate(client, () -> {
+                backendConnections.incrementAndGet();
+                return new MemorySocket(new byte[0], new RecordingOutputStream());
+            }));
+            assertEquals(0, backendConnections.get());
+        }
+    }
+
+    private static PostgresProtocolHandler.AuthenticatedSession authenticate(
+            Socket client, PostgresProtocolHandler.BackendConnector backend) throws IOException {
+        return PostgresProtocolHandler.authenticate(client, backend, "master", "password", "appdb",
+                false, null, null, null, (user, password) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
+                5000);
+    }
+
+    private static byte[] cancelRequest(int length, int processId, int secretKey) {
+        return ByteBuffer.allocate(length).putInt(length).putInt(80877102)
+                .putInt(processId).putInt(secretKey).array();
     }
 
     private static byte[] startupAndPassword() throws IOException {

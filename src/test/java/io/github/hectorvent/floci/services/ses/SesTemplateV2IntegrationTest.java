@@ -685,8 +685,24 @@ class SesTemplateV2IntegrationTest {
     }
 
     @ParameterizedTest(name = "{0}")
-    @MethodSource("wrongTypeSendEmailBodies")
+    @MethodSource("io.github.hectorvent.floci.services.ses.SesV2SerializationErrors#nonObjectBodies")
     @Order(51)
+    void sendEmail_nonObjectBody_isASerializationException(String body, String message) {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo(message));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("wrongTypeSendEmailBodies")
+    @Order(52)
     void sendEmail_wrongMemberType_returnsSerializationException(String label, String body) {
         given()
             .contentType("application/json")
@@ -701,9 +717,6 @@ class SesTemplateV2IntegrationTest {
 
     static Stream<Arguments> malformedSendEmailBodies() {
         return Stream.of(
-                Arguments.of("body is array", "[1,2,3]"),
-                Arguments.of("body is JSON null literal", "null"),
-                Arguments.of("body is JSON string", "\"hello\""),
                 Arguments.of("TemplateData as invalid JSON string", """
                     {
                       "FromEmailAddress": "sender@example.com",

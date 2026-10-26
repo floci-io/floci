@@ -275,7 +275,7 @@ class ElastiCachePortSharingIntegrationTest {
      * endpoint reaching a different group's proxy produces.
      */
     private static String withAuth(int port, String token, String... command) throws IOException {
-        try (Socket socket = new Socket("localhost", port)) {
+        try (Socket socket = ElastiCacheTestConnections.openSocket("localhost", port)) {
             socket.setSoTimeout(10_000);
             OutputStream out = socket.getOutputStream();
             InputStream in = socket.getInputStream();

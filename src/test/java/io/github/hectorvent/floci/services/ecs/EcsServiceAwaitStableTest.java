@@ -219,13 +219,6 @@ class EcsServiceAwaitStableTest {
             }
             return null;
         }).when(containerManager).attachTaskNetwork(any(), any(), anyString());
-        // Its launch fails only once the wait has cleared the service's launch failure and started
-        // the new deployment's task: when the wait's second pass stops the previous deployment's.
-        doAnswer(invocation -> {
-            releaseStale.countDown();
-            stalePass.join();
-            return null;
-        }).when(containerManager).releaseTaskNetwork(any(), anyString());
         service.createCluster("race-cluster", REGION);
         registerTaskDef(service, "race-fam", "app:1");
         EcsServiceModel svc = service.createService("race-cluster", "race-svc", "race-fam", 1,
@@ -233,10 +226,20 @@ class EcsServiceAwaitStableTest {
         service.awaitServiceStable(svc, GENEROUS);
         service.updateService("race-cluster", "race-svc", null, 2, null, REGION);
         stalePass.start();
-        assertTrue(staleLaunching.await(10, TimeUnit.SECONDS));
-        TaskDefinition rev2 = registerTaskDef(service, "race-fam", "app:2");
-        EcsServiceModel updated = service.updateService("race-cluster", "race-svc",
-                rev2.getTaskDefinitionArn(), 1, null, REGION);
+        TaskDefinition rev2;
+        EcsServiceModel updated;
+        try {
+            assertTrue(staleLaunching.await(10, TimeUnit.SECONDS));
+            rev2 = registerTaskDef(service, "race-fam", "app:2");
+            updated = service.updateService("race-cluster", "race-svc",
+                    rev2.getTaskDefinitionArn(), 1, null, REGION);
+        } finally {
+            // A new pass waits for this stale pass, so its cleanup cannot release this latch.
+            releaseStale.countDown();
+            stalePass.join(TimeUnit.SECONDS.toMillis(10));
+        }
+        assertFalse(stalePass.isAlive(), "the stale pass must finish before replacement reconciliation");
+        assertTrue(service.hasLaunchFailure(svc.getServiceArn()), "the stale launch did fail");
 
         service.awaitServiceStable(updated, GENEROUS);
 

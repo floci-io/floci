@@ -21,13 +21,20 @@ public final class ResourcePolicyProviders {
      */
     public static List<ResourcePolicyProvider.ResourcePolicy> policiesFor(
             Instance<ResourcePolicyProvider> providers, String credentialScope, String resourceArn) {
+        return policiesFor(providers, credentialScope, null, resourceArn);
+    }
+
+    /** The policies applying to an action, as determined by each resource-owning service. */
+    public static List<ResourcePolicyProvider.ResourcePolicy> policiesFor(
+            Instance<ResourcePolicyProvider> providers, String credentialScope, String action, String resourceArn) {
         if (providers == null || providers.isUnsatisfied()) {
             return List.of();
         }
         List<ResourcePolicyProvider.ResourcePolicy> policies = new ArrayList<>();
         for (ResourcePolicyProvider provider : providers) {
             List<ResourcePolicyProvider.ResourcePolicy> supplied =
-                    provider.getResourcePolicies(credentialScope, resourceArn);
+                    action == null ? provider.getResourcePolicies(credentialScope, resourceArn)
+                            : provider.getResourcePolicies(credentialScope, action, resourceArn);
             if (supplied != null && !supplied.isEmpty()) {
                 policies.addAll(supplied);
             }

@@ -224,7 +224,7 @@ public class EcsLoadBalancerRegistrar {
             }
             TargetDescription td = new TargetDescription();
             td.setId(containerManager.resolveContainerHost(container));
-            td.setPort(binding.hostPort());
+            td.setPort(EcsTaskAddress.isLoopback(td.getId()) ? binding.hostPort() : binding.containerPort());
             action.accept(lb.getTargetGroupArn(), td);
         }
     }

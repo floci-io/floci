@@ -407,6 +407,12 @@ public class DockerClientProducer {
         return requireAtLeastOne(seconds, "floci.docker.api-timeout-seconds", "FLOCI_DOCKER_API_TIMEOUT_SECONDS");
     }
 
+    /** At 0 every pull would be given up at once, so a launch that needs an image could never start. */
+    public static int validateImagePullTimeoutSeconds(int seconds) {
+        return requireAtLeastOne(seconds, "floci.docker.image-pull-timeout-seconds",
+                "FLOCI_DOCKER_IMAGE_PULL_TIMEOUT_SECONDS");
+    }
+
     private static int requireAtLeastOne(int value, String setting, String envVar) {
         if (value < 1) {
             throw new IllegalArgumentException(setting + " (" + envVar + ") must be at least 1, got: " + value);

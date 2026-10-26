@@ -84,7 +84,11 @@ When Floci runs in Docker, publish `5432` alongside `4566`.
   session, an IAM user's key), its ARN with its path.
 - The signature is verified like any other Floci IAM token: the `test` key, or a key or session
   Floci issued. With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`, the principal also needs
-  `dsql:DbConnectAdmin` or `dsql:DbConnect` on the cluster ARN.
+  `dsql:DbConnectAdmin` or `dsql:DbConnect` on the cluster ARN, and the cluster's resource-based
+  policy is evaluated as DSQL evaluates it on connect, with the client's address as
+  `aws:SourceIp`. An explicit `Deny` in it refuses the connection with the hint `User: <caller> is
+  not authorized to perform: dsql:<action> on resource: <cluster ARN> with an explicit deny in a
+  resource-based policy`.
 - Refusals are `FATAL` with DSQL's text and a `Session Id` detail: `08P01` without TLS, `08006` for
   a token refused, `28000` for a role the token cannot sign in as, `55000` for any database other
   than `postgres`, and `42704` for a custom (dotted) parameter in the startup.
@@ -186,8 +190,10 @@ it with DSQL's messages:
 The policy is kept and returned in DSQL's form: pretty-printed, its elements in DSQL's order, a
 list of one value written as that value, condition values as text, an account id as its root ARN,
 and `2008-10-17` when it has no `Version`. A policy's version is the time it was set, in epoch
-milliseconds. Cluster policies are not enforced: Floci's IAM enforcement checks a connection's
-identity policies (see [Authentication](#authentication)), and no control plane call.
+milliseconds. With IAM enforcement on, the cluster's policy is evaluated for every control plane
+call on the cluster, as DSQL evaluates it, and when a client connects (see
+[Authentication](#authentication)). Each control plane call is checked against the cluster it names,
+and `CreateCluster` and `ListClusters` against `cluster/*`.
 
 ## CloudFormation
 

@@ -53,6 +53,7 @@ import java.util.function.Supplier;
 import static io.github.hectorvent.floci.services.elbv2.ElbV2PublicationTestSupport.allowPublications;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -143,6 +144,23 @@ class ElbV2ServiceTest {
         assertEquals("ValidationError", refusal.getErrorCode());
         assertEquals("At least two subnets in two different Availability Zones must be specified",
                 refusal.getMessage());
+        assertEquals(400, refusal.getHttpStatus());
+        assertTrue(service.describeLoadBalancers(REGION, null, null, null, null).isEmpty());
+        verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
+    }
+
+    /**
+     * A {@code Type} outside the model's enum is refused, as AWS refuses it, before anything is looked up or
+     * stored, rather than read as an Application Load Balancer.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"other", "Application", ""})
+    void aLoadBalancerOfATypeOutsideTheEnumIsRefused(String type) {
+        AwsException refusal = assertThrows(AwsException.class, () -> service.createLoadBalancer(REGION,
+                "unknown-type", null, type, null, List.of("subnet-a", "subnet-b"), List.of(), Map.of()));
+        assertEquals("ValidationError", refusal.getErrorCode());
+        assertEquals("1 validation error detected: Value '" + type + "' at 'type' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [application, network, gateway]", refusal.getMessage());
         assertEquals(400, refusal.getHttpStatus());
         assertTrue(service.describeLoadBalancers(REGION, null, null, null, null).isEmpty());
         verify(ec2Service, never()).describeSubnets(anyString(), anyList(), any());
@@ -242,6 +260,67 @@ class ElbV2ServiceTest {
         AwsException refusal = assertThrows(AwsException.class, () -> service.createLoadBalancer(REGION,
                 "taken", "internal", "application", "ipv4", List.of(), List.of(), Map.of()));
         assertEquals("DuplicateLoadBalancerName", refusal.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"HTTP", "HTTPS", "TCP"})
+    void createTargetGroupRejectsMissingPortBeforePublishing(String protocol) {
+        AwsException error = assertThrows(AwsException.class, () -> service.createTargetGroup(
+                REGION, "missing-port", protocol, null, null, "vpc-test", "ip",
+                null, null, null, null, null, null, null, null, null, null, Map.of()));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("A port must be specified", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeTargetGroups(REGION, null, List.of(), List.of()).isEmpty());
+        verifyNoInteractions(dataPlane, healthChecker);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {-1, 0, 65536, Integer.MAX_VALUE})
+    void createListenerRejectsInvalidPortWithoutPublishing(int port) {
+        String lb = service.createLoadBalancer(REGION, "listener-range", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        clearInvocations(dataPlane);
+        AwsException error = assertThrows(AwsException.class, () -> service.createListener(REGION, lb,
+                "HTTP", port, null, List.of(), List.of(), List.of(), Map.of()));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeListeners(REGION, lb, List.of()).isEmpty());
+        assertTrue(service.describeRules(REGION, null, List.of()).isEmpty());
+        verifyNoInteractions(dataPlane);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {-1, 0, 65536, Integer.MAX_VALUE})
+    void modifyListenerRejectsInvalidPortWithoutMutation(int port) {
+        String lb = service.createLoadBalancer(REGION, "listener-change", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        Listener listener = service.createListener(REGION, lb, "HTTP", 8080, null,
+                List.of(), List.of(), List.of(), Map.of());
+        clearInvocations(dataPlane);
+        AwsException error = assertThrows(AwsException.class, () -> service.modifyListener(REGION,
+                listener.getListenerArn(), "HTTPS", port, "changed", List.of(HELD_CERTIFICATE), null, null));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(8080, listener.getPort());
+        assertEquals("HTTP", listener.getProtocol());
+        assertNull(listener.getSslPolicy());
+        assertTrue(listener.getCertificates().isEmpty());
+        verifyNoInteractions(dataPlane);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 65535})
+    void listenerPortBoundariesAndOmittedUpdateAreAccepted(int port) {
+        String lb = service.createLoadBalancer(REGION, "listener-boundary", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        Listener listener = service.createListener(REGION, lb, "HTTP", port, null,
+                List.of(), List.of(), List.of(), Map.of());
+        assertEquals(port, listener.getPort());
+        int replacement = port == 1 ? 65535 : 1;
+        service.modifyListener(REGION, listener.getListenerArn(), null, replacement, null, null, null, null);
+        assertEquals(replacement, listener.getPort());
+        service.modifyListener(REGION, listener.getListenerArn(), null, null, null, null, null, null);
+        assertEquals(replacement, listener.getPort());
     }
 
     @ParameterizedTest
@@ -531,6 +610,85 @@ class ElbV2ServiceTest {
         assertTrue(newTargetGroup.getLoadBalancerArns().contains(lbArn));
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {1, 65535})
+    void gatewayListenerRejectsExplicitPortWithoutPublication(int port) {
+        String lbArn = service.createLoadBalancer(REGION, "gateway-port", "internal", "gateway", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        clearInvocations(dataPlane);
+
+        AwsException createError = assertThrows(AwsException.class, () -> service.createListener(
+                REGION, lbArn, "GENEVE", port, null, List.of(), List.of(), List.of(), Map.of()));
+        assertEquals("InvalidConfigurationRequest", createError.getErrorCode());
+        assertTrue(service.describeListeners(REGION, lbArn, null).isEmpty());
+        verifyNoInteractions(dataPlane);
+
+        Listener listener = service.createListener(REGION, lbArn, null, null, null,
+                List.of(), List.of(), List.of(), Map.of());
+        String originalProtocol = listener.getProtocol();
+        clearInvocations(dataPlane);
+        AwsException modifyError = assertThrows(AwsException.class, () -> service.modifyListener(
+                REGION, listener.getListenerArn(), "TCP", port, null, null, null, null));
+        assertEquals("InvalidConfigurationRequest", modifyError.getErrorCode());
+        assertNull(listener.getPort());
+        assertEquals(originalProtocol, listener.getProtocol());
+        verifyNoInteractions(dataPlane);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"GENEVE", "TCP", ""})
+    void gatewayListenerRejectsExplicitProtocolWithoutPublication(String protocol) {
+        String lbArn = service.createLoadBalancer(REGION, "gateway-protocol", "internal", "gateway", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        clearInvocations(dataPlane);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createListener(
+                REGION, lbArn, protocol, null, null, List.of(), List.of(), List.of(), Map.of()));
+
+        assertEquals("InvalidConfigurationRequest", error.getErrorCode());
+        assertTrue(service.describeListeners(REGION, lbArn, null).isEmpty());
+        verifyNoInteractions(dataPlane);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"GENEVE", "TCP", ""})
+    void gatewayListenerRejectsProtocolUpdateWithoutMutation(String protocol) {
+        String lbArn = service.createLoadBalancer(REGION, "gateway-protocol", "internal", "gateway", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        Listener listener = service.createListener(REGION, lbArn, null, null, null,
+                List.of(), List.of(), List.of(), Map.of());
+        String originalProtocol = listener.getProtocol();
+        clearInvocations(dataPlane);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.modifyListener(
+                REGION, listener.getListenerArn(), protocol, null, null, null, null, null));
+
+        assertEquals("InvalidConfigurationRequest", error.getErrorCode());
+        assertEquals(originalProtocol, listener.getProtocol());
+        assertNull(listener.getPort());
+        verifyNoInteractions(dataPlane);
+    }
+
+    @Test
+    void gatewayListenerOmittedPortAllowsActionUpdate() {
+        String lbArn = service.createLoadBalancer(REGION, "gateway-actions", "internal", "gateway", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        String oldTarget = createTargetGroup("gateway-old");
+        String newTarget = createTargetGroup("gateway-new");
+        Listener listener = service.createListener(REGION, lbArn, null, null, null,
+                List.of(), List.of(forwardAction(oldTarget)), List.of(), Map.of());
+        assertEquals("GENEVE", listener.getProtocol());
+
+        service.modifyListener(REGION, listener.getListenerArn(), null, null, null, null,
+                List.of(forwardAction(newTarget)), null);
+
+        assertNull(listener.getPort());
+        assertEquals("GENEVE", listener.getProtocol());
+        assertEquals(newTarget, listener.getDefaultActions().getFirst().getTargetGroupArn());
+        assertEquals(newTarget, service.describeRules(REGION, listener.getListenerArn(), null).getFirst()
+                .getActions().getFirst().getTargetGroupArn());
+    }
+
     @Test
     void modifyListenerPortRestartsListener() {
         String lbArn = service.createLoadBalancer(
@@ -816,6 +974,186 @@ class ElbV2ServiceTest {
             service.registerTargets(REGION, tgArn, List.of(target));
         }
         assertEquals(4, service.describeTargetGroups(REGION, null, List.of(tgArn), null).getFirst().getTargets().size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void registerTargetsUsesEffectivePortForIdentity(boolean initiallyExplicit) {
+        String tgArn = createTargetGroup("default-port-tg");
+        TargetDescription original = target("i-default", initiallyExplicit ? 9999 : null);
+        TargetDescription replacement = target("i-default", initiallyExplicit ? null : 9999);
+        TargetDescription override = target("i-default", 10000);
+        service.registerTargets(REGION, tgArn, List.of(original, override));
+
+        service.registerTargets(REGION, tgArn, List.of(replacement));
+
+        List<TargetDescription> registered = service.describeTargetGroups(
+                REGION, null, List.of(tgArn), null).getFirst().getTargets();
+        assertEquals(2, registered.size());
+        assertTrue(registered.stream().allMatch(t -> "i-default".equals(t.getId())));
+        List<Integer> ports = registered.stream().map(TargetDescription::getPort).toList();
+        assertTrue(ports.contains(10000));
+        assertTrue(ports.contains(9999));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deregisterTargetsMatchesDefaultPortWithoutRemovingAnOverride(boolean initiallyExplicit) {
+        String tgArn = createTargetGroup("remove-default-port-tg");
+        TargetDescription original = target("i-default", initiallyExplicit ? 9999 : null);
+        TargetDescription override = target("i-default", 10000);
+        service.registerTargets(REGION, tgArn, List.of(original, override));
+        TargetDescription removal = target("i-default", initiallyExplicit ? null : 9999);
+
+        service.deregisterTargets(REGION, tgArn, List.of(removal));
+        service.deregisterTargets(REGION, tgArn, List.of(removal));
+
+        List<TargetDescription> registered = service.describeTargetGroups(
+                REGION, null, List.of(tgArn), null).getFirst().getTargets();
+        assertEquals(1, registered.size());
+        assertEquals("i-default", registered.getFirst().getId());
+        assertEquals(10000, registered.getFirst().getPort());
+        TargetHealth removed = service.describeTargetHealth(REGION, tgArn, List.of(removal)).getFirst();
+        assertEquals("unused", removed.getState());
+        assertEquals("Target.NotRegistered", removed.getReason());
+        assertEquals("9999", removed.getHealthCheckPort());
+        verify(healthChecker, times(2)).removeTargets(eq(tgArn), eq(List.of(removal)), any(TargetGroup.class));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, -1, 65536, Integer.MAX_VALUE})
+    void createTargetGroupRejectsOutOfRangePortBeforePublishing(int port) {
+        AwsException error = assertThrows(AwsException.class, () -> service.createTargetGroup(
+                REGION, "invalid-port", "HTTP", "HTTP1", port, "vpc-a", "ip",
+                "HTTP", "traffic-port", true, "/", 30, 5, 5, 2, "200", "ipv4", Map.of()));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertTrue(service.describeTargetGroups(REGION, null, null, null).isEmpty());
+        verifyNoInteractions(healthChecker);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"register,0", "register,65536", "deregister,0", "deregister,65536", "health,0", "health,65536"})
+    void targetPortValidationPrecedesLookup(String operation, int port) {
+        AwsException error = assertThrows(AwsException.class,
+                () -> targetOperation(operation, "missing-group", List.of(target("i-valid", port))));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertTrue(error.getMessage().contains("targets.1.member.port"));
+        verifyNoInteractions(healthChecker);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"register", "deregister", "health"})
+    void invalidTargetPortInBatchPreservesRegisteredTargets(String operation) {
+        String arn = createTargetGroup("range-batch");
+        service.registerTargets(REGION, arn, List.of(target("i-valid", 9999)));
+        clearInvocations(healthChecker);
+        AwsException error = assertThrows(AwsException.class, () -> targetOperation(operation, arn,
+                List.of(target("i-valid", null), target("i-invalid", 65536))));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertTrue(error.getMessage().contains("targets.2.member.port"));
+        List<TargetDescription> registered = service.describeTargetGroups(REGION, null, List.of(arn), null)
+                .getFirst().getTargets();
+        assertEquals(1, registered.size());
+        assertEquals("i-valid", registered.getFirst().getId());
+        assertEquals(9999, registered.getFirst().getPort());
+        verifyNoInteractions(healthChecker);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"register,65536,65537", "deregister,65536,65537", "health,65536,65537",
+            "register,65537,65536", "deregister,65537,65536", "health,65537,65536"})
+    void targetPortErrorsAggregateBeforeMutation(String operation, int first, int second) {
+        String arn = createTargetGroup("aggregate-ports");
+        service.registerTargets(REGION, arn, List.of(target("i-valid", 9999)));
+        clearInvocations(healthChecker);
+        AwsException error = assertThrows(AwsException.class, () -> targetOperation(operation, arn,
+                List.of(target("i-valid", null), target("i-first", first), target("i-second", second))));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("2 validation errors detected: Value '" + first
+                + "' at 'targets.2.member.port' failed to satisfy constraint: Member must have value "
+                + "less than or equal to 65535; Value '" + second
+                + "' at 'targets.3.member.port' failed to satisfy constraint: Member must have value "
+                + "less than or equal to 65535", error.getMessage());
+        List<TargetDescription> registered = service.describeTargetGroups(REGION, null, List.of(arn), null)
+                .getFirst().getTargets();
+        assertEquals(1, registered.size());
+        assertEquals("i-valid", registered.getFirst().getId());
+        assertEquals(9999, registered.getFirst().getPort());
+        verifyNoInteractions(healthChecker);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 65535})
+    void targetPortBoundariesRemainUsable(int port) {
+        TargetGroup group = service.createTargetGroup(REGION, "boundary-port", "HTTP", "HTTP1", port,
+                "vpc-a", "ip", "HTTP", "traffic-port", true, "/", 30, 5, 5, 2, "200", "ipv4", Map.of());
+        String arn = group.getTargetGroupArn();
+        service.registerTargets(REGION, arn, List.of(target("10.0.0.5", null), target("10.0.0.5", port)));
+        assertEquals(1, group.getTargets().size());
+        assertEquals(port, group.getTargets().getFirst().getPort());
+        service.deregisterTargets(REGION, arn, List.of(target("10.0.0.5", null)));
+        assertTrue(group.getTargets().isEmpty());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"register,1", "register,65535", "deregister,1", "deregister,65535", "health,1", "health,65535"})
+    void lambdaTargetPortsAreRejectedBeforeBatchMutation(String operation, int port) {
+        TargetGroup group = service.createTargetGroup(REGION, "lambda-port", null, null, null,
+                null, "lambda", null, null, false, null, null, null, null, null, null, null, Map.of());
+        String id = "arn:aws:lambda:us-west-2:000000000000:function:target";
+        service.registerTargets(REGION, group.getTargetGroupArn(), List.of(target(id, null)));
+        clearInvocations(healthChecker);
+        AwsException error = assertThrows(AwsException.class, () -> targetOperation(operation,
+                group.getTargetGroupArn(), List.of(target(id, null), target(id, port))));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("Port cannot be specified for Lambda function targets", error.getMessage());
+        assertEquals(1, group.getTargets().size());
+        assertEquals(null, group.getTargets().getFirst().getPort());
+        verifyNoInteractions(healthChecker);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"register", "deregister", "health"})
+    void lambdaTargetPortRangeValidationPrecedesTargetTypeValidation(String operation) {
+        TargetGroup group = service.createTargetGroup(REGION, "lambda-range", null, null, null,
+                null, "lambda", null, null, false, null, null, null, null, null, null, null, Map.of());
+        clearInvocations(healthChecker);
+        AwsException error = assertThrows(AwsException.class, () -> targetOperation(operation,
+                group.getTargetGroupArn(), List.of(target("lambda-target", 65536))));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertTrue(error.getMessage().contains("targets.1.member.port"));
+        verifyNoInteractions(healthChecker);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 65535})
+    void lambdaTargetsDoNotInheritGroupPort(int port) {
+        TargetGroup group = service.createTargetGroup(REGION, "lambda-group-port", null, null, port,
+                null, "lambda", null, null, false, null, null, null, null, null, null, null, Map.of());
+        String arn = group.getTargetGroupArn();
+        String id = "arn:aws:lambda:us-west-2:000000000000:function:target";
+        service.registerTargets(REGION, arn, List.of(target(id, null)));
+        TargetDescription described = service.describeTargetHealth(REGION, arn, null).getFirst().getTarget();
+        assertNull(described.getPort());
+        service.deregisterTargets(REGION, arn, List.of(described));
+        assertTrue(service.describeTargetHealth(REGION, arn, null).isEmpty());
+    }
+
+    private void targetOperation(String operation, String arn, List<TargetDescription> targets) {
+        Runnable request = switch (operation) {
+            case "register" -> () -> service.registerTargets(REGION, arn, targets);
+            case "deregister" -> () -> service.deregisterTargets(REGION, arn, targets);
+            case "health" -> () -> service.describeTargetHealth(REGION, arn, targets);
+            default -> throw new IllegalArgumentException(operation);
+        };
+        request.run();
+    }
+
+    private static TargetDescription target(String id, Integer port) {
+        TargetDescription target = new TargetDescription();
+        target.setId(id);
+        target.setPort(port);
+        return target;
     }
 
     private String createTargetGroup(String name) {

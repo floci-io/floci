@@ -15,6 +15,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -27,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 class CodeBuildListProjectsTest {
@@ -198,6 +200,41 @@ class CodeBuildListProjectsTest {
         Map<String, Object> nextPage = listPage(nextRequest);
         assertEquals(List.of("project-100"), nextPage.get("projects"));
         assertFalse(nextPage.containsKey("nextToken"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void keepsCursorSortValueWhenProjectChangesDuringPageConstruction() throws Exception {
+        IntStream.range(0, 101).forEach(index -> createProject(REGION,
+                "project-%03d".formatted(index), (double) index, (double) index));
+        Project changing = new Project() {
+            private boolean changed;
+
+            @Override
+            public String getName() {
+                if (!changed) {
+                    setLastModified(1000.0);
+                    changed = true;
+                }
+                return super.getName();
+            }
+        };
+        changing.setName("project-099");
+        changing.setCreated(99.0);
+        changing.setLastModified(99.0);
+        Field field = CodeBuildService.class.getDeclaredField("projects");
+        field.setAccessible(true);
+        Map<String, Map<String, Project>> regions =
+                (Map<String, Map<String, Project>>) field.get(service);
+        regions.get(REGION).put("project-099", changing);
+
+        Map<String, Object> first = listPage(Map.of("sortBy", "LAST_MODIFIED_TIME"));
+        String token = (String) first.get("nextToken");
+        assertNotNull(token);
+        assertEquals(99.0, mapper.readTree(Base64.getUrlDecoder().decode(token))
+                .path("sortValue").asDouble());
+        Map<String, Object> second = listPage(Map.of("sortBy", "LAST_MODIFIED_TIME", "nextToken", token));
+        assertTrue(((List<String>) second.get("projects")).contains("project-100"));
     }
 
     @SuppressWarnings("unchecked")

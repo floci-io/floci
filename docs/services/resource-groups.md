@@ -48,7 +48,7 @@ Deleting a group removes its membership and tokens. It does not cancel or delete
 
 ## Scope
 
-Only the five operations and capacity-pool configuration above are implemented. Dynamic tag/CloudFormation queries, other service configurations, independent tag-update operations and `UngroupResources` are not supported. Unsupported configurations are rejected. Membership does not allocate physical capacity or make instance scheduling consume a reservation. No asynchronous membership transition is simulated: accepted additions complete synchronously and `Pending` is empty.
+Only the five operations and capacity-pool configuration above are implemented. Dynamic tag/CloudFormation queries, other service configurations, independent tag-update operations and `UngroupResources` are not supported. Unsupported configurations are rejected. Membership does not allocate physical capacity. EC2 launches that target the group consume matching available member reservations; the launch preference controls On-Demand fallback. No asynchronous membership transition is simulated: accepted additions complete synchronously and `Pending` is empty.
 
 Group state follows the configured Floci storage mode. Pagination tokens are in memory and are intentionally invalidated by restart/reset.
 

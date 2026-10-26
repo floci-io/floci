@@ -30,6 +30,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.LogRecord;
 import java.util.stream.Stream;
 
@@ -455,6 +456,102 @@ class CodeArtifactAssetPersistenceTest {
         assertEquals("ResourceNotFoundException", gone.getErrorCode());
     }
 
+    /**
+     * Qodo review finding on the PR that added {@code DisposePackageVersions}: unlike {@code
+     * deletePackage} (whose version record is already gone by the time its own best-effort asset
+     * cleanup runs, so a failure there can never be reached again), a disposed version's record
+     * is kept around: {@code DescribePackageVersion} must keep answering for it. The dispose path
+     * used to catch and log a failed delete the same way {@code deletePackage} does, then still
+     * mark the version Disposed and clear its asset map regardless, permanently orphaning bytes
+     * that record could no longer point back to. The same {@link DirectoryNotEmptyException} trick
+     * as {@link #deletingAnAssetsBytesFailingStillRemovesTheVersionRecordAndCleansUpTheOtherAsset}
+     * forces a real delete failure.
+     *
+     * <p>Raised again by Greptile's review: this now also proves the status write itself runs
+     * <em>before</em> the delete, not after (see {@code applyGenericStatusChange}'s own javadoc).
+     * The version reads {@code Disposed} (blocking downloads immediately) rather than staying
+     * {@code Published} with a broken asset still reachable, even though this one real asset's
+     * own delete never actually succeeded.
+     */
+    @Test
+    void disposePackageVersionsPropagatesAFailedAssetDeletionInsteadOfReportingSuccess(@TempDir Path dir)
+            throws IOException {
+        CodeArtifactService service = newService(dir);
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "v1".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+
+        Path assetFile;
+        try (Stream<Path> paths = Files.walk(dir.resolve("codeartifact-assets"))) {
+            assetFile = paths.filter(Files::isRegularFile).filter(p -> matchesContent(p, content))
+                    .findFirst().orElseThrow();
+        }
+        Files.delete(assetFile);
+        Files.createDirectory(assetFile);
+        Files.createFile(assetFile.resolve("not-empty"));
+
+        UncheckedIOException e = assertThrows(UncheckedIOException.class, () -> service.disposePackageVersions(
+                REGION, "dom", null, "repo", "generic", "ns", "pkg", List.of("1.0.0"), null, null));
+        assertTrue(e.getCause() instanceof DirectoryNotEmptyException, "expected the real delete failure to "
+                + "propagate rather than being swallowed, got cause: " + e.getCause());
+
+        CodeArtifactPackageVersion pv = service.describePackageVersion(REGION, "dom", null, "repo", "generic", "ns",
+                "pkg", "1.0.0");
+        assertEquals("Disposed", pv.getStatus(), "the status write runs before the delete, so a failed delete "
+                + "must still leave the version blocked rather than reading as the untouched Published it no "
+                + "longer really is");
+        assertEquals(1, pv.getAssets().size(), "the one asset whose own delete failed is never removed from the "
+                + "record (only a successfully deleted asset is), but is still unreachable through downloads "
+                + "now that the version itself reads Disposed");
+        AwsException blocked = assertThrows(AwsException.class, () -> service.getPackageVersionAsset(REGION, "dom",
+                null, "repo", "generic", "ns", "pkg", "1.0.0", "a.txt", null));
+        assertEquals("ResourceNotFoundException", blocked.getErrorCode());
+    }
+
+    /**
+     * Raised by Greptile's review: proves the per-asset bookkeeping, not just the upfront status
+     * write above. With two assets, one whose delete succeeds and one whose delete then fails,
+     * the record must name only the one that genuinely never got deleted, not the one already
+     * gone, so a retry (now let through for an already-{@code Disposed} version, see {@code
+     * checkStatusTransitionAllowed}'s own javadoc) picks up exactly where this attempt stopped.
+     */
+    @Test
+    void disposePackageVersionsRemovesEachAssetFromTheRecordRightAfterItsOwnSuccessfulDelete(@TempDir Path dir)
+            throws IOException {
+        CodeArtifactService service = newService(dir);
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] contentA = "content of a".getBytes(StandardCharsets.UTF_8);
+        byte[] contentB = "content of b".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt",
+                Digests.sha256Hex(contentA), "true", contentA);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "1.0.0", "b.txt",
+                Digests.sha256Hex(contentB), "true", contentB);
+
+        Path assetFileA;
+        Path assetFileB;
+        try (Stream<Path> paths = Files.walk(dir.resolve("codeartifact-assets"))) {
+            List<Path> files = paths.filter(Files::isRegularFile).toList();
+            assetFileA = files.stream().filter(p -> matchesContent(p, contentA)).findFirst().orElseThrow();
+            assetFileB = files.stream().filter(p -> matchesContent(p, contentB)).findFirst().orElseThrow();
+        }
+        Files.delete(assetFileB);
+        Files.createDirectory(assetFileB);
+        Files.createFile(assetFileB.resolve("not-empty"));
+
+        assertThrows(UncheckedIOException.class, () -> service.disposePackageVersions(REGION, "dom", null, "repo",
+                "generic", "ns", "my-pkg", List.of("1.0.0"), null, null));
+
+        assertFalse(Files.exists(assetFileA), "the asset whose own delete succeeded must still be gone");
+        CodeArtifactPackageVersion pv = service.describePackageVersion(REGION, "dom", null, "repo", "generic", "ns",
+                "my-pkg", "1.0.0");
+        assertEquals("Disposed", pv.getStatus());
+        assertEquals(Set.of("b.txt"), pv.getAssets().keySet(), "only the asset whose delete never actually "
+                + "succeeded should still be named in the record");
+    }
+
     private static boolean matchesContent(Path file, byte[] expected) {
         try {
             return Arrays.equals(Files.readAllBytes(file), expected);
@@ -467,7 +564,7 @@ class CodeArtifactAssetPersistenceTest {
      * Found by Qodo review: {@code copyPackageVersions} used to read and write each version's
      * assets inline inside its own commit loop, so a later version's corrupted source bytes
      * would be discovered only after an earlier, otherwise-valid version in the same batch was
-     * already committed to the destination — the per-call all-or-nothing contract AWS documents
+     * already committed to the destination, the per-call all-or-nothing contract AWS documents
      * for the caller-visible failure codes, silently broken for this emulator-internal one.
      * Every pending version's source assets are now verified against their persisted hashes
      * before any version in the batch has anything written to the destination at all.

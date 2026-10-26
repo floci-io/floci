@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.ses;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -38,8 +37,8 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrF
 import static io.github.hectorvent.floci.services.ses.SesV2Json.intMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
+import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 
 /**
  * SES V2 contact-list and contact endpoints ({@code /v2/email/contact-lists}). Every operation
@@ -71,11 +70,10 @@ public class SesContactController {
     public Response createContactList(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            if (body == null || body.isBlank()) {
+            if (body == null || body.isEmpty()) {
                 throw new AwsException("BadRequestException", "Request body is required.", 400);
             }
-            JsonNode request = objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("CreateContactList", request);
             // Read leniently; the service surfaces a missing ContactListName as the AWS Smithy
             // validation error rather than a custom "required" message.
@@ -88,8 +86,6 @@ public class SesContactController {
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -129,10 +125,7 @@ public class SesContactController {
                                       String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("UpdateContactList", request);
             JsonNode topicsNode = request.path("Topics");
             // Treat absent or explicit-null Topics as "not provided" (keep existing), consistent
@@ -148,8 +141,6 @@ public class SesContactController {
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -211,11 +202,10 @@ public class SesContactController {
                                   @PathParam("contactListName") String contactListName, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            if (body == null || body.isBlank()) {
+            if (body == null || body.isEmpty()) {
                 throw new AwsException("BadRequestException", "Request body is required.", 400);
             }
-            JsonNode request = objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("CreateContact", request);
             String emailAddress = request.path("EmailAddress").asText(null);
             List<TopicPreference> prefs = parseTopicPreferences(request.path("TopicPreferences"));
@@ -227,8 +217,6 @@ public class SesContactController {
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -238,10 +226,7 @@ public class SesContactController {
                                  @PathParam("contactListName") String contactListName, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("ListContacts", request);
             Integer pageSize = intMemberOrAbsent(request, "PageSize");
             String nextToken = request.path("NextToken").asText(null);
@@ -256,8 +241,6 @@ public class SesContactController {
             return Response.ok(result).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -294,10 +277,7 @@ public class SesContactController {
                                   @PathParam("emailAddress") String emailAddress, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("UpdateContact", request);
             JsonNode prefsNode = request.path("TopicPreferences");
             boolean prefsPresent = !prefsNode.isMissingNode() && !prefsNode.isNull();
@@ -310,8 +290,6 @@ public class SesContactController {
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 

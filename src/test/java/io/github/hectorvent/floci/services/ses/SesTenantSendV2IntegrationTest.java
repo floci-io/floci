@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
@@ -20,8 +21,8 @@ import static org.hamcrest.Matchers.notNullValue;
  * the From identity (exact-address precedence included) and the configuration set; the
  * stored-template gate is inferred from the association model, not observed. The send-path
  * tenant-not-found wording differs from the management operations (no angle brackets, account id
- * included, probe-confirmed). The tenant's SendingStatus is not checked — nothing can move it off
- * ENABLED in the emulator.
+ * included, probe-confirmed). A tenant whose customer-managed status is DISABLED is refused with a
+ * 400 {@code MessageRejected} (probe-confirmed for the simple, templated, raw and bulk sends).
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -184,8 +185,8 @@ class SesTenantSendV2IntegrationTest {
     @Test
     @Order(8)
     void rawSend_gatesTheMimeDerivedSender() {
-        v2().body("{\"EmailIdentity\":\"floci-raw.example.com\"}")
-                .when().post("/v2/email/identities").then().statusCode(200);
+        // Verified, so the 403 is what stops the send: an unverified sender is reported first.
+        SesDomainIdentityTestHelper.createVerified("floci-raw.example.com", AUTH);
         String mime = "From: probe@floci-raw.example.com\r\nTo: success@simulator.amazonses.com\r\n"
                 + "Subject: s\r\n\r\nbody";
         String data = java.util.Base64.getEncoder().encodeToString(mime.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -266,6 +267,23 @@ class SesTenantSendV2IntegrationTest {
                 .when().post("/v2/email/outbound-bulk-emails").then().statusCode(404)
                 .body("message", equalTo(
                         "Tenant ghost-tenant for AwsAccountId 000000000000 not found."));
+        // The tenant is looked up before the stored template...
+        v2().body("{\"FromEmailAddress\":\"" + FROM + "\",\"TenantName\":\"ghost-tenant\","
+                        + "\"DefaultContent\":{\"Template\":{\"TemplateName\":\"ghost-template\","
+                        + "\"TemplateData\":\"{}\"}},"
+                        + "\"BulkEmailEntries\":[{\"Destination\":{\"ToAddresses\":"
+                        + "[\"success@simulator.amazonses.com\"]}}]}")
+                .when().post("/v2/email/outbound-bulk-emails").then().statusCode(404)
+                .body("message", equalTo(
+                        "Tenant ghost-tenant for AwsAccountId 000000000000 not found."));
+        // ...but not at all when no entry names a recipient: each entry is answered instead.
+        v2().body("{\"FromEmailAddress\":\"" + FROM + "\",\"TenantName\":\"ghost-tenant\","
+                        + "\"DefaultContent\":{\"Template\":{\"TemplateName\":\"" + TEMPLATE + "\","
+                        + "\"TemplateData\":\"{}\"}},"
+                        + "\"BulkEmailEntries\":[{\"Destination\":{}}]}")
+                .when().post("/v2/email/outbound-bulk-emails").then().statusCode(200)
+                .body("BulkEmailEntryResults[0].Status", equalTo("INVALID_PARAMETER"))
+                .body("BulkEmailEntryResults[0].Error", equalTo("Destination cannot be empty"));
     }
 
     @Test
@@ -282,6 +300,96 @@ class SesTenantSendV2IntegrationTest {
 
     @Test
     @Order(12)
+    void send_disabledTenant_isRejectedBeforeAssociationAndVerification() {
+        String tenantArn = v2().body("{\"TenantName\":\"" + TENANT + "\"}")
+                .when().post("/v2/email/tenants/get").then().statusCode(200)
+                .extract().path("Tenant.TenantArn");
+        String disabled = "Sending disabled for <" + tenantArn
+                + ">. For more information, please check the resource configuration and status.";
+        setStatus(tenantArn, "DISABLED");
+
+        v2().body(simpleSend(TENANT, ""))
+                .when().post("/v2/email/outbound-emails").then().statusCode(400)
+                .body("__type", equalTo("MessageRejected"))
+                .body("message", equalTo(disabled));
+        v2().body("{\"FromEmailAddress\":\"" + FROM + "\",\"TenantName\":\"" + TENANT + "\","
+                        + "\"DefaultContent\":{\"Template\":{\"TemplateName\":\"" + TEMPLATE + "\","
+                        + "\"TemplateData\":\"{}\"}},"
+                        + "\"BulkEmailEntries\":[{\"Destination\":{\"ToAddresses\":"
+                        + "[\"success@simulator.amazonses.com\"]}}]}")
+                .when().post("/v2/email/outbound-bulk-emails").then().statusCode(400)
+                .body("__type", equalTo("MessageRejected"))
+                .body("message", equalTo(disabled));
+        // A malformed address and a send with no recipient are reported ahead of the refusal...
+        v2().body("{\"FromEmailAddress\":\"" + FROM + "\",\"TenantName\":\"" + TENANT + "\","
+                        + "\"Content\":{\"Simple\":{\"Subject\":{\"Data\":\"s\"},"
+                        + "\"Body\":{\"Text\":{\"Data\":\"t\"}}}}}")
+                .when().post("/v2/email/outbound-emails").then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("At least one destination address is required."));
+        v2().body(simpleSend(TENANT, "").replace(FROM, "not an address"))
+                .when().post("/v2/email/outbound-emails").then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("Local address contains control or whitespace"));
+        // ...while a raw message with no recipient anywhere is refused before its missing To header...
+        String noRecipients = Base64.getEncoder().encodeToString(
+                ("From: " + FROM + "\r\nSubject: s\r\n\r\nbody\r\n").getBytes(StandardCharsets.UTF_8));
+        v2().body("{\"TenantName\":\"" + TENANT + "\",\"Content\":{\"Raw\":{\"Data\":\"" + noRecipients + "\"}}}")
+                .when().post("/v2/email/outbound-emails").then().statusCode(400)
+                .body("__type", equalTo("MessageRejected"))
+                .body("message", equalTo(disabled));
+        // ...and an unverified sender and an unassociated identity both lose to the refusal...
+        v2().body(simpleSend(TENANT, "").replace(FROM, "someone@unverified.example.com"))
+                .when().post("/v2/email/outbound-emails").then().statusCode(400)
+                .body("__type", equalTo("MessageRejected"));
+        // ...while an unknown configuration set still wins over it, except on a bulk send.
+        v2().body(simpleSend(TENANT, "\"ConfigurationSetName\":\"ghost-cs\","))
+                .when().post("/v2/email/outbound-emails").then().statusCode(404)
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Configuration set <ghost-cs> does not exist."));
+        v2().body("{\"FromEmailAddress\":\"" + FROM + "\",\"TenantName\":\"" + TENANT + "\","
+                        + "\"ConfigurationSetName\":\"ghost-cs\","
+                        + "\"DefaultContent\":{\"Template\":{\"TemplateName\":\"" + TEMPLATE + "\","
+                        + "\"TemplateData\":\"{}\"}},"
+                        + "\"BulkEmailEntries\":[{\"Destination\":{\"ToAddresses\":"
+                        + "[\"success@simulator.amazonses.com\"]}}]}")
+                .when().post("/v2/email/outbound-bulk-emails").then().statusCode(400)
+                .body("__type", equalTo("MessageRejected"))
+                .body("message", equalTo(disabled));
+        // A bulk send meets the refusal before an unknown stored template, and skips it when no
+        // entry names a recipient.
+        v2().body("{\"FromEmailAddress\":\"" + FROM + "\",\"TenantName\":\"" + TENANT + "\","
+                        + "\"DefaultContent\":{\"Template\":{\"TemplateName\":\"ghost-template\","
+                        + "\"TemplateData\":\"{}\"}},"
+                        + "\"BulkEmailEntries\":[{\"Destination\":{\"ToAddresses\":"
+                        + "[\"success@simulator.amazonses.com\"]}}]}")
+                .when().post("/v2/email/outbound-bulk-emails").then().statusCode(400)
+                .body("__type", equalTo("MessageRejected"))
+                .body("message", equalTo(disabled));
+        v2().body("{\"FromEmailAddress\":\"" + FROM + "\",\"TenantName\":\"" + TENANT + "\","
+                        + "\"DefaultContent\":{\"Template\":{\"TemplateName\":\"" + TEMPLATE + "\","
+                        + "\"TemplateData\":\"{}\"}},"
+                        + "\"BulkEmailEntries\":[{\"Destination\":{\"ToAddresses\":[]}}]}")
+                .when().post("/v2/email/outbound-bulk-emails").then().statusCode(200)
+                .body("BulkEmailEntryResults[0].Status", equalTo("INVALID_PARAMETER"))
+                .body("BulkEmailEntryResults[0].Error", equalTo("Destination cannot be empty"));
+
+        setStatus(tenantArn, "REINSTATED");
+        v2().body(simpleSend(TENANT, ""))
+                .when().post("/v2/email/outbound-emails").then().statusCode(200)
+                .body("MessageId", notNullValue());
+        setStatus(tenantArn, "ENABLED");
+    }
+
+    private static void setStatus(String tenantArn, String status) {
+        v2().urlEncodingEnabled(false).body("{\"SendingStatus\":\"" + status + "\"}")
+                .when().put("/v2/email/reputation/entities/RESOURCE/"
+                        + URLEncoder.encode(tenantArn, StandardCharsets.UTF_8) + "/customer-managed-status")
+                .then().statusCode(200);
+    }
+
+    @Test
+    @Order(13)
     void cleanup_cascadeAndResources() {
         v2().body("{\"TenantName\":\"" + TENANT + "\"}")
                 .when().post("/v2/email/tenants/delete").then().statusCode(200);

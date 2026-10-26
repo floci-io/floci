@@ -486,7 +486,7 @@ class IotServiceTest {
              "actions": [{"cloudwatchLogs": {"logGroupName": "/iot/missing", "roleArn": "arn:aws:iam::000000000000:role/rule"}}],
              "errorAction": %s}
             """.formatted(lambdaErrorAction()));
-        doThrow(new AwsException("ResourceNotFoundException", "The specified log group does not exist: /iot/missing", 400))
+        doThrow(new AwsException("ResourceNotFoundException", "The specified log group does not exist.", 400))
                 .when(logs).createLogStream("/iot/missing", "metricsRule", REGION);
 
         assertDoesNotThrow(() -> publish("{\"v\":1}"));
