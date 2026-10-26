@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
-import io.github.hectorvent.floci.testing.StepFunctionsExecutions;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
@@ -11,10 +10,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 
 import static io.github.hectorvent.floci.testing.EmrRequests.emr;
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.StepFunctionsExecutions.historyInRegion;
+import static io.github.hectorvent.floci.testing.StepFunctionsExecutions.runInRegion;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -27,7 +26,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class StepFunctionsEmrIntegrationTest {
 
     private static final String REGION = "eu-west-3";
-    private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/test-role";
     private static final String RESOURCE = "arn:aws:states:::elasticmapreduce:";
     private static final String GROUPS_CLUSTER = """
             {"Name": "sfn-emr", "ReleaseLabel": "emr-7.5.0",
@@ -233,35 +231,12 @@ class StepFunctionsEmrIntegrationTest {
         assertEquals(cause, execution.jsonPath().getString("cause"));
     }
 
-    private Response run(String definition) {
-        String stateMachineArn = sfn("CreateStateMachine", MAPPER.createObjectNode()
-                .put("name", "sfn-emr-" + UUID.randomUUID())
-                .put("definition", definition)
-                .put("roleArn", ROLE_ARN).toString())
-                .then().statusCode(200).extract().path("stateMachineArn");
-        String executionArn = sfn("StartExecution", MAPPER.createObjectNode()
-                .put("stateMachineArn", stateMachineArn).put("input", "{}").toString())
-                .then().statusCode(200).extract().path("executionArn");
-        return StepFunctionsExecutions.waitForTerminalState(executionArn);
+    private static Response run(String definition) {
+        return runInRegion(REGION, definition);
     }
 
-    private List<JsonNode> history(Response execution) throws Exception {
-        String body = sfn("GetExecutionHistory", MAPPER.createObjectNode()
-                .put("executionArn", execution.jsonPath().getString("executionArn")).toString())
-                .then().statusCode(200).extract().asString();
-        List<JsonNode> events = new ArrayList<>();
-        MAPPER.readTree(body).path("events").forEach(events::add);
-        return events;
-    }
-
-    private static Response sfn(String action, String body) {
-        return given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + REGION
-                        + "/states/aws4_request, SignedHeaders=host, Signature=abc")
-                .header("X-Amz-Target", "AWSStepFunctions." + action)
-                .contentType("application/x-amz-json-1.0")
-                .body(body)
-                .when().post("/");
+    private static List<JsonNode> history(Response execution) throws Exception {
+        return historyInRegion(REGION, execution);
     }
 
     private static List<String> fieldNames(JsonNode node) {

@@ -228,9 +228,12 @@ public class LambdaWebDataPlane {
         acquire(request, host, target, revision, requestId, null);
     }
 
-    /** The domain is minted for each creation, so a recreated endpoint shares no state with the deleted one. */
+    /**
+     * The domain is minted for each creation, so a recreated endpoint shares no state with the deleted one.
+     * Each region of an endpoint has its own environments and rate limit.
+     */
     private static String endpointKey(WebFunctionTarget target) {
-        return String.join("|", target.accountId(), target.region(), target.endpoint().domainName);
+        return String.join("|", target.accountId(), target.servingRegion(), target.endpoint().domainName);
     }
 
     /** Starts or reuses the revision's environment off the event loop, then forwards. */
@@ -242,7 +245,7 @@ public class LambdaWebDataPlane {
             }
             Integer maxEnvironments = target.endpoint().scalingConfig == null
                     ? null : target.endpoint().scalingConfig.maxEnvironments;
-            return environments.acquire(target.accountId(), target.region(), target.function(),
+            return environments.acquire(target.accountId(), target.servingRegion(), target.function(),
                     endpointKey(target), maxEnvironments, revision);
         }, false)
                 .onSuccess(environment -> forward(request, host, target, revision, environment, requestId, dead == null))

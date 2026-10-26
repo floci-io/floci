@@ -9,15 +9,17 @@ import java.util.Map;
 
 @RegisterForReflection
 public class RuntimeConfiguration {
-    private Map<String, Object> properties = new LinkedHashMap<>();
+    // Not named properties, as the other configurations' is: a configuration has a properties member,
+    // which Jackson would bind to a field of that name, replacing every member read before it.
+    private final Map<String, Object> members = new LinkedHashMap<>();
 
     @JsonAnyGetter
-    public Map<String, Object> getProperties() {
-        return properties;
+    public Map<String, Object> getMembers() {
+        return members;
     }
 
     @JsonAnySetter
-    public void setProperty(String key, Object value) {
-        properties.put(key, value);
+    public void setMember(String key, Object value) {
+        members.put(key, value);
     }
 }

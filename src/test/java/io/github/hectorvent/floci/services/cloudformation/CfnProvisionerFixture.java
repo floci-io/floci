@@ -40,6 +40,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFron
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudMapCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudTrailCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCompositeAlarmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchDashboardCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoResourceServerCfnProvisioner;
@@ -366,6 +367,7 @@ final class CfnProvisionerFixture {
             }
             if (cloudWatchMetricsService != null) {
                 discovered.add(new CloudWatchCfnProvisioner(cloudWatchMetricsService));
+                discovered.add(new CloudWatchCompositeAlarmCfnProvisioner(cloudWatchMetricsService));
             }
             if (cloudWatchDashboardsService != null) {
                 discovered.add(new CloudWatchDashboardCfnProvisioner(cloudWatchDashboardsService));

@@ -43,8 +43,35 @@ public class CapacityReservation {
     private String placementGroupArn;
     private String region;
     private List<Tag> tags = new ArrayList<>();
+    private List<String> instanceIds = new ArrayList<>();
 
     public CapacityReservation() {}
+
+    public CapacityReservation(CapacityReservation other) {
+        capacityReservationId = other.capacityReservationId;
+        ownerId = other.ownerId;
+        capacityReservationArn = other.capacityReservationArn;
+        availabilityZone = other.availabilityZone;
+        availabilityZoneId = other.availabilityZoneId;
+        instanceType = other.instanceType;
+        instancePlatform = other.instancePlatform;
+        tenancy = other.tenancy;
+        totalInstanceCount = other.totalInstanceCount;
+        availableInstanceCount = other.availableInstanceCount;
+        ebsOptimized = other.ebsOptimized;
+        ephemeralStorage = other.ephemeralStorage;
+        state = other.state;
+        startDate = other.startDate;
+        endDate = other.endDate;
+        endDateType = other.endDateType;
+        instanceMatchCriteria = other.instanceMatchCriteria;
+        createDate = other.createDate;
+        outpostArn = other.outpostArn;
+        placementGroupArn = other.placementGroupArn;
+        region = other.region;
+        tags = new ArrayList<>(other.tags);
+        instanceIds = new ArrayList<>(other.instanceIds);
+    }
 
     public String getCapacityReservationId() { return capacityReservationId; }
     public void setCapacityReservationId(String capacityReservationId) { this.capacityReservationId = capacityReservationId; }
@@ -110,4 +137,8 @@ public class CapacityReservation {
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }
+
+    public List<String> getInstanceIds() { return instanceIds; }
+    public void setInstanceIds(List<String> instanceIds) { this.instanceIds = instanceIds; }
+
 }

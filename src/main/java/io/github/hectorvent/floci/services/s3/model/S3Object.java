@@ -54,8 +54,8 @@ public class S3Object {
     private String dataGeneration;
 
     // Internal-only s3.object.sequencer of the write that stored this instance, assigned under the
-    // bucket lock so concurrent writes to one key get values in the order they were stored.
-    @JsonIgnore
+    // bucket lock so concurrent writes to one key get values in the order they were stored. Unlike
+    // dataGeneration, this is persisted because version promotion needs the order after restart.
     private String eventSequencer;
 
     public S3Object() {

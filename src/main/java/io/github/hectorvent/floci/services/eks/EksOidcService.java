@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.CompactJws;
 import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -16,14 +16,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
-import java.security.Signature;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
@@ -180,12 +178,9 @@ public class EksOidcService implements OidcIssuerKeyLookup {
         long exp = now + lifetime;
         String subject = "system:serviceaccount:" + namespace + ":" + serviceAccount;
 
-        String header = Base64Url.encode(writeJson(buildHeader(key.getKeyId())));
-        String payload = Base64Url.encode(writeJson(
-                buildClaims(issuer, aud, subject, namespace, serviceAccount, now, exp)));
-
-        String signingInput = header + "." + payload;
-        return signingInput + "." + sign(signingInput, toPrivateKey(key.getPrivateKey()));
+        return CompactJws.sign(writeJson(buildHeader(key.getKeyId())),
+                writeJson(buildClaims(issuer, aud, subject, namespace, serviceAccount, now, exp)),
+                toPrivateKey(key.getPrivateKey()), "SHA256withRSA");
     }
 
     private int resolveLifetime(Integer requested) {
@@ -229,17 +224,6 @@ public class EksOidcService implements OidcIssuerKeyLookup {
             return objectMapper.writeValueAsBytes(node);
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Failed to serialize EKS OIDC token claims", e);
-        }
-    }
-
-    private String sign(String signingInput, PrivateKey privateKey) {
-        try {
-            Signature signature = Signature.getInstance("SHA256withRSA");
-            signature.initSign(privateKey);
-            signature.update(signingInput.getBytes(StandardCharsets.UTF_8));
-            return Base64Url.encode(signature.sign());
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("EKS OIDC token signing failed", e);
         }
     }
 

@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -79,6 +80,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
@@ -131,6 +133,13 @@ public class ApiGatewayService implements ResourceProvider {
      */
     private final Object domainNameLock = new Object();
     private final Object vpcLinkTagLock = new Object();
+    /**
+     * Guards a usage plan patch, its delete, the CloudFormation limits replacement, the rollback
+     * restore and the {@code readUsagePlan} read. A patch writes back what it read, so two at once
+     * would restore one another's stale values, and a delete between its read and its write would
+     * be undone.
+     */
+    private final Object usagePlanLock = new Object();
     private final TlsCertificateManager certificateManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -1498,6 +1507,22 @@ public class ApiGatewayService implements ResourceProvider {
     // ──────────────────────────── Usage Plans ────────────────────────────
 
     public UsagePlan createUsagePlan(String region, Map<String, Object> request) {
+        // CreateUsagePlan's input model reports every violation in one message, the period's before the name's.
+        List<String> violations = new ArrayList<>();
+        String periodViolation = UsagePlanLimits.periodViolation(request);
+        if (periodViolation != null) {
+            violations.add(periodViolation);
+        }
+        if (request.get("name") == null) {
+            violations.add(SmithyValidationErrors.notNull("createUsagePlanInput.name"));
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+        if (String.valueOf(request.get("name")).isEmpty()) {
+            throw new AwsException("BadRequestException", "Usage Plan name must be specified", 400);
+        }
+        UsagePlan.Limits limits = UsagePlanLimits.fromRequest(request);
         Map<String, String> tags = new HashMap<>();
         if (request.get("tags") instanceof Map<?, ?> rawTags) {
             rawTags.forEach((key, value) -> tags.put(String.valueOf(key), String.valueOf(value)));
@@ -1511,14 +1536,7 @@ public class ApiGatewayService implements ResourceProvider {
         plan.setName((String) request.get("name"));
         plan.setDescription((String) request.get("description"));
         plan.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
-
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> apiStages = (List<Map<String, Object>>) request.get("apiStages");
-        if (apiStages != null) {
-            for (Map<String, Object> as : apiStages) {
-                plan.getApiStages().add(new UsagePlan.ApiStage((String) as.get("apiId"), (String) as.get("stage")));
-            }
-        }
+        plan.applyLimits(limits);
 
         usagePlanStore.put(usagePlanKey(region, plan.getId()), plan);
         LOG.infov("Created Usage Plan {0}", plan.getId());
@@ -1527,65 +1545,67 @@ public class ApiGatewayService implements ResourceProvider {
 
     public UsagePlan getUsagePlan(String region, String usagePlanId) {
         return usagePlanStore.get(usagePlanKey(region, usagePlanId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Usage Plan not found", 404));
+                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid Usage Plan ID specified", 404));
+    }
+
+    /** Reads the stored plan under the lock patches hold, so the reader sees one revision of it. */
+    public <T> T readUsagePlan(String region, String usagePlanId, Function<UsagePlan, T> reader) {
+        synchronized (usagePlanLock) {
+            return reader.apply(getUsagePlan(region, usagePlanId));
+        }
     }
 
     public UsagePlan updateUsagePlan(String region, String usagePlanId, List<Map<String, String>> patchOperations) {
-        UsagePlan plan = getUsagePlan(region, usagePlanId);
-        // The store hands back live objects, so every op is validated against pending values first and
-        // only applied once the whole patch is known to be good.
-        String newName = plan.getName();
-        String newDescription = plan.getDescription();
-        List<UsagePlan.ApiStage> newApiStages = new ArrayList<>(plan.getApiStages());
-        if (patchOperations != null) {
-            for (Map<String, String> op : patchOperations) {
-                if (op == null) {
-                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
-                }
-                String opType = op.get("op");
-                String path = op.get("path");
-                String value = op.get("value");
-                if (path == null || value == null) {
-                    throw new AwsException("BadRequestException", "Missing path or value", 400);
-                }
-                if ("/apiStages".equals(path)) {
-                    // AWS models stage membership as add/remove of an "apiId:stage" pair.
-                    if (!"add".equals(opType) && !"remove".equals(opType)) {
-                        throw new AwsException("BadRequestException", "Invalid operation", 400);
+        synchronized (usagePlanLock) {
+            UsagePlan plan = getUsagePlan(region, usagePlanId);
+            // The store hands back live objects, so every op is validated against pending values first and
+            // the plan only changes once the whole patch is known to be good.
+            String newName = plan.getName();
+            String newDescription = plan.getDescription();
+            UsagePlanLimits.Patch limits = new UsagePlanLimits.Patch(plan);
+            if (patchOperations != null) {
+                for (Map<String, String> op : patchOperations) {
+                    if (op == null) {
+                        throw new AwsException("BadRequestException", "Invalid patch operation", 400);
                     }
-                    String[] parts = value.split(":", 2);
-                    if (parts.length != 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
+                    String opType = op.get("op");
+                    String path = op.get("path");
+                    String value = op.get("value");
+                    UsagePlanLimits.requirePatchOp(opType);
+                    if (path == null) {
+                        throw new AwsException("BadRequestException", "Missing path or value", 400);
+                    }
+                    // A remove of /throttle, /quota or a stage throttle carries no value, so only the name
+                    // and description ops below insist on one.
+                    if (limits.apply(opType, path, value)) {
+                        continue;
+                    }
+                    // API Gateway allows /productCode on add, remove and replace; Floci has no product codes to set.
+                    if ("/productCode".equals(path)) {
+                        throw new AwsException("BadRequestException", "Usage plan product codes are not supported", 400);
+                    }
+                    // API Gateway takes /name and /description through replace only.
+                    if (!"replace".equals(opType) || (!"/name".equals(path) && !"/description".equals(path))) {
+                        throw UsagePlanLimits.invalidPatchPath(opType, path);
+                    }
+                    if (value == null) {
                         throw new AwsException("BadRequestException",
-                                "apiStages value must be in the form apiId:stage", 400);
+                                "/name".equals(path) ? "Usage Plan name must be specified" : "Missing path or value", 400);
                     }
-                    UsagePlan.ApiStage stage = new UsagePlan.ApiStage(parts[0], parts[1]);
-                    if ("add".equals(opType)) {
-                        if (!newApiStages.contains(stage)) {
-                            newApiStages.add(stage);
-                        }
+                    if ("/name".equals(path)) {
+                        newName = value;
                     } else {
-                        newApiStages.remove(stage);
+                        newDescription = value;
                     }
-                    continue;
-                }
-                if (!"add".equals(opType) && !"replace".equals(opType)) {
-                    throw new AwsException("BadRequestException", "Invalid operation", 400);
-                }
-                if ("/name".equals(path)) {
-                    newName = value;
-                } else if ("/description".equals(path)) {
-                    newDescription = value;
-                } else {
-                    throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
                 }
             }
+            UsagePlan.Limits newLimits = limits.result();
+            plan.setName(newName);
+            plan.setDescription(newDescription);
+            plan.applyLimits(newLimits);
+            usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
+            return plan;
         }
-        plan.setName(newName);
-        plan.setDescription(newDescription);
-        plan.getApiStages().clear();
-        plan.getApiStages().addAll(newApiStages);
-        usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
-        return plan;
     }
 
     public List<UsagePlan> getUsagePlans(String region) {
@@ -1594,8 +1614,10 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     public void deleteUsagePlan(String region, String usagePlanId) {
-        getUsagePlan(region, usagePlanId);
-        usagePlanStore.delete(usagePlanKey(region, usagePlanId));
+        synchronized (usagePlanLock) {
+            getUsagePlan(region, usagePlanId);
+            usagePlanStore.delete(usagePlanKey(region, usagePlanId));
+        }
     }
 
     /**
@@ -1611,6 +1633,37 @@ public class ApiGatewayService implements ResourceProvider {
         plan.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
         usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
         return plan;
+    }
+
+    /**
+     * Replaces a usage plan's stages, throttle and quota wholesale. CloudFormation drives them to the
+     * template's desired state on update, as it does tags, so a stage the template dropped has to go.
+     */
+    public UsagePlan replaceUsagePlanLimits(String region, String usagePlanId, UsagePlan.Limits limits) {
+        synchronized (usagePlanLock) {
+            UsagePlan plan = getUsagePlan(region, usagePlanId);
+            plan.applyLimits(limits);
+            usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
+            return plan;
+        }
+    }
+
+    /**
+     * Sets a usage plan's name, description, stages, throttle, quota and tags to exactly the given
+     * values, a null description included, which no patch can set. It is for putting back the plan
+     * as it was before a failed CloudFormation update changed it.
+     */
+    public UsagePlan restoreUsagePlan(String region, String usagePlanId, String name, String description,
+                                      UsagePlan.Limits limits, Map<String, String> tags) {
+        synchronized (usagePlanLock) {
+            UsagePlan plan = getUsagePlan(region, usagePlanId);
+            plan.setName(name);
+            plan.setDescription(description);
+            plan.applyLimits(limits);
+            plan.setTags(new HashMap<>(tags));
+            usagePlanStore.put(usagePlanKey(region, usagePlanId), plan);
+            return plan;
+        }
     }
 
     public void tagUsagePlan(String region, String usagePlanId, Map<String, String> tags) {
@@ -1659,10 +1712,9 @@ public class ApiGatewayService implements ResourceProvider {
      * {@code [used, remaining]} pair per day of the inclusive range. {@code position} is absent
      * when there is no further page, which is what stops a caller's pagination loop.
      *
-     * <p><strong>Both numbers are zero.</strong> Nothing counts requests per API key, and a
-     * {@link UsagePlan} carries no quota, so there is no limit to subtract from. Storing a quota on
-     * the usage plan and counting on the execute path are the two pieces still missing; this method
-     * is where they would surface.
+     * <p><strong>Both numbers are zero.</strong> Nothing counts requests per API key, so there is no
+     * use to report or to subtract from a plan's quota. Counting on the execute path is the piece
+     * still missing; this method is where it would surface.
      */
     public UsageReport getUsage(String region, String usagePlanId, String startDate, String endDate,
                                 String keyId, Integer limit, String position) {
@@ -1708,7 +1760,7 @@ public class ApiGatewayService implements ResourceProvider {
         for (UsagePlanKey key : page) {
             List<long[]> perDay = new ArrayList<>();
             for (int day = 0; day < days; day++) {
-                // [used, remaining]: nothing is metered, and no quota is stored to subtract from.
+                // [used, remaining]: nothing is metered, so there is no use to report or subtract from a quota.
                 perDay.add(new long[] {0L, 0L});
             }
             items.put(key.getId(), perDay);

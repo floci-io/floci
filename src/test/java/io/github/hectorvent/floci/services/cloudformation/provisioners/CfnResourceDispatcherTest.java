@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
 
@@ -13,12 +15,15 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -163,6 +168,22 @@ class CfnResourceDispatcherTest {
     }
 
     @Test
+    void aProvisionerThatMigratesAStubOfADisabledServiceDropsTheDisabledMarker() {
+        when(registry.forType(TYPE)).thenReturn(Optional.of(provisioner((resource, ctx) -> {
+            resource.setPhysicalId("dash-real");
+            resource.getAttributes().put("Arn", "arn:aws:ecr:us-east-1:000000000000:repository/dash-real");
+        })));
+
+        StackResource resource = dispatcher.provision("Dash", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack", "Dash-1a2b3c4d",
+                Map.of("Arn", "arn:aws:stub:::Dash", CloudFormationTemplateEngine.SERVICE_DISABLED_ATTR, "true"));
+
+        assertFalse(resource.getAttributes().containsKey(CloudFormationTemplateEngine.SERVICE_DISABLED_ATTR),
+                "the real resource must not keep refusing its own attributes");
+        assertEquals("dash-real", resource.getPhysicalId());
+    }
+
+    @Test
     void aProvisionerThatMigratesAStubAndWritesOtherAttributesStillDropsTheStubArn() {
         when(registry.forType(TYPE)).thenReturn(Optional.of(provisioner((resource, ctx) ->
                 resource.getAttributes().put("FlociThingNameMode", "generated"))));
@@ -224,6 +245,167 @@ class CfnResourceDispatcherTest {
         verify(owner).delete(any(StackResource.class), anyString());
         verify(owner).delete(org.mockito.ArgumentMatchers.argThat((StackResource r) ->
                 "thing-1".equals(r.getPhysicalId()) && "r".equals(r.getAttributes().get("Role"))), any());
+    }
+
+    /**
+     * A provisioner whose service is turned off serves none of its types: the dispatcher stubs
+     * the resource instead of provisioning it, so a disabled service is never reached.
+     */
+    @Test
+    void aProvisionerWhoseServiceIsDisabledIsStubbedNotProvisioned() {
+        DisabledServiceProvisioner disabled = new DisabledServiceProvisioner(TYPE);
+        CfnResourceDispatcher routed = new CfnResourceDispatcher(mapper, new CloudFormationResourceRegistry(
+                List.of(disabled)), dynamicReferences, null);
+
+        StackResource resource = routed.provision("Thing", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack");
+
+        assertFalse(disabled.provisioned, "a disabled service must not be provisioned");
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        assertEquals("arn:aws:stub:::Thing", resource.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void deletingAResourceOfADisabledServiceReachesNoProvisioner() {
+        DisabledServiceProvisioner disabled = new DisabledServiceProvisioner(TYPE);
+        CfnResourceDispatcher routed = new CfnResourceDispatcher(mapper, new CloudFormationResourceRegistry(
+                List.of(disabled)), dynamicReferences, null);
+
+        routed.delete(TYPE, "thing-1", "us-east-1");
+
+        assertFalse(disabled.deleted, "a disabled service must not be deleted from");
+    }
+
+    @Test
+    void aStubbedResourceOfADisabledServiceIsMarkedSoItsMissingAttributesAreRefused() {
+        CfnResourceDispatcher routed = disabledDispatcher(new DisabledServiceProvisioner(TYPE));
+
+        StackResource resource = routed.provision("Thing", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack");
+
+        assertEquals("true", resource.getAttributes().get(CloudFormationTemplateEngine.SERVICE_DISABLED_ATTR));
+    }
+
+    @Test
+    void updatingARealResourceWhileItsServiceIsDisabledFailsAndKeepsItsPhysicalId() {
+        DisabledServiceProvisioner disabled = new DisabledServiceProvisioner(TYPE);
+        CfnResourceDispatcher routed = disabledDispatcher(disabled);
+
+        StackResource resource = routed.provision("Thing", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack", "real-repo",
+                Map.of("Arn", "arn:aws:ecr:us-east-1:000000000000:repository/real-repo"));
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertEquals("real-repo", resource.getPhysicalId());
+        assertFalse(resource.getAttributes().containsKey(CloudFormationTemplateEngine.SERVICE_DISABLED_ATTR));
+        assertFalse(disabled.provisioned);
+    }
+
+    @Test
+    void updatingAStubWhileItsServiceIsDisabledStaysStubbed() {
+        CfnResourceDispatcher routed = disabledDispatcher(new DisabledServiceProvisioner(TYPE));
+
+        StackResource resource = routed.provision("Thing", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack", "Thing-1a2b3c4d",
+                Map.of("Arn", "arn:aws:stub:::Thing", CloudFormationTemplateEngine.SERVICE_DISABLED_ATTR, "true"));
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        assertEquals("arn:aws:stub:::Thing", resource.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void deletingARealResourceWhileItsServiceIsDisabledFailsInsteadOfDroppingIt() {
+        DisabledServiceProvisioner disabled = new DisabledServiceProvisioner(TYPE);
+        CfnResourceDispatcher routed = disabledDispatcher(disabled);
+        StackResource real = new StackResource();
+        real.setResourceType(TYPE);
+        real.setPhysicalId("real-repo");
+        real.setAttributes(Map.of("Arn", "arn:aws:ecr:us-east-1:000000000000:repository/real-repo"));
+
+        AwsException failure = assertThrows(AwsException.class, () -> routed.delete(real, "us-east-1"));
+
+        assertEquals(400, failure.getHttpStatus());
+        assertFalse(disabled.deleted);
+    }
+
+    @Test
+    void deletingAStubWhileItsServiceIsDisabledSucceeds() {
+        CfnResourceDispatcher routed = disabledDispatcher(new DisabledServiceProvisioner(TYPE));
+        StackResource stub = new StackResource();
+        stub.setResourceType(TYPE);
+        stub.setPhysicalId("Thing-1a2b3c4d");
+        stub.setAttributes(Map.of("Arn", "arn:aws:stub:::Thing",
+                CloudFormationTemplateEngine.SERVICE_DISABLED_ATTR, "true"));
+
+        assertDoesNotThrow(() -> routed.delete(stub, "us-east-1"));
+    }
+
+    @Test
+    void aStubbedResourceOfADisabledServiceSaysTheServiceIsDisabledAndNamesItsFlag() {
+        CfnResourceDispatcher routed = disabledDispatcher(new DisabledServiceProvisioner(TYPE));
+
+        StackResource resource = routed.provision("Thing", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack");
+
+        assertEquals("Resource type " + TYPE + " is not provisioned because its Floci service is disabled. "
+                + "Set floci.services.thing.enabled=true to provision it. "
+                + "It was stubbed and nothing was created for it.", resource.getStatusReason());
+    }
+
+    @Test
+    void aDisabledServiceFailsWithTheDisabledMessageWhenStubbingIsOff() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().cloudformation().allowStubUnsupportedResourceTypes()).thenReturn(false);
+        CfnResourceDispatcher strict = new CfnResourceDispatcher(mapper, new CloudFormationResourceRegistry(
+                List.of(new DisabledServiceProvisioner(TYPE))), dynamicReferences, config);
+
+        StackResource resource = strict.provision("Thing", TYPE, mapper.createObjectNode(), null,
+                "us-east-1", "000000000000", "my-stack");
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertEquals("Resource type " + TYPE + " is not provisioned because its Floci service is disabled. "
+                + "Set floci.services.thing.enabled=true to provision it.", resource.getStatusReason());
+    }
+
+    private CfnResourceDispatcher disabledDispatcher(DisabledServiceProvisioner disabled) {
+        return new CfnResourceDispatcher(mapper, new CloudFormationResourceRegistry(List.of(disabled)),
+                dynamicReferences, null);
+    }
+
+    /** A provisioner whose service is disabled, recording whether it was ever asked to act. */
+    private static final class DisabledServiceProvisioner implements CfnResourceProvisioner {
+        private final String type;
+        private boolean provisioned;
+        private boolean deleted;
+
+        private DisabledServiceProvisioner(String type) {
+            this.type = type;
+        }
+
+        @Override
+        public Set<String> resourceTypes() {
+            return Set.of(type);
+        }
+
+        @Override
+        public boolean serviceDisabled() {
+            return true;
+        }
+
+        @Override
+        public String serviceEnabledFlag() {
+            return "floci.services.thing.enabled";
+        }
+
+        @Override
+        public void provision(StackResource resource, JsonNode properties, ProvisionContext ctx) {
+            provisioned = true;
+        }
+
+        @Override
+        public void delete(String resourceType, String physicalId, String region) {
+            deleted = true;
+        }
     }
 
     /** A provisioner that serves {@code type} and does nothing, for routing through a real registry. */

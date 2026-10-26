@@ -260,7 +260,8 @@ class SesContactV2IntegrationTest {
         given().contentType("application/json").header("Authorization", SES_AUTH).body("[]")
         .when().post(CONTACTS + "/list")
         .then().statusCode(400)
-                .body("__type", equalTo("BadRequestException"));
+                .body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("Start of list found where not expected"));
     }
 
     // Type coercion, verified against real AWS: a JSON string coerces to the Boolean UnsubscribeAll

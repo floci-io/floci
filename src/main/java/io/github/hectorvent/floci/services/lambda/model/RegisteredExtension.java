@@ -59,6 +59,10 @@ public class RegisteredExtension {
         return waitingContext != null;
     }
 
+    public boolean hasReceivedFirstNext() {
+        return firstNextReceived;
+    }
+
     /**
      * Records that this extension has issued its first {@code /extension/event/next}, which is
      * what AWS treats as the extension being init-ready (registering alone only obtains an

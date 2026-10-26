@@ -468,15 +468,26 @@ class S3ServiceAnnotationsTest {
     }
 
     @Test
-    void deleteMarkerOnPreVersioningObjectRemovesItsAnnotations() throws Exception {
+    void deleteMarkerOnPreVersioningObjectPreservesItsAnnotationsUntilPermanentDeletion() throws Exception {
         putAnnotation("pre-versioning", "payload");
         s3Service.putBucketVersioning(BUCKET, "Enabled");
-        s3Service.deleteObject(BUCKET, "docs/readme.txt");
+        S3Object marker = s3Service.deleteObject(BUCKET, "docs/readme.txt");
 
-        // The annotations are gone, including the payload files on disk.
+        ObjectAnnotation annotation = s3Service.getObjectAnnotation(
+                BUCKET, "docs/readme.txt", "pre-versioning", "null");
+        assertEquals("payload", new String(
+                s3Service.readObjectAnnotationPayload(annotation), StandardCharsets.UTF_8));
         try (Stream<Path> stream = Files.walk(tempDir.resolve("s3").resolve(".accounts")
                 .resolve("000000000000").resolve(".annotations"))) {
-            List<java.nio.file.Path> files = stream.filter(Files::isRegularFile).toList();
+            List<Path> files = stream.filter(Files::isRegularFile).toList();
+            assertEquals(1, files.size());
+        }
+
+        s3Service.deleteObject(BUCKET, "docs/readme.txt", marker.getVersionId());
+        s3Service.deleteObject(BUCKET, "docs/readme.txt", "null");
+        try (Stream<Path> stream = Files.walk(tempDir.resolve("s3").resolve(".accounts")
+                .resolve("000000000000").resolve(".annotations"))) {
+            List<Path> files = stream.filter(Files::isRegularFile).toList();
             assertTrue(files.isEmpty(), "annotation payload files should be removed, found: " + files);
         }
     }

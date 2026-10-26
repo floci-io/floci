@@ -138,6 +138,16 @@ public enum SesListPaging {
             true),
 
     /**
+     * ListReputationEntities (probed 2026-10-23): an empty token is refused like an unreadable one,
+     * and a token from another filter has its own message, which the service renders. Three entities
+     * came back whole without a PageSize, so the default is taken to be the bound.
+     */
+    V2_LIST_REPUTATION_ENTITIES(Namespace.REPUTATION_ENTITY, 1000, 1000,
+            size -> badRequest("The page size must be between 1 and 1000"),
+            token -> badRequest("Failed to deserialize token. "),
+            true),
+
+    /**
      * The request has no size member; the model documents "up to 100 receipt rule sets at a time".
      * SES allows 40 rule sets per region, so a second page could not be observed.
      */
@@ -162,6 +172,7 @@ public enum SesListPaging {
         static final String DEDICATED_IP = "dedicated-ip";
         static final String SUPPRESSED_DESTINATION = "suppressed-destination";
         static final String RECEIPT_RULE_SET = "receipt-rule-set";
+        static final String REPUTATION_ENTITY = "reputation-entity";
     }
 
     /** What the tenant lists share, and ListImportJobs borrows: the bound and Smithy's messages. */
@@ -271,6 +282,16 @@ public enum SesListPaging {
             throw invalidToken.apply(nextToken);
         }
         return limit;
+    }
+
+    /**
+     * True when {@code token} is one this list issued in {@code region}, whatever it was bound to, so
+     * a list whose tokens SES refuses with a message of their own once the filter changes can tell
+     * that case from an unreadable token.
+     */
+    boolean issuedInRegion(String token, String region) {
+        String issuer = namespace + "@" + region;
+        return Pagination.tokenStartsWith(token, issuer + ":") || Pagination.tokenStartsWith(token, issuer + "#");
     }
 
     int pageSize(Integer requested) {

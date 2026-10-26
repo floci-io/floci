@@ -224,7 +224,7 @@ class CognitoUserPoolDomainIntegrationTest {
 
         acm("DeleteCertificate", CERTIFICATE_ARN)
                 .then()
-                .statusCode(409)
+                .statusCode(400)
                 .body("__type", equalTo("ResourceInUseException"));
     }
 

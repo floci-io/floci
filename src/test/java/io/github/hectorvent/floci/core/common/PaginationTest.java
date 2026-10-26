@@ -11,9 +11,11 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PaginationTest {
 
@@ -91,6 +93,25 @@ class PaginationTest {
                 Function.identity(), 1, "!!!", 3, 3, "InvalidParameterValue", "Marker"));
         assertEquals("InvalidParameterValue", e.getErrorCode());
         assertEquals("Invalid Marker.", e.getMessage());
+    }
+
+    @Test
+    void tokenStartsWith_matchesTheDecodedCursorPrefix() {
+        String token = page(1, null, "ns").nextToken();
+
+        assertTrue(Pagination.tokenStartsWith(token, "ns:"));
+        assertFalse(Pagination.tokenStartsWith(token, "other:"));
+    }
+
+    @Test
+    void tokenStartsWith_isFalseForATokenThatDoesNotDecode() {
+        assertFalse(Pagination.tokenStartsWith("!!!", ""));
+    }
+
+    @Test
+    void tokenStartsWith_isFalseForAnAbsentToken() {
+        assertFalse(Pagination.tokenStartsWith(null, ""));
+        assertFalse(Pagination.tokenStartsWith("", ""));
     }
 
     private static PaginatedResult<String> page(int limit, String token, String namespace) {

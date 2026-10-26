@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eks;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -269,13 +270,8 @@ public final class EksVpcRouteProgramming {
         if (isSet(cluster.getAccountId())) {
             return cluster.getAccountId();
         }
-        if (isSet(cluster.getArn())) {
-            String[] parts = cluster.getArn().split(":");
-            if (parts.length > 4 && isSet(parts[4])) {
-                return parts[4];
-            }
-        }
-        return null;
+        String accountId = AwsArnUtils.accountOrDefault(cluster.getArn(), null);
+        return isSet(accountId) ? accountId : null;
     }
 
 

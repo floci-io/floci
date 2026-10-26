@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.Alarm;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.PredefinedMetricSpecification;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.ScalableTarget;
@@ -86,15 +88,20 @@ public class ApplicationAutoScalingJsonHandler {
     }
 
     private Response handleDescribeScalableTargets(JsonNode request, String region) {
-        List<ScalableTarget> found = service.describeScalableTargets(
+        PaginatedResult<ScalableTarget> result = service.describeScalableTargets(
                 text(request, "ServiceNamespace"),
                 stringList(request.path("ResourceIds")),
                 text(request, "ScalableDimension"),
+                optionalMaxResults(request),
+                text(request, "NextToken"),
                 region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("ScalableTargets");
-        found.forEach(t -> array.add(scalableTargetJson(t)));
+        result.items().forEach(t -> array.add(scalableTargetJson(t)));
+        if (result.nextToken() != null) {
+            response.put("NextToken", result.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -128,16 +135,21 @@ public class ApplicationAutoScalingJsonHandler {
     }
 
     private Response handleDescribeScalingPolicies(JsonNode request, String region) {
-        List<ScalingPolicy> found = service.describeScalingPolicies(
+        PaginatedResult<ScalingPolicy> result = service.describeScalingPolicies(
                 text(request, "ServiceNamespace"),
                 text(request, "ResourceId"),
                 text(request, "ScalableDimension"),
                 stringList(request.path("PolicyNames")),
+                optionalMaxResults(request),
+                text(request, "NextToken"),
                 region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("ScalingPolicies");
-        found.forEach(p -> array.add(scalingPolicyJson(p)));
+        result.items().forEach(p -> array.add(scalingPolicyJson(p)));
+        if (result.nextToken() != null) {
+            response.put("NextToken", result.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -368,5 +380,16 @@ public class ApplicationAutoScalingJsonHandler {
     private static Integer integer(JsonNode node, String field) {
         JsonNode value = node.path(field);
         return value.isMissingNode() || value.isNull() ? null : value.asInt();
+    }
+
+    private static Integer optionalMaxResults(JsonNode request) {
+        JsonNode value = request.get("MaxResults");
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new AwsException("ValidationException", "MaxResults must be an integer.", 400);
+        }
+        return value.intValue();
     }
 }

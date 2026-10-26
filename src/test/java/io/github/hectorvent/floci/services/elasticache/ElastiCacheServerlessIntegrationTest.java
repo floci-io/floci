@@ -205,7 +205,7 @@ class ElastiCacheServerlessIntegrationTest {
     }
 
     private static Socket socket(ServerlessCache cache) throws IOException {
-        Socket socket = new Socket(cache.endpoint().address(), cache.endpoint().port());
+        Socket socket = ElastiCacheTestConnections.openSocket(cache.endpoint().address(), cache.endpoint().port(), !"memcached".equals(cache.engine()));
         socket.setSoTimeout(10_000);
         return socket;
     }

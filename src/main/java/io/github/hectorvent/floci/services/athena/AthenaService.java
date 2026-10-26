@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CsvParser;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.athena.model.CreateWorkGroupConfigurationRequest;
@@ -361,6 +363,20 @@ public class AthenaService {
                 .map(this::toWorkGroupSummary)
                 .toList());
         return workGroups;
+    }
+
+    public PaginatedResult<Map<String, Object>> listWorkGroupsPage(String region, int maxResults, String nextToken) {
+        if (maxResults < 1 || maxResults > 50) {
+            throw new AwsException("InvalidRequestException", "MaxResults must be between 1 and 50", 400);
+        }
+        if (nextToken != null && nextToken.isEmpty()) {
+            throw new AwsException("InvalidRequestException", "Invalid NextToken", 400);
+        }
+        return Pagination.paginate(listWorkGroups(region), workGroup -> {
+            String name = (String) workGroup.get("Name");
+            return DEFAULT_WORKGROUP.equals(name) ? "0" : "1" + name;
+        }, maxResults, nextToken, "ListWorkGroups:" + region,
+                token -> new AwsException("InvalidRequestException", "Invalid NextToken", 400));
     }
 
     /**

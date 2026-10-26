@@ -38,7 +38,7 @@ class SesTenantListFilterServiceTest {
             service.createTenant(name, List.of(), ACCOUNT, REGION);
         }
         tenantStore.put("tenant::" + REGION + "::other-FILTER-gamma", new Tenant("other-FILTER-gamma",
-                "tn-gamma", "arn", Instant.now(), List.of(), "DISABLED", null));
+                "tn-gamma", "arn", Instant.now(), List.of(), "DISABLED", null, null, null));
     }
 
     @Test

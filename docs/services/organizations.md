@@ -33,6 +33,16 @@ call `LeaveOrganization`. An account in no organization gets
 
 ## Behaviour notes
 
+- OU responses include `Path`, and account responses include a single-entry `Paths` array.
+  Both use the current organization/root/OU ancestry, include the resource ID and trailing slash,
+  and reflect account moves. Delegated-administrator responses retain their separate shape.
+  List rendering reuses request-local parent IDs rather than re-reading each selected resource.
+  Concurrent removals do not invalidate an already selected page; a stale row with an ancestor
+  that is no longer available is omitted only after confirming that the row was removed or moved.
+- Management policy types include `INSPECTOR_POLICY`, `UPGRADE_ROLLOUT_POLICY`, `BEDROCK_POLICY`,
+  `S3_POLICY`, `NETWORK_SECURITY_DIRECTOR_POLICY`, and `GUARDDUTY_POLICY`. They use the existing
+  enable, create, attach, list, effective-policy, detach, delete, and disable flows. Policy content
+  is not validated against a per-type schema, and these policies do not configure the backing AWS services.
 - The AWS-managed `p-FullAWSAccess` SCP is created with the organization and attached to the
   root, every new OU and every new account. Detaching the last service control policy from a
   target is rejected with `ConstraintViolationException`, as on AWS.
@@ -49,6 +59,15 @@ call `LeaveOrganization`. An account in no organization gets
 - `CreateAccount` returns a `CreateAccountStatus` you can poll with
   `DescribeCreateAccountStatus`, matching the asynchronous AWS contract. A duplicate email
   produces `State=FAILED` with `FailureReason=EMAIL_ALREADY_EXISTS` rather than an error.
+- As on AWS, `CreateAccount` preconfigures the account access role in the new member account:
+  the optional `RoleName` parameter names it, defaulting to `OrganizationAccountAccessRole`.
+  The role exists in the new account, its trust policy allows the management account
+  (`arn:<partition>:iam::<management-account-id>:root` to `sts:AssumeRole`), and it carries the
+  `AdministratorAccess` AWS-managed policy, so the management account can assume it immediately.
+  Accounts that join through `InviteAccountToOrganization` do not get the role, matching AWS.
+  A `RoleName` off the published pattern answers `InvalidInputException` with the reference's
+  `Reason` member (`INVALID_PATTERN`, or `INVALID_ROLE_NAME` for the reserved
+  `AWSServiceRoleFor` prefix), so SDK callers can read the cause.
 - `DescribeEffectivePolicy` merges every policy of the requested type down the
   root → OU → target chain, with the closest ancestor winning on conflicting keys. As on AWS,
   the access-control types (`SERVICE_CONTROL_POLICY`, `RESOURCE_CONTROL_POLICY`) are rejected.

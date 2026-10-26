@@ -46,6 +46,7 @@ import static org.mockito.Mockito.when;
  * <p>The failing branch pauses in a Wait that the sleeper holds until every other branch is
  * parked on its own wait, so the cut always lands while the others are mid-state.
  */
+@Timeout(20)
 class AslExecutorParallelCutTest {
 
     private static final String REGION = "us-east-2";
@@ -105,6 +106,7 @@ class AslExecutorParallelCutTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private StepFunctionsService sfnService;
     private List<HistoryEvent> history;
+    private Runnable nestedWaitStarted = () -> { };
 
     @BeforeEach
     void setUp() {
@@ -376,20 +378,23 @@ class AslExecutorParallelCutTest {
 
     /**
      * The failing branch's one-second Pause is held until {@code waitingBranches} other branch
-     * threads have started a sleep of their own (a {@code .sync} poll, or a longer Wait); every
+     * threads have entered a nested status wait or a longer Wait; every
      * other sleep is real, so the cut interrupts it.
      */
-    private static AslExecutor.Sleeper sleeper(int waitingBranches) {
+    private AslExecutor.Sleeper sleeper(int waitingBranches) {
         CountDownLatch othersWaiting = new CountDownLatch(waitingBranches);
         Set<Thread> seen = ConcurrentHashMap.newKeySet();
-        return nanos -> {
-            if (nanos == PAUSE_NANOS) {
-                othersWaiting.await();
-                return;
-            }
+        nestedWaitStarted = () -> {
             if (seen.add(Thread.currentThread())) {
                 othersWaiting.countDown();
             }
+        };
+        return nanos -> {
+            if (nanos == PAUSE_NANOS) {
+                assertTrue(othersWaiting.await(5, TimeUnit.SECONDS), "other branches must enter their waits");
+                return;
+            }
+            nestedWaitStarted.run();
             TimeUnit.NANOSECONDS.sleep(nanos);
         };
     }
@@ -403,6 +408,10 @@ class AslExecutorParallelCutTest {
                 .sfnService(instance)
                 .customResourceLiveness(null)
                 .sleeper(sleeper)
+                .nestedWaiter((subscription, observed, nanos) -> {
+                    nestedWaitStarted.run();
+                    subscription.awaitChange(observed, nanos);
+                })
                 .maxWaitSeconds(30)
                 .build();
     }

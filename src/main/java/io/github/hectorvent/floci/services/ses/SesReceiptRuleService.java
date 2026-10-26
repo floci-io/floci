@@ -751,34 +751,29 @@ public class SesReceiptRuleService {
      */
     private static void validateFilterShape(ReceiptFilter filter) {
         if (filter == null) {
-            throw SmithyValidationErrors.validationError(
-                    notNullViolation("filter"));
+            throw SmithyValidationErrors.validationError(SmithyValidationErrors.notNullWithoutValue("filter"));
         }
         List<String> violations = new ArrayList<>();
         if (filter.getName() == null) {
-            violations.add(notNullViolation("filter.name"));
+            violations.add(SmithyValidationErrors.notNullWithoutValue("filter.name"));
         }
         boolean hasIpFilter = filter.getPolicy() != null || filter.getCidr() != null;
         if (!hasIpFilter) {
-            violations.add(notNullViolation("filter.ipFilter"));
+            violations.add(SmithyValidationErrors.notNullWithoutValue("filter.ipFilter"));
         } else {
             if (filter.getPolicy() == null) {
-                violations.add(notNullViolation("filter.ipFilter.policy"));
+                violations.add(SmithyValidationErrors.notNullWithoutValue("filter.ipFilter.policy"));
             } else if (!"Allow".equals(filter.getPolicy()) && !"Block".equals(filter.getPolicy())) {
                 violations.add("Value at 'filter.ipFilter.policy' failed to satisfy constraint: "
                         + "Member must satisfy enum value set: [Allow, Block]");
             }
             if (filter.getCidr() == null) {
-                violations.add(notNullViolation("filter.ipFilter.cidr"));
+                violations.add(SmithyValidationErrors.notNullWithoutValue("filter.ipFilter.cidr"));
             }
         }
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationError(violations);
         }
-    }
-
-    private static String notNullViolation(String path) {
-        return "Value at '" + path + "' failed to satisfy constraint: Member must not be null";
     }
 
     /**

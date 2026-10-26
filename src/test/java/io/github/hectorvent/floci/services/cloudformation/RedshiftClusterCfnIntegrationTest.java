@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import org.awaitility.Awaitility;
@@ -12,7 +13,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.redshift.RedshiftClient;
+import software.amazon.awssdk.services.redshift.model.Endpoint;
 
+import java.net.URI;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -47,6 +54,9 @@ class RedshiftClusterCfnIntegrationTest {
 
     private final List<String> stacksToCleanup = new ArrayList<>();
 
+    @TestHTTPResource
+    URI endpoint;
+
     @BeforeAll
     static void configure() {
         Assumptions.assumeTrue(dockerAvailable(), "Docker is required for this integration test");
@@ -74,6 +84,85 @@ class RedshiftClusterCfnIntegrationTest {
             }
         }
         stacksToCleanup.clear();
+    }
+
+    @Test
+    void snapshotStackRestoresRowsAfterSourceClusterWasDeleted() throws Exception {
+        String stackName = "rs-restore-it-" + System.currentTimeMillis();
+        String source = stackName + "-source";
+        String target = stackName + "-target";
+        String snapshot = stackName + "-backup";
+        stacksToCleanup.add(stackName);
+        try (RedshiftClient client = RedshiftClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build()) {
+            client.createCluster(request -> request.clusterIdentifier(source).nodeType("ra3.large")
+                    .masterUsername("admin").masterUserPassword("Snapshot123"));
+            try {
+                Endpoint sourceEndpoint = client.describeClusters(
+                        request -> request.clusterIdentifier(source)).clusters().getFirst().endpoint();
+                String sourceHost = "host.docker.internal".equalsIgnoreCase(sourceEndpoint.address())
+                        ? "127.0.0.1" : sourceEndpoint.address();
+                try (Connection connection = waitForConnection(sourceHost, sourceEndpoint.port(), "admin", "Snapshot123");
+                     Statement statement = connection.createStatement()) {
+                    statement.execute("CREATE TABLE snapshot_rows (id integer)");
+                    statement.execute("INSERT INTO snapshot_rows VALUES (42)");
+                }
+                client.createClusterSnapshot(request -> request.clusterIdentifier(source).snapshotIdentifier(snapshot));
+                client.deleteCluster(request -> request.clusterIdentifier(source).skipFinalClusterSnapshot(true));
+                String template = """
+                        {"Resources":{"Warehouse":{"Type":"AWS::Redshift::Cluster","Properties":{
+                          "ClusterIdentifier":"%s","NodeType":"ra3.large","MasterUsername":"admin",
+                          "DBName":"dev","ClusterType":"single-node","SnapshotIdentifier":"%s"}}},
+                         "Outputs":{
+                           "Ref":{"Value":{"Ref":"Warehouse"}},
+                           "Addr":{"Value":{"Fn::GetAtt":["Warehouse","Endpoint.Address"]}},
+                           "Port":{"Value":{"Fn::GetAtt":["Warehouse","Endpoint.Port"]}},
+                           "Ns":{"Value":{"Fn::GetAtt":["Warehouse","ClusterNamespaceArn"]}}}}
+                        """.formatted(target, snapshot);
+                cloudFormation(stackName, "CreateStack", template);
+                String stacks = describeStacks(stackName, "CREATE_COMPLETE");
+                assertEquals(target, outputValue(stacks, "Ref"));
+                assertTrue(outputValue(stacks, "Ns").contains(":namespace:"));
+                String address = outputValue(stacks, "Addr");
+                String host = "host.docker.internal".equalsIgnoreCase(address) ? "127.0.0.1" : address;
+                try (Connection connection = waitForConnection(host, Integer.parseInt(outputValue(stacks, "Port")),
+                        "admin", "Snapshot123");
+                     Statement statement = connection.createStatement();
+                     ResultSet rows = statement.executeQuery("SELECT id FROM snapshot_rows")) {
+                    assertTrue(rows.next());
+                    assertEquals(42, rows.getInt(1));
+                    assertFalse(rows.next());
+                }
+                try (Connection connection = waitForConnection(host, Integer.parseInt(outputValue(stacks, "Port")),
+                        "admin", "Snapshot123");
+                     Statement statement = connection.createStatement()) {
+                    statement.execute("INSERT INTO snapshot_rows VALUES (99)");
+                }
+                cloudFormation(stackName, "UpdateStack", template.replace("\"NodeType\":\"ra3.large\"",
+                        "\"NodeType\":\"ra3.xlplus\""));
+                String updated = describeStacks(stackName, "UPDATE_COMPLETE");
+                assertEquals(outputValue(stacks, "Addr"), outputValue(updated, "Addr"));
+                assertEquals(outputValue(stacks, "Port"), outputValue(updated, "Port"));
+                try (Connection connection = waitForConnection(host, Integer.parseInt(outputValue(updated, "Port")),
+                        "admin", "Snapshot123");
+                     Statement statement = connection.createStatement();
+                     ResultSet rows = statement.executeQuery("SELECT id FROM snapshot_rows ORDER BY id")) {
+                    assertTrue(rows.next());
+                    assertEquals(42, rows.getInt(1));
+                    assertTrue(rows.next());
+                    assertEquals(99, rows.getInt(1));
+                    assertFalse(rows.next());
+                }
+            } finally {
+                cloudFormation(stackName, "DeleteStack", null);
+                CfnStackWaits.awaitStackDeleted(stackName);
+                stacksToCleanup.remove(stackName);
+                client.deleteClusterSnapshot(request -> request.snapshotIdentifier(snapshot));
+                if (client.describeClusters().clusters().stream().anyMatch(cluster -> cluster.clusterIdentifier().equals(source))) {
+                    client.deleteCluster(request -> request.clusterIdentifier(source).skipFinalClusterSnapshot(true));
+                }
+            }
+        }
     }
 
     @Test

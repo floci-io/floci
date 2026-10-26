@@ -220,9 +220,8 @@ public class CognitoIdentityJsonHandler {
     private boolean requiredBool(JsonNode node, String field) {
         Boolean value = bool(node, field);
         if (value == null) {
-            throw SmithyValidationErrors.validationException("Value null at '"
-                    + Character.toLowerCase(field.charAt(0)) + field.substring(1)
-                    + "' failed to satisfy constraint: Member must not be null");
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notNull(Character.toLowerCase(field.charAt(0)) + field.substring(1)));
         }
         return value;
     }

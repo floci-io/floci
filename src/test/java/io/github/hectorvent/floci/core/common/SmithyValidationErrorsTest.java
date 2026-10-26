@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SmithyValidationErrorsTest {
@@ -49,4 +50,39 @@ class SmithyValidationErrorsTest {
     void noViolations_isAProgrammingError() {
         assertThrows(IllegalArgumentException.class, () -> SmithyValidationErrors.message(List.of()));
     }
+
+    @Test
+    void notNull_hasTwoForms() {
+        assertEquals("Value null at 'a.b' failed to satisfy constraint: Member must not be null",
+                SmithyValidationErrors.notNull("a.b"));
+        assertEquals("Value at 'a.b' failed to satisfy constraint: Member must not be null",
+                SmithyValidationErrors.notNullWithoutValue("a.b"));
+    }
+
+    @Test
+    void lengthBoundsPreserveValuesAndIncludeEndpoints() {
+        assertEquals("Value '' at 'name' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to 1",
+                SmithyValidationErrors.lengthOutOfRange("name", "", 1, 3));
+        assertEquals("Value 'abcd' at 'name' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 3",
+                SmithyValidationErrors.lengthOutOfRange("name", "abcd", 1, 3));
+        assertNull(SmithyValidationErrors.lengthOutOfRange("name", "a", 1, 3));
+        assertNull(SmithyValidationErrors.lengthOutOfRange("name", "abc", 1, 3));
+        assertNull(SmithyValidationErrors.lengthOutOfRange("name", " ", 1, 3));
+        assertEquals("Value ' ' at 'name' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to 1",
+                SmithyValidationErrors.lengthTooShort("name", " ", 1));
+    }
+    @Test
+    void lengthBoundsCountSupplementaryCharactersOnce() {
+        String value = "\uD83D\uDE00";
+        assertNull(SmithyValidationErrors.lengthOutOfRange("name", value, 1, 1));
+        assertEquals(SmithyValidationErrors.lengthTooShort("name", value, 2),
+                SmithyValidationErrors.lengthOutOfRange("name", value, 2, 3));
+        assertEquals("Value '" + value.repeat(2) + "' at 'name' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 1",
+                SmithyValidationErrors.lengthOutOfRange("name", value.repeat(2), 0, 1));
+    }
+
 }

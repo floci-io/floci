@@ -18,6 +18,9 @@ import io.vertx.mutiny.core.Vertx;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -27,8 +30,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -254,6 +260,8 @@ class AslExecutorLambdaInvokeResultTest {
 
         assertEquals("SUCCEEDED", execution.getStatus());
         assertEquals("V1", objectMapper.readTree(execution.getOutput()).path("marker").asText());
+        verify(lambdaExecutor).invoke(any(LambdaFunction.class), any(byte[].class),
+                eq(InvocationType.RequestResponse), eq(0), eq("1"));
     }
 
     @Test
@@ -283,6 +291,60 @@ class AslExecutorLambdaInvokeResultTest {
         JsonNode output = objectMapper.readTree(execution.getOutput());
         assertEquals("V2", output.path("Payload").path("marker").asText());
         assertEquals("2", output.path("ExecutedVersion").asText());
+        verify(lambdaExecutor).invoke(any(LambdaFunction.class), any(byte[].class),
+                eq(InvocationType.RequestResponse), eq(0), eq("live"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"echo-lambda", "000000000000:function:echo-lambda",
+            "arn:aws:lambda:us-east-2:000000000000:function:echo-lambda"})
+    void optimizedInvokeUsesAnExplicitAlias(String reference) throws Exception {
+        stubVersion("2", "V2");
+        LambdaAlias alias = new LambdaAlias();
+        alias.setName("live");
+        alias.setFunctionName(FUNCTION_NAME);
+        alias.setFunctionVersion("2");
+        when(aliasStore.get(REGION, FUNCTION_NAME, "live")).thenReturn(Optional.of(alias));
+
+        Execution execution = run(optimizedInvocation(reference, "live"));
+
+        assertEquals("SUCCEEDED", execution.getStatus());
+        JsonNode output = objectMapper.readTree(execution.getOutput());
+        assertEquals("V2", output.path("Payload").path("marker").asText());
+        assertEquals("2", output.path("ExecutedVersion").asText());
+        verify(lambdaExecutor).invoke(any(LambdaFunction.class), any(byte[].class),
+                eq(InvocationType.RequestResponse), eq(0), eq("live"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"echo-lambda", "echo-lambda:2"})
+    void optimizedInvokeUsesAnExplicitVersion(String reference) throws Exception {
+        stubVersion("2", "V2");
+
+        Execution execution = run(optimizedInvocation(reference, "2"));
+
+        assertEquals("SUCCEEDED", execution.getStatus());
+        assertEquals("V2", objectMapper.readTree(execution.getOutput()).path("Payload").path("marker").asText());
+        verify(lambdaExecutor).invoke(any(LambdaFunction.class), any(byte[].class),
+                eq(InvocationType.RequestResponse), eq(0), eq("2"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"echo-lambda:1, 2", "echo-lambda, invalid.alias"})
+    void optimizedInvokeRejectsAnInconsistentOrInvalidQualifier(String reference, String qualifier) {
+        Execution execution = run(optimizedInvocation(reference, qualifier));
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Lambda.InvalidParameterValueException", execution.getError());
+        verifyNoInteractions(lambdaExecutor);
+    }
+
+    private static String optimizedInvocation(String reference, String qualifier) {
+        return """
+                {"StartAt":"Call","States":{"Call":{"Type":"Task",
+                  "Resource":"arn:aws:states:::lambda:invoke",
+                  "Parameters":{"FunctionName":"%s","Qualifier":"%s","Payload":{}},"End":true}}}
+                """.formatted(reference, qualifier);
     }
 
     private void stubVersion(String version, String marker) throws Exception {
@@ -292,6 +354,11 @@ class AslExecutorLambdaInvokeResultTest {
         function.setVersion(version);
         when(functionStore.get(REGION, FUNCTION_NAME, version)).thenReturn(Optional.of(function));
         when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, null,
+                        objectMapper.writeValueAsBytes(objectMapper.createObjectNode().put("marker", marker)),
+                        null, "version-request"));
+        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse),
+                eq(0), anyString()))
                 .thenReturn(new InvokeResult(200, null,
                         objectMapper.writeValueAsBytes(objectMapper.createObjectNode().put("marker", marker)),
                         null, "version-request"));

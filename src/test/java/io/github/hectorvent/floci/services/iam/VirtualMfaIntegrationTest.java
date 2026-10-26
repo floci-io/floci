@@ -14,6 +14,7 @@ import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -722,5 +723,128 @@ class VirtualMfaIntegrationTest {
         .when().post("/").then()
             .statusCode(409)
             .body("ErrorResponse.Error.Code", equalTo("LimitExceeded"));
+    }
+
+    /**
+     * {@code GetMFADevice} reads a FIDO security key, which nothing in the IAM API creates, so the
+     * answer is always {@code NoSuchEntity}. That is still the answer AWS's own SDKs model for the
+     * operation, where refusing it outright is not, which is the whole reason it is dispatched.
+     */
+    @Test
+    void aFidoKeySerialIsReportedMissingRatherThanUnsupported() {
+        iam("GetMFADevice")
+            .formParam("SerialNumber", "arn:aws:iam::000000000000:u2f/root/testFidoKey-R1234")
+        .when().post("/").then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"))
+            .body("ErrorResponse.Error.Message", equalTo("The MFA device with serial number "
+                    + "arn:aws:iam::000000000000:u2f/root/testFidoKey-R1234 cannot be found."));
+    }
+
+    /**
+     * A virtual device is refused the same way, deliberately. The reference says of this
+     * operation's serial number that "we only accept FIDO security key ARNs", and the device
+     * created here is an {@code mfa/} one, so answering with it would hand back a device AWS would
+     * not return for the same request.
+     */
+    @Test
+    void aVirtualDeviceIsNotReadableAsAFidoKey() {
+        Device device = createDevice("mfa-fido-read-" + suffix());
+
+        iam("GetMFADevice")
+            .formParam("SerialNumber", device.serialNumber())
+        .when().post("/").then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+
+        // And it is still the user's device, listed as before: the refusal reads nothing out and
+        // changes nothing.
+        String userName = createUser("mfa-fido-read-user-" + suffix());
+        enable(userName, device);
+        iam("ListMFADevices").formParam("UserName", userName)
+        .when().post("/").then()
+            .statusCode(200)
+            .body("ListMFADevicesResponse.ListMFADevicesResult.MFADevices.member.SerialNumber",
+                    equalTo(device.serialNumber()));
+    }
+
+    /**
+     * The declared shapes are read before the device is looked for, as the validation ahead of the
+     * operation does. {@code serialNumberType} is 9 to 256 with a pattern, so a short serial and
+     * one carrying a character outside it are each a counted violation, and a value breaking both
+     * is two.
+     */
+    @Test
+    void aSerialOutsideItsDeclaredShapeIsAValidationError() {
+        iam("GetMFADevice").formParam("SerialNumber", "u2f/root")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at "
+                    + "'serialNumber' failed to satisfy constraint: Member must have length "
+                    + "greater than or equal to 9"));
+
+        iam("GetMFADevice").formParam("SerialNumber", "u2f root key!")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at "
+                    + "'serialNumber' failed to satisfy constraint: Member must satisfy regular "
+                    + "expression pattern: [\\w+=/:,.@-]+"));
+
+        iam("GetMFADevice").formParam("SerialNumber", "u2f key!")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Message", startsWith("2 validation errors detected"));
+    }
+
+    /**
+     * A {@code UserName} the request carries is read as a value even when it is blank, because the
+     * member is present whatever it holds: an empty name breaks both of {@code userNameType}'s
+     * constraints and a whitespace one breaks its pattern. Reading a blank name as no name would
+     * answer for the device under a name AWS would never accept, and would skip the user
+     * resolution the request asked for.
+     */
+    @Test
+    void aBlankUserNameIsReadAsAValueRatherThanAsAbsent() {
+        iam("GetMFADevice")
+            .formParam("SerialNumber", "arn:aws:iam::000000000000:u2f/root/testFidoKey-R1234")
+            .formParam("UserName", "")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("2 validation errors detected: Value at "
+                    + "'userName' failed to satisfy constraint: Member must have length greater "
+                    + "than or equal to 1; Value at 'userName' failed to satisfy constraint: "
+                    + "Member must satisfy regular expression pattern: [\\w+=,.@-]+"));
+
+        iam("GetMFADevice")
+            .formParam("SerialNumber", "arn:aws:iam::000000000000:u2f/root/testFidoKey-R1234")
+            .formParam("UserName", "   ")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at "
+                    + "'userName' failed to satisfy constraint: Member must satisfy regular "
+                    + "expression pattern: [\\w+=,.@-]+"));
+    }
+
+    /**
+     * The user is resolved when the request names one, because an absent user is the same
+     * {@code NoSuchEntity} under a message of its own, and the user this operation reads a device
+     * for is the one half of the request that can exist.
+     */
+    @Test
+    void aUserTheAccountDoesNotHoldIsReportedBeforeTheDevice() {
+        String missing = "mfa-fido-nobody-" + suffix();
+
+        iam("GetMFADevice")
+            .formParam("SerialNumber", "arn:aws:iam::000000000000:u2f/root/testFidoKey-R1234")
+            .formParam("UserName", missing)
+        .when().post("/").then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"))
+            .body("ErrorResponse.Error.Message",
+                    equalTo("The user with name " + missing + " cannot be found."));
     }
 }

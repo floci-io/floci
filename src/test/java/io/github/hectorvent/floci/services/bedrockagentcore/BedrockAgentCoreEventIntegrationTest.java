@@ -1,13 +1,22 @@
 package io.github.hectorvent.floci.services.bedrockagentcore;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.bedrockagentcore.model.MemoryEvent;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -24,6 +33,9 @@ import static org.hamcrest.Matchers.startsWith;
  */
 @QuarkusTest
 class BedrockAgentCoreEventIntegrationTest {
+
+    @Inject
+    StorageFactory storageFactory;
 
     private static String createMemory(String name) {
         return given().contentType(ContentType.JSON)
@@ -245,5 +257,23 @@ class BedrockAgentCoreEventIntegrationTest {
         given().contentType(ContentType.JSON).body("{\"nextToken\":\"not-a-real-token\"}")
                 .when().post("/memories/" + memoryId + "/actor/actor1/sessions/sess1")
                 .then().statusCode(400);
+    }
+
+    @Test
+    void deletingAMemoryDropsOnlyItsStoredEvents() {
+        String gone = createMemory("evtGone");
+        String kept = createMemory("evtKept");
+        createEvent(gone, "actor1", "sess1", 1789300800d, "bye");
+        createEvent(kept, "actor1", "sess1", 1789300800d, "stay");
+
+        given().when().delete("/memories/" + gone + "/delete")
+                .then().statusCode(202);
+
+        // The events are unreachable through the API once the memory is gone, so read the store.
+        List<String> stored = storageFactory.<MemoryEvent>create("bedrockagentcore",
+                        "bedrock-agentcore-events.json", new TypeReference<>() {})
+                .scanAllAccounts().stream().map(MemoryEvent::getMemoryId).toList();
+        assertThat(stored, hasItem(kept));
+        assertThat(stored, not(hasItem(gone)));
     }
 }

@@ -32,6 +32,7 @@ final class LambdaWebErrorPages {
     static final Page IMPORT_CODE_ERROR = new Page(502, "Bad Gateway", "Runtime.ImportCodeError", APPLICATION_ERROR);
     static final Page RUNTIME_EXIT = new Page(502, "Bad Gateway", "Runtime.Exit", APPLICATION_ERROR);
     static final Page RUNTIME_EXIT_ERROR = new Page(502, "Bad Gateway", "Runtime.ExitError", APPLICATION_ERROR);
+    static final Page CANNOT_ASSUME_ROLE = new Page(502, "Bad Gateway", "Platform.CannotAssumeRole", APPLICATION_ERROR);
     private static final String RATE_EXCEEDED = "Request rate exceeded. Please try again later.";
     static final Page ENDPOINT_MAX_ENV_THROTTLE = new Page(429, "Too Many Requests",
             "Platform.EndpointMaxEnvThrottle", RATE_EXCEEDED);

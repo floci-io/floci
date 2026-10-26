@@ -1,9 +1,9 @@
 package io.github.hectorvent.floci.config;
 
+import io.github.hectorvent.floci.testing.TlsTrust;
+
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManagerFactory;
 import java.nio.file.Path;
-import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.util.List;
 import java.util.Set;
@@ -14,15 +14,7 @@ final class TlsTestSupport {
     private TlsTestSupport() {}
 
     static SSLContext trustOnlyTheCa() throws Exception {
-        KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
-        trust.load(null, null);
-        trust.setCertificateEntry("floci",
-                FlociCertificateAuthority.loadOrCreate(Path.of(SelfSignedTlsProfile.TLS_DIR)).certificate());
-        TrustManagerFactory factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        factory.init(trust);
-        SSLContext context = SSLContext.getInstance("TLS");
-        context.init(null, factory.getTrustManagers(), null);
-        return context;
+        return TlsTrust.trusting(FlociCertificateAuthority.loadOrCreate(Path.of(SelfSignedTlsProfile.TLS_DIR)).certificate());
     }
 
     static Set<String> dnsSans(X509Certificate certificate) throws Exception {

@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.services.cognito.CognitoService;
+import io.github.hectorvent.floci.services.cognito.model.UserPool;
+import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -14,6 +17,7 @@ import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -55,6 +59,9 @@ class ApiGatewayHttpContextMappingIntegrationTest {
 
     @InjectMock
     LambdaService lambdaService;
+
+    @Inject
+    CognitoService cognitoService;
 
     private String apiId;
     private String resourceId;
@@ -140,6 +147,52 @@ class ApiGatewayHttpContextMappingIntegrationTest {
                         MAPPER.readTree(response.path("body").asText()).path("requestId").asText());
             }
         }
+    }
+
+    @Test
+    void mapsCognitoListClaimsIntoHttpProxyHeaders() throws Exception {
+        UserPool pool = cognitoService.createUserPool(Map.of("PoolName", "groups-mapping"), "us-east-1");
+        String username = "group-user-" + UUID.randomUUID();
+        cognitoService.adminCreateUser(pool.getId(), username,
+                Map.of("email", username + "@example.com"), "TempPass1!");
+        cognitoService.adminSetUserPassword(pool.getId(), username, "Perm1234!", true);
+        cognitoService.createGroup(pool.getId(), "admins", "Admin group", 1, null);
+        cognitoService.createGroup(pool.getId(), "auditors", "Audit group", 2, null);
+        cognitoService.adminAddUserToGroup(pool.getId(), "admins", username);
+        cognitoService.adminAddUserToGroup(pool.getId(), "auditors", username);
+        UserPoolClient client = cognitoService.createUserPoolClient(pool.getId(), "groups-client", false, false,
+                List.of(), List.of(), null, List.of(), null,
+                List.of("ALLOW_USER_PASSWORD_AUTH"), null, null, List.of(), null, List.of(), null,
+                null, null, List.of(), null, null);
+        Map<String, Object> auth = cognitoService.initiateAuth(client.getClientId(),
+                "USER_PASSWORD_AUTH", Map.of("USERNAME", username, "PASSWORD", "Perm1234!"));
+        String token = (String) ((Map<?, ?>) auth.get("AuthenticationResult")).get("AccessToken");
+
+        String authorizerId = given().contentType(ContentType.JSON).body(Map.of(
+                        "name", "groups-authorizer", "type", "COGNITO_USER_POOLS",
+                        "providerARNs", List.of(pool.getArn()),
+                        "identitySource", "method.request.header.Authorization"))
+                .post("/restapis/" + apiId + "/authorizers")
+                .then().statusCode(201).extract().path("id");
+        given().contentType(ContentType.JSON).body(Map.of(
+                        "authorizationType", "COGNITO_USER_POOLS", "authorizerId", authorizerId))
+                .put(methodPath + "GET").then().statusCode(201);
+        configureIntegration("HTTP_PROXY", "GET", Map.of(
+                "integration.request.header.X-Auth-Groups", "context.authorizer.claims.cognito:groups",
+                "integration.request.header.X-Auth-Sub", "context.authorizer.claims.sub",
+                "integration.request.path.principal", "context.authorizer.claims.sub",
+                "integration.request.path.proxy", "method.request.path.proxy"));
+        deploy();
+
+        JsonNode response = MAPPER.readTree(given().header("Authorization", "Bearer " + token)
+                .header("X-Auth-Groups", "forged")
+                .get("/execute-api/" + apiId + "/test/orders/42")
+                .then().statusCode(200).extract().asByteArray());
+        JsonNode groups = response.path("headers").path("x-auth-groups");
+        assertEquals(1, groups.size());
+        assertEquals("admins,auditors", groups.get(0).asText());
+        assertFalse(groups.get(0).asText().contains("forged"));
+        assertTrue(response.path("headers").has("x-auth-sub"));
     }
 
     @ParameterizedTest

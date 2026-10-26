@@ -24,6 +24,8 @@
 | `ReEncrypt` | Re-encrypt under a different key |
 | `GenerateDataKey` | Generate a data key (plaintext + encrypted) |
 | `GenerateDataKeyWithoutPlaintext` | Generate only the encrypted data key |
+| `GenerateDataKeyPair` | Generate an asymmetric data key pair (plaintext + encrypted private key, public key) |
+| `GenerateDataKeyPairWithoutPlaintext` | Generate an asymmetric data key pair (encrypted private key, public key) |
 | `Sign` | Sign a message with an asymmetric key |
 | `Verify` | Verify a signature |
 | `GenerateMac` | Generate a MAC with an HMAC key |
@@ -225,6 +227,12 @@ there.
 ## Grant Support Scope
 
 Grant lifecycle operations (`CreateGrant`, `ListGrants`, `ListRetirableGrants`, `RevokeGrant`, `RetireGrant`) are supported. However, grant lifecycle support **does not** imply grant-based authorization enforcement on cryptographic operations (`Encrypt`, `Decrypt`, `Sign`, `Verify`, `GenerateDataKey`, etc.). Grants are stored and queryable but are not evaluated during crypto operations.
+
+## IAM Enforcement
+
+With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, an operation that names a key is evaluated against that key's ARN, as on AWS. A `KeyId` given as a key id, an alias name, an alias ARN or a key ARN resolves to the key it names, so a policy scoped to one key ARN allows that key and no other, and a `Deny` scoped to one fires for that key. A `Decrypt` that names no `KeyId` is evaluated against the key that encrypted its `CiphertextBlob`.
+
+`CreateAlias`, `UpdateAlias` and `DeleteAlias` are evaluated against the alias ARN and the key it points at, `UpdateAlias` also against the key it will point at, the two resource types the Service Authorization Reference lists for them. `ReEncrypt` is evaluated against both keys it acts on, under the single `kms:ReEncrypt` action: the source its `SourceKeyId` names, or when it names none the key that encrypted its `CiphertextBlob` (never a `KeyId`, which the operation does not read), and the destination its `DestinationKeyId` names. AWS authorizes the two halves separately as `kms:ReEncryptFrom` and `kms:ReEncryptTo`, which Floci does not split yet. The grant operations name the key the grant they act on belongs to: a `RetireGrant` carrying a `GrantToken` the key that grant belongs to, since the handler finds the grant by the token alone, and a `RetireGrant` or `RevokeGrant` identifying its grant by `KeyId` and `GrantId` the key it names together with the key that grant belongs to. A request nothing resolves keeps the permissive `key/*` pattern, and the operation then fails with its own error. `CreateKey`, `GenerateRandom`, `ListKeys`, `ListAliases` and `ListRetirableGrants` name no key resource and are evaluated against `*`, the resource a policy must name for them on AWS too.
 
 ## Configuration
 

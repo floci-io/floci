@@ -3,8 +3,10 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StopContainerCmd;
+import com.github.dockerjava.api.exception.NotModifiedException;
 import org.junit.jupiter.api.Test;
 
+import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -15,6 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -140,6 +143,29 @@ class ContainerLifecycleManagerTeardownTest {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void aContainerThatHadAlreadyExitedCountsAsStopped() throws Exception {
+        DockerClient docker = mock(DockerClient.class);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
+        StopContainerCmd stop = mock(StopContainerCmd.class);
+        when(docker.stopContainerCmd(anyString())).thenReturn(stop);
+        when(stop.withTimeout(anyInt())).thenReturn(stop);
+        // Docker answers a stop of an exited container with HTTP 304.
+        when(stop.exec()).thenThrow(new NotModifiedException("Container already stopped"));
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
+        when(docker.removeContainerCmd(anyString())).thenReturn(remove);
+        when(remove.withForce(true)).thenReturn(remove);
+        when(remove.exec()).thenThrow(new IllegalStateException("daemon refused removal"));
+        Closeable logStream = mock(Closeable.class);
+
+        manager.stopAndRemove("exited", logStream, 0);
+
+        verify(logStream).close();
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> manager.stopAndRemoveStrict("exited-strict", null));
+        assertEquals(0, failure.getSuppressed().length);
     }
 
 }

@@ -1366,6 +1366,34 @@ class GlueServiceTest {
     }
 
     @Test
+    void workflowAndTriggerListsKeepTheirOwnPageSizeLimits() {
+        assertTrue(glueService.listWorkflows(25, null).items().isEmpty());
+        assertTrue(glueService.getTriggers(null, 200, null).items().isEmpty());
+        for (int maxResults : List.of(-1, 0, 26)) {
+            AwsException failure = assertThrows(AwsException.class,
+                    () -> glueService.listWorkflows(maxResults, null));
+            assertEquals("InvalidInputException", failure.getErrorCode());
+            assertEquals("MaxResults must be between 1 and 25", failure.getMessage());
+        }
+        for (int maxResults : List.of(-1, 0, 201)) {
+            AwsException failure = assertThrows(AwsException.class,
+                    () -> glueService.getTriggers(null, maxResults, null));
+            assertEquals("InvalidInputException", failure.getErrorCode());
+            assertEquals("MaxResults must be between 1 and 200", failure.getMessage());
+        }
+    }
+
+    @Test
+    void triggerPageSizeIsValidatedBeforeTheDependentJobLookup() {
+        AwsException failure = assertThrows(AwsException.class,
+                () -> glueService.getTriggers("missing", 201, null));
+        assertEquals("InvalidInputException", failure.getErrorCode());
+        assertEquals("MaxResults must be between 1 and 200", failure.getMessage());
+        assertEquals("EntityNotFoundException", assertThrows(AwsException.class,
+                () -> glueService.getTriggers("missing", 200, null)).getErrorCode());
+    }
+
+    @Test
     void taggingNonExistentResourceThrows() {
         String fakeJobArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":job/fake-job";
         String fakeCrawlerArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":crawler/fake-crawler";

@@ -8,7 +8,6 @@ import io.github.hectorvent.floci.services.emr.model.EmrCluster;
 import io.github.hectorvent.floci.services.emr.model.EmrStep;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
-import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,7 +34,6 @@ import static org.mockito.Mockito.when;
 class AslExecutorEmrSyncTest {
 
     private static final String REGION = "eu-west-3";
-    private static final String ACCOUNT = "000000000000";
     private static final String CLUSTER_ID = "j-SYNCTEST00001";
     private static final String STEP_ID = "s-SYNCTEST00001";
     private static final String ADD_STEP = """
@@ -64,7 +62,8 @@ class AslExecutorEmrSyncTest {
             return cluster;
         });
         sfnService = mock(StepFunctionsService.class);
-        when(sfnService.describeExecution(any())).thenAnswer(invocation -> parent(invocation.getArgument(0), "RUNNING"));
+        when(sfnService.describeExecution(any())).thenAnswer(invocation ->
+                AslExecutorFixture.execution(invocation.getArgument(0), "RUNNING"));
         Instance<StepFunctionsService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(sfnService);
         executor = AslExecutorFixture.builder()
@@ -140,7 +139,8 @@ class AslExecutorEmrSyncTest {
         when(emrService.describeCluster(CLUSTER_ID)).thenReturn(cluster("STARTING"));
         AtomicInteger parentReads = new AtomicInteger();
         when(sfnService.describeExecution(any())).thenAnswer(invocation ->
-                parent(invocation.getArgument(0), parentReads.incrementAndGet() < 3 ? "RUNNING" : "ABORTED"));
+                AslExecutorFixture.execution(invocation.getArgument(0),
+                        parentReads.incrementAndGet() < 3 ? "RUNNING" : "ABORTED"));
 
         Execution execution = run(task("createCluster.sync"), CREATE_CLUSTER);
 
@@ -174,13 +174,6 @@ class AslExecutorEmrSyncTest {
         return cluster;
     }
 
-    private static Execution parent(String executionArn, String status) {
-        Execution parent = new Execution();
-        parent.setExecutionArn(executionArn);
-        parent.setStatus(status);
-        return parent;
-    }
-
     private static List<String> fieldNames(JsonNode node) {
         List<String> names = new ArrayList<>();
         node.fieldNames().forEachRemaining(names::add);
@@ -188,21 +181,7 @@ class AslExecutorEmrSyncTest {
     }
 
     private Execution run(String definition, String input) {
-        StateMachine stateMachine = new StateMachine();
-        stateMachine.setName("emr-sync-test");
-        stateMachine.setStateMachineArn("arn:aws:states:%s:%s:stateMachine:emr-sync-test".formatted(REGION, ACCOUNT));
-        stateMachine.setRoleArn("arn:aws:iam::%s:role/test-role".formatted(ACCOUNT));
-        stateMachine.setDefinition(definition);
-
-        Execution execution = new Execution();
-        execution.setName("emr-sync-execution");
-        execution.setExecutionArn("arn:aws:states:%s:%s:execution:emr-sync-test:emr-sync-execution"
-                .formatted(REGION, ACCOUNT));
-        execution.setStateMachineArn(stateMachine.getStateMachineArn());
-        execution.setInput(input);
-
         history = new ArrayList<>();
-        executor.executeSync(stateMachine, execution, history, (updated, events) -> { });
-        return execution;
+        return AslExecutorFixture.runSync(executor, REGION, "emr-sync-test", definition, input, history);
     }
 }

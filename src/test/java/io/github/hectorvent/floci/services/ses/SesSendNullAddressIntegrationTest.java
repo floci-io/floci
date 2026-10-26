@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -18,7 +19,9 @@ class SesSendNullAddressIntegrationTest {
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
-    private static final String SENDER = "sender@example.com";
+    // A verified sender of its own: an identity under example.com would outlive this class and
+    // reach the other SES classes that share the application.
+    private static final String SENDER = "null-address-sender@floci.test";
     private static final String TO = "success@simulator.amazonses.com";
     private static final String SIMPLE =
             "{\"Simple\": {\"Subject\": {\"Data\": \"s\"}, \"Body\": {\"Text\": {\"Data\": \"b\"}}}}";
@@ -48,6 +51,19 @@ class SesSendNullAddressIntegrationTest {
 
     private static String entry(String destination) {
         return "{\"Destination\": " + destination + "}";
+    }
+
+    @BeforeEach
+    void verifySender() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "VerifyEmailIdentity")
+            .formParam("EmailAddress", SENDER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test
@@ -84,6 +100,16 @@ class SesSendNullAddressIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("BadRequestException"))
             .body("message", equalTo(NULL_ADDRESS));
+    }
+
+    @Test
+    void sendBulkEmail_onlyEmptyDestinationsInTheRequest_answerEmptyDestination() {
+        bulk("", entry("{}") + ", " + entry("{\"ToAddresses\": [], \"CcAddresses\": [null]}"))
+            .statusCode(200)
+            .body("BulkEmailEntryResults[0].Status", equalTo("INVALID_PARAMETER"))
+            .body("BulkEmailEntryResults[0].Error", equalTo(EMPTY_DESTINATION))
+            .body("BulkEmailEntryResults[1].Status", equalTo("INVALID_PARAMETER"))
+            .body("BulkEmailEntryResults[1].Error", equalTo(EMPTY_DESTINATION));
     }
 
     @Test

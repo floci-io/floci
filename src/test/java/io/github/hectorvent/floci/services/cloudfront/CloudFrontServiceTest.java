@@ -781,6 +781,42 @@ class CloudFrontServiceTest {
     }
 
     @Test
+    void createDistributionRejectsAResponseCompletionTimeoutShorterThanTheReadTimeout() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+
+        AwsException below = assertAws("InvalidArgument",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin -> {
+                    origin.getCustomOriginConfig().put("OriginReadTimeout", 30);
+                    origin.setResponseCompletionTimeout(29);
+                }), Map.of()));
+        assertEquals("The parameter ResponseCompletionTimeout must be greater than or equal to"
+                + " OriginReadTimeout.", below.getMessage());
+        assertEquals(400, below.getHttpStatus());
+
+        AwsException negative = assertAws("InvalidArgument",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin ->
+                        origin.setResponseCompletionTimeout(-1)), Map.of()));
+        assertEquals("The parameter ResponseCompletionTimeout must be a non-negative integer.",
+                negative.getMessage());
+        assertEquals(400, negative.getHttpStatus());
+
+        // A completion timeout as long as the read timeout, and none at all, are both accepted.
+        assertDoesNotThrow(() -> service.createDistribution(distributionWithCustomOrigin(origin -> {
+            origin.getCustomOriginConfig().put("OriginReadTimeout", 30);
+            origin.setResponseCompletionTimeout(30);
+        }), Map.of()));
+        assertDoesNotThrow(() -> service.createDistribution(distributionWithCustomOrigin(origin ->
+                origin.setResponseCompletionTimeout(0)), Map.of()));
+
+        // No OriginReadTimeout means the 30 s default, which a shorter completion timeout breaks.
+        AwsException belowDefault = assertAws("InvalidArgument",
+                () -> service.createDistribution(distributionWithCustomOrigin(origin ->
+                        origin.setResponseCompletionTimeout(10)), Map.of()));
+        assertEquals("The parameter ResponseCompletionTimeout must be greater than or equal to"
+                + " OriginReadTimeout.", belowDefault.getMessage());
+    }
+
+    @Test
     void updateDistributionRejectsOriginSettingsOutsideTheAwsRange() {
         CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
         Distribution existing = service.createDistribution(
@@ -795,6 +831,34 @@ class CloudFrontServiceTest {
                 existing.getId(), existing.getEtag(),
                 distributionWithCustomOrigin(origin ->
                         origin.getCustomOriginConfig().put("OriginReadTimeout", 121))));
+    }
+
+    @Test
+    void updateDistributionRejectsAResponseCompletionTimeoutShorterThanTheReadTimeout() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        Distribution existing = service.createDistribution(
+                distributionWithCustomOrigin(origin -> { }), Map.of());
+
+        AwsException below = assertAws("InvalidArgument", () -> service.updateDistribution(
+                existing.getId(), existing.getEtag(),
+                distributionWithCustomOrigin(origin -> {
+                    origin.getCustomOriginConfig().put("OriginReadTimeout", 30);
+                    origin.setResponseCompletionTimeout(29);
+                })));
+        assertEquals("The parameter ResponseCompletionTimeout must be greater than or equal to"
+                + " OriginReadTimeout.", below.getMessage());
+        assertEquals(400, below.getHttpStatus());
+
+        AwsException negative = assertAws("InvalidArgument", () -> service.updateDistribution(
+                existing.getId(), existing.getEtag(),
+                distributionWithCustomOrigin(origin -> origin.setResponseCompletionTimeout(-1))));
+        assertEquals("The parameter ResponseCompletionTimeout must be a non-negative integer.",
+                negative.getMessage());
+        assertEquals(400, negative.getHttpStatus());
+
+        // The rejected updates left the distribution as it was.
+        Origin origin = service.getDistribution(existing.getId()).getConfig().getOrigins().getFirst();
+        assertNull(origin.getResponseCompletionTimeout());
     }
 
     @Test

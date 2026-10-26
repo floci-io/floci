@@ -64,8 +64,7 @@ public class AppSyncVtlEngine {
         engine.setProperty("resource.loader.string.class",
                 "org.apache.velocity.runtime.resource.loader.StringResourceLoader");
         engine.setProperty(RuntimeConstants.RUNTIME_REFERENCES_STRICT, false);
-        engine.setProperty("userdirective",
-                "io.github.hectorvent.floci.services.appsync.graphql.ReturnDirective");
+        engine.setProperty("userdirective", ReturnDirective.class.getName());
         engine.setProperty(RuntimeConstants.MAX_NUMBER_LOOPS, config.services().appsync().vtlMaxLoops());
         VtlSandbox.restrictIntrospection(engine);
         engine.init();

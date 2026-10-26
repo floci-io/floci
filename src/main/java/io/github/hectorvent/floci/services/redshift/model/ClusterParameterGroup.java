@@ -55,6 +55,7 @@ public class ClusterParameterGroup {
     public static List<Parameter> defaultParameters() {
         List<Parameter> defaults = new ArrayList<>(List.of(
                 new Parameter("max_cursor_result_set_size", "0", "Maximum cursor result set size", "integer"),
+                new Parameter("enable_user_activity_logging", "false", "Enable user activity audit logging", "boolean"),
                 new Parameter("wlm_json_configuration", "{}", "WLM configuration", "string")
         ));
         defaults.forEach(parameter -> parameter.setSource("engine-default"));

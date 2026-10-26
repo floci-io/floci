@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.applicationautoscaling;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.PredefinedMetricSpecification;
@@ -11,7 +12,10 @@ import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsS
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -148,6 +152,167 @@ class ApplicationAutoScalingServiceTest {
         assertEquals(2, service.describeScalableTargets(NAMESPACE, null, null, REGION).size());
         assertEquals(1, service.describeScalableTargets(NAMESPACE, List.of(RESOURCE_ID), DIMENSION, REGION).size());
         assertEquals(0, service.describeScalableTargets("kafka", null, null, REGION).size());
+    }
+
+    @Test
+    void describeScalableTargetsHonorsMaxResultsAndNextToken() {
+        service.registerScalableTarget(NAMESPACE, "service/a/one", DIMENSION, 1, 10,
+                null, null, Map.of(), REGION);
+        service.registerScalableTarget(NAMESPACE, "service/a/two", DIMENSION, 1, 10,
+                null, null, Map.of(), REGION);
+
+        PaginatedResult<ScalableTarget> first = service.describeScalableTargets(
+                NAMESPACE, null, null, 1, null, REGION);
+
+        assertEquals(1, first.items().size());
+        assertNotNull(first.nextToken());
+
+        service.deregisterScalableTarget(NAMESPACE, first.items().getFirst().getResourceId(), DIMENSION, REGION);
+        PaginatedResult<ScalableTarget> second = service.describeScalableTargets(
+                NAMESPACE, null, null, 1, first.nextToken(), REGION);
+
+        assertEquals(1, second.items().size());
+        assertNull(second.nextToken());
+        assertTrue(!first.items().getFirst().getResourceId()
+                .equals(second.items().getFirst().getResourceId()));
+    }
+
+    @Test
+    void describeScalingPoliciesHonorsMaxResultsAndNextToken() {
+        register();
+        service.putScalingPolicy("policy-a", "StepScaling", NAMESPACE, RESOURCE_ID, DIMENSION,
+                null, null, REGION);
+        service.putScalingPolicy("policy-b", "StepScaling", NAMESPACE, RESOURCE_ID, DIMENSION,
+                null, null, REGION);
+
+        PaginatedResult<ScalingPolicy> first = service.describeScalingPolicies(
+                NAMESPACE, RESOURCE_ID, DIMENSION, null, 1, null, REGION);
+
+        assertEquals(1, first.items().size());
+        assertNotNull(first.nextToken());
+
+        service.deleteScalingPolicy(first.items().getFirst().getPolicyName(), NAMESPACE, RESOURCE_ID, DIMENSION, REGION);
+        PaginatedResult<ScalingPolicy> second = service.describeScalingPolicies(
+                NAMESPACE, RESOURCE_ID, DIMENSION, null, 1, first.nextToken(), REGION);
+
+        assertEquals(1, second.items().size());
+        assertNull(second.nextToken());
+        assertTrue(!first.items().getFirst().getPolicyName()
+                .equals(second.items().getFirst().getPolicyName()));
+    }
+
+    @Test
+    void describePaginationValidatesPageSizeAndToken() {
+        register();
+
+        assertThrows(AwsException.class, () -> service.describeScalableTargets(
+                NAMESPACE, null, null, 0, null, REGION));
+        assertThrows(AwsException.class, () -> service.describeScalableTargets(
+                NAMESPACE, null, null, 51, null, REGION));
+        assertThrows(AwsException.class, () -> service.describeScalableTargets(
+                NAMESPACE, null, null, null, "", REGION));
+    }
+
+    @Test
+    void targetTokensDistinguishFilterListsWithCommas() {
+        String dimension = "custom-resource:ResourceType:Property";
+        for (String id : List.of("a, b", "x")) {
+            service.registerScalableTarget("custom-resource", id, dimension, 1, 10, null, null, null, REGION);
+        }
+        String token = service.describeScalableTargets("custom-resource", List.of("a, b", "x"),
+                null, 1, null, REGION).nextToken();
+        assertNotNull(token);
+        assertEquals("x", service.describeScalableTargets("custom-resource", List.of("x", "a, b"),
+                null, 1, token, REGION).items().getFirst().getResourceId());
+
+        assertInvalidToken(() -> service.describeScalableTargets("custom-resource", List.of("a", "b", "x"),
+                null, 1, token, REGION));
+    }
+
+    @Test
+    void policyTokensDistinguishFilterListsWithCommas() {
+        register();
+        for (String name : List.of("a, b", "x")) {
+            service.putScalingPolicy(name, "StepScaling", NAMESPACE, RESOURCE_ID, DIMENSION, null, null, REGION);
+        }
+        String token = service.describeScalingPolicies(NAMESPACE, RESOURCE_ID, DIMENSION,
+                List.of("a, b", "x"), 1, null, REGION).nextToken();
+        assertNotNull(token);
+        assertEquals("x", service.describeScalingPolicies(NAMESPACE, RESOURCE_ID, DIMENSION,
+                List.of("x", "a, b"), 1, token, REGION).items().getFirst().getPolicyName());
+
+        assertInvalidToken(() -> service.describeScalingPolicies(NAMESPACE, RESOURCE_ID, DIMENSION,
+                List.of("a", "b", "x"), 1, token, REGION));
+    }
+
+    @Test
+    void targetTokensRejectEditedCursors() {
+        register();
+        service.registerScalableTarget(NAMESPACE, "service/z/last", DIMENSION, 1, 10, null, null, null, REGION);
+        String token = service.describeScalableTargets(NAMESPACE, null, null, 1, null, REGION).nextToken();
+        assertNotNull(token);
+
+        assertInvalidToken(() -> service.describeScalableTargets(NAMESPACE, null, null, 1, editedToken(token), REGION));
+        assertInvalidToken(() -> service.describeScalingPolicies(NAMESPACE, null, null, null, 1, token, REGION));
+    }
+
+    @Test
+    void policyTokensRejectEditedCursors() {
+        register();
+        for (String name : List.of("first", "last")) {
+            service.putScalingPolicy(name, "StepScaling", NAMESPACE, RESOURCE_ID, DIMENSION, null, null, REGION);
+        }
+        String token = service.describeScalingPolicies(NAMESPACE, null, null, null, 1, null, REGION).nextToken();
+        assertNotNull(token);
+
+        assertInvalidToken(() -> service.describeScalingPolicies(
+                NAMESPACE, null, null, null, 1, editedToken(token), REGION));
+        assertInvalidToken(() -> service.describeScalableTargets(NAMESPACE, null, null, 1, token, REGION));
+    }
+
+    @Test
+    void malformedTokensUseTheModeledErrorCode() {
+        for (String token : List.of("", "not!base64")) {
+            assertInvalidToken(() -> service.describeScalableTargets(NAMESPACE, null, null, 1, token, REGION));
+            assertInvalidToken(() -> service.describeScalingPolicies(NAMESPACE, null, null, null, 1, token, REGION));
+        }
+    }
+
+    @Test
+    void scalingPolicyPageSizeDefaultsToTen() {
+        register();
+        for (int index = 0; index < 11; index++) {
+            service.putScalingPolicy("policy-" + index, "StepScaling", NAMESPACE, RESOURCE_ID, DIMENSION,
+                    null, null, REGION);
+        }
+        PaginatedResult<ScalingPolicy> first = service.describeScalingPolicies(
+                NAMESPACE, null, null, null, null, null, REGION);
+        assertEquals(10, first.items().size());
+        assertNotNull(first.nextToken());
+        PaginatedResult<ScalingPolicy> second = service.describeScalingPolicies(
+                NAMESPACE, null, null, null, null, first.nextToken(), REGION);
+        assertEquals(1, second.items().size());
+        assertNull(second.nextToken());
+    }
+
+    @Test
+    void scalingPolicyPageSizeHasItsOwnMaximum() {
+        register();
+        assertEquals(1, service.describeScalableTargets(NAMESPACE, null, null, 50, null, REGION).items().size());
+        assertEquals(0, service.describeScalingPolicies(NAMESPACE, null, null, null, 10, null, REGION).items().size());
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeScalingPolicies(NAMESPACE, null, null, null, 11, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    private static String editedToken(String token) {
+        String decoded = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString((decoded + "edited").getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void assertInvalidToken(Executable request) {
+        AwsException error = assertThrows(AwsException.class, request);
+        assertEquals("InvalidNextTokenException", error.getErrorCode());
     }
 
     @Test

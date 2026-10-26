@@ -32,6 +32,7 @@ import io.quarkus.tls.runtime.config.TlsConfig;
 import io.vertx.core.Context;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.net.KeyCertOptions;
 import io.vertx.core.net.PemKeyCertOptions;
@@ -57,6 +58,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.AdditionalAnswers;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
@@ -87,6 +89,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -108,6 +111,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -903,14 +907,17 @@ class IotMqttBrokerServiceTest {
         assertEquals("CLIENT_ERROR", disconnected.get(0).get("disconnectReason").asText());
     }
 
-    /** A PUBLISH beyond the decoder's packet limit never reaches the publish handler, yet AWS reports the same client error. */
+    /** The decoder rejects an oversized advertised length before reading the body or invoking the publish handler. */
     @Test
     void aPacketAboveTheDecoderLimitEndsTheSessionWithAClientError() throws Exception {
         startBrokerRecordingPublishes();
         try (Socket socket = rawConnect("undecodable")) {
-            rawPublish(socket, 0, "devices/d1/huge", new byte[150 * 1024]);
+            byte[] body = new byte[150 * 1024];
+            byte[] frame = packet(0x30, body);
+            socket.getOutputStream().write(frame, 0, frame.length - body.length);
 
             awaitPresence("disconnected", "undecodable", 1);
+            assertEquals(-1, socket.getInputStream().read(), "the decoder closes without waiting for the body");
         }
         barrier();
 
@@ -1474,6 +1481,80 @@ class IotMqttBrokerServiceTest {
         broker.evaluateRulesOnWorker(topic, afterDrainRan::countDown);
         assertTrue(afterDrainRan.await(10, TimeUnit.SECONDS), "capacity came back once the backlog drained");
         assertFalse(beyondBoundRan.get(), "the evaluation beyond the bound never ran");
+    }
+
+    @Test
+    void drainedRulesReleaseCapacityWhileTheirCallerContextIsBlocked() throws Exception {
+        String topic = "devices/d1/metrics";
+        Context context = vertx.getOrCreateContext();
+        CountDownLatch submitted = new CountDownLatch(1);
+        CountDownLatch releaseCaller = new CountDownLatch(1);
+        CountDownLatch callerReturned = new CountDownLatch(1);
+        CountDownLatch rulesRan = new CountDownLatch(IotMqttBrokerService.MAX_PENDING_RULE_EVALUATIONS);
+        CountDownLatch afterDrainRan = new CountDownLatch(1);
+        CountDownLatch workerStarted = new CountDownLatch(1);
+        CountDownLatch releaseWorker = new CountDownLatch(1);
+        AtomicReference<Throwable> callerFailure = new AtomicReference<>();
+        boolean callerQueued = false;
+        try {
+            broker.ruleWorker.executeBlocking(() -> {
+                workerStarted.countDown();
+                releaseWorker.await();
+                return null;
+            }, false);
+            context.runOnContext(ignored -> {
+                try {
+                    for (int i = 0; i < IotMqttBrokerService.MAX_PENDING_RULE_EVALUATIONS; i++) {
+                        broker.evaluateRulesOnWorker(topic, rulesRan::countDown);
+                    }
+                    submitted.countDown();
+                    releaseCaller.await();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    callerFailure.set(interrupted);
+                } catch (RuntimeException failure) {
+                    callerFailure.set(failure);
+                } finally {
+                    submitted.countDown();
+                    callerReturned.countDown();
+                }
+            });
+            callerQueued = true;
+            assertTrue(workerStarted.await(10, TimeUnit.SECONDS), "the worker held the queued rules");
+            assertTrue(submitted.await(10, TimeUnit.SECONDS), "the caller submitted the bounded backlog");
+            assertNull(callerFailure.get());
+            releaseWorker.countDown();
+            assertTrue(rulesRan.await(10, TimeUnit.SECONDS), "the rules drained while their caller remained blocked");
+            CountDownLatch workerDrained = new CountDownLatch(1);
+            broker.ruleWorker.executeBlocking(() -> {
+                workerDrained.countDown();
+                return null;
+            }, false);
+            assertTrue(workerDrained.await(10, TimeUnit.SECONDS), "the worker passed the last rule's cleanup");
+            broker.evaluateRulesOnWorker(topic, afterDrainRan::countDown);
+            assertTrue(afterDrainRan.await(10, TimeUnit.SECONDS), "drained worker capacity is immediately reusable");
+        } finally {
+            releaseWorker.countDown();
+            releaseCaller.countDown();
+            if (callerQueued) {
+                assertTrue(callerReturned.await(10, TimeUnit.SECONDS), "the caller context was released");
+            }
+        }
+    }
+
+    @Test
+    void rejectedRuleDispatchDoesNotConsumePendingCapacity() {
+        Vertx rejectedVertx = mock(Vertx.class);
+        WorkerExecutor rejectedWorker = mock(WorkerExecutor.class);
+        when(rejectedVertx.createSharedWorkerExecutor("floci-iot-mqtt-rules", 1)).thenReturn(rejectedWorker);
+        when(rejectedWorker.executeBlocking(ArgumentMatchers.<Callable<Void>>any(), eq(false)))
+                .thenThrow(new IllegalStateException("dispatch unavailable"));
+        IotMqttBrokerService rejectedBroker = new IotMqttBrokerService(
+                config, rejectedVertx, iotService, customAuthorizer, registry, nanoTime::get);
+        for (int i = 0; i <= IotMqttBrokerService.MAX_PENDING_RULE_EVALUATIONS; i++) {
+            assertThrows(IllegalStateException.class,
+                    () -> rejectedBroker.evaluateRulesOnWorker("devices/d1/metrics", () -> {}));
+        }
     }
 
     @Test

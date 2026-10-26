@@ -422,6 +422,45 @@ class AssumeRolePolicyEvaluatorTest {
     }
 
     @Test
+    void aWildcardPrincipalNamesAServiceToo() {
+        assertTrue(evaluator.allowsService(trust("{\"AWS\":\"*\"}"), "lambda.amazonaws.com"));
+        assertTrue(evaluator.allowsService(trust("{\"AWS\":[\"*\"]}"), "lambda.amazonaws.com", null, null));
+        assertTrue(evaluator.allowsService(trust("\"*\""), "lambda.amazonaws.com", null, null));
+        assertFalse(evaluator.allowsService(trust("{\"AWS\":\"arn:aws:iam::000000000000:root\"}"),
+                "lambda.amazonaws.com", null, null));
+        String denied = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"},
+              {"Effect":"Deny","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}
+            """;
+        assertFalse(evaluator.allowsService(denied, "lambda.amazonaws.com"));
+        assertFalse(evaluator.allowsService(denied, "lambda.amazonaws.com", null, null));
+    }
+
+    @Test
+    void serviceTrustSeesThePrincipalKeysOfTheService() {
+        assertTrue(evaluator.allowsService(serviceTrust("{\"Bool\":{\"aws:PrincipalIsAWSService\":\"true\"}}"),
+                "lambda.amazonaws.com", null, null));
+        assertTrue(evaluator.allowsService(
+                serviceTrust("{\"StringEquals\":{\"aws:PrincipalServiceName\":\"lambda.amazonaws.com\"}}"),
+                "lambda.amazonaws.com", null, null));
+        assertFalse(evaluator.allowsService(serviceTrust("{\"Bool\":{\"aws:PrincipalIsAWSService\":\"false\"}}"),
+                "lambda.amazonaws.com", null, null));
+        assertFalse(evaluator.allowsService(serviceTrust("{\"Null\":{\"aws:PrincipalIsAWSService\":\"true\"}}"),
+                "lambda.amazonaws.com", null, null));
+        assertFalse(evaluator.allowsService(serviceTrust("{\"Null\":{\"aws:PrincipalServiceName\":\"true\"}}"),
+                "lambda.amazonaws.com", null, null));
+    }
+
+    private static String serviceTrust(String condition) {
+        return """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole",
+               "Condition":%s}]}
+            """.formatted(condition);
+    }
+
+    @Test
     void serviceTrustEvaluatesNegatedSourceConditions() {
         String doc = """
             {"Statement":[

@@ -112,7 +112,7 @@ public class LambdaWebIamAuth {
         if (distributionArn != null) {
             return authorizeCloudFront(distributionArn, target);
         }
-        String accessKeyId = authenticate(request, target.region());
+        String accessKeyId = authenticate(request, target.servingRegion());
         return accessKeyId != null && authorize(accessKeyId, target);
     }
 
@@ -137,6 +137,8 @@ public class LambdaWebIamAuth {
         Map<String, List<String>> context = resourceContext(target);
         context.putAll(IamConditionContextResolver.serviceCallContext(principal, endpointArn, target.accountId(),
                 distributionArn, AwsArnUtils.parse(distributionArn).accountId()));
+        // The endpoint ARN names the home region, not the region that serves.
+        context.put("aws:RequestedRegion", List.of(target.servingRegion()));
         String policy = target.function().policy;
         boolean allowed = evaluator.evaluateServicePrincipal(isBlank(policy) ? null : List.of(policy), principal,
                 ACTION, endpointArn, context) == Decision.ALLOW;
@@ -251,7 +253,7 @@ public class LambdaWebIamAuth {
         if (callerAccount.isEmpty()) {
             return false;
         }
-        boolean allowed = RequestScopes.callAs(callerAccount.get(), target.region(),
+        boolean allowed = RequestScopes.callAs(callerAccount.get(), target.servingRegion(),
                 () -> evaluate(accessKeyId, callerAccount.get(), target));
         if (!allowed) {
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}",
@@ -283,7 +285,7 @@ public class LambdaWebIamAuth {
         }
         String endpointArn = target.endpoint().endpointArn;
         Map<String, List<String>> effective = IamConditionContextResolver.withGlobalContext(
-                context, endpointArn, target.region(), callerAccount, target.accountId());
+                context, endpointArn, target.servingRegion(), callerAccount, target.accountId());
         String policy = target.function().policy;
         ResourcePolicyDecision grant = evaluator.evaluateResourcePolicyFor(
                 isBlank(policy) ? null : List.of(policy), RequestPrincipal.caller(callerArns.orElse(null)),

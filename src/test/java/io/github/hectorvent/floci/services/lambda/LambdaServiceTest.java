@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
+import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.LambdaUrlConfig;
@@ -19,6 +20,7 @@ import io.github.hectorvent.floci.services.s3.model.S3ObjectUpdatedEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayInputStream;
@@ -1641,6 +1643,49 @@ class LambdaServiceTest {
         assertEquals("ValidationException", error.getErrorCode());
     }
 
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void deletingQualifierWaitsForProvisionedConcurrencyLock(boolean alias, boolean qualifiedName) throws Exception {
+        String name = "qualifier-deletion-lock";
+        LambdaFunction latest = service.createFunction(REGION, baseRequest(name));
+        LambdaFunction version = service.publishVersion(REGION, name, null);
+        if (alias) {
+            service.createAlias(REGION, name, "live", version.getVersion(), null, null);
+        }
+        String reference = qualifiedName ? latest.getFunctionArn() + ":" + version.getVersion() : name;
+        AtomicReference<Thread> requester = new AtomicReference<>();
+        try (ExecutorService tasks = Executors.newSingleThreadExecutor()) {
+            Future<?> deletion;
+            synchronized (service.lockForConcurrencyOp(latest.getFunctionArn())) {
+                deletion = tasks.submit(() -> {
+                    requester.set(Thread.currentThread());
+                    if (alias) {
+                        service.deleteAlias(REGION, reference, "live");
+                    } else {
+                        service.deleteVersion(REGION, reference, version.getVersion());
+                    }
+                });
+                awaitBlockedOrDone(requester, deletion);
+                assertFalse(deletion.isDone());
+                if (alias) {
+                    assertEquals(version.getVersion(), service.getAlias(REGION, name, "live").getFunctionVersion());
+                } else {
+                    assertEquals(version.getVersion(), service.getFunction(REGION, name, version.getVersion()).getVersion());
+                }
+            }
+            deletion.get(5, TimeUnit.SECONDS);
+        }
+        AwsException missing = assertThrows(AwsException.class, () -> {
+            if (alias) {
+                service.getAlias(REGION, name, "live");
+            } else {
+                service.getFunction(REGION, name, version.getVersion());
+            }
+        });
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+        assertEquals("$LATEST", service.getFunction(REGION, name).getVersion());
+    }
+
     @Test
     void createFunctionUrlConfigRejectsUnknownAuthType() {
         AwsException error = assertThrows(AwsException.class,
@@ -2309,13 +2354,18 @@ class LambdaServiceTest {
     }
 
     private static LambdaService s3BackedService(S3Service s3, WarmPool warmPool, ZipExtractor extractor) {
+        return s3BackedService(s3, warmPool, extractor, null);
+    }
+
+    private static LambdaService s3BackedService(S3Service s3, WarmPool warmPool, ZipExtractor extractor,
+                                                 EmulatorConfig config) {
         StorageFactory storageFactory = mock(StorageFactory.class);
         when(storageFactory.create(anyString(), anyString(), any()))
                 .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         LambdaFunctionStore functionStore = new LambdaFunctionStore(new InMemoryStorage<String, LambdaFunction>());
         LambdaAliasStore aliasStore = new LambdaAliasStore(storageFactory);
         return new LambdaService(functionStore, null, new LambdaConcurrencyLimiter(),
-                warmPool, new CodeStore(Path.of("target/test-data/lambda-code")), extractor, null,
+                warmPool, new CodeStore(Path.of("target/test-data/lambda-code")), extractor, config,
                 new RegionResolver(REGION, "000000000000"), null, aliasStore,
                 new LambdaTargetResolver(functionStore, aliasStore), s3, null, null, null, null,
                 storageFactory, null, null, null, null, new ObjectMapper());
@@ -2373,6 +2423,201 @@ class LambdaServiceTest {
             release.countDown();
             workers.shutdownNow();
         }
+    }
+
+    @Test
+    void reactiveSyncDisabled_leavesTheFunctionOnItsDeployedCode() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        WarmPool warmPool = mock(WarmPool.class);
+        LambdaService syncingService = s3BackedService(s3, warmPool, new ZipExtractor(),
+                reactiveS3SyncConfig(false, false));
+        String name = "reactive-disabled-" + UUID.randomUUID();
+        when(s3.openObject("code-bucket", "function.zip", null)).thenReturn(heldObject(zipWithBody("v1")));
+        Map<String, Object> request = baseRequest(name);
+        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "function.zip"));
+        LambdaFunction latest = syncingService.createFunction(REGION, request);
+
+        syncingService.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "function.zip"));
+
+        verify(s3, times(1)).openObject("code-bucket", "function.zip", null);
+        verify(warmPool, never()).pushCodeUpdate(any());
+        assertEquals("v1", Files.readString(Path.of(latest.getCodeLocalPath()).resolve("index.js")).trim());
+    }
+
+    @Test
+    void asyncReactiveSync_returnsBeforeTheRedeployAndReportsInProgressUntilItFinishes() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        WarmPool warmPool = mock(WarmPool.class);
+        ZipExtractor extractor = spy(new ZipExtractor());
+        LambdaService syncingService = s3BackedService(s3, warmPool, extractor, reactiveS3SyncConfig(true, true));
+        String name = "reactive-async-" + UUID.randomUUID();
+        when(s3.openObject("code-bucket", "function.zip", null))
+                .thenReturn(heldObject(zipWithBody("v1")))
+                .thenReturn(heldObject(zipWithBody("v2")));
+        Map<String, Object> request = baseRequest(name);
+        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "function.zip"));
+        LambdaFunction latest = syncingService.createFunction(REGION, request);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(inv -> {
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return inv.callRealMethod();
+        }).when(extractor).extractTo(any(byte[].class), any(Path.class), anyInt(), any(Runnable.class));
+        try {
+            syncingService.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "function.zip"));
+
+            assertEquals("InProgress", syncingService.lastUpdateStatus(latest));
+            verify(warmPool, never()).pushCodeUpdate(any());
+        } finally {
+            release.countDown();
+        }
+
+        verify(warmPool, timeout(5000)).pushCodeUpdate(latest);
+        awaitLastUpdateStatus(syncingService, latest, "Successful");
+        assertEquals("v2", Files.readString(Path.of(latest.getCodeLocalPath()).resolve("index.js")).trim());
+    }
+
+    @Test
+    void asyncReactiveSync_coalescesUploadsThatArriveWhileOneIsRunning() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        WarmPool warmPool = mock(WarmPool.class);
+        ZipExtractor extractor = spy(new ZipExtractor());
+        LambdaService syncingService = s3BackedService(s3, warmPool, extractor, reactiveS3SyncConfig(true, true));
+        String name = "reactive-coalesce-" + UUID.randomUUID();
+        when(s3.openObject("code-bucket", "function.zip", null))
+                .thenReturn(heldObject(zipWithBody("v1")))
+                .thenReturn(heldObject(zipWithBody("v2")))
+                .thenReturn(heldObject(zipWithBody("v5")));
+        Map<String, Object> request = baseRequest(name);
+        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "function.zip"));
+        LambdaFunction latest = syncingService.createFunction(REGION, request);
+        CountDownLatch extracting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(inv -> {
+            extracting.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return inv.callRealMethod();
+        }).when(extractor).extractTo(any(byte[].class), any(Path.class), anyInt(), any(Runnable.class));
+        try {
+            syncingService.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "function.zip"));
+            assertTrue(extracting.await(5, TimeUnit.SECONDS));
+            for (int upload = 3; upload <= 5; upload++) {
+                syncingService.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "function.zip"));
+            }
+        } finally {
+            release.countDown();
+        }
+
+        verify(warmPool, timeout(5000).times(2)).pushCodeUpdate(latest);
+        awaitLastUpdateStatus(syncingService, latest, "Successful");
+        // Create, the running sync, and one queued sync for the three uploads behind it.
+        verify(s3, times(3)).openObject("code-bucket", "function.zip", null);
+        assertEquals("v5", Files.readString(Path.of(latest.getCodeLocalPath()).resolve("index.js")).trim());
+    }
+
+    @Test
+    void asyncReactiveSync_deploysAnUploadToANewSourceWhileTheOldOneIsStillQueued() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        WarmPool warmPool = mock(WarmPool.class);
+        LambdaService syncingService = s3BackedService(s3, warmPool, new ZipExtractor(),
+                reactiveS3SyncConfig(true, true));
+        String name = "reactive-new-source-" + UUID.randomUUID();
+        when(s3.openObject("code-bucket", "old.zip", null)).thenReturn(heldObject(zipWithBody("v1")));
+        when(s3.openObject("code-bucket", "new.zip", null))
+                .thenReturn(heldObject(zipWithBody("v2")))
+                .thenReturn(heldObject(zipWithBody("v3")));
+        Map<String, Object> request = baseRequest(name);
+        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "old.zip"));
+        LambdaFunction latest = syncingService.createFunction(REGION, request);
+
+        // Holding the function's lock keeps the old source's sync queued behind it.
+        synchronized (syncingService.lockForConcurrencyOp(latest.getFunctionArn())) {
+            syncingService.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "old.zip"));
+            syncingService.updateFunctionCode(REGION, name, Map.of("S3Bucket", "code-bucket", "S3Key", "new.zip"));
+            syncingService.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "new.zip"));
+            assertEquals("InProgress", syncingService.lastUpdateStatus(latest));
+        }
+
+        verify(warmPool, timeout(5000)).pushCodeUpdate(latest);
+        awaitLastUpdateStatus(syncingService, latest, "Successful");
+        verify(s3, times(1)).openObject("code-bucket", "old.zip", null);
+        verify(s3, times(2)).openObject("code-bucket", "new.zip", null);
+        assertEquals("v3", Files.readString(Path.of(latest.getCodeLocalPath()).resolve("index.js")).trim());
+    }
+
+    @Test
+    void failedReactiveSync_reportsFailedUntilTheNextCodeUpdate() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        WarmPool warmPool = mock(WarmPool.class);
+        LambdaService syncingService = s3BackedService(s3, warmPool, new ZipExtractor(),
+                reactiveS3SyncConfig(true, false));
+        LambdaFunction latest = functionWhoseLastSyncFailed(syncingService, s3);
+
+        assertEquals("Failed", syncingService.lastUpdateStatus(latest));
+        assertEquals("Reactive S3 sync from s3://code-bucket/function.zip failed: The specified key does not exist.",
+                syncingService.lastUpdateStatusReason(latest));
+        verify(warmPool, never()).pushCodeUpdate(any());
+
+        syncingService.updateFunctionCode(REGION, latest.getFunctionName(), Map.of("ZipFile", zipWithBody("v2")));
+
+        assertEquals("Successful", syncingService.lastUpdateStatus(latest));
+        assertNull(syncingService.lastUpdateStatusReason(latest));
+    }
+
+    @Test
+    void failedReactiveSync_isClearedByAConfigurationUpdate() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        LambdaService syncingService = s3BackedService(s3, mock(WarmPool.class), new ZipExtractor(),
+                reactiveS3SyncConfig(true, false));
+        LambdaFunction latest = functionWhoseLastSyncFailed(syncingService, s3);
+
+        syncingService.updateFunctionConfiguration(REGION, latest.getFunctionName(),
+                Map.of("Environment", Map.of("Variables", Map.of("STAGE", "ci"))));
+
+        assertEquals("Successful", syncingService.lastUpdateStatus(latest));
+        assertNull(syncingService.lastUpdateStatusReason(latest));
+    }
+
+    /**
+     * A function deployed from {@code s3://code-bucket/function.zip} whose sync after the object was
+     * overwritten failed because the object had gone. {@code s3} is the mock {@code service} reads.
+     */
+    private LambdaFunction functionWhoseLastSyncFailed(LambdaService service, S3Service s3)
+            throws Exception {
+        when(s3.openObject("code-bucket", "function.zip", null))
+                .thenReturn(heldObject(zipWithBody("v1")))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
+        Map<String, Object> request = baseRequest("reactive-failed-" + UUID.randomUUID());
+        request.put("Code", Map.of("S3Bucket", "code-bucket", "S3Key", "function.zip"));
+        LambdaFunction latest = service.createFunction(REGION, request);
+        service.onS3ObjectUpdated(new S3ObjectUpdatedEvent("code-bucket", "function.zip"));
+        return latest;
+    }
+
+    private static EmulatorConfig reactiveS3SyncConfig(boolean enabled, boolean async) {
+        EmulatorConfig cfg = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig svc = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambdaCfg = mock(EmulatorConfig.LambdaServiceConfig.class);
+        EmulatorConfig.LambdaServiceConfig.ReactiveS3Sync sync =
+                mock(EmulatorConfig.LambdaServiceConfig.ReactiveS3Sync.class);
+        when(cfg.services()).thenReturn(svc);
+        when(svc.lambda()).thenReturn(lambdaCfg);
+        when(lambdaCfg.reactiveS3Sync()).thenReturn(sync);
+        when(lambdaCfg.defaultTimeoutSeconds()).thenReturn(3);
+        when(lambdaCfg.defaultMemoryMb()).thenReturn(128);
+        when(lambdaCfg.zipMaxEntries()).thenReturn(ZipExtractor.DEFAULT_MAX_ENTRIES);
+        when(lambdaCfg.executor()).thenReturn("docker");
+        when(sync.enabled()).thenReturn(enabled);
+        when(sync.async()).thenReturn(async);
+        return cfg;
+    }
+
+    private static void awaitLastUpdateStatus(LambdaService service, LambdaFunction fn, String expected)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!expected.equals(service.lastUpdateStatus(fn)) && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(expected, service.lastUpdateStatus(fn));
     }
 
     @Test
@@ -2847,6 +3092,28 @@ class LambdaServiceTest {
         assertEquals("ValidationException", error.getErrorCode());
         assertEquals("1 validation error detected: Value 'v1' at 'functionVersion' failed to satisfy constraint: "
                 + "Member must satisfy regular expression pattern: (\\$LATEST(\\.PUBLISHED)?|[0-9]+)", error.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"$LATEST", "2"})
+    void updateAliasValidatesProvisionedCapacityBeforeMutatingItsStoredFields(String targetVersion) {
+        WarmPool warmPool = mock(WarmPool.class);
+        LambdaService guarded = s3BackedService(null, warmPool, new ZipExtractor());
+        LambdaFunction fn = guarded.createFunction(REGION, baseRequest("alias-capacity-fn"));
+        LambdaAlias alias = guarded.createAlias(REGION, fn.getFunctionName(), "live", "1", "original", null);
+        AwsException failure = new AwsException("InvalidParameterValueException",
+                "Provisioned Concurrency Configs cannot be applied to unpublished function versions.", 400);
+        doAnswer(invocation -> {
+            assertTrue(Thread.holdsLock(guarded.lockForConcurrencyOp(fn.getFunctionArn())));
+            throw failure;
+        }).when(warmPool).validateProvisionedAliasUpdate(fn, "live", targetVersion);
+
+        assertSame(failure, assertThrows(AwsException.class, () -> guarded.updateAlias(REGION,
+                fn.getFunctionName(), "live", targetVersion, "changed", Map.of("2", 0.1))));
+        assertSame(alias, guarded.getAlias(REGION, fn.getFunctionName(), "live"));
+        assertEquals("1", alias.getFunctionVersion());
+        assertEquals("original", alias.getDescription());
+        assertTrue(alias.getRoutingConfig() == null || alias.getRoutingConfig().isEmpty());
     }
 
     @Test

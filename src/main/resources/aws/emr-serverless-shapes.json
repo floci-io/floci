@@ -1,0 +1,959 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_emr_serverless_shapes.py",
+    "botocore": "botocore 1.43.113 (installed package)"
+  },
+  "operations": {
+    "CancelJobRun": "CancelJobRunRequest",
+    "CreateApplication": "CreateApplicationRequest",
+    "DeleteApplication": "DeleteApplicationRequest",
+    "GetApplication": "GetApplicationRequest",
+    "GetDashboardForJobRun": "GetDashboardForJobRunRequest",
+    "GetJobRun": "GetJobRunRequest",
+    "GetResourceDashboard": "GetResourceDashboardRequest",
+    "GetSession": "GetSessionRequest",
+    "GetSessionEndpoint": "GetSessionEndpointRequest",
+    "ListApplications": "ListApplicationsRequest",
+    "ListJobRunAttempts": "ListJobRunAttemptsRequest",
+    "ListJobRuns": "ListJobRunsRequest",
+    "ListSessions": "ListSessionsRequest",
+    "ListTagsForResource": "ListTagsForResourceRequest",
+    "StartApplication": "StartApplicationRequest",
+    "StartJobRun": "StartJobRunRequest",
+    "StartSession": "StartSessionRequest",
+    "StopApplication": "StopApplicationRequest",
+    "TagResource": "TagResourceRequest",
+    "TerminateSession": "TerminateSessionRequest",
+    "UntagResource": "UntagResourceRequest",
+    "UpdateApplication": "UpdateApplicationRequest"
+  },
+  "shapes": {
+    "Application": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "name": "ApplicationName",
+        "arn": "ApplicationArn",
+        "releaseLabel": "ReleaseLabel",
+        "type": "EngineType",
+        "state": "ApplicationState",
+        "stateDetails": "String256",
+        "initialCapacity": "InitialCapacityConfigMap",
+        "maximumCapacity": "MaximumAllowedResources",
+        "createdAt": "Date",
+        "updatedAt": "Date",
+        "tags": "TagMap",
+        "autoStartConfiguration": "AutoStartConfig",
+        "autoStopConfiguration": "AutoStopConfig",
+        "networkConfiguration": "NetworkConfiguration",
+        "architecture": "Architecture",
+        "imageConfiguration": "ImageConfiguration",
+        "workerTypeSpecifications": "WorkerTypeSpecificationMap",
+        "runtimeConfiguration": "ConfigurationList",
+        "monitoringConfiguration": "MonitoringConfiguration",
+        "diskEncryptionConfiguration": "DiskEncryptionConfiguration",
+        "interactiveConfiguration": "InteractiveConfiguration",
+        "schedulerConfiguration": "SchedulerConfiguration",
+        "identityCenterConfiguration": "IdentityCenterConfiguration",
+        "jobLevelCostAllocationConfiguration": "JobLevelCostAllocationConfiguration"
+      }
+    },
+    "ApplicationArn": {
+      "type": "string"
+    },
+    "ApplicationId": {
+      "type": "string"
+    },
+    "ApplicationList": {
+      "type": "list",
+      "member": "ApplicationSummary"
+    },
+    "ApplicationName": {
+      "type": "string"
+    },
+    "ApplicationState": {
+      "type": "string"
+    },
+    "ApplicationSummary": {
+      "type": "structure",
+      "members": {
+        "id": "ApplicationId",
+        "name": "ApplicationName",
+        "arn": "ApplicationArn",
+        "releaseLabel": "ReleaseLabel",
+        "type": "EngineType",
+        "state": "ApplicationState",
+        "stateDetails": "String256",
+        "createdAt": "Date",
+        "updatedAt": "Date",
+        "architecture": "Architecture"
+      }
+    },
+    "Architecture": {
+      "type": "string"
+    },
+    "Arn": {
+      "type": "string"
+    },
+    "AttemptNumber": {
+      "type": "integer"
+    },
+    "AutoStartConfig": {
+      "type": "structure",
+      "members": {
+        "enabled": "Boolean"
+      }
+    },
+    "AutoStopConfig": {
+      "type": "structure",
+      "members": {
+        "enabled": "Boolean",
+        "idleTimeoutMinutes": "AutoStopConfigIdleTimeoutMinutesInteger"
+      }
+    },
+    "AutoStopConfigIdleTimeoutMinutesInteger": {
+      "type": "integer"
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "CancelJobRunRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "CancelJobRunResponse": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "jobRunId": "JobRunId"
+      }
+    },
+    "ClientToken": {
+      "type": "string"
+    },
+    "CloudWatchLoggingConfiguration": {
+      "type": "structure",
+      "members": {
+        "enabled": "Boolean",
+        "logGroupName": "LogGroupName",
+        "logStreamNamePrefix": "LogStreamNamePrefix",
+        "encryptionKeyArn": "EncryptionKeyArn",
+        "logTypes": "LogTypeMap"
+      }
+    },
+    "Configuration": {
+      "type": "structure",
+      "members": {
+        "classification": "String1024",
+        "properties": "SensitivePropertiesMap",
+        "configurations": "ConfigurationList"
+      }
+    },
+    "ConfigurationList": {
+      "type": "list",
+      "member": "Configuration"
+    },
+    "ConfigurationOverrides": {
+      "type": "structure",
+      "members": {
+        "applicationConfiguration": "ConfigurationList",
+        "monitoringConfiguration": "MonitoringConfiguration",
+        "diskEncryptionConfiguration": "DiskEncryptionConfiguration"
+      }
+    },
+    "ConfigurationPropertyValue": {
+      "type": "string"
+    },
+    "CpuSize": {
+      "type": "string"
+    },
+    "CreateApplicationRequest": {
+      "type": "structure",
+      "members": {
+        "name": "ApplicationName",
+        "releaseLabel": "ReleaseLabel",
+        "type": "EngineType",
+        "clientToken": "ClientToken",
+        "initialCapacity": "InitialCapacityConfigMap",
+        "maximumCapacity": "MaximumAllowedResources",
+        "tags": "TagMap",
+        "autoStartConfiguration": "AutoStartConfig",
+        "autoStopConfiguration": "AutoStopConfig",
+        "networkConfiguration": "NetworkConfiguration",
+        "architecture": "Architecture",
+        "imageConfiguration": "ImageConfigurationInput",
+        "workerTypeSpecifications": "WorkerTypeSpecificationInputMap",
+        "runtimeConfiguration": "ConfigurationList",
+        "monitoringConfiguration": "MonitoringConfiguration",
+        "diskEncryptionConfiguration": "DiskEncryptionConfiguration",
+        "interactiveConfiguration": "InteractiveConfiguration",
+        "schedulerConfiguration": "SchedulerConfiguration",
+        "identityCenterConfiguration": "IdentityCenterConfigurationInput",
+        "jobLevelCostAllocationConfiguration": "JobLevelCostAllocationConfiguration"
+      }
+    },
+    "CreateApplicationResponse": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "name": "ApplicationName",
+        "arn": "ApplicationArn"
+      }
+    },
+    "Date": {
+      "type": "timestamp"
+    },
+    "DeleteApplicationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteApplicationResponse": {
+      "type": "structure",
+      "members": {}
+    },
+    "DiskEncryptionConfiguration": {
+      "type": "structure",
+      "members": {
+        "encryptionContext": "EncryptionContext",
+        "encryptionKeyArn": "EncryptionKeyArn"
+      }
+    },
+    "DiskSize": {
+      "type": "string"
+    },
+    "DiskType": {
+      "type": "string"
+    },
+    "Double": {
+      "type": "double"
+    },
+    "Duration": {
+      "type": "long"
+    },
+    "EncryptionContext": {
+      "type": "map",
+      "value": "EncryptionContextValue"
+    },
+    "EncryptionContextValue": {
+      "type": "string"
+    },
+    "EncryptionKeyArn": {
+      "type": "string"
+    },
+    "EndpointUrl": {
+      "type": "string"
+    },
+    "EngineType": {
+      "type": "string"
+    },
+    "EntryPointArgument": {
+      "type": "string"
+    },
+    "EntryPointArguments": {
+      "type": "list",
+      "member": "EntryPointArgument"
+    },
+    "EntryPointPath": {
+      "type": "string"
+    },
+    "GetApplicationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetApplicationResponse": {
+      "type": "structure",
+      "members": {
+        "application": "Application"
+      }
+    },
+    "GetDashboardForJobRunRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetDashboardForJobRunResponse": {
+      "type": "structure",
+      "members": {
+        "url": "Url"
+      }
+    },
+    "GetJobRunRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetJobRunResponse": {
+      "type": "structure",
+      "members": {
+        "jobRun": "JobRun"
+      }
+    },
+    "GetResourceDashboardRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetResourceDashboardResponse": {
+      "type": "structure",
+      "members": {
+        "url": "Url"
+      }
+    },
+    "GetSessionEndpointRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetSessionEndpointResponse": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "sessionId": "SessionId",
+        "endpoint": "EndpointUrl",
+        "authToken": "SessionAuthToken",
+        "authTokenExpiresAt": "Date"
+      }
+    },
+    "GetSessionRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "GetSessionResponse": {
+      "type": "structure",
+      "members": {
+        "session": "Session"
+      }
+    },
+    "Hive": {
+      "type": "structure",
+      "members": {
+        "query": "Query",
+        "initQueryFile": "InitScriptPath",
+        "parameters": "HiveCliParameters"
+      }
+    },
+    "HiveCliParameters": {
+      "type": "string"
+    },
+    "IAMRoleArn": {
+      "type": "string"
+    },
+    "IdentityCenterApplicationArn": {
+      "type": "string"
+    },
+    "IdentityCenterConfiguration": {
+      "type": "structure",
+      "members": {
+        "identityCenterInstanceArn": "IdentityCenterInstanceArn",
+        "identityCenterApplicationArn": "IdentityCenterApplicationArn",
+        "userBackgroundSessionsEnabled": "Boolean"
+      }
+    },
+    "IdentityCenterConfigurationInput": {
+      "type": "structure",
+      "members": {
+        "identityCenterInstanceArn": "IdentityCenterInstanceArn",
+        "userBackgroundSessionsEnabled": "Boolean"
+      }
+    },
+    "IdentityCenterInstanceArn": {
+      "type": "string"
+    },
+    "ImageConfiguration": {
+      "type": "structure",
+      "members": {
+        "imageUri": "ImageUri",
+        "resolvedImageDigest": "ImageDigest",
+        "applicationLevelDigestResolution": "Boolean"
+      }
+    },
+    "ImageConfigurationInput": {
+      "type": "structure",
+      "members": {
+        "imageUri": "ImageUri",
+        "applicationLevelDigestResolution": "Boolean"
+      }
+    },
+    "ImageDigest": {
+      "type": "string"
+    },
+    "ImageUri": {
+      "type": "string"
+    },
+    "InitScriptPath": {
+      "type": "string"
+    },
+    "InitialCapacityConfig": {
+      "type": "structure",
+      "members": {
+        "workerCount": "WorkerCounts",
+        "workerConfiguration": "WorkerResourceConfig"
+      }
+    },
+    "InitialCapacityConfigMap": {
+      "type": "map",
+      "value": "InitialCapacityConfig"
+    },
+    "Integer": {
+      "type": "integer"
+    },
+    "InteractiveConfiguration": {
+      "type": "structure",
+      "members": {
+        "studioEnabled": "Boolean",
+        "livyEndpointEnabled": "Boolean",
+        "sessionEnabled": "Boolean"
+      }
+    },
+    "JobArn": {
+      "type": "string"
+    },
+    "JobDriver": {
+      "type": "structure",
+      "members": {
+        "sparkSubmit": "SparkSubmit",
+        "hive": "Hive"
+      }
+    },
+    "JobLevelCostAllocationConfiguration": {
+      "type": "structure",
+      "members": {
+        "enabled": "Boolean"
+      }
+    },
+    "JobRun": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "jobRunId": "JobRunId",
+        "name": "String256",
+        "arn": "JobArn",
+        "createdBy": "RequestIdentityUserArn",
+        "createdAt": "Date",
+        "updatedAt": "Date",
+        "executionRole": "IAMRoleArn",
+        "executionIamPolicy": "JobRunExecutionIamPolicy",
+        "state": "JobRunState",
+        "stateDetails": "String256",
+        "releaseLabel": "ReleaseLabel",
+        "configurationOverrides": "ConfigurationOverrides",
+        "jobDriver": "JobDriver",
+        "tags": "TagMap",
+        "totalResourceUtilization": "TotalResourceUtilization",
+        "networkConfiguration": "NetworkConfiguration",
+        "totalExecutionDurationSeconds": "Integer",
+        "executionTimeoutMinutes": "Duration",
+        "billedResourceUtilization": "ResourceUtilization",
+        "mode": "JobRunMode",
+        "retryPolicy": "RetryPolicy",
+        "attempt": "AttemptNumber",
+        "attemptCreatedAt": "Date",
+        "attemptUpdatedAt": "Date",
+        "startedAt": "Date",
+        "endedAt": "Date",
+        "queuedDurationMilliseconds": "Long",
+        "imageConfiguration": "ImageConfiguration",
+        "workerTypeSpecifications": "WorkerTypeSpecificationMap"
+      }
+    },
+    "JobRunAttemptSummary": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "id": "JobRunId",
+        "name": "String256",
+        "mode": "JobRunMode",
+        "arn": "JobArn",
+        "createdBy": "RequestIdentityUserArn",
+        "jobCreatedAt": "Date",
+        "createdAt": "Date",
+        "updatedAt": "Date",
+        "executionRole": "IAMRoleArn",
+        "state": "JobRunState",
+        "stateDetails": "String256",
+        "releaseLabel": "ReleaseLabel",
+        "type": "JobRunType",
+        "attempt": "AttemptNumber"
+      }
+    },
+    "JobRunAttempts": {
+      "type": "list",
+      "member": "JobRunAttemptSummary"
+    },
+    "JobRunExecutionIamPolicy": {
+      "type": "structure",
+      "members": {
+        "policy": "PolicyDocument",
+        "policyArns": "PolicyArnList"
+      }
+    },
+    "JobRunId": {
+      "type": "string"
+    },
+    "JobRunMode": {
+      "type": "string"
+    },
+    "JobRunState": {
+      "type": "string"
+    },
+    "JobRunSummary": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "id": "JobRunId",
+        "name": "String256",
+        "mode": "JobRunMode",
+        "arn": "JobArn",
+        "createdBy": "RequestIdentityUserArn",
+        "createdAt": "Date",
+        "updatedAt": "Date",
+        "executionRole": "IAMRoleArn",
+        "state": "JobRunState",
+        "stateDetails": "String256",
+        "releaseLabel": "ReleaseLabel",
+        "type": "JobRunType",
+        "attempt": "AttemptNumber",
+        "attemptCreatedAt": "Date",
+        "attemptUpdatedAt": "Date"
+      }
+    },
+    "JobRunType": {
+      "type": "string"
+    },
+    "JobRuns": {
+      "type": "list",
+      "member": "JobRunSummary"
+    },
+    "ListApplicationsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListApplicationsResponse": {
+      "type": "structure",
+      "members": {
+        "applications": "ApplicationList",
+        "nextToken": "NextToken"
+      }
+    },
+    "ListJobRunAttemptsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListJobRunAttemptsResponse": {
+      "type": "structure",
+      "members": {
+        "jobRunAttempts": "JobRunAttempts",
+        "nextToken": "NextToken"
+      }
+    },
+    "ListJobRunsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListJobRunsResponse": {
+      "type": "structure",
+      "members": {
+        "jobRuns": "JobRuns",
+        "nextToken": "NextToken"
+      }
+    },
+    "ListSessionsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListSessionsResponse": {
+      "type": "structure",
+      "members": {
+        "sessions": "Sessions",
+        "nextToken": "NextToken"
+      }
+    },
+    "ListTagsForResourceRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListTagsForResourceResponse": {
+      "type": "structure",
+      "members": {
+        "tags": "TagMap"
+      }
+    },
+    "LogGroupName": {
+      "type": "string"
+    },
+    "LogStreamNamePrefix": {
+      "type": "string"
+    },
+    "LogTypeList": {
+      "type": "list",
+      "member": "LogTypeString"
+    },
+    "LogTypeMap": {
+      "type": "map",
+      "value": "LogTypeList"
+    },
+    "LogTypeString": {
+      "type": "string"
+    },
+    "Long": {
+      "type": "long"
+    },
+    "ManagedPersistenceMonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "enabled": "Boolean",
+        "encryptionKeyArn": "EncryptionKeyArn"
+      }
+    },
+    "MaximumAllowedResources": {
+      "type": "structure",
+      "members": {
+        "cpu": "CpuSize",
+        "memory": "MemorySize",
+        "disk": "DiskSize"
+      }
+    },
+    "MemorySize": {
+      "type": "string"
+    },
+    "MonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "s3MonitoringConfiguration": "S3MonitoringConfiguration",
+        "managedPersistenceMonitoringConfiguration": "ManagedPersistenceMonitoringConfiguration",
+        "cloudWatchLoggingConfiguration": "CloudWatchLoggingConfiguration",
+        "prometheusMonitoringConfiguration": "PrometheusMonitoringConfiguration"
+      }
+    },
+    "NetworkConfiguration": {
+      "type": "structure",
+      "members": {
+        "subnetIds": "SubnetIds",
+        "securityGroupIds": "SecurityGroupIds"
+      }
+    },
+    "NextToken": {
+      "type": "string"
+    },
+    "PolicyArnList": {
+      "type": "list",
+      "member": "Arn"
+    },
+    "PolicyDocument": {
+      "type": "string"
+    },
+    "PrometheusMonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "remoteWriteUrl": "PrometheusUrlString"
+      }
+    },
+    "PrometheusUrlString": {
+      "type": "string"
+    },
+    "Query": {
+      "type": "string"
+    },
+    "ReleaseLabel": {
+      "type": "string"
+    },
+    "RequestIdentityUserArn": {
+      "type": "string"
+    },
+    "ResourceUtilization": {
+      "type": "structure",
+      "members": {
+        "vCPUHour": "Double",
+        "memoryGBHour": "Double",
+        "storageGBHour": "Double"
+      }
+    },
+    "RetryPolicy": {
+      "type": "structure",
+      "members": {
+        "maxAttempts": "AttemptNumber",
+        "maxFailedAttemptsPerHour": "RetryPolicyMaxFailedAttemptsPerHourInteger"
+      }
+    },
+    "RetryPolicyMaxFailedAttemptsPerHourInteger": {
+      "type": "integer"
+    },
+    "S3MonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "logUri": "UriString",
+        "encryptionKeyArn": "EncryptionKeyArn"
+      }
+    },
+    "SchedulerConfiguration": {
+      "type": "structure",
+      "members": {
+        "queueTimeoutMinutes": "Integer",
+        "maxConcurrentRuns": "Integer"
+      }
+    },
+    "SecurityGroupIds": {
+      "type": "list",
+      "member": "SecurityGroupString"
+    },
+    "SecurityGroupString": {
+      "type": "string"
+    },
+    "SensitivePropertiesMap": {
+      "type": "map",
+      "value": "ConfigurationPropertyValue"
+    },
+    "Session": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "sessionId": "SessionId",
+        "arn": "SessionArn",
+        "name": "String256",
+        "state": "SessionState",
+        "stateDetails": "String1024",
+        "releaseLabel": "ReleaseLabel",
+        "executionRoleArn": "IAMRoleArn",
+        "createdBy": "RequestIdentityUserArn",
+        "createdAt": "Date",
+        "updatedAt": "Date",
+        "startedAt": "Date",
+        "endedAt": "Date",
+        "idleSince": "Date",
+        "configurationOverrides": "SessionConfigurationOverrides",
+        "networkConfiguration": "NetworkConfiguration",
+        "idleTimeoutMinutes": "Duration",
+        "tags": "TagMap",
+        "totalResourceUtilization": "TotalResourceUtilization",
+        "billedResourceUtilization": "ResourceUtilization",
+        "totalExecutionDurationSeconds": "Long"
+      }
+    },
+    "SessionArn": {
+      "type": "string"
+    },
+    "SessionAuthToken": {
+      "type": "string"
+    },
+    "SessionConfigurationOverrides": {
+      "type": "structure",
+      "members": {
+        "runtimeConfiguration": "ConfigurationList"
+      }
+    },
+    "SessionId": {
+      "type": "string"
+    },
+    "SessionState": {
+      "type": "string"
+    },
+    "SessionSummary": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "sessionId": "SessionId",
+        "arn": "SessionArn",
+        "name": "String256",
+        "state": "SessionState",
+        "stateDetails": "String1024",
+        "releaseLabel": "ReleaseLabel",
+        "executionRoleArn": "IAMRoleArn",
+        "createdBy": "RequestIdentityUserArn",
+        "createdAt": "Date",
+        "updatedAt": "Date"
+      }
+    },
+    "Sessions": {
+      "type": "list",
+      "member": "SessionSummary"
+    },
+    "SparkSubmit": {
+      "type": "structure",
+      "members": {
+        "entryPoint": "EntryPointPath",
+        "entryPointArguments": "EntryPointArguments",
+        "sparkSubmitParameters": "SparkSubmitParameters"
+      }
+    },
+    "SparkSubmitParameters": {
+      "type": "string"
+    },
+    "StartApplicationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "StartApplicationResponse": {
+      "type": "structure",
+      "members": {}
+    },
+    "StartJobRunRequest": {
+      "type": "structure",
+      "members": {
+        "clientToken": "ClientToken",
+        "executionRoleArn": "IAMRoleArn",
+        "executionIamPolicy": "JobRunExecutionIamPolicy",
+        "jobDriver": "JobDriver",
+        "configurationOverrides": "ConfigurationOverrides",
+        "tags": "TagMap",
+        "executionTimeoutMinutes": "Duration",
+        "name": "String256",
+        "mode": "JobRunMode",
+        "retryPolicy": "RetryPolicy"
+      }
+    },
+    "StartJobRunResponse": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "jobRunId": "JobRunId",
+        "arn": "JobArn"
+      }
+    },
+    "StartSessionRequest": {
+      "type": "structure",
+      "members": {
+        "clientToken": "ClientToken",
+        "executionRoleArn": "IAMRoleArn",
+        "configurationOverrides": "SessionConfigurationOverrides",
+        "tags": "TagMap",
+        "idleTimeoutMinutes": "Duration",
+        "name": "String256"
+      }
+    },
+    "StartSessionResponse": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "sessionId": "SessionId",
+        "arn": "SessionArn"
+      }
+    },
+    "StopApplicationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "StopApplicationResponse": {
+      "type": "structure",
+      "members": {}
+    },
+    "String1024": {
+      "type": "string"
+    },
+    "String256": {
+      "type": "string"
+    },
+    "SubnetIds": {
+      "type": "list",
+      "member": "SubnetString"
+    },
+    "SubnetString": {
+      "type": "string"
+    },
+    "TagMap": {
+      "type": "map",
+      "value": "TagValue"
+    },
+    "TagResourceRequest": {
+      "type": "structure",
+      "members": {
+        "tags": "TagMap"
+      }
+    },
+    "TagResourceResponse": {
+      "type": "structure",
+      "members": {}
+    },
+    "TagValue": {
+      "type": "string"
+    },
+    "TerminateSessionRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "TerminateSessionResponse": {
+      "type": "structure",
+      "members": {
+        "applicationId": "ApplicationId",
+        "sessionId": "SessionId"
+      }
+    },
+    "TotalResourceUtilization": {
+      "type": "structure",
+      "members": {
+        "vCPUHour": "Double",
+        "memoryGBHour": "Double",
+        "storageGBHour": "Double"
+      }
+    },
+    "UntagResourceRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "UntagResourceResponse": {
+      "type": "structure",
+      "members": {}
+    },
+    "UpdateApplicationRequest": {
+      "type": "structure",
+      "members": {
+        "clientToken": "ClientToken",
+        "initialCapacity": "InitialCapacityConfigMap",
+        "maximumCapacity": "MaximumAllowedResources",
+        "autoStartConfiguration": "AutoStartConfig",
+        "autoStopConfiguration": "AutoStopConfig",
+        "networkConfiguration": "NetworkConfiguration",
+        "architecture": "Architecture",
+        "imageConfiguration": "ImageConfigurationInput",
+        "workerTypeSpecifications": "WorkerTypeSpecificationInputMap",
+        "interactiveConfiguration": "InteractiveConfiguration",
+        "releaseLabel": "ReleaseLabel",
+        "runtimeConfiguration": "ConfigurationList",
+        "monitoringConfiguration": "MonitoringConfiguration",
+        "diskEncryptionConfiguration": "DiskEncryptionConfiguration",
+        "schedulerConfiguration": "SchedulerConfiguration",
+        "identityCenterConfiguration": "IdentityCenterConfigurationInput",
+        "jobLevelCostAllocationConfiguration": "JobLevelCostAllocationConfiguration"
+      }
+    },
+    "UpdateApplicationResponse": {
+      "type": "structure",
+      "members": {
+        "application": "Application"
+      }
+    },
+    "UriString": {
+      "type": "string"
+    },
+    "Url": {
+      "type": "string"
+    },
+    "WorkerCounts": {
+      "type": "long"
+    },
+    "WorkerResourceConfig": {
+      "type": "structure",
+      "members": {
+        "cpu": "CpuSize",
+        "memory": "MemorySize",
+        "disk": "DiskSize",
+        "diskType": "DiskType"
+      }
+    },
+    "WorkerTypeSpecification": {
+      "type": "structure",
+      "members": {
+        "imageConfiguration": "ImageConfiguration"
+      }
+    },
+    "WorkerTypeSpecificationInput": {
+      "type": "structure",
+      "members": {
+        "imageConfiguration": "ImageConfigurationInput"
+      }
+    },
+    "WorkerTypeSpecificationInputMap": {
+      "type": "map",
+      "value": "WorkerTypeSpecificationInput"
+    },
+    "WorkerTypeSpecificationMap": {
+      "type": "map",
+      "value": "WorkerTypeSpecification"
+    }
+  }
+}

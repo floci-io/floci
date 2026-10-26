@@ -55,10 +55,12 @@ class SecurityGroupFirewallManagerTest {
                 embeddedDnsServer);
 
         assertThrows(IllegalStateException.class, () -> manager.createNamespace("ec2", "i-1", "000000000000",
-                "us-east-1", Optional.empty(), Map.of()));
+                "us-east-1", Optional.empty(), Map.of(8080, 0), Map.of(), "127.0.0.1"));
 
         ArgumentCaptor<ContainerSpec> helper = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).createAndStart(helper.capture());
+        assertEquals(Map.of(8080, 0), helper.getValue().portBindings());
+        assertEquals(Map.of(8080, "127.0.0.1"), helper.getValue().portBindingHostIps());
         assertTrue(helper.getValue().dnsServers().contains("172.18.0.2"), "the helper uses Floci's DNS");
         assertTrue(helper.getValue().extraHosts().contains("host.docker.internal:host-gateway"),
                 "the helper resolves host.docker.internal");

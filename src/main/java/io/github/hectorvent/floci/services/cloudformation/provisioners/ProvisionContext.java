@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 
@@ -120,6 +121,26 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
             return null;
         }
         return engine.resolve(props.get(name));
+    }
+
+    /**
+     * Resolves an optional integer property, or null when it is absent or explicitly null. One an
+     * intrinsic resolves to nothing stays null too: the engine resolves {@code AWS::NoValue} to blank,
+     * which is how the common {@code Fn::If [cond, value, AWS::NoValue]} drops a property. A value
+     * written into the template has to be an integer, a literal blank included, as CloudFormation's
+     * schema type check requires. A {@code Ref} to a parameter whose value is blank cannot be told
+     * apart from {@code AWS::NoValue} here, so it stays null as well.
+     */
+    public Integer resolveOptionalInt(JsonNode props, String name) {
+        String value = resolveOptional(props, name);
+        if (value == null || (value.isBlank() && !props.get(name).isTextual())) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError", "Value of property " + name + " must be an integer.", 400);
+        }
     }
 
     /**

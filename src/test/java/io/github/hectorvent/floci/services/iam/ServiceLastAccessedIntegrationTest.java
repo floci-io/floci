@@ -39,6 +39,9 @@ class ServiceLastAccessedIntegrationTest {
         return given().header("Authorization", IAM_AUTH).formParam("Action", action);
     }
 
+    /** Well formed at the 36 characters jobIDType declares, and carried by no job. */
+    private static final String UNKNOWN_JOB_ID = "00000000-0000-4000-8000-000000000000";
+
     private static String suffix() {
         return Long.toString(System.nanoTime(), 36);
     }
@@ -1090,9 +1093,8 @@ class ServiceLastAccessedIntegrationTest {
      */
     @Test
     void theRemainingEnumReportsAlsoOpenWithTheCount() {
-        // GenerateServiceLastAccessedDetails: the Granularity enum. The ARN has to resolve first,
-        // because the handler looks the target up before the granularity is checked, so a
-        // nonexistent one answers NoSuchEntity and never reaches it.
+        // GenerateServiceLastAccessedDetails: the Granularity enum, on an ARN that resolves. The
+        // enum is read ahead of that lookup now, which the test below pins on an ARN that does not.
         String arn = createUser("granularity-" + suffix());
         iam("GenerateServiceLastAccessedDetails")
             .formParam("Arn", arn)
@@ -1108,5 +1110,80 @@ class ServiceLastAccessedIntegrationTest {
             .body(containsString("ValidationError"))
             .body(containsString("1 validation error detected"))
             .body(containsString("Member must satisfy enum value set"));
+    }
+
+    /**
+     * The ordering DRIFT-3 was about. {@code jobIDType} is a fixed 36 characters, so an id of the
+     * wrong length is a bad request on its shape and never reaches the store: AWS validates ahead
+     * of the operation, and the store it would have been looked up in is behind it.
+     */
+    @Test
+    void aJobIdOutsideItsDeclaredLengthIsRefusedBeforeTheLookup() {
+        iam("GetServiceLastAccessedDetails").formParam("JobId", "nope")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value at 'jobId' failed to satisfy constraint: "
+                            + "Member must have length equal to 36"))
+            .body(not(containsString("NoSuchEntity")));
+    }
+
+    /** The same shape on the entities reader, which pages the same job through the same id. */
+    @Test
+    void theWithEntitiesReaderHoldsTheSameJobIdShape() {
+        iam("GetServiceLastAccessedDetailsWithEntities")
+            .formParam("JobId", "nope").formParam("ServiceNamespace", "s3")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", containsString("Member must have length equal to 36"));
+    }
+
+    /**
+     * The other half of the ordering: a well-formed id that no job carries, with a {@code MaxItems}
+     * the model refuses. The paging members are read before the job is looked up, so this is the
+     * 400 AWS answers rather than the 404 the missing job would otherwise produce first.
+     */
+    @Test
+    void anUnknownJobWithAMalformedMaxItemsIsAValidationErrorRatherThanNotFound() {
+        iam("GetServiceLastAccessedDetails")
+            .formParam("JobId", UNKNOWN_JOB_ID).formParam("MaxItems", "0")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", containsString("at 'maxItems'"))
+            .body(not(containsString("NoSuchEntity")));
+
+        // And a marker that is no marker at all, on the same unknown job.
+        iam("GetServiceLastAccessedDetails")
+            .formParam("JobId", UNKNOWN_JOB_ID).formParam("Marker", "not-a-marker")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+
+        // The unknown job on its own is still a 404, so the ordering is what changed and not the
+        // answer for a request that breaks nothing.
+        iam("GetServiceLastAccessedDetails").formParam("JobId", UNKNOWN_JOB_ID)
+        .when().post("/").then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+    }
+
+    /**
+     * The same rule on the generator: {@code Granularity} is a declared enum, so it is refused
+     * whether or not the ARN names anything. It used to be read inside the generate, behind the
+     * lookup that resolves the target.
+     */
+    @Test
+    void theGranularityIsRefusedWhateverTheArnNames() {
+        iam("GenerateServiceLastAccessedDetails")
+            .formParam("Arn", "arn:aws:iam::000000000000:user/laa-nobody-" + suffix())
+            .formParam("Granularity", "HOURLY")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", containsString("Member must satisfy enum value set"))
+            .body(not(containsString("NoSuchEntity")));
     }
 }

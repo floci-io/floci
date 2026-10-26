@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.kinesis;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -47,6 +48,32 @@ class KinesisListStreamsTest {
         assertFalse(empty.path("HasMoreStreams").asBoolean());
         assertEquals(List.of("alpha", "mu", "zeta"), names(list(Map.of("Limit", 3))));
         assertFalse(list(Map.of("Limit", 3)).path("HasMoreStreams").asBoolean());
+    }
+
+    @Test
+    void returnsAStreamSummaryForEveryNameOnThePage() {
+        create("alpha", REGION);
+        create("mu", REGION);
+
+        ObjectNode page = list(Map.of("Limit", 1));
+
+        assertEquals(1, page.path("StreamSummaries").size());
+        JsonNode summary = page.path("StreamSummaries").get(0);
+        assertEquals("alpha", summary.path("StreamName").asText());
+        assertEquals("arn:aws:kinesis:us-east-1:000000000000:stream/alpha", summary.path("StreamARN").asText());
+        assertTrue(summary.path("StreamStatus").isTextual());
+        assertEquals("PROVISIONED", summary.path("StreamModeDetails").path("StreamMode").asText());
+        assertTrue(summary.path("StreamCreationTimestamp").isNumber());
+    }
+
+    // AWS sends StreamSummaries even when there are no streams. The CLI's text output writes a
+    // None line for each paginator result key missing from the page.
+    @Test
+    void returnsEmptyStreamSummariesForAnEmptyRegion() {
+        ObjectNode page = list(Map.of());
+
+        assertTrue(page.path("StreamSummaries").isArray());
+        assertTrue(page.path("StreamSummaries").isEmpty());
     }
 
     @ParameterizedTest

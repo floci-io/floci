@@ -83,6 +83,24 @@ class Ec2NetworkInterfaceIntegrationTest {
         org.junit.jupiter.api.Assertions.assertTrue(securityGroupId.startsWith("sg-"));
     }
 
+    @Test
+    @Order(18)
+    void missingSecurityGroupReturnsTheNetworkInterfaceError() {
+        String missingGroup = "sg-0f294603eafad4835";
+        given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", subnetId)
+            .formParam("SecurityGroupId.1", missingGroup)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidSecurityGroupID.NotFound"))
+            .body("Response.Errors.Error.Message",
+                    equalTo("The securityGroup ID '" + missingGroup + "' does not exist"));
+    }
+
     // ─── Create ────────────────────────────────────────────────────────────────
 
     @Test

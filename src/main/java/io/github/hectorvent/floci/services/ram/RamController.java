@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -14,6 +15,7 @@ import io.github.hectorvent.floci.services.iam.ServiceLinkedRoles;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
+import io.github.hectorvent.floci.services.ram.model.ResourceShareAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
 import io.github.hectorvent.floci.services.ram.model.SharePermission;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
@@ -194,6 +196,49 @@ public class RamController {
         ObjectNode response = objectMapper.createObjectNode();
         response.set("resourceShareAssociations",
                 associationArray(updated, resourceArns, principals, "DISASSOCIATED"));
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/getresourceshareassociations")
+    @Consumes(MediaType.WILDCARD)
+    public Response getResourceShareAssociations(String body) {
+        JsonNode request = readTree(body);
+        JsonNode maxResultsNode = request.get("maxResults");
+        Integer maxResults = null;
+        if (maxResultsNode != null && !maxResultsNode.isNull()) {
+            if (!maxResultsNode.isIntegralNumber() || !maxResultsNode.canConvertToInt()) {
+                throw new AwsException("InvalidParameterException", "maxResults must be an integer.", 400);
+            }
+            maxResults = maxResultsNode.intValue();
+        }
+        PaginatedResult<ResourceShareAssociation> page = service.getResourceShareAssociations(
+                regionResolver.getAccountId(), regionResolver.getRegion(),
+                request.path("associationType").asText(),
+                request.hasNonNull("associationStatus") ? request.path("associationStatus").asText() : null,
+                stringList(request.path("resourceShareArns")),
+                request.hasNonNull("resourceArn") ? request.path("resourceArn").asText() : null,
+                request.hasNonNull("principal") ? request.path("principal").asText() : null,
+                maxResults, request.hasNonNull("nextToken") ? request.path("nextToken").asText() : null);
+
+        ArrayNode associations = objectMapper.createArrayNode();
+        for (ResourceShareAssociation association : page.items()) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("resourceShareArn", association.resourceShareArn());
+            node.put("resourceShareName", association.resourceShareName());
+            node.put("associatedEntity", association.associatedEntity());
+            node.put("associationType", association.associationType());
+            node.put("status", "ASSOCIATED");
+            node.put("creationTime", association.creationTime().toEpochMilli() / 1000.0);
+            node.put("lastUpdatedTime", association.lastUpdatedTime().toEpochMilli() / 1000.0);
+            node.put("external", false);
+            associations.add(node);
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourceShareAssociations", associations);
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 

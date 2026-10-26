@@ -65,6 +65,26 @@ public class CodeArtifactMavenController {
         }
         MavenRequestScope scope = requireScope(headers, domain, repository);
         Optional<String[]> coordinate = parseNamespaceAndPackageName(gav);
+        // Raised by hectorvent's review: a real mvn deploy to a coordinate
+        // updatePackageVersionsStatus/disposePackageVersions left Archived or Disposed must be
+        // refused outright, the same way PublishPackageVersion already refuses it for the generic
+        // format, not accepted and then have forgetContainerBackedStatusOverride below silently
+        // un-block it afterward. Checked before the real write, not after; the version element is
+        // null for a bare maven-metadata.xml PUT (see this coordinate's own javadoc), which never
+        // represents a specific version to block either way. The returned revision (or null) is
+        // held onto below: raised by Greptile's review, a concurrent status change landing between
+        // this check and the clear below must not be erased by it (see
+        // CodeArtifactService#forgetContainerBackedStatusOverrideIfUnchanged's own javadoc).
+        String beforeRevision = null;
+        if (coordinate.filter(c -> c[2] != null).isPresent()) {
+            String[] c = coordinate.get();
+            try {
+                beforeRevision = service.requireContainerBackedVersionNotArchivedOrDisposed(scope.region(), domain,
+                        scope.owner(), repository, "maven", c[0], c[1], c[2]);
+            } catch (AwsException e) {
+                return Response.status(409).entity(e.getMessage()).build();
+            }
+        }
         // Snapshotted before the real write, not after: see
         // CodeArtifactService#currentContainerBackedPackageFence's own javadoc for why the order
         // matters.
@@ -74,17 +94,31 @@ public class CodeArtifactMavenController {
         if (outcome.wroteNewContent()) {
             coordinate.ifPresent(c -> service.recordContainerBackedAssetBytes(scope.region(), domain, scope.owner(),
                     repository, "maven", c[0], c[1], content.length, fenceSnapshot.get()));
+            // Found by Qodo review: a real mvn deploy to a coordinate updatePackageVersionsStatus/
+            // disposePackageVersions previously archived or disposed would still have its fresh
+            // content blocked by that stale override, since nothing before this cleared it for a
+            // native publish the way copyPackageVersions now does for its own overwrite path. The
+            // version element is null for a bare maven-metadata.xml PUT (see this coordinate's own
+            // javadoc), which never represents a specific version to clear an override for anyway.
+            // By this point the guard above has already refused an Archived/Disposed coordinate,
+            // so the only override left to clear here is Unlisted (or none), and only if it is
+            // still exactly what the guard above saw.
+            String beforeRevisionFinal = beforeRevision;
+            coordinate.filter(c -> c[2] != null).ifPresent(c -> service.forgetContainerBackedStatusOverrideIfUnchanged(
+                    scope.region(), domain, scope.owner(), repository, "maven", c[0], c[1], c[2],
+                    beforeRevisionFinal));
         }
         return Response.status(outcome.status()).build();
     }
 
     /**
      * Splits a GAV path ({@code <groupId-as-slashes>/<artifactId>/<version>/<filename>}, the real
-     * Maven repository layout) into CodeArtifact's Maven namespace (dot-joined groupId) and
-     * package name (artifactId), the inverse of what {@code ReposiliteSidecarClient}'s own
-     * namespace/packageName-aware methods already build. Only ever used for byte accounting, a
-     * side channel that must never fail a publish that would otherwise succeed, so a path with too
-     * few segments to be a well-formed GAV is reported as unknown rather than thrown.
+     * Maven repository layout) into CodeArtifact's Maven namespace (dot-joined groupId), package
+     * name (artifactId), and version: the inverse of what {@code ReposiliteSidecarClient}'s own
+     * namespace/packageName-aware methods already build. The namespace/packageName pair is used
+     * for byte accounting, a side channel that must never fail a publish that would otherwise
+     * succeed, so a path with too few segments to be a well-formed GAV is reported as unknown
+     * rather than thrown.
      *
      * <p>{@code maven-metadata.xml} (and its {@code .sha1}/{@code .md5}/{@code .sha256} checksum
      * siblings) needs its own rule, not the ordinary one below: every real {@code mvn deploy} also
@@ -94,23 +128,27 @@ public class CodeArtifactMavenController {
      * alone can't tell the two apart; the filename itself can, and already does, via
      * {@link #isMavenMetadataFile}. Once that is known, the artifactId is always the segment
      * directly before it, no version segment in between, so this takes one fewer trailing segment
-     * than the ordinary rule does. A versioned snapshot's own {@code .../<version>/
-     * maven-metadata.xml} is the one real path this still gets slightly wrong, reading the version
+     * than the ordinary rule does, and the returned version is {@code null} rather than guessed.
+     * A versioned snapshot's own {@code .../<version>/maven-metadata.xml} is the one real path
+     * this still gets slightly wrong for the namespace/packageName pair, reading the version
      * string itself as the package name instead of skipping over it; accepted rather than chased
-     * further, since this is a byte count summed at the domain level only (never read back by
-     * package), and this one rare case still adds its real byte count to the right total under a
-     * harmless, if misnamed, bucket nothing else will ever look up by that name.
+     * further, since that pair is only ever used for a byte count summed at the domain level
+     * (never read back by package), and this one rare case still adds its real byte count to the
+     * right total under a harmless, if misnamed, bucket nothing else will ever look up by that
+     * name. The version element has no such approximation to make: it is {@code null} exactly
+     * when there genuinely is no version in the path.
      */
     private static Optional<String[]> parseNamespaceAndPackageName(String gav) {
         String[] segments = gav.split("/");
-        int packageNameIndex = isMavenMetadataFile(segments[segments.length - 1])
-                ? segments.length - 2 : segments.length - 3;
+        boolean metadataFile = isMavenMetadataFile(segments[segments.length - 1]);
+        int packageNameIndex = metadataFile ? segments.length - 2 : segments.length - 3;
         if (packageNameIndex < 1) {
             return Optional.empty();
         }
         String packageName = segments[packageNameIndex];
         String namespace = String.join(".", Arrays.asList(segments).subList(0, packageNameIndex));
-        return Optional.of(new String[] {namespace, packageName});
+        String version = metadataFile ? null : segments[packageNameIndex + 1];
+        return Optional.of(new String[] {namespace, packageName, version});
     }
 
     private static boolean isMavenMetadataFile(String filename) {

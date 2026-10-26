@@ -78,6 +78,7 @@ import io.github.hectorvent.floci.services.ses.SesIdentityController;
 import io.github.hectorvent.floci.services.ses.SesImportJobController;
 import io.github.hectorvent.floci.services.ses.SesInsightsController;
 import io.github.hectorvent.floci.services.ses.SesMetricsController;
+import io.github.hectorvent.floci.services.ses.SesReputationEntityController;
 import io.github.hectorvent.floci.services.ses.SesSendController;
 import io.github.hectorvent.floci.services.ses.SesSuppressionController;
 import io.github.hectorvent.floci.services.ses.SesTagController;
@@ -268,7 +269,7 @@ public class ResolvedServiceCatalog {
                         config.storage().services().cloudwatchmetrics().flushIntervalMs(), AwsNamespaces.CW, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY, ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("GraniteServiceVersion20100801."), Set.of("monitoring"),
-                        Set.of("GraniteServiceVersion20100801"), Set.of()),
+                        Set.of("GraniteServiceVersion20100801"), Set.of(), "CloudWatchVersion20130116."),
                 descriptor("secretsmanager", "secretsmanager", config.services().secretsmanager().enabled(), true,
                         "secretsmanager", storageMode(config.storage().services().secretsmanager().mode(), config.storage().mode()),
                         config.storage().services().secretsmanager().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -338,7 +339,7 @@ public class ResolvedServiceCatalog {
                                 SesDedicatedIpController.class, SesExportJobController.class,
                                 SesIdentityController.class,
                                 SesInsightsController.class, SesMetricsController.class,
-                                SesSendController.class,
+                                SesReputationEntityController.class, SesSendController.class,
                                 SesSuppressionController.class, SesTagController.class,
                                 SesTemplateController.class, SesImportJobController.class,
                                 SesTenantController.class)),

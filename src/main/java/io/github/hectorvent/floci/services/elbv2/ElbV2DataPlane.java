@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver.CertificateMaterial;
 import io.github.hectorvent.floci.core.common.Pem;
+import io.github.hectorvent.floci.core.common.tls.ReloadingKeyManager;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
@@ -31,9 +32,10 @@ import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.http.HttpVersion;
 import io.vertx.core.http.RequestOptions;
+import io.vertx.core.net.JdkSSLEngineOptions;
+import io.vertx.core.net.KeyCertOptions;
 import io.vertx.core.net.NetSocket;
 import io.vertx.core.net.PemKeyCertOptions;
-import io.vertx.core.net.SSLOptions;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -123,6 +125,7 @@ public class ElbV2DataPlane {
         private int depth;
         private int closing;
         private long generation;
+        private ReloadingKeyManager tlsKeyManager;
         private volatile RoutingView routing = new RoutingView(Map.of(), Map.of());
     }
 
@@ -476,9 +479,10 @@ public class ElbV2DataPlane {
                 .setHost("0.0.0.0")
                 .setPort(port);
         if (secure) {
+            state.tlsKeyManager = new ReloadingKeyManager(new ElbV2TlsKeyManager(vertx, tlsKeyCertOptions(port)));
             options.setSsl(true)
-                    .setSni(true)
-                    .setPemKeyCertOptions(tlsKeyCertOptions(port));
+                    .setSslEngineOptions(new JdkSSLEngineOptions())
+                    .setKeyCertOptions(KeyCertOptions.wrap(state.tlsKeyManager));
         }
         HttpServer server = vertx.createHttpServer(options);
         long generation = ++state.generation;
@@ -655,9 +659,15 @@ public class ElbV2DataPlane {
     }
 
     private void refreshTlsOptions(int port, HttpServer server) {
-        server.updateSSLOptions(new SSLOptions().setKeyCertOptions(tlsKeyCertOptions(port)), true)
-                .onFailure(err -> LOG.warnv("ELBv2 listener TLS certificates failed to refresh on {0}: {1}",
-                        String.valueOf(port), err.getMessage()));
+        PortState state = portStates.get(port);
+        if (state != null && servers.get(port) == server && state.tlsKeyManager != null) {
+            try {
+                state.tlsKeyManager.reload(new ElbV2TlsKeyManager(vertx, tlsKeyCertOptions(port)));
+            } catch (RuntimeException failure) {
+                LOG.warnv(failure, "ELBv2 listener TLS certificates failed to refresh on {0}: {1}",
+                        String.valueOf(port), failure.getMessage());
+            }
+        }
     }
 
     private void restartPortServer(int port) {

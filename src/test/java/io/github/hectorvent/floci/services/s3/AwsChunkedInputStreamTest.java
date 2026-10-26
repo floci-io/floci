@@ -18,8 +18,40 @@ class AwsChunkedInputStreamTest {
 
     @Test
     void decodesSignedChunksUpToTheFinalChunk() throws IOException {
-        assertEquals("hello world", decode("5;chunk-signature=abc\r\nhello\r\n6;chunk-signature=def\r\n world\r\n"
-                + "0;chunk-signature=ghi\r\n\r\n"));
+        String first = "a".repeat(8192);
+        assertEquals(first + " world", decode("2000;chunk-signature=abc\r\n" + first + "\r\n6;chunk-signature=def\r\n"
+                + " world\r\n0;chunk-signature=ghi\r\n\r\n"));
+    }
+
+    @Test
+    void aChunkBeforeTheLastUnder8KiBIsAnInvalidChunkSize() {
+        assertInvalidChunkSize("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+        assertInvalidChunkSize("5;chunk-signature=abc\r\nhello\r\n6;chunk-signature=def\r\n world\r\n"
+                + "0;chunk-signature=ghi\r\n\r\n");
+        assertInvalidChunkSize("1fff\r\n" + "a".repeat(8191) + "\r\n1\r\nb\r\n0\r\n\r\n");
+        assertInvalidChunkSize("2000\r\n" + "a".repeat(8192) + "\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+    }
+
+    @Test
+    void onlyTheLastChunkMayBeUnder8KiB() throws IOException {
+        String full = "a".repeat(8192);
+        assertEquals("hello", decode("5\r\nhello\r\n0\r\n\r\n"));
+        assertEquals(full, decode("2000\r\n" + full + "\r\n0\r\n\r\n"));
+        assertEquals(full + "b", decode("2000\r\n" + full + "\r\n1\r\nb\r\n0\r\n\r\n"));
+        assertEquals(full + full + "hello", decode("2000\r\n" + full + "\r\n2000\r\n" + full
+                + "\r\n5\r\nhello\r\n0\r\n\r\n"));
+    }
+
+    @Test
+    void readsTheTrailerAfterALastChunkUnder8KiB() throws IOException {
+        String full = "a".repeat(8192);
+        try (AwsChunkedInputStream in = new AwsChunkedInputStream(new ByteArrayInputStream(
+                ("2000\r\n" + full + "\r\n5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n\r\n")
+                        .getBytes(StandardCharsets.US_ASCII)),
+                ChecksumAlgorithm.CRC32)) {
+            assertEquals(full + "hello", new String(in.readAllBytes(), StandardCharsets.US_ASCII));
+            assertEquals("NhCmhg==", in.trailerChecksum());
+        }
     }
 
     @Test
@@ -128,6 +160,13 @@ class AwsChunkedInputStreamTest {
             assertEquals("IncompleteBody", error.getErrorCode(), body);
             assertEquals(400, error.getHttpStatus(), body);
         }
+    }
+
+    private static void assertInvalidChunkSize(String framed) {
+        AwsException error = assertThrows(AwsException.class, () -> decode(framed));
+        assertEquals("InvalidChunkSizeError", error.getErrorCode());
+        assertEquals("Only the last chunk is allowed to have a size less than 8192 bytes", error.getMessage());
+        assertEquals(403, error.getHttpStatus());
     }
 
     private static String decode(String framed) throws IOException {

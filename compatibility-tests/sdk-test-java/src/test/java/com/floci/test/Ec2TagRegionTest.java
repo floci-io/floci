@@ -1,5 +1,6 @@
 package com.floci.test;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
@@ -16,6 +17,7 @@ import software.amazon.awssdk.services.ec2.model.Tag;
 import software.amazon.awssdk.services.ec2.model.TagDescription;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -25,7 +27,9 @@ class Ec2TagRegionTest {
     @Test
     @DisplayName("DescribeTags lists only the tags of resources in the client's region")
     void describeTagsListsOnlyTheClientRegionsTags() {
-        Region other = otherRegionInThePartition();
+        Optional<Region> second = otherRegionInThePartition();
+        Assumptions.assumeTrue(second.isPresent(), () -> "no second region in partition " + TestFixtures.partition());
+        Region other = second.get();
         try (Ec2Client home = TestFixtures.ec2Client(); Ec2Client away = clientFor(other)) {
             String homeVpc = home.createVpc(CreateVpcRequest.builder().cidrBlock("10.92.0.0/16").build()).vpc().vpcId();
             String awayVpc = away.createVpc(CreateVpcRequest.builder().cidrBlock("10.93.0.0/16").build()).vpc().vpcId();
@@ -50,7 +54,7 @@ class Ec2TagRegionTest {
                 .tags().stream().map(TagDescription::resourceId).toList();
     }
 
-    private static Region otherRegionInThePartition() {
+    private static Optional<Region> otherRegionInThePartition() {
         Region home = TestFixtures.region();
         String partition = TestFixtures.partition();
         return Region.regions().stream()
@@ -60,8 +64,7 @@ class Ec2TagRegionTest {
                     return metadata != null && partition.equals(metadata.partition().id());
                 })
                 .sorted((a, b) -> a.id().compareTo(b.id()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("no second region in partition " + partition));
+                .findFirst();
     }
 
     private static Ec2Client clientFor(Region region) {

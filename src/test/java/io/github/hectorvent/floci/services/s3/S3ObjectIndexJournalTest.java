@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -13,6 +14,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -136,6 +139,35 @@ class S3ObjectIndexJournalTest {
     }
 
     @Test
+    void aTagUpdateOnAnArchivedNullVersionIsReplayedFromTheJournal() throws IOException {
+        Path directory = root.resolve("live");
+        Path afterCrash = root.resolve("after-crash");
+        StorageFactory first = newFactory(directory);
+        try {
+            S3Service s3 = newService(first, directory);
+            s3.createBucket(VERSIONED_BUCKET, REGION);
+            s3.putObject(VERSIONED_BUCKET, key(0), body(0), "text/plain", Map.of());
+            s3.putBucketVersioning(VERSIONED_BUCKET, "Enabled");
+            s3.putObject(VERSIONED_BUCKET, key(0), body(1), "text/plain", Map.of());
+            s3.putObjectTagging(VERSIONED_BUCKET, key(0), "null", Map.of("stage", "archived"));
+            copyAsLeftByAKill(directory, afterCrash);
+        } finally {
+            first.shutdownAll();
+        }
+
+        StorageFactory second = newFactory(afterCrash);
+        try {
+            S3Service reopened = newService(second, afterCrash);
+            assertEquals(Map.of("stage", "archived"),
+                    reopened.getObjectTagging(VERSIONED_BUCKET, key(0), "null"));
+            assertArrayEquals(body(1), reopened.getObject(VERSIONED_BUCKET, key(0)).getData());
+            assertArrayEquals(body(0), reopened.getObject(VERSIONED_BUCKET, key(0), "null").getData());
+        } finally {
+            second.shutdownAll();
+        }
+    }
+
+    @Test
     void aLegalHoldSetByVersionIdOnTheCurrentVersionIsReplayedUnderTheLatestKeyToo() throws IOException {
         Path directory = root.resolve("live");
         Path afterCrash = root.resolve("after-crash");
@@ -156,6 +188,54 @@ class S3ObjectIndexJournalTest {
         try {
             S3Service reopened = newService(second, afterCrash);
             assertEquals("ON", reopened.getObjectLegalHold(VERSIONED_BUCKET, key(0), null).getLegalHoldStatus());
+        } finally {
+            second.shutdownAll();
+        }
+    }
+
+    @Test
+    void archivedNullPromotionOrderSurvivesJournalReplay() throws IOException {
+        Path directory = root.resolve("live");
+        Path afterCrash = root.resolve("after-crash");
+        StorageFactory first = newFactory(directory);
+        try {
+            S3Service s3 = newService(first, directory);
+            s3.createBucket(VERSIONED_BUCKET, REGION);
+            s3.putBucketVersioning(VERSIONED_BUCKET, "Enabled");
+            s3.putObject(VERSIONED_BUCKET, key(0),
+                    "older numbered".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+            s3.putBucketVersioning(VERSIONED_BUCKET, "Suspended");
+            s3.putObject(VERSIONED_BUCKET, key(0),
+                    "newer null".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+            copyAsLeftByAKill(directory, afterCrash);
+        } finally {
+            first.shutdownAll();
+        }
+
+        StorageFactory second = newFactory(afterCrash);
+        try {
+            S3Service reopened = newService(second, afterCrash);
+            List<S3Object> restored = reopened.listObjectVersions(
+                    VERSIONED_BUCKET, key(0), 100, null).versions();
+            S3Object older = restored.stream()
+                    .filter(version -> version.getVersionId() != null)
+                    .findFirst()
+                    .orElseThrow();
+            S3Object newerNull = restored.stream()
+                    .filter(version -> version.getVersionId() == null)
+                    .findFirst()
+                    .orElseThrow();
+            assertTrue(older.getEventSequencer() != null && newerNull.getEventSequencer() != null,
+                    "initial PUT records must persist their write order before archival");
+            Instant tied = Instant.parse("2026-10-21T00:00:00Z");
+            older.setLastModified(tied);
+            newerNull.setLastModified(tied);
+            reopened.putBucketVersioning(VERSIONED_BUCKET, "Enabled");
+            String currentVersionId = reopened.putObject(VERSIONED_BUCKET, key(0),
+                    "current".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of()).getVersionId();
+            reopened.deleteObject(VERSIONED_BUCKET, key(0), currentVersionId);
+            assertArrayEquals("newer null".getBytes(StandardCharsets.UTF_8),
+                    reopened.getObject(VERSIONED_BUCKET, key(0)).getData());
         } finally {
             second.shutdownAll();
         }

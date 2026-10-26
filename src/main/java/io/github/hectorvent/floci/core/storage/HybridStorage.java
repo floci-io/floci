@@ -9,17 +9,13 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -32,11 +28,12 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
 
     private static final Logger LOG = Logger.getLogger(HybridStorage.class);
 
-    private final ConcurrentHashMap<K, V> store = new ConcurrentHashMap<>();
+    private volatile ConcurrentHashMap<K, V> store = new ConcurrentHashMap<>();
     private final Path filePath;
     private final ObjectMapper objectMapper;
     private final TypeReference<Map<K, V>> typeReference;
     private final ScheduledExecutorService scheduler;
+    private final Object flushLock = new Object();
     private final AtomicBoolean dirty = new AtomicBoolean(false);
 
     public HybridStorage(Path filePath, TypeReference<Map<K, V>> typeReference, long flushIntervalMs) {
@@ -47,17 +44,20 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
         this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         this.objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
 
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "hybrid-storage-flush");
-            t.setDaemon(true);
-            return t;
-        });
-        this.scheduler.scheduleAtFixedRate(this::flushIfDirty, flushIntervalMs, flushIntervalMs, TimeUnit.MILLISECONDS);
+        this.scheduler = StorageFiles.scheduleEvery("hybrid-storage-flush", flushIntervalMs, this::flushIfDirty);
     }
 
     @Override
-    public void put(K key, V value) {
+    public synchronized void put(K key, V value) {
         store.put(key, value);
+        dirty.set(true);
+    }
+
+    @Override
+    public synchronized void putAllAtomically(Map<K, V> entries) {
+        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
+        candidate.putAll(Map.copyOf(entries));
+        store = candidate;
         dirty.set(true);
     }
 
@@ -67,8 +67,19 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void delete(K key) {
+    public synchronized void delete(K key) {
         store.remove(key);
+        dirty.set(true);
+    }
+
+    @Override
+    public synchronized void deleteAllAtomically(Set<K> keys) {
+        if (keys.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
+        candidate.keySet().removeAll(Set.copyOf(keys));
+        store = candidate;
         dirty.set(true);
     }
 
@@ -82,7 +93,7 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
 
     @Override
     public Set<K> keys() {
-        return Collections.unmodifiableSet(store.keySet());
+        return Set.copyOf(store.keySet());
     }
 
     @Override
@@ -107,21 +118,13 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void clear() {
+    public synchronized void clear() {
         store.clear();
         dirty.set(true);
     }
 
     public void shutdown() {
-        scheduler.shutdown();
-        try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            scheduler.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
+        StorageFiles.stop(scheduler);
         flush();
     }
 
@@ -131,16 +134,16 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
         }
     }
 
-    private synchronized void persistToDisk() {
-        try {
-            Files.createDirectories(filePath.getParent());
-            Path tempFile = filePath.resolveSibling(filePath.getFileName() + ".tmp");
-            objectMapper.writeValue(tempFile.toFile(), store);
-            Files.move(tempFile, filePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            LOG.debugv("Flushed {0} entries to {1}", store.size(), filePath);
-        } catch (IOException e) {
-            LOG.errorv(e, "Failed to persist data to {0}", filePath);
-            dirty.set(true);
+    private void persistToDisk() {
+        synchronized (flushLock) {
+            Map<K, V> snapshot = store;
+            try {
+                StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), snapshot));
+                LOG.debugv("Flushed {0} entries to {1}", snapshot.size(), filePath);
+            } catch (IOException e) {
+                LOG.errorv(e, "Failed to persist data to {0}", filePath);
+                dirty.set(true);
+            }
         }
     }
 }

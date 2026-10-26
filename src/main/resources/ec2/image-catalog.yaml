@@ -26,6 +26,13 @@ images:
       - /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64
       - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
       - /aws/service/eks/optimized-ami/{k8s-version}/amazon-linux-2023/x86_64/standard/recommended/image_id
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/schema_version
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_name
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/os
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/ecs_agent_version
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/ecs_runtime_version
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
     name: al2023-ami-2023.0.20230315.0-kernel-6.1-x86_64
     description: Amazon Linux 2023 AMI
@@ -40,6 +47,13 @@ images:
       - /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64
       - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64
       - /aws/service/eks/optimized-ami/{k8s-version}/amazon-linux-2023/arm64/standard/recommended/image_id
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/schema_version
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_name
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/os
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/ecs_agent_version
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/ecs_runtime_version
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
     name: al2023-ami-2023.0.20230315.0-kernel-6.1-arm64
     description: Amazon Linux 2023 AMI
@@ -276,7 +290,7 @@ images:
     creationDate: "2026-01-01T00:00:00.000Z"
 
   - imageId: ami-rocky9
-    dockerImage: public.ecr.aws/docker/library/rockylinux:9
+    dockerImage: quay.io/rockylinux/rockylinux:9.6
     name: Rocky-9-EC2-Base-9.6-20260101.0.x86_64
     description: Rocky Linux 9
     ownerId: "792107900819"
@@ -284,7 +298,7 @@ images:
     creationDate: "2026-01-01T00:00:00.000Z"
 
   - imageId: ami-rocky10
-    dockerImage: quay.io/rockylinux/rockylinux:10
+    dockerImage: quay.io/rockylinux/rockylinux:10.0
     name: Rocky-10-EC2-Base-10.0-20260101.0.x86_64
     description: Rocky Linux 10
     ownerId: "792107900819"

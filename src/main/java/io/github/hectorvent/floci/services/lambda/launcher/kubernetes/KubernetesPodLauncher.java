@@ -229,6 +229,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             LOG.infov("Created pod {0} for function {1}", podName, fn.getFunctionName());
 
             awaitRunning(namespace, podName, fn.getFunctionName());
+            runtimeApiServer.markContainerStarted();
 
             ContainerHandle handle = new ContainerHandle(podName, fn.getFunctionName(),
                     runtimeApiServer, ContainerState.WARM, false);

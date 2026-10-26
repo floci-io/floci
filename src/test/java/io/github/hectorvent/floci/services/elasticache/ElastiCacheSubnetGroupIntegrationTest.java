@@ -257,4 +257,27 @@ class ElastiCacheSubnetGroupIntegrationTest {
             .statusCode(400)
             .body(containsString("Cache Subnet Group " + GROUP + " does not exist"));
     }
+
+    @Test
+    @Order(6)
+    void missingSubnetGroupTagMutationsUseTheAwsFaultCode() {
+        String arn = "arn:aws:elasticache:us-east-1:000000000000:subnetgroup:missing-tag-sng";
+
+        elasticache("AddTagsToResource")
+                .formParam("ResourceName", arn)
+                .formParam("Tags.Tag.1.Key", "env")
+                .formParam("Tags.Tag.1.Value", "test")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("CacheSubnetGroupNotFoundFault"));
+
+        elasticache("RemoveTagsFromResource")
+                .formParam("ResourceName", arn)
+                .formParam("TagKeys.member.1", "env")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("CacheSubnetGroupNotFoundFault"));
+    }
 }

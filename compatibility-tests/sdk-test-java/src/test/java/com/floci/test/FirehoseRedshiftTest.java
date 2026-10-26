@@ -151,7 +151,8 @@ class FirehoseRedshiftTest {
                 // The stream does not exist when creation failed.
             }
             try {
-                redshift.deleteCluster(DeleteClusterRequest.builder().clusterIdentifier(clusterId).build());
+                redshift.deleteCluster(DeleteClusterRequest.builder().clusterIdentifier(clusterId)
+                        .skipFinalClusterSnapshot(true).build());
             } catch (ClusterNotFoundException ignored) {
                 // The cluster does not exist when creation failed.
             }

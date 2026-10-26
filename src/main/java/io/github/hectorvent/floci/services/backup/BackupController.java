@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.backup.model.*;
 import jakarta.inject.Inject;
@@ -103,12 +105,18 @@ public class BackupController {
     @GET
     @Path("/backup-vaults/")
     public Response listBackupVaults(@Context HttpHeaders headers,
-                                      @QueryParam("vaultType") String byVaultType) {
+                                      @QueryParam("vaultType") String byVaultType,
+                                      @QueryParam("maxResults") String maxResults,
+                                      @QueryParam("nextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        List<BackupVault> vaults = service.listBackupVaults(region, byVaultType);
+        PaginatedResult<BackupVault> page = service.listBackupVaults(region, byVaultType,
+                Pagination.parseMaxResults(maxResults, "InvalidParameterValueException"), nextToken);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode list = out.putArray("BackupVaultList");
-        vaults.forEach(v -> list.add(vaultJson(v)));
+        page.items().forEach(v -> list.add(vaultJson(v)));
+        if (page.nextToken() != null) {
+            out.put("NextToken", page.nextToken());
+        }
         return Response.ok(out).build();
     }
 

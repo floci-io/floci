@@ -6,9 +6,17 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
+import io.github.hectorvent.floci.services.dsql.DsqlPrincipals;
 import io.github.hectorvent.floci.services.dsql.model.DsqlCluster;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
+import io.github.hectorvent.floci.services.iam.RequestPrincipal;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyProviders;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import jakarta.annotation.PreDestroy;
@@ -53,9 +61,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * eu-west-1, 2026-10-16): the password is a SigV4 token for the endpoint's host, {@code admin}
  * signs {@code DbConnectAdmin} and every other role {@code DbConnect}, a token is taken up to 5
  * seconds past its expiry, and a role other than {@code admin} logs in only for an IAM role that
- * {@code AWS IAM GRANT} mapped to it. Every refusal is the same {@code access denied}, with a hint
- * only where DSQL gives one. DSQL lets clients in while a cluster is still CREATING; Floci's
- * clusters are CREATING only while their database starts, and serve once it answers.
+ * {@code AWS IAM GRANT} mapped to it. With IAM enforcement on, the caller's policies and the
+ * cluster's resource-based policy have to let it connect. Every refusal is the same
+ * {@code access denied}, with a hint only where DSQL gives one. DSQL lets clients in while a
+ * cluster is still CREATING; Floci's clusters are CREATING only while their database starts, and
+ * serve once it answers.
  */
 @ApplicationScoped
 public class DsqlEndpoint {
@@ -71,6 +81,8 @@ public class DsqlEndpoint {
     private final IamService iamService;
     private final IamPolicyEvaluator policyEvaluator;
     private final Instance<ScpProvider> scpProvider;
+    private final Instance<ResourcePolicyProvider> resourcePolicyProviders;
+    private final DsqlPrincipals principals;
     private final SigV4RequestValidator validator;
     private final boolean enforcement;
     private final int configuredPort;
@@ -112,12 +124,15 @@ public class DsqlEndpoint {
 
     @Inject
     public DsqlEndpoint(DsqlTlsCertificates certificates, IamService iamService, IamPolicyEvaluator policyEvaluator,
-                        Instance<ScpProvider> scpProvider, EmulatorConfig config, Clock clock) {
+                        Instance<ScpProvider> scpProvider, Instance<ResourcePolicyProvider> resourcePolicyProviders,
+                        DsqlPrincipals principals, EmulatorConfig config, Clock clock) {
         this.clock = clock;
         this.certificates = certificates;
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
         this.scpProvider = scpProvider;
+        this.resourcePolicyProviders = resourcePolicyProviders;
+        this.principals = principals;
         this.validator = new SigV4RequestValidator(iamService);
         this.enforcement = config.services().iam().enforcementEnabled();
         this.configuredPort = config.services().dsql().port();
@@ -275,11 +290,12 @@ public class DsqlEndpoint {
     }
 
     /**
-     * Whether {@code token} lets {@code user} in, checked in the order DSQL reports: the cluster
-     * the client named as its TLS server, the action the user needs, the token's expiry, then its
-     * signature and, for a role other than {@code admin}, the IAM role mapped to it.
+     * Whether {@code token} lets {@code user} in from {@code sourceIp}, checked in the order DSQL
+     * reports: the cluster the client named as its TLS server, the action the user needs, the
+     * token's expiry, then its signature, the policies with IAM enforcement on and, for a role other
+     * than {@code admin}, the IAM role mapped to it.
      */
-    Admission admit(String token, String user, String serverName) {
+    Admission admit(String token, String user, String serverName, String sourceIp) {
         URI uri;
         try {
             uri = URI.create("https://" + token);
@@ -331,16 +347,16 @@ public class DsqlEndpoint {
         }
         // The endpoint runs outside any request: the caller's identity and policies are read in the
         // cluster's account, as the enforcement filter reads them in the request's.
-        String principal = RequestScopes.callAs(route.accountId(), route.region(), () -> {
-            if (enforcement && !allowedByIam(accessKeyId, "dsql:" + needed, route)) {
-                return null;
-            }
-            return iamService.resolvePrincipalArn(accessKeyId).orElseGet(() -> AwsArnUtils.Arn.global(
-                    AwsRegions.partitionFor(route.region()), "iam", route.accountId(), "root").toString());
+        Admission identified = RequestScopes.callAs(route.accountId(), route.region(), () -> {
+            Admission refused = enforcement ? refusedByIam(accessKeyId, "dsql:" + needed, route, sourceIp) : null;
+            return refused != null ? refused : new Admission(true, null, null, route,
+                    iamService.resolvePrincipalArn(accessKeyId).orElseGet(() -> AwsArnUtils.Arn.global(
+                            AwsRegions.partitionFor(route.region()), "iam", route.accountId(), "root").toString()));
         });
-        if (principal == null) {
-            return Admission.refused(null);
+        if (!identified.allowed()) {
+            return identified;
         }
+        String principal = identified.principalArn();
         if (!ADMIN.equals(user)) {
             try {
                 if (!mapped(route.backend(), principal, user)) {
@@ -374,22 +390,37 @@ public class DsqlEndpoint {
     }
 
     /**
-     * Whether the caller's policies let it {@code action} the cluster, under its organization's
-     * service control policies as the enforcement filter applies them. A known credential with no
-     * policies to evaluate is let through, as the filter lets it.
+     * The refusal DSQL gives unless the caller's policies, under its organization's service control
+     * policies, and the cluster's resource-based policy let it {@code action} the cluster, or null when
+     * they do. DSQL evaluates the cluster's policy on connect, with the client's address as
+     * {@code aws:SourceIp}, and hints only at an explicit Deny in it (measured). A known credential
+     * with no policies to evaluate is let through, as the enforcement filter lets it.
      */
-    private boolean allowedByIam(String accessKeyId, String action, Route route) {
+    private Admission refusedByIam(String accessKeyId, String action, Route route, String sourceIp) {
         CallerContext caller = iamService.resolveCallerContext(accessKeyId);
         if (caller == null) {
-            return true;
+            return null;
         }
         List<List<String>> scpLevels = scpProvider.isResolvable()
                 ? scpProvider.get().effectiveScpLevels(route.accountId()) : null;
         if (scpLevels != null) {
             caller = caller.withScpLevels(scpLevels);
         }
-        return policyEvaluator.simulatePrincipalPolicy(caller, action, route.arn(), Map.of())
-                == IamPolicyEvaluator.SimulationDecision.ALLOWED;
+        CallerArns arns = principals.callerOf(accessKeyId);
+        List<String> clusterPolicies = ResourcePolicyProviders.policiesFor(resourcePolicyProviders, "dsql",
+                route.arn()).stream().map(ResourcePolicyProvider.ResourcePolicy::policyDocument).toList();
+        Map<String, List<String>> context = principals.policyContext(arns, route.arn(), route.region(),
+                Map.of("aws:SourceIp", List.of(sourceIp)));
+        ResourcePolicyDecision clusterPolicy = policyEvaluator.evaluateResourcePolicyFor(clusterPolicies,
+                RequestPrincipal.caller(arns), action, route.arn(), context);
+        if (policyEvaluator.evaluateResolvedResourcePolicy(caller, clusterPolicy,
+                ResourceAccountRelationship.SAME_ACCOUNT, action, route.arn(), context) == Decision.ALLOW) {
+            return null;
+        }
+        return Admission.refused(clusterPolicy == ResourcePolicyDecision.EXPLICIT_DENY
+                ? DsqlPrincipals.notAuthorized(arns.callerArn(), action, route.arn(),
+                        DsqlPrincipals.EXPLICIT_RESOURCE_DENY)
+                : null);
     }
 
     /**

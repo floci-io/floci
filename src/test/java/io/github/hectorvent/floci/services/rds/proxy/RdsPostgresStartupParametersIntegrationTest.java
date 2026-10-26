@@ -1,9 +1,7 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
-import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import io.quarkus.test.junit.QuarkusTest;
-import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -16,11 +14,12 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.util.Properties;
 
-import static io.github.hectorvent.floci.testing.RdsRequests.rds;
+import static io.github.hectorvent.floci.testing.RdsRequests.assumeDocker;
+import static io.github.hectorvent.floci.testing.RdsRequests.createPostgresInstance;
+import static io.github.hectorvent.floci.testing.RdsRequests.deleteInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The parameters a client puts in its PostgreSQL StartupMessage reach the instance through the
@@ -35,32 +34,15 @@ class RdsPostgresStartupParametersIntegrationTest {
     private static final String MASTER_USER = "master";
     private static final String MASTER_PASSWORD = "Master123!";
 
-    @Inject
-    DockerClient dockerClient;
-
     @BeforeEach
-    void checkDocker() {
-        try {
-            dockerClient.pingCmd().exec();
-        } catch (Exception e) {
-            assumeTrue(false, "Docker is not available: " + e.getMessage());
-        }
+    void checkDocker() throws InterruptedException {
+        assumeDocker();
     }
 
     @Test
     void clientStartupParametersApplyToTheSession() throws Exception {
         String dbId = "startup-params-" + Long.toString(System.nanoTime(), 36);
-        int port = rds("CreateDBInstance")
-                .formParam("DBInstanceIdentifier", dbId)
-                .formParam("Engine", "postgres")
-                .formParam("MasterUsername", MASTER_USER)
-                .formParam("MasterUserPassword", MASTER_PASSWORD)
-                .formParam("DBName", "appdb")
-                .formParam("AllocatedStorage", "20")
-                .formParam("DBInstanceClass", "db.t3.micro")
-        .when().post("/").then().statusCode(200)
-                .extract().xmlPath()
-                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+        int port = createPostgresInstance(dbId, MASTER_USER, MASTER_PASSWORD, false);
         try {
             Properties properties = new Properties();
             properties.setProperty("user", MASTER_USER);
@@ -76,17 +58,14 @@ class RdsPostgresStartupParametersIntegrationTest {
                 assertThat(show(connection, "application_name"), equalTo("floci-startup-params"));
             }
         } finally {
-            rds("DeleteDBInstance")
-                    .formParam("DBInstanceIdentifier", dbId)
-                    .formParam("SkipFinalSnapshot", "true")
-            .when().post("/");
+            deleteInstance(dbId);
         }
     }
 
     @Test
     void clientStartupParametersApplyToAnIamSessionAsTheTokenRole() throws Exception {
         String dbId = "startup-params-iam-" + Long.toString(System.nanoTime(), 36);
-        int port = createIamInstance(dbId);
+        int port = createPostgresInstance(dbId, MASTER_USER, MASTER_PASSWORD, true);
         try {
             asMaster(port,
                     "CREATE ROLE app_user LOGIN",
@@ -113,7 +92,7 @@ class RdsPostgresStartupParametersIntegrationTest {
     @Test
     void anIamSessionCannotTakeTheMasterIdentityThroughStartupParameters() throws Exception {
         String dbId = "startup-params-iam-escalation-" + Long.toString(System.nanoTime(), 36);
-        int port = createIamInstance(dbId);
+        int port = createPostgresInstance(dbId, MASTER_USER, MASTER_PASSWORD, true);
         try {
             asMaster(port, "CREATE ROLE app_user LOGIN", "GRANT rds_iam TO app_user");
 
@@ -135,7 +114,7 @@ class RdsPostgresStartupParametersIntegrationTest {
     @Test
     void anIamSessionLoadsTheTokenRolesOwnDefaultsBeneathTheClientsParameters() throws Exception {
         String dbId = "startup-params-iam-defaults-" + Long.toString(System.nanoTime(), 36);
-        int port = createIamInstance(dbId);
+        int port = createPostgresInstance(dbId, MASTER_USER, MASTER_PASSWORD, true);
         try {
             asMaster(port,
                     "CREATE ROLE reader NOLOGIN",
@@ -175,29 +154,6 @@ class RdsPostgresStartupParametersIntegrationTest {
         } finally {
             deleteInstance(dbId);
         }
-    }
-
-    /** Creates a PostgreSQL instance with IAM database authentication and returns its proxy port. */
-    private static int createIamInstance(String dbId) {
-        return rds("CreateDBInstance")
-                .formParam("DBInstanceIdentifier", dbId)
-                .formParam("Engine", "postgres")
-                .formParam("MasterUsername", MASTER_USER)
-                .formParam("MasterUserPassword", MASTER_PASSWORD)
-                .formParam("DBName", "appdb")
-                .formParam("AllocatedStorage", "20")
-                .formParam("DBInstanceClass", "db.t3.micro")
-                .formParam("EnableIAMDatabaseAuthentication", "true")
-        .when().post("/").then().statusCode(200)
-                .extract().xmlPath()
-                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
-    }
-
-    private static void deleteInstance(String dbId) {
-        rds("DeleteDBInstance")
-                .formParam("DBInstanceIdentifier", dbId)
-                .formParam("SkipFinalSnapshot", "true")
-        .when().post("/");
     }
 
     /** Runs {@code statements} in order as the master user. */

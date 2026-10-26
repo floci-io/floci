@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.marketplace.MarketplaceEntitlementCon
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsJsonHandler;
+import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
@@ -39,6 +40,9 @@ import java.util.zip.GZIPInputStream;
  * <p>
  * Currently supported services: DynamoDB (incl. Streams), SQS, SNS, Kinesis,
  * Step Functions, and CloudWatch Metrics.
+ * <p>
+ * Requests run on virtual threads, as in {@link AwsJsonController}, so a ReceiveMessage or
+ * GetActivityTask long poll does not hold one of the shared request workers while it waits.
  */
 @Path("/")
 public class AwsJsonCborController {
@@ -292,6 +296,7 @@ public class AwsJsonCborController {
     @Path("service/{serviceId}/operation/{operation}")
     @Consumes({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
     @Produces({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
+    @RunOnVirtualThread
     public Response handleSmithyRpcV2Cbor(
             @PathParam(RPC_V2_SERVICE_PARAMETER) String serviceId,
             @PathParam(RPC_V2_OPERATION_PARAMETER) String operation,
@@ -384,6 +389,7 @@ public class AwsJsonCborController {
     @POST
     @Consumes({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
     @Produces({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
+    @RunOnVirtualThread
     public Response handleCborRequest(
             @HeaderParam("X-Amz-Target") String target,
             @Context HttpHeaders httpHeaders,

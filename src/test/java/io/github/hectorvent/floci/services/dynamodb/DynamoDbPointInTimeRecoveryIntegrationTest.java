@@ -277,6 +277,12 @@ class DynamoDbPointInTimeRecoveryIntegrationTest {
                 "One or more parameter values were invalid: ARNs must start with 'arn:': abc");
         expectError(restore("\"SourceTableArn\": \"arn:aws:s3:::bucket\"" + rest), "ValidationException",
                 "One or more parameter values were invalid: Invalid resource Arn: arn:aws:s3:::bucket");
+        String emptyPartition = "arn::dynamodb:us-east-1:000000000000:table/" + table;
+        expectError(restore("\"SourceTableArn\": \"" + emptyPartition + "\"" + rest), "ValidationException",
+                "One or more parameter values were invalid: Partition must be non-empty: " + emptyPartition);
+        String otherPartition = "arn:aws-cn:dynamodb:cn-north-1:000000000000:table/" + table;
+        expectError(restore("\"SourceTableArn\": \"" + otherPartition + "\"" + rest), "ValidationException",
+                "One or more parameter values were invalid: Invalid resource Arn: " + otherPartition);
         expectError(restore("\"SourceTableArn\": \"arn:aws:dynamodb:us-east-1:000000000000:foo/bar\"" + rest),
                 "ValidationException", "One or more parameter values were invalid: sourceTableArn is not a valid ARN");
         expectError(restore("\"SourceTableArn\": \"" + TABLE_ARN_PREFIX + "ab\"" + rest), "ValidationException",
@@ -294,6 +300,10 @@ class DynamoDbPointInTimeRecoveryIntegrationTest {
                 + "\"TargetTableName\": \"PitrIT-never\", \"UseLatestRestorableTime\": true, "
                 + "\"SSESpecificationOverride\": {\"Enabled\": true, \"SSEType\": \"KMS\"}"),
                 "TableNotFoundException", "Table not found");
+        expectError(restore("\"SourceTableArn\": \"arn:aws:dynamodb:cn-north-1:000000000000:table/PitrIT-missing\", "
+                + "\"TargetTableName\": \"PitrIT-never\", \"UseLatestRestorableTime\": true, "
+                + "\"SSESpecificationOverride\": {\"Enabled\": true}"),
+                "ValidationException", "Invalid Request: Table ARN is invalid.");
     }
 
     @Test

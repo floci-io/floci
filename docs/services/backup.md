@@ -247,7 +247,12 @@ Actual backup is simulated — no data is read from or written to the referenced
 - Report plans (`CreateReportPlan`, `DescribeReportPlan`, etc.)
 - Framework operations (`CreateFramework`, etc.)
 - Legal holds
-- Pagination tokens on list operations
+- Pagination tokens on list operations other than `ListBackupVaults`
+
+`ListBackupVaults` accepts `maxResults` from 1 to 1000 and returns `NextToken` when
+more vaults remain. Pass it as `nextToken` with the same region and `vaultType`
+filter to continue. Floci uses vault-name order and a page size of 1000 when the
+size is omitted; AWS does not document a default order or page size.
 
 ## Examples
 

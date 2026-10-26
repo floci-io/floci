@@ -214,7 +214,7 @@ class RdsContainerManagerPostgresTest {
             // already stopped or gone
         }
         try {
-            dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+            dockerClient.removeContainerCmd(containerId).withForce(true).withRemoveVolumes(true).exec();
         } catch (DockerException ignored) {
             // already removed
         }

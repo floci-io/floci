@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lakeformation;
 
+import io.github.hectorvent.floci.core.common.AwsArnShapes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -93,11 +94,7 @@ public class LakeFormationService {
         try {
             AwsArnUtils.Arn parsed = AwsArnUtils.parse(roleArn);
             if (parsed.partition().isBlank()
-                    || !"iam".equals(parsed.service())
-                    || !parsed.region().isEmpty()
-                    || parsed.accountId().isBlank()
-                    || !parsed.resource().startsWith("role/")
-                    || parsed.resource().length() == "role/".length()
+                    || !AwsArnShapes.isIamRole(parsed)
                     || roleArn.chars().anyMatch(Character::isWhitespace)) {
                 throw new IllegalArgumentException("Invalid IAM role ARN");
             }

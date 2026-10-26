@@ -11,25 +11,29 @@ import java.util.Set;
 
 final class ExtendedQuerySession {
 
-    private final Map<String, CopyStatementParser.S3Statement> statements = new LinkedHashMap<>();
+    private final Map<String, PreparedSql> statements = new LinkedHashMap<>();
     private final Map<String, String> portals = new LinkedHashMap<>();
     private final List<JournalEntry> journal = new ArrayList<>();
     private long nextMutationId = 1;
 
     synchronized Mutation stageParse(String statementName, CopyStatementParser.S3Statement statement) {
-        Map<String, CopyStatementParser.S3Statement> statementsBefore = new LinkedHashMap<>(statements);
+        return stageParse(statementName, statement, null);
+    }
+
+    synchronized Mutation stageParse(String statementName, CopyStatementParser.S3Statement statement, String sql) {
+        Map<String, PreparedSql> statementsBefore = new LinkedHashMap<>(statements);
         Map<String, String> portalsBefore = new LinkedHashMap<>(portals);
-        if (statement == null) {
+        if (statement == null && sql == null) {
             statements.remove(statementName);
         } else {
-            statements.put(statementName, statement);
+            statements.put(statementName, new PreparedSql(statement, sql));
         }
         portals.entrySet().removeIf(entry -> entry.getValue().equals(statementName));
         return record(statementsBefore, portalsBefore);
     }
 
     synchronized Mutation stageBind(String portalName, String statementName) {
-        Map<String, CopyStatementParser.S3Statement> statementsBefore = new LinkedHashMap<>(statements);
+        Map<String, PreparedSql> statementsBefore = new LinkedHashMap<>(statements);
         Map<String, String> portalsBefore = new LinkedHashMap<>(portals);
         if (statements.containsKey(statementName)) {
             portals.put(portalName, statementName);
@@ -44,7 +48,7 @@ final class ExtendedQuerySession {
             throw new IllegalArgumentException("Close target type must be S or P");
         }
 
-        Map<String, CopyStatementParser.S3Statement> statementsBefore = new LinkedHashMap<>(statements);
+        Map<String, PreparedSql> statementsBefore = new LinkedHashMap<>(statements);
         Map<String, String> portalsBefore = new LinkedHashMap<>(portals);
         if (targetType == 'S') {
             statements.remove(name);
@@ -118,12 +122,16 @@ final class ExtendedQuerySession {
     }
 
     synchronized Optional<CopyStatementParser.S3Statement> statement(String statementName) {
-        return Optional.ofNullable(statements.get(statementName));
+        return Optional.ofNullable(statements.get(statementName)).map(PreparedSql::statement);
     }
 
     synchronized Optional<CopyStatementParser.S3Statement> portal(String portalName) {
         String statementName = portals.get(portalName);
-        return Optional.ofNullable(statementName).map(statements::get);
+        return Optional.ofNullable(statementName).map(statements::get).map(PreparedSql::statement);
+    }
+
+    synchronized Optional<String> portalSql(String portalName) {
+        return Optional.ofNullable(portals.get(portalName)).map(statements::get).map(PreparedSql::sql);
     }
 
     synchronized void clearPortals() {
@@ -160,7 +168,7 @@ final class ExtendedQuerySession {
      * entry's "before" or the live maps, keeps it a fixed historical fact: those two proxies go
      * stale once an earlier {@link #rejectFrom} has already run its own cascading portal cleanup.
      */
-    private Mutation record(Map<String, CopyStatementParser.S3Statement> statementsBefore,
+    private Mutation record(Map<String, PreparedSql> statementsBefore,
                             Map<String, String> portalsBefore) {
         Mutation mutation = new Mutation(nextMutationId++);
         journal.add(new JournalEntry(
@@ -181,11 +189,13 @@ final class ExtendedQuerySession {
     record Mutation(long id) {
     }
 
+    private record PreparedSql(CopyStatementParser.S3Statement statement, String sql) { }
+
     private record JournalEntry(
             Mutation mutation,
-            Map<String, CopyStatementParser.S3Statement> statementsBefore,
+            Map<String, PreparedSql> statementsBefore,
             Map<String, String> portalsBefore,
-            Map<String, CopyStatementParser.S3Statement> statementsAfter,
+            Map<String, PreparedSql> statementsAfter,
             Map<String, String> portalsAfter) {
     }
 }

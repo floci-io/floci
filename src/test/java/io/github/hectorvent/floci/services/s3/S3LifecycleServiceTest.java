@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -124,6 +125,24 @@ class S3LifecycleServiceTest {
 
         s3Service.applyLifecycleExpiration(Instant.now().plus(Duration.ofDays(3)));
         assertThat(versionIds("a.txt"), contains(v3.getVersionId(), v2.getVersionId()));
+    }
+
+    @Test
+    void noncurrentExpirationDeletesAnArchivedNullVersionWithoutChangingTheCurrentVersion() {
+        put("a.txt");
+        s3Service.putBucketVersioning(BUCKET, "Enabled");
+        S3Object current = put("a.txt");
+        lifecycle(rule("Enabled", "<Filter></Filter>",
+                "<NoncurrentVersionExpiration><NoncurrentDays>1</NoncurrentDays>"
+                        + "</NoncurrentVersionExpiration>"));
+
+        s3Service.applyLifecycleExpiration(Instant.now().plus(Duration.ofDays(3)));
+
+        assertThat(versionIds("a.txt"), contains(current.getVersionId()));
+        assertEquals("data", new String(s3Service.getObject(BUCKET, "a.txt").getData(), StandardCharsets.UTF_8));
+        AwsException missing = assertThrows(AwsException.class,
+                () -> s3Service.getObject(BUCKET, "a.txt", "null"));
+        assertEquals("NoSuchVersion", missing.getErrorCode());
     }
 
     @Test

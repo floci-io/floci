@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static io.github.hectorvent.floci.testing.DelegationRequests.entityArn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -37,6 +38,8 @@ class DelegationRequestIntegrationTest {
             + "/20261011/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=abc";
     private static final String TOPIC = "arn:aws:sns:us-east-1:000000000001:partner-notifications";
     private static final String TEMPLATE = "arn:aws:iam::partner:policy/template/example";
+    private static final String SUMMARY_RESULT =
+            "GetHumanReadableSummaryResponse.GetHumanReadableSummaryResult.";
     private static final String PARTNER_STS_AUTH = "AWS4-HMAC-SHA256 Credential=" + PARTNER
             + "/20261011/us-east-1/sts/aws4_request, SignedHeaders=host, Signature=abc";
     private static final String CUSTOMER_STS_AUTH = "AWS4-HMAC-SHA256 Credential=" + CUSTOMER
@@ -464,6 +467,133 @@ class DelegationRequestIntegrationTest {
                 .formParam("Version", "2011-06-15")
             .when().post("/").then().statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+    }
+
+    private static ValidatableResponse summarize(String authorization, String entityArn,
+                                                 String locale) {
+        RequestSpecification request = iam(authorization)
+                .formParam("Action", "GetHumanReadableSummary")
+                .formParam("Version", "2010-05-08")
+                .formParam("EntityArn", entityArn);
+        if (locale != null) {
+            request = request.formParam("Locale", locale);
+        }
+        return request.when().post("/").then();
+    }
+
+    @Test
+    void theSummaryComesBackAsMarkdownInTheLocaleItWasAskedFor() {
+        String id = createdId();
+
+        ValidatableResponse summary = summarize(PARTNER_AUTH, entityArn(PARTNER, id), "en")
+                .statusCode(200)
+                .body(SUMMARY_RESULT + "SummaryState", equalTo("AVAILABLE"))
+                .body(SUMMARY_RESULT + "Locale", equalTo("en"));
+
+        String content = summary.extract().path(SUMMARY_RESULT + "SummaryContent");
+        assertTrue(content.startsWith("# Delegation request " + id), content);
+        assertTrue(content.contains("Set up the integration"), content);
+        assertTrue(content.contains("Policy template `" + TEMPLATE + "`"), content);
+        assertTrue(content.contains("State `UNASSIGNED`"), content);
+    }
+
+    @Test
+    void anIndexedParameterValueThatCarriesNoValueIsNotSummarized() {
+        // The indices come off the keys the request carries, so a dotted sub-key makes an index
+        // exist with no value under it. Nothing is stored for that index and the summary says
+        // nothing about it either, rather than reading it back as a value.
+        String id = iam(PARTNER_AUTH)
+                .formParam("Action", "CreateDelegationRequest")
+                .formParam("Version", "2010-05-08")
+                .formParam("Description", "Set up the integration")
+                .formParam("NotificationChannel", TOPIC)
+                .formParam("RequestorWorkflowId", workflowId())
+                .formParam("SessionDuration", "3600")
+                .formParam("Permissions.PolicyTemplateArn", TEMPLATE)
+                .formParam("Permissions.Parameters.member.1.Name", "BucketName")
+                .formParam("Permissions.Parameters.member.1.Type", "string")
+                .formParam("Permissions.Parameters.member.1.Values.member.1.Nested", "ignored")
+            .when().post("/").then().statusCode(200)
+                .extract().path("CreateDelegationRequestResponse"
+                        + ".CreateDelegationRequestResult.DelegationRequestId");
+
+        String content = summarize(PARTNER_AUTH, entityArn(PARTNER, id), "en").statusCode(200)
+                .extract().path(SUMMARY_RESULT + "SummaryContent");
+
+        assertTrue(content.contains("- Parameter `BucketName` (string)"), content);
+        assertFalse(content.contains("null"), content);
+    }
+
+    @Test
+    void anEntityOfAnotherTypeIsAnsweredWithoutASummary() {
+        // The member is left out of the answer altogether: content is non-empty only if the state
+        // is AVAILABLE, and there is no summary of a user to give.
+        summarize(PARTNER_AUTH, "arn:aws:iam::" + PARTNER + ":user/admin", null).statusCode(200)
+                .body(SUMMARY_RESULT + "SummaryState", equalTo("NOT_SUPPORTED"))
+                .body(SUMMARY_RESULT + "Locale", equalTo("en"))
+                .body(not(containsString("<SummaryContent>")));
+    }
+
+    @Test
+    void aLocaleFlociDoesNotWriteIsAnsweredWithoutASummaryToo() {
+        String id = createdId();
+
+        summarize(PARTNER_AUTH, entityArn(PARTNER, id), "ja").statusCode(200)
+                .body(SUMMARY_RESULT + "SummaryState", equalTo("NOT_AVAILABLE"))
+                .body(SUMMARY_RESULT + "Locale", equalTo("ja"))
+                .body(not(containsString("<SummaryContent>")));
+    }
+
+    @Test
+    void theSummaryIsAsVisibleAsTheRequestItSummarizes() {
+        String id = createdId();
+        byId(CUSTOMER_AUTH, "AssociateDelegationRequest", id).statusCode(200);
+
+        // Claimed by the customer, so the partner that filed it can no longer read either the
+        // request or its summary, which is the rule GetDelegationRequest publishes.
+        summarize(PARTNER_AUTH, entityArn(PARTNER, id), null).statusCode(404)
+                .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+        summarize(CUSTOMER_AUTH, entityArn(PARTNER, id), null).statusCode(200)
+                .body(SUMMARY_RESULT + "SummaryState", equalTo("AVAILABLE"));
+    }
+
+    @Test
+    void anEntityArnNoRequestMatchesIsNoSuchEntityAndOneThatIsNoArnIsInvalidInput() {
+        summarize(PARTNER_AUTH, entityArn(PARTNER, "dr-0000000000000000"), null).statusCode(404)
+                .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+        summarize(PARTNER_AUTH, "delegation-request/dr-0123456789abcdef", null).statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+        summarize(PARTNER_AUTH, "arn:aws:iam::1:u", null).statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", containsString("entityArn"));
+    }
+
+    @Test
+    void theReleaseRefusesAnIdThatBreaksItsPatternAndNotOnlyAnAbsentOne() {
+        // The other half of the check above, and the one a regression could lose quietly: an id
+        // that arrived and cannot be a request id at all, rather than one that never arrived.
+        iam(CUSTOMER_AUTH)
+                .formParam("Action", "SendDelegationToken")
+                .formParam("Version", "2010-05-08")
+                .formParam("DelegationRequestId", "dr-0123456789abcdef!")
+            .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", containsString("delegationRequestId"));
+    }
+
+    @Test
+    void theRootApprovalCapHoldsOverTheWireToo() {
+        // The customer signs with its account id here, which names no IAM user, so this suite's
+        // approver is the account root: a request longer than four hours cannot be approved with
+        // it, which is the guide's rule rather than a local one.
+        String id = create(workflowId(), null, "18000").statusCode(200)
+                .extract().path("CreateDelegationRequestResponse"
+                        + ".CreateDelegationRequestResult.DelegationRequestId");
+        byId(CUSTOMER_AUTH, "AssociateDelegationRequest", id).statusCode(200);
+
+        byId(CUSTOMER_AUTH, "AcceptDelegationRequest", id).statusCode(403)
+                .body("ErrorResponse.Error.Code", equalTo("AccessDenied"))
+                .body("ErrorResponse.Error.Message", containsString("4 hours or less"));
     }
 
     @Test

@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.globalaccelerator;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -186,6 +188,19 @@ public class GlobalAcceleratorService {
 
     public List<Accelerator> listAccelerators() {
         return accelerators.scan(key -> true);
+    }
+
+    public PaginatedResult<Accelerator> listAccelerators(Integer maxResults, String nextToken) {
+        int limit = maxResults != null ? maxResults : 10;
+        if (limit < 1 || limit > 100) {
+            throw new AwsException("InvalidArgumentException", "MaxResults must be between 1 and 100", 400);
+        }
+        if (nextToken != null && nextToken.length() > 255) {
+            throw new AwsException("InvalidNextTokenException", "Invalid NextToken", 400);
+        }
+        String namespace = "ListAccelerators:" + regionResolver.getPartition() + ":" + regionResolver.getAccountId();
+        return Pagination.paginate(listAccelerators(), Accelerator::getAcceleratorArn, limit, nextToken, namespace,
+                token -> new AwsException("InvalidNextTokenException", "Invalid NextToken", 400));
     }
 
     public AcceleratorAttributes describeAcceleratorAttributes(String acceleratorArn) {

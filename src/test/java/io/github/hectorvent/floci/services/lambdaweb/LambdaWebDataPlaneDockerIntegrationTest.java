@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebEnvironmentManager.Environment;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -41,11 +42,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -103,6 +107,16 @@ class LambdaWebDataPlaneDockerIntegrationTest {
               if (req.url.startsWith('/status/')) {
                 res.writeHead(Number(req.url.split('/')[2]), {'x-app': 'yes'}); res.end('status body'); return;
               }
+              if (req.url.startsWith('/metadata')) {
+                const url = 'http://' + process.env.AWS_LAMBDA_METADATA_API + '/2026-01-15/metadata/execution-environment';
+                const auth = {headers: {authorization: 'Bearer ' + process.env.AWS_LAMBDA_METADATA_TOKEN}};
+                Promise.all([fetch(url, auth), fetch(url)]).then(async ([ok, refused]) => {
+                  res.end(JSON.stringify({status: ok.status, body: await ok.text(), refused: refused.status,
+                    api: process.env.AWS_LAMBDA_METADATA_API, runtimeApi: process.env.AWS_LAMBDA_RUNTIME_API,
+                    token: process.env.AWS_LAMBDA_METADATA_TOKEN}));
+                }, (e) => { res.statusCode = 500; res.end(String(e)); });
+                return;
+              }
               if (req.url.startsWith('/crash')) { setTimeout(() => process.exit(1), 50); return; }
               if (req.url.startsWith('/exit')) { res.end('bye', () => process.exit(0)); return; }
               let body = '';
@@ -112,7 +126,8 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 res.end(JSON.stringify({method: req.method, url: req.url, headers: req.headers, bodyLength: body.length,
                   env: {endpoint: process.env.AWS_LAMBDA_HTTP_ENDPOINT, init: process.env.AWS_LAMBDA_INITIALIZATION_TYPE,
                         exec: process.env.AWS_EXECUTION_ENV, account: process.env.AWS_ACCOUNT_ID,
-                        region: process.env.AWS_REGION, custom: process.env.CUSTOM}}));
+                        region: process.env.AWS_REGION, custom: process.env.CUSTOM},
+                  execArgv: process.execArgv}));
               });
             }).listen(Number(port), host);
             """;
@@ -122,6 +137,9 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
     @Inject
     S3Service s3Service;
+
+    @Inject
+    IamService iamService;
 
     @Inject
     LambdaWebEnvironmentManager environments;
@@ -405,6 +423,89 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
     @Test
     @Timeout(180)
+    void theMetadataEndpointAnswersTheZoneToTheEnvironmentToken() throws Exception {
+        String domain = createFunction(30);
+
+        JsonPath answer = given().header("Host", domain).when().get("/metadata").then().statusCode(200)
+                .extract().jsonPath();
+        assertEquals(200, answer.getInt("status"));
+        assertEquals("{\"AvailabilityZoneID\":\"use1-az1\"}\n", answer.getString("body"));
+        assertEquals(401, answer.getInt("refused"));
+        assertEquals(answer.getString("api"), answer.getString("runtimeApi"));
+        assertTrue(answer.getString("token").matches("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"));
+    }
+
+    @Test
+    @Timeout(240)
+    void aPerRegionEndpointServesEachRegionFromItsOwnEnvironments() throws Exception {
+        createFunction(30, 1);
+        String endpoints = BASE + "/web-functions/" + functionName + "/endpoints";
+        String revisionId = given().when().get(endpoints + "/dev").then().statusCode(200)
+                .extract().path("revisionWeights[0].revisionId");
+        JsonPath created = given().contentType("application/json")
+                .body("""
+                        {"endpointName": "per", "endpointType": "PerRegion", "regions": ["us-west-2"],
+                         "authType": "ApplicationManaged", "scalingConfig": {"maxEnvironments": 2},
+                         "revisionWeights": [{"revisionId": "%s", "weight": 100}]}""".formatted(revisionId))
+                .when().put(endpoints)
+                .then().statusCode(202)
+                .extract().jsonPath();
+        String east = created.getString("regionalEndpoints.us-east-1.domainName");
+        String west = created.getString("regionalEndpoints.us-west-2.domainName");
+
+        Response westEcho = given().header("Host", west).when().get("/");
+        westEcho.then().statusCode(200).body("env.region", equalTo("us-west-2"));
+        String westStream = westEcho.header("lambda-web-logstream");
+        given().header("Host", east).when().get("/").then().statusCode(200).body("env.region", equalTo("us-east-1"))
+                .header("lambda-web-logstream", not(equalTo(westStream)));
+        JsonPath zone = given().header("Host", west).when().get("/metadata").then().statusCode(200)
+                .extract().jsonPath();
+        assertEquals("{\"AvailabilityZoneID\":\"usw2-az1\"}\n", zone.getString("body"));
+
+        // maxEnvironments holds in each region on its own, as on AWS.
+        AtomicInteger next = new AtomicInteger();
+        CyclicBarrier together = new CyclicBarrier(4);
+        List<String> waited = parallel(4, () -> raw("GET /wait HTTP/1.1\r\nHost: "
+                + (next.getAndIncrement() % 2 == 0 ? east : west) + "\r\nConnection: close\r\n\r\n", together));
+        assertTrue(waited.stream().allMatch(response -> response.startsWith("HTTP/1.1 200 ")),
+                String.join("\n----\n", waited));
+
+        // The .local group is in the region that served and the centralized one in the home region. Each batch
+        // reaches the .local group first.
+        String group = "/aws/lambda/web/" + functionName;
+        Predicate<List<String>> started = events -> events.stream().anyMatch(event -> event.contains("\"starting\""));
+        assertTrue(started.test(awaitLogEvents(group, westStream + "-000000000000-us-west-2", started)));
+        List<String> local = logEvents("us-west-2", group + ".local", westStream);
+        JsonPath starting = JsonPath.from(local.stream().filter(event -> event.contains("\"starting\""))
+                .findFirst().orElseThrow());
+        assertEquals("us-west-2", starting.getString("region"));
+        JsonPath initStart = platformEvent(local, "platform.initStart");
+        assertEquals("us-west-2", initStart.getString("region"));
+        assertTrue(initStart.getString("record.runtimeVersionArn").startsWith(
+                "arn:aws:lambda:us-west-2::runtime/nodejs24.x/version/"), initStart.prettify());
+        assertEquals(List.of(), logEvents("us-east-1", group + ".local", westStream));
+
+        // AWS/Lambda/Web is also centralized in the home region. The usage metrics are not.
+        Map<String, String> endpoint = Map.of("FunctionName", functionName, "EndpointName", "per");
+        Map<String, String> westUsage = Map.of("FunctionName", functionName, "EndpointName", "per",
+                "ExecutionRegion", "us-west-2");
+        metrics.awaitPublished(Duration.ofSeconds(5));
+        assertEquals(4, LambdaWebMetricStatistics.of("us-west-2", LambdaWebMetrics.NAMESPACE, "ExecutedRequests",
+                endpoint, "Sum"));
+        assertEquals(7, LambdaWebMetricStatistics.of("us-east-1", LambdaWebMetrics.NAMESPACE, "ExecutedRequests",
+                endpoint, "Sum"));
+        assertEquals(4, LambdaWebMetricStatistics.of("us-west-2", LambdaWebMetrics.USAGE_NAMESPACE,
+                "ExecutedRequests", westUsage, "Sum"));
+        assertEquals(0, LambdaWebMetricStatistics.of("us-east-1", LambdaWebMetrics.USAGE_NAMESPACE,
+                "ExecutedRequests", westUsage, "Sum"));
+
+        given().when().delete(endpoints + "/per").then().statusCode(204);
+        given().header("Host", west).when().get("/").then().statusCode(404)
+                .header("lambda-web-error-type", "Platform.InvalidEndpoint");
+    }
+
+    @Test
+    @Timeout(180)
     void anEnvironmentRunsTheCodeTheRevisionWasCreatedFrom() throws Exception {
         String domain = createFunction(30);
         s3Service.putObject(BUCKET, functionName + ".zip", zip("process.exit(1);"), "application/zip", Map.of());
@@ -523,8 +624,14 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
     private String createFunction(int timeoutSeconds, int maxConcurrencyPerEnvironment, String systemLogLevel,
                                   String mode, String authType) throws IOException {
+        return createFunction(timeoutSeconds, maxConcurrencyPerEnvironment, systemLogLevel, mode, authType, null);
+    }
+
+    private String createFunction(int timeoutSeconds, int maxConcurrencyPerEnvironment, String systemLogLevel,
+                                  String mode, String authType, String nodeOptions) throws IOException {
         functionName = "dp-docker-" + Long.toString(System.nanoTime(), 36);
-        s3Service.createBucket(BUCKET, "us-east-1");
+        LambdaWebRoles.trustLambda(iamService, ROLE);
+        LambdaWebCodeBuckets.create(s3Service, BUCKET);
         s3Service.putObject(BUCKET, functionName + ".zip", zip(APP), "application/zip", Map.of());
         return given().contentType("application/json")
                 .body("""
@@ -534,12 +641,14 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                                            "runtimeConfig": {"runtime": "nodejs24.x"}},
                            "serviceConfig": {"executionRoleArn": "%s", "timeoutSeconds": %d,
                                              "maxConcurrencyPerEnvironment": %d,
-                                             "environmentVariables": {"CUSTOM": "yes", "MODE": "%s"},
+                                             "environmentVariables": {"CUSTOM": "yes", "MODE": "%s"%s},
                                              "telemetryConfig": {"loggingConfig": {"systemLogLevel": "%s"}}}},
                          "endpointConfig": {"endpointName": "dev", "endpointType": "HomeRegion",
                                             "authType": "%s", "autoDeploymentMode": "LatestRevision"}}
                         """.formatted(functionName, BUCKET, functionName, ROLE, timeoutSeconds,
-                        maxConcurrencyPerEnvironment, mode, systemLogLevel, authType))
+                        maxConcurrencyPerEnvironment, mode,
+                        nodeOptions == null ? "" : ", \"NODE_OPTIONS\": \"" + nodeOptions + "\"",
+                        systemLogLevel, authType))
                 .when().put(BASE + "/web-functions")
                 .then().statusCode(202)
                 .extract().path("endpoint.domainName");
@@ -652,6 +761,17 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
     @Test
     @Timeout(180)
+    void heapFlagsInNodeOptionsReplaceTheDefaultOnes() throws Exception {
+        String domain = createFunction(30, 64, "INFO", "serve", "ApplicationManaged",
+                "--expose-gc --max-old-space-size=1536");
+
+        given().header("Host", domain).when().get("/").then().statusCode(200)
+                .body("execArgv", contains("--expose-gc", "--max-http-header-size", "135168",
+                        "--no-experimental-require-module", "--max-old-space-size=1536"));
+    }
+
+    @Test
+    @Timeout(180)
     void anAppThatExitsWithAnErrorAtStartGetsTheExitErrorPage() throws Exception {
         String domain = createFunction(30, 64, "WARN", "exit");
         String group = "/aws/lambda/web/" + functionName + ".local";
@@ -737,9 +857,17 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     }
 
     private static List<String> logEvents(String logGroup, String logStream) {
-        List<String> messages = RestAssuredJsonUtils.awsAction("Logs_20140328", "GetLogEvents",
-                        "{\"logGroupName\": \"%s\", \"logStreamName\": \"%s\", \"startFromHead\": true}"
-                                .formatted(logGroup, logStream))
+        return logEvents("us-east-1", logGroup, logStream);
+    }
+
+    private static List<String> logEvents(String region, String logGroup, String logStream) {
+        List<String> messages = given()
+                .header("Authorization", auth("test", region, "logs"))
+                .header("X-Amz-Target", "Logs_20140328.GetLogEvents")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"logGroupName\": \"%s\", \"logStreamName\": \"%s\", \"startFromHead\": true}"
+                        .formatted(logGroup, logStream))
+                .when().post("/")
                 .then().extract().jsonPath().getList("events.message", String.class);
         return messages == null ? List.of() : messages;
     }

@@ -173,6 +173,9 @@ class Route53IntegrationTest {
 
         assertThat(body, containsString("<Type>SOA</Type>"));
         assertThat(body, containsString("<Type>NS</Type>"));
+        assertThat(body, containsString(
+                "<Value>ns-1.awsdns-01.org. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400</Value>"));
+        assertThat(body, containsString("<Value>ns-4.awsdns-04.co.uk.</Value>"));
     }
 
     @Test

@@ -140,6 +140,7 @@ floci:
       default-visibility-timeout: 30
       max-message-size: 1048576
       endpoint-strategy: floci
+      cloudwatch-metrics-enabled: false   # tests publish themselves, so no tick stamps another test's queue behind its back
     s3:
       enabled: true
       enforce-auth: false
@@ -157,6 +158,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      container-drain-timeout-seconds: 15
       docker-flags: ""
       honour-architectures: false
       zip-max-entries: 100000
@@ -166,6 +168,9 @@ floci:
       # aws-config-path:
       hot-reload:
         enabled: true
+      reactive-s3-sync:
+        enabled: true
+        async: false
     apigateway:
       enabled: true
       vtl-max-loops: 10000
@@ -180,6 +185,7 @@ floci:
     msk:
       enabled: true
       mock: true
+      scram-reconciliation-interval-ms: 5000
       default-image: "redpandadata/redpanda:latest"
     amazonmq:
       enabled: true
@@ -213,7 +219,7 @@ floci:
       default-credential-duration-seconds: 900
       proxy-handshake-timeout-millis: 10000
       proxy-backend-connect-timeout-millis: 5000
-      proxy-max-connections: 100
+      proxy-max-connections: 2000
       spectrum-max-rows: 1000000
     rds:
       enabled: true
@@ -319,6 +325,7 @@ floci:
       enforce-vcpu-quotas: false
       # Optional complete catalog override for locally built guest images.
       image-catalog-path: ${FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH:}
+      managed-prefix-list-catalog-path: ${FLOCI_SERVICES_EC2_MANAGED_PREFIX_LIST_CATALOG_PATH:}
       enabled: true
       imds-port: 9169
       ssh-port-range-start: 2200
@@ -342,6 +349,7 @@ floci:
     ecs:
       enabled: true
       mock: true
+      dynamic-awsvpc-host-ports: false
       host-volume-roots: []
       allow-unsafe-host-volumes: false
       image-pull-behavior: prefer-cached
@@ -497,6 +505,7 @@ floci:
     emrserverless:
       enabled: true
       job-run-duration-seconds: 0   # 0 = BATCH job runs succeed as soon as they start
+      runner-mode: immediate
     ssoadmin:
       enabled: true
     ssooidc:

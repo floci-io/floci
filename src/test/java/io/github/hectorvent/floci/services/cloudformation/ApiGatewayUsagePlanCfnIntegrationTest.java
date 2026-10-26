@@ -1,24 +1,22 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
-import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
-import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
-import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -26,13 +24,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * {@code AWS::ApiGateway::UsagePlanKey} attaching an API key to it, the way a template guards an
  * API behind a key. The API and the key are created outside the stack, since the stack only owns
  * the plan and the association. Asserts that {@code Ref} and {@code Fn::GetAtt Id} resolve to the
- * plan id and to {@code <keyId>:<usagePlanId>}, that an update renames the plan and moves its stage
- * in place, and that deleting the stack removes the plan and the association but not the key.
+ * plan id and to {@code <keyId>:<usagePlanId>}, that the plan reports its stage with the stage's
+ * method throttle, its throttle and its quota, that an update renames the plan, moves its stage and
+ * changes the stage throttle in place and drops a quota the template omits through
+ * {@code AWS::NoValue}, and that deleting the stack removes the plan and
+ * the association but not the key.
  */
 @QuarkusTest
 class ApiGatewayUsagePlanCfnIntegrationTest {
 
-    private static final String REGION = "us-east-1";
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260905/us-east-1/cloudformation/aws4_request";
     private static final String STACK = "apigw-usageplan-cfn-it";
@@ -45,7 +45,13 @@ class ApiGatewayUsagePlanCfnIntegrationTest {
             "KeyId": {"Type": "String"},
             "PlanName": {"Type": "String"},
             "Description": {"Type": "String"},
-            "TagValue": {"Type": "String"}
+            "TagValue": {"Type": "String"},
+            "QuotaLimit": {"Type": "Number"},
+            "BurstLimit": {"Type": "Number"},
+            "WithQuota": {"Type": "String"}
+          },
+          "Conditions": {
+            "HasQuota": {"Fn::Equals": [{"Ref": "WithQuota"}, "true"]}
           },
           "Resources": {
             "Plan": {
@@ -53,9 +59,11 @@ class ApiGatewayUsagePlanCfnIntegrationTest {
               "Properties": {
                 "UsagePlanName": {"Ref": "PlanName"},
                 "Description": {"Ref": "Description"},
-                "ApiStages": [{"ApiId": {"Ref": "ApiId"}, "Stage": {"Ref": "StageName"}}],
+                "ApiStages": [{"ApiId": {"Ref": "ApiId"}, "Stage": {"Ref": "StageName"},
+                               "Throttle": {"/items/GET": {"BurstLimit": {"Ref": "BurstLimit"}, "RateLimit": 2}}}],
                 "Throttle": {"BurstLimit": 10, "RateLimit": 5},
-                "Quota": {"Limit": 1000, "Period": "MONTH"},
+                "Quota": {"Fn::If": ["HasQuota", {"Limit": {"Ref": "QuotaLimit"}, "Period": "MONTH"},
+                                     {"Ref": "AWS::NoValue"}]},
                 "Tags": [{"Key": "stack", "Value": {"Ref": "TagValue"}}]
               }
             },
@@ -77,9 +85,6 @@ class ApiGatewayUsagePlanCfnIntegrationTest {
         }
         """;
 
-    @Inject
-    ApiGatewayService apiGatewayService;
-
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -94,7 +99,7 @@ class ApiGatewayUsagePlanCfnIntegrationTest {
         String keyId = given().contentType(ContentType.JSON).body("{\"name\":\"" + STACK + "-key\"}")
             .when().post("/apikeys").then().statusCode(201).extract().path("id");
         try {
-            cloudFormation("CreateStack", parameters(apiId, "dev", keyId, "gold", "first", "v1"));
+            cloudFormation("CreateStack", parameters(apiId, "dev", keyId, "gold", "first", "v1", "1000", "4", "true"));
             String created = describeStacks("CREATE_COMPLETE");
             String planId = outputValue(created, "PlanRef");
 
@@ -108,11 +113,21 @@ class ApiGatewayUsagePlanCfnIntegrationTest {
                 .body("name", equalTo("gold"))
                 .body("description", equalTo("first"))
                 .body("tags.stack", equalTo("v1"));
-            assertEquals(List.of(new UsagePlan.ApiStage(apiId, "dev")),
-                    apiGatewayService.getUsagePlan(REGION, planId).getApiStages());
+            getUsagePlan(planId)
+                .statusCode(200)
+                .body("apiStages", hasSize(1))
+                .body("apiStages[0].apiId", equalTo(apiId))
+                .body("apiStages[0].stage", equalTo("dev"))
+                .body("apiStages[0].throttle['/items/GET'].burstLimit", equalTo(4))
+                .body("apiStages[0].throttle['/items/GET'].rateLimit", equalTo(2.0f))
+                .body("throttle.burstLimit", equalTo(10))
+                .body("throttle.rateLimit", equalTo(5.0f))
+                .body("quota.limit", equalTo(1000))
+                .body("quota.offset", equalTo(0))
+                .body("quota.period", equalTo("MONTH"));
             getUsagePlanKey(planId, keyId).statusCode(200).body("type", equalTo("API_KEY"));
 
-            cloudFormation("UpdateStack", parameters(apiId, "prod", keyId, "platinum", "second", "v2"));
+            cloudFormation("UpdateStack", parameters(apiId, "prod", keyId, "platinum", "second", "v2", "2000", "6", "false"));
             String updated = describeStacks("UPDATE_COMPLETE");
 
             // The plan is renamed and moved to the other stage in place; the association survives.
@@ -123,8 +138,17 @@ class ApiGatewayUsagePlanCfnIntegrationTest {
                 .body("name", equalTo("platinum"))
                 .body("description", equalTo("second"))
                 .body("tags.stack", equalTo("v2"));
-            assertEquals(List.of(new UsagePlan.ApiStage(apiId, "prod")),
-                    apiGatewayService.getUsagePlan(REGION, planId).getApiStages());
+            getUsagePlan(planId)
+                .statusCode(200)
+                .body("apiStages", hasSize(1))
+                .body("apiStages[0].apiId", equalTo(apiId))
+                .body("apiStages[0].stage", equalTo("prod"))
+                .body("apiStages[0].throttle['/items/GET'].burstLimit", equalTo(6))
+                .body("apiStages[0].throttle['/items/GET'].rateLimit", equalTo(2.0f))
+                .body("throttle.burstLimit", equalTo(10))
+                .body("throttle.rateLimit", equalTo(5.0f))
+                // AWS::NoValue leaves the quota out of the template, so the update takes it off the plan.
+                .body("quota", nullValue());
             getUsagePlanKey(planId, keyId).statusCode(200);
 
             cloudFormation("DeleteStack", Map.of());
@@ -141,9 +165,11 @@ class ApiGatewayUsagePlanCfnIntegrationTest {
     }
 
     private static Map<String, String> parameters(String apiId, String stage, String keyId, String planName,
-                                                  String description, String tagValue) {
+                                                  String description, String tagValue, String quotaLimit,
+                                                  String burstLimit, String withQuota) {
         return Map.of("ApiId", apiId, "StageName", stage, "KeyId", keyId, "PlanName", planName,
-                "Description", description, "TagValue", tagValue);
+                "Description", description, "TagValue", tagValue, "QuotaLimit", quotaLimit,
+                "BurstLimit", burstLimit, "WithQuota", withQuota);
     }
 
     private static void cloudFormation(String action, Map<String, String> parameters) {

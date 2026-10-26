@@ -354,7 +354,7 @@ public class AcmService implements ResourceProvider {
         List<String> consumers = certificateInUseBy(certificateArn, region);
         if (!consumers.isEmpty()) {
             throw new AwsException("ResourceInUseException",
-                "Certificate " + certificateArn + " is in use by: " + String.join(", ", consumers), 409);
+                "Certificate " + certificateArn + " is in use by: " + String.join(", ", consumers), 400);
         }
 
         String storageKey = regionKey(region, cert.extractCertificateId());

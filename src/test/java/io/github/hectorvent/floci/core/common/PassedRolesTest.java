@@ -32,6 +32,8 @@ class PassedRolesTest {
     private static final String DEFAULT_ADMINISTRATION = ROLES + "AWSCloudFormationStackSetAdministrationRole";
     private static final String EC2 = "ec2.amazonaws.com";
     private static final String AUTOSCALING = "autoscaling.amazonaws.com";
+    private static final String RDS = "rds.amazonaws.com";
+    private static final String DMS = "dms.amazonaws.com";
     private static final String PROFILE_ARN = "arn:aws:iam::111122223333:instance-profile/arn-profile";
 
     /**
@@ -41,7 +43,8 @@ class PassedRolesTest {
      * instance {@code i-arn} runs with that other profile, and the group {@code g} launches from
      * {@code lt-web} once a refresh names only a version, or from {@code arn-template} at the group's
      * version 2 once a refresh names that template alone. IAM holds the role {@code app-role} under the
-     * path {@code /app/}.
+     * path {@code /app/}. Service Catalog holds a launch constraint {@code cons-launch} and a notification
+     * constraint {@code cons-notify}.
      */
     private static final PassedRoles.Lookups LOOKUPS = new PassedRoles.Lookups() {
         @Override
@@ -100,6 +103,16 @@ class PassedRolesTest {
         @Override
         public Optional<String> heldRoleArn(String roleName) {
             return "app-role".equals(roleName) ? Optional.of(ROLES + "app/app-role") : Optional.empty();
+        }
+
+        @Override
+        public Optional<String> serviceCatalogConstraintType(String constraintId) {
+            return switch (constraintId) {
+                case "cons-launch" -> Optional.of("LAUNCH");
+                case "cons-lowercase" -> Optional.of("launch");
+                case "cons-notify" -> Optional.of("NOTIFICATION");
+                default -> Optional.empty();
+            };
         }
     };
 
@@ -203,6 +216,40 @@ class PassedRolesTest {
                 PassedRoles.of("lambda:CreateNetworkConnector", json(operator), LOOKUPS));
         assertEquals(List.of(passed("operator", "lambda.amazonaws.com")),
                 PassedRoles.of("lambda:UpdateNetworkConnector", json(operator), LOOKUPS));
+    }
+
+    @Test
+    void eksPassesItsClusterNodePodAndAddonRolesAndANodeAccessEntrysPrincipal() {
+        String eks = "eks.amazonaws.com";
+        assertEquals(List.of(passed("cluster", eks)), PassedRoles.of("eks:CreateCluster",
+                json("{\"name\":\"c\",\"roleArn\":\"" + ROLES + "cluster\"}"), LOOKUPS));
+        assertEquals(List.of(passed("node", eks)), PassedRoles.of("eks:CreateNodegroup",
+                json("{\"nodeRole\":\"" + ROLES + "node\"}"), LOOKUPS));
+        assertEquals(List.of(passed("fargate", eks)), PassedRoles.of("eks:CreateFargateProfile",
+                json("{\"podExecutionRoleArn\":\"" + ROLES + "fargate\"}"), LOOKUPS));
+        String addon = """
+                {"serviceAccountRoleArn":"%1$saddon","podIdentityAssociations":[
+                 {"serviceAccount":"a","roleArn":"%1$spod-a"},{"serviceAccount":"b","roleArn":"%1$spod-b"}]}"""
+                .formatted(ROLES);
+        for (String action : List.of("eks:CreateAddon", "eks:UpdateAddon")) {
+            assertEquals(List.of(passed("addon", eks), passed("pod-a", eks), passed("pod-b", eks)),
+                    PassedRoles.of(action, json(addon), LOOKUPS));
+        }
+        // The association's role goes to Pod Identity; its target role is assumed with it, not passed.
+        String association = "{\"roleArn\":\"" + ROLES + "pod\",\"targetRoleArn\":\"" + ROLES + "target\"}";
+        for (String action : List.of("eks:CreatePodIdentityAssociation", "eks:UpdatePodIdentityAssociation")) {
+            assertEquals(List.of(passed("pod", "pods.eks.amazonaws.com")), PassedRoles.of(action, json(association),
+                    LOOKUPS));
+        }
+        // Only a node access entry passes its principal, to EC2.
+        for (String type : List.of("EC2_LINUX", "EC2_WINDOWS")) {
+            assertEquals(List.of(passed("worker", EC2)), PassedRoles.of("eks:CreateAccessEntry",
+                    json("{\"principalArn\":\"" + ROLES + "worker\",\"type\":\"" + type + "\"}"), LOOKUPS));
+        }
+        assertEquals(List.of(), PassedRoles.of("eks:CreateAccessEntry",
+                json("{\"principalArn\":\"" + ROLES + "admin\",\"type\":\"STANDARD\"}"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("eks:CreateAccessEntry",
+                json("{\"principalArn\":\"" + ROLES + "admin\"}"), LOOKUPS));
     }
 
     @Test
@@ -382,6 +429,272 @@ class PassedRolesTest {
             assertEquals(List.of(passed("snapshots", serverless)), PassedRoles.of(action,
                     json("{\"scheduledActionName\":\"a\",\"roleArn\":\"" + ROLES + "snapshots\"}"), LOOKUPS), action);
         }
+    }
+
+    @Test
+    void rdsPassesEachRoleARequestNamesForAnInstanceOrClusterToRds() {
+        for (String action : new String[] {"rds:AddRoleToDBCluster", "rds:AddRoleToDBInstance",
+                "rds:RemoveRoleFromDBCluster", "rds:RemoveRoleFromDBInstance", "rds:CreateDBProxy", "rds:ModifyDBProxy"}) {
+            assertEquals(List.of(passed("feature", RDS)), PassedRoles.of(action,
+                    form("DBInstanceIdentifier=d&RoleArn=" + ROLES + "feature&FeatureName=s3Import"), LOOKUPS), action);
+        }
+        assertEquals(List.of(passed("export", RDS)), PassedRoles.of("rds:StartExportTask",
+                form("ExportTaskIdentifier=e&IamRoleArn=" + ROLES + "export"), LOOKUPS));
+        // The directory role is named without its path, so it is checked on the ARN IAM holds it under.
+        assertEquals(List.of(new PassedRole(ROLES + "app/app-role", RDS), passed("monitoring", RDS)),
+                PassedRoles.of("rds:CreateDBInstance", form("DBInstanceIdentifier=d&DomainIAMRoleName=app-role"
+                        + "&MonitoringRoleArn=" + ROLES + "monitoring"), LOOKUPS));
+        assertEquals(List.of(passed("gone", RDS)), PassedRoles.of("rds:ModifyDBCluster",
+                form("DBClusterIdentifier=c&DomainIAMRoleName=gone"), LOOKUPS));
+        // A cluster's associated roles at any index, in either list form; a restore of an instance takes no
+        // monitoring role, and a modify of a cluster no associated roles.
+        assertEquals(List.of(passed("monitoring", RDS), passed("s3", RDS), passed("lambda", RDS)),
+                PassedRoles.of("rds:RestoreDBClusterToPointInTime", form("DBClusterIdentifier=c&MonitoringRoleArn="
+                        + ROLES + "monitoring&AssociatedRoles.DBClusterAssociatedRole.1.RoleArn=" + ROLES
+                        + "s3&AssociatedRoles.member.3.RoleArn=" + ROLES + "lambda"), LOOKUPS));
+        assertEquals(List.of(passed("gone", RDS)), PassedRoles.of("rds:RestoreDBInstanceFromDBSnapshot",
+                form("DBInstanceIdentifier=d&DomainIAMRoleName=gone&MonitoringRoleArn=" + ROLES + "monitoring"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("rds:ModifyDBCluster",
+                form("DBClusterIdentifier=c&AssociatedRoles.member.1.RoleArn=" + ROLES + "s3"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("rds:CreateDBCluster", form("DBClusterIdentifier=c"), LOOKUPS));
+    }
+
+    @Test
+    void anOptionGroupPassesTheRoleEachOptionTakesInItsIamRoleSettingToRds() {
+        String backup = "OptionsToInclude.OptionConfiguration.1.";
+        String audit = "OptionsToInclude.OptionConfiguration.2.";
+        String legacy = "OptionsToInclude.member.1.";
+        // Read as the handler reads it: both list forms, up to the first gap, and a setting named twice
+        // as its last value.
+        assertEquals(List.of(passed("audit", RDS), passed("legacy", RDS)), PassedRoles.of("rds:ModifyOptionGroup",
+                form("OptionGroupName=g&" + backup + "OptionName=SQLSERVER_BACKUP_RESTORE&" + backup
+                        + "OptionSettings.OptionSetting.2.Name=IAM_ROLE_ARN&" + backup
+                        + "OptionSettings.OptionSetting.2.Value=" + ROLES + "after-gap&" + audit
+                        + "OptionName=SQLSERVER_AUDIT&" + audit + "OptionSettings.OptionSetting.1.Name=S3_BUCKET_ARN&"
+                        + audit + "OptionSettings.OptionSetting.1.Value=" + ROLES + "bucket&" + audit
+                        + "OptionSettings.OptionSetting.2.Name=IAM_ROLE_ARN&" + audit
+                        + "OptionSettings.OptionSetting.2.Value=" + ROLES + "first&" + audit
+                        + "OptionSettings.member.1.Name=IAM_ROLE_ARN&" + audit + "OptionSettings.member.1.Value="
+                        + ROLES + "audit&" + legacy + "OptionName=SQLSERVER_BACKUP_RESTORE&" + legacy
+                        + "OptionSettings.member.1.Name=IAM_ROLE_ARN&" + legacy + "OptionSettings.member.1.Value="
+                        + ROLES + "legacy&OptionsToInclude.OptionConfiguration.4.OptionName=SQLSERVER_AUDIT&"
+                        + "OptionsToInclude.OptionConfiguration.4.OptionSettings.OptionSetting.1.Name=IAM_ROLE_ARN&"
+                        + "OptionsToInclude.OptionConfiguration.4.OptionSettings.OptionSetting.1.Value=" + ROLES
+                        + "option-after-gap"), LOOKUPS));
+    }
+
+    @Test
+    void dmsPassesItsEndpointsAndReplicationInstancesRolesToDms() {
+        String endpoint = """
+                {"EndpointIdentifier":"e","ServiceAccessRoleArn":"%1$saccess",
+                 "S3Settings":{"ServiceAccessRoleArn":"%1$ss3","BucketName":"b"},
+                 "PostgreSQLSettings":{"SecretsManagerAccessRoleArn":"%1$ssecrets"},
+                 "OracleSettings":{"SecretsManagerOracleAsmAccessRoleArn":"%1$sasm"},
+                 "Tags":[{"Key":"ServiceAccessRoleArn","Value":"%1$stag"}],
+                 "FooSettings":{"ServiceAccessRoleArn":"%1$sunknown-structure"},
+                 "KafkaSettings":{"ServiceAccessRoleArn":"%1$sno-role-member"},
+                 "DynamoDbSettings":{"SecretsManagerAccessRoleArn":"%1$snot-its-member"}}""".formatted(ROLES);
+        // Only the role members the DMS model gives each settings structure the handler stores.
+        for (String action : new String[] {"dms:CreateEndpoint", "dms:ModifyEndpoint"}) {
+            assertEquals(List.of(passed("access", DMS), passed("s3", DMS), passed("secrets", DMS), passed("asm", DMS)),
+                    PassedRoles.of(action, json(endpoint), LOOKUPS), action);
+        }
+        for (String action : new String[] {"dms:CreateReplicationInstance", "dms:ModifyReplicationInstance"}) {
+            assertEquals(List.of(passed("key-cache", DMS)), PassedRoles.of(action, json(
+                    "{\"KerberosAuthenticationSettings\":{\"KeyCacheSecretIamArn\":\"" + ROLES + "key-cache\"}}"),
+                    LOOKUPS), action);
+        }
+    }
+
+    @Test
+    void ssmPassesAnAssociationsDispatchRoleAndACommandsNotificationRoleToSsm() {
+        String ssm = "ssm.amazonaws.com";
+        // An Automation runbook's assume role is a parameter the runbook names, and a target location's
+        // execution role is one in each target account: neither is read.
+        String association = "{\"Name\":\"doc\",\"AssociationDispatchAssumeRole\":\"" + ROLES + "dispatch\","
+                + "\"Parameters\":{\"AutomationAssumeRole\":[\"" + ROLES + "automation\"]},"
+                + "\"TargetLocations\":[{\"ExecutionRoleName\":\"execution\"}]}";
+        for (String action : new String[] {"ssm:CreateAssociation", "ssm:UpdateAssociation"}) {
+            assertEquals(List.of(passed("dispatch", ssm)), PassedRoles.of(action, json(association), LOOKUPS), action);
+            assertEquals(List.of(), PassedRoles.of(action, json("{\"Name\":\"doc\"}"), LOOKUPS), action);
+        }
+        assertEquals(List.of(passed("notifications", ssm)), PassedRoles.of("ssm:SendCommand",
+                json("{\"DocumentName\":\"AWS-RunShellScript\",\"ServiceRoleArn\":\"" + ROLES + "notifications\","
+                        + "\"NotificationConfig\":{\"NotificationArn\":\"arn:aws:sns:us-east-1:111122223333:t\"}}"),
+                LOOKUPS));
+        // A document's request names no role, and a role is only ever a setting's value.
+        assertEquals(List.of(), PassedRoles.of("ssm:CreateDocument",
+                json("{\"Name\":\"d\",\"Content\":\"{\\\"assumeRole\\\":\\\"" + ROLES + "runbook\\\"}\"}"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("ssm:UpdateServiceSetting",
+                json("{\"SettingId\":\"/ssm/managed-instance/default-ec2-instance-management-role\","
+                        + "\"SettingValue\":\"service-role/AWSSystemsManagerDefaultEC2InstanceManagementRole\"}"),
+                LOOKUPS));
+    }
+
+    @Test
+    void serviceCatalogPassesTheLaunchRoleAConstraintAnActionOrAProvisionedProductNames() {
+        String catalog = "servicecatalog.amazonaws.com";
+        assertEquals(List.of(passed("launch", catalog)), PassedRoles.of("servicecatalog:CreateConstraint",
+                json(constraint("LAUNCH", "{\\\"RoleArn\\\":\\\"" + ROLES + "launch\\\"}")), LOOKUPS));
+        // A local role name carries no path: the ARN IAM holds the role under, or else the one the name gives.
+        assertEquals(List.of(new PassedRole(ROLES + "app/app-role", catalog)), PassedRoles.of(
+                "servicecatalog:CreateConstraint",
+                json(constraint("LAUNCH", "{\\\"LocalRoleName\\\":\\\"app-role\\\"}")), LOOKUPS));
+        assertEquals(List.of(passed("gone", catalog)), PassedRoles.of("servicecatalog:CreateConstraint",
+                json(constraint("LAUNCH", "{\\\"LocalRoleName\\\":\\\"gone\\\"}")), LOOKUPS));
+        // Only a launch constraint names a launch role, and only in a JSON document.
+        assertEquals(List.of(), PassedRoles.of("servicecatalog:CreateConstraint",
+                json(constraint("NOTIFICATION", "{\\\"RoleArn\\\":\\\"" + ROLES + "launch\\\"}")), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("servicecatalog:CreateConstraint",
+                json(constraint("LAUNCH", "RoleArn=" + ROLES + "launch")), LOOKUPS));
+        // Floci keeps a constraint's type as given, so a launch constraint is one in any case.
+        assertEquals(List.of(passed("launch", catalog)), PassedRoles.of("servicecatalog:CreateConstraint",
+                json(constraint("launch", "{\\\"RoleArn\\\":\\\"" + ROLES + "launch\\\"}")), LOOKUPS));
+
+        // An update names no type, so it goes by the constraint's own.
+        String parameters = "\"Parameters\":\"{\\\"RoleArn\\\":\\\"" + ROLES + "launch\\\"}\"";
+        assertEquals(List.of(passed("launch", catalog)), PassedRoles.of("servicecatalog:UpdateConstraint",
+                json("{\"Id\":\"cons-launch\"," + parameters + "}"), LOOKUPS));
+        assertEquals(List.of(passed("launch", catalog)), PassedRoles.of("servicecatalog:UpdateConstraint",
+                json("{\"Id\":\"cons-lowercase\"," + parameters + "}"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("servicecatalog:UpdateConstraint",
+                json("{\"Id\":\"cons-notify\"," + parameters + "}"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("servicecatalog:UpdateConstraint",
+                json("{\"Id\":\"cons-missing\"," + parameters + "}"), LOOKUPS));
+
+        for (String action : new String[] {"servicecatalog:CreateServiceAction", "servicecatalog:UpdateServiceAction"}) {
+            assertEquals(List.of(passed("action", catalog)), PassedRoles.of(action,
+                    json("{\"Definition\":{\"Name\":\"AWS-RestartEC2Instance\",\"AssumeRole\":\"" + ROLES
+                            + "action\"}}"), LOOKUPS), action);
+            // LAUNCH_ROLE reuses the provisioned product's launch role, which passes nothing new.
+            assertEquals(List.of(), PassedRoles.of(action,
+                    json("{\"Definition\":{\"AssumeRole\":\"LAUNCH_ROLE\"}}"), LOOKUPS), action);
+        }
+        assertEquals(List.of(passed("launch", catalog)), PassedRoles.of(
+                "servicecatalog:UpdateProvisionedProductProperties",
+                json("{\"ProvisionedProductProperties\":{\"LAUNCH_ROLE\":\"" + ROLES + "launch\","
+                        + "\"OWNER\":\"" + ROLES + "owner\"}}"), LOOKUPS));
+    }
+
+    @Test
+    void secretsManagerBudgetsAndSwfPassTheRolesTheirRequestsName() {
+        assertEquals(List.of(passed("rotation", "secretsmanager.amazonaws.com")), PassedRoles.of(
+                "secretsmanager:RotateSecret", json("{\"SecretId\":\"s\",\"ExternalSecretRotationRoleArn\":\""
+                        + ROLES + "rotation\",\"RotationLambdaARN\":\"arn:aws:lambda:us-east-1:111122223333:"
+                        + "function:rotate\"}"), LOOKUPS));
+        // The roles an IAM budget action attaches its policy to are what it acts on, not roles it passes.
+        String budgetAction = "{\"ExecutionRoleArn\":\"" + ROLES + "execution\",\"Definition\":{\"IamActionDefinition\":"
+                + "{\"PolicyArn\":\"arn:aws:iam::111122223333:policy/deny\",\"Roles\":[\"" + ROLES + "target\"]}}}";
+        for (String action : new String[] {"budgets:CreateBudgetAction", "budgets:UpdateBudgetAction"}) {
+            assertEquals(List.of(passed("execution", "budgets.amazonaws.com")),
+                    PassedRoles.of(action, json(budgetAction), LOOKUPS), action);
+        }
+
+        String swf = "swf.amazonaws.com";
+        assertEquals(List.of(passed("default", swf)), PassedRoles.of("swf:RegisterWorkflowType",
+                json("{\"name\":\"w\",\"defaultLambdaRole\":\"" + ROLES + "default\"}"), LOOKUPS));
+        assertEquals(List.of(passed("execution", swf)), PassedRoles.of("swf:StartWorkflowExecution",
+                json("{\"workflowId\":\"w\",\"lambdaRole\":\"" + ROLES + "execution\"}"), LOOKUPS));
+        // Each decision is read from the attributes its type names, as the SWF handler reads it.
+        assertEquals(List.of(passed("next", swf), passed("child", swf)), PassedRoles.of(
+                "swf:RespondDecisionTaskCompleted", json("{\"taskToken\":\"t\",\"decisions\":["
+                        + "{\"decisionType\":\"ContinueAsNewWorkflowExecution\","
+                        + "\"continueAsNewWorkflowExecutionDecisionAttributes\":{\"lambdaRole\":\"" + ROLES + "next\"}},"
+                        + "{\"decisionType\":\"ScheduleLambdaFunction\","
+                        + "\"scheduleLambdaFunctionDecisionAttributes\":{\"id\":\"f\",\"name\":\"f\"}},"
+                        + "{\"decisionType\":\"StartChildWorkflowExecution\","
+                        + "\"startChildWorkflowExecutionDecisionAttributes\":{\"lambdaRole\":\"" + ROLES + "child\"},"
+                        + "\"continueAsNewWorkflowExecutionDecisionAttributes\":{\"lambdaRole\":\"" + ROLES + "unread\"}}]}"),
+                LOOKUPS));
+    }
+
+    @Test
+    void snsPassesTheRolesItsAttributesNameToSns() {
+        String sns = "sns.amazonaws.com";
+        // Read as the Query handler reads the map: up to the first entry with no key, a key's last value.
+        assertEquals(List.of(passed("lambda-success", sns), passed("sqs-failure", sns)), PassedRoles.of("sns:CreateTopic",
+                form("Name=t&Attributes.entry.1.key=LambdaSuccessFeedbackRoleArn&Attributes.entry.1.value=" + ROLES
+                        + "first&Attributes.entry.2.key=DisplayName&Attributes.entry.2.value=" + ROLES + "display"
+                        + "&Attributes.entry.3.key=SQSFailureFeedbackRoleArn&Attributes.entry.3.value=" + ROLES
+                        + "sqs-failure&Attributes.entry.4.key=LambdaSuccessFeedbackRoleArn&Attributes.entry.4.value="
+                        + ROLES + "lambda-success&Attributes.entry.6.key=HTTPSuccessFeedbackRoleArn"
+                        + "&Attributes.entry.6.value=" + ROLES + "after-gap"), LOOKUPS));
+        assertEquals(List.of(passed("firehose", sns)), PassedRoles.of("sns:CreateTopic",
+                json("{\"Name\":\"t\",\"Attributes\":{\"FirehoseFailureFeedbackRoleArn\":\"" + ROLES
+                        + "firehose\",\"Policy\":\"{}\"}}"), LOOKUPS));
+        assertEquals(List.of(passed("http", sns)), PassedRoles.of("sns:SetTopicAttributes",
+                form("TopicArn=t&AttributeName=HTTPSuccessFeedbackRoleArn&AttributeValue=" + ROLES + "http"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("sns:SetTopicAttributes",
+                form("TopicArn=t&AttributeName=DisplayName&AttributeValue=" + ROLES + "http"), LOOKUPS));
+        // A role attribute with no value names no role; SNS answers the request.
+        assertEquals(List.of(), PassedRoles.of("sns:SetTopicAttributes",
+                form("TopicArn=t&AttributeName=HTTPSuccessFeedbackRoleArn"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("sns:SetTopicAttributes",
+                json("{\"TopicArn\":\"t\",\"AttributeName\":\"HTTPSuccessFeedbackRoleArn\"}"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("sns:SetSubscriptionAttributes",
+                form("SubscriptionArn=s&AttributeName=SubscriptionRoleArn"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("sns:SetSubscriptionAttributes",
+                json("{\"SubscriptionArn\":\"s\",\"AttributeName\":\"SubscriptionRoleArn\",\"AttributeValue\":null}"),
+                LOOKUPS));
+        // A subscription's role is its own attribute, not a topic's.
+        assertEquals(List.of(passed("subscription", sns)), PassedRoles.of("sns:Subscribe",
+                form("TopicArn=t&Protocol=firehose&Attributes.entry.1.key=SubscriptionRoleArn&Attributes.entry.1.value="
+                        + ROLES + "subscription"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("sns:Subscribe",
+                form("TopicArn=t&Attributes.entry.1.key=LambdaSuccessFeedbackRoleArn&Attributes.entry.1.value="
+                        + ROLES + "topic"), LOOKUPS));
+        assertEquals(List.of(passed("subscription", sns)), PassedRoles.of("sns:SetSubscriptionAttributes",
+                json("{\"SubscriptionArn\":\"s\",\"AttributeName\":\"SubscriptionRoleArn\",\"AttributeValue\":\""
+                        + ROLES + "subscription\"}"), LOOKUPS));
+        for (String action : new String[] {"sns:CreatePlatformApplication", "sns:SetPlatformApplicationAttributes"}) {
+            assertEquals(List.of(passed("platform", sns)), PassedRoles.of(action,
+                    form("Name=a&Attributes.entry.1.key=FailureFeedbackRoleArn&Attributes.entry.1.value=" + ROLES
+                            + "platform"), LOOKUPS), action);
+        }
+        assertEquals(List.of(passed("sms", sns)), PassedRoles.of("sns:SetSMSAttributes",
+                form("attributes.entry.1.key=DeliveryStatusIAMRole&attributes.entry.1.value=" + ROLES + "sms"), LOOKUPS));
+    }
+
+    @Test
+    void aLogsSubscriptionFilterPolicyPassesTheRoleItsDocumentNamesToLogs() {
+        String document = "\"{\\\"DestinationArn\\\":\\\"arn:aws:kinesis:us-east-1:111122223333:stream/s\\\","
+                + "\\\"RoleArn\\\":\\\"" + ROLES + "delivery\\\"}\"";
+        assertEquals(List.of(passed("delivery", "logs.amazonaws.com")), PassedRoles.of("logs:PutAccountPolicy",
+                json("{\"policyName\":\"p\",\"policyType\":\"SUBSCRIPTION_FILTER_POLICY\",\"policyDocument\":"
+                        + document + "}"), LOOKUPS));
+        // Another type of policy names no role, and a document that is not JSON names none either.
+        assertEquals(List.of(), PassedRoles.of("logs:PutAccountPolicy",
+                json("{\"policyName\":\"p\",\"policyType\":\"FIELD_INDEX_POLICY\",\"policyDocument\":"
+                        + document + "}"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("logs:PutAccountPolicy",
+                json("{\"policyName\":\"p\",\"policyType\":\"SUBSCRIPTION_FILTER_POLICY\",\"policyDocument\":"
+                        + "\"RoleArn=" + ROLES + "delivery\"}"), LOOKUPS));
+    }
+
+    @Test
+    void theTableReadsARoleInAQueryListAByNameMemberAMapAndOneWithNoNamedService() {
+        // SES's receipt rule actions in either list form the Query protocol sends.
+        assertEquals(List.of(passed("connect", "ses.amazonaws.com"), passed("s3", "ses.amazonaws.com")),
+                PassedRoles.of("ses:CreateReceiptRule", form("RuleSetName=r&Rule.Name=n"
+                        + "&Rule.Actions.member.1.S3Action.IamRoleArn=" + ROLES + "s3"
+                        + "&Rule.Actions.2.ConnectAction.IAMRoleARN=" + ROLES + "connect"), LOOKUPS));
+        // Glue takes a job's role by name, which is the role IAM holds under it, path included.
+        assertEquals(List.of(new PassedRole(ROLES + "app/app-role", "glue.amazonaws.com")),
+                PassedRoles.of("glue:CreateJob", json("{\"Name\":\"j\",\"Role\":\"app-role\"}"), LOOKUPS));
+        assertEquals(List.of(passed("gone", "glue.amazonaws.com")),
+                PassedRoles.of("glue:CreateJob", json("{\"Name\":\"j\",\"Role\":\"gone\"}"), LOOKUPS));
+        // An identity pool's roles are the values of a map, which the Service Reference passes to no service.
+        assertEquals(List.of(new PassedRole(ROLES + "authenticated", null)), PassedRoles.of(
+                "cognito-identity:SetIdentityPoolRoles", json("{\"IdentityPoolId\":\"p\",\"Roles\":{\"authenticated\":\""
+                        + ROLES + "authenticated\"}}"), LOOKUPS));
+        // A member taking only an ARN passes nothing for a name.
+        assertEquals(List.of(), PassedRoles.of("codebuild:CreateProject",
+                json("{\"name\":\"p\",\"serviceRole\":\"app-role\"}"), LOOKUPS));
+    }
+
+    private static String constraint(String type, String parameters) {
+        return "{\"PortfolioId\":\"port\",\"ProductId\":\"prod\",\"Type\":\"" + type + "\",\"Parameters\":\""
+                + parameters + "\"}";
     }
 
     private static PassedRole passed(String roleName, String service) {

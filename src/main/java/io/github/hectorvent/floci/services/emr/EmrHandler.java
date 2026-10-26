@@ -317,7 +317,7 @@ public class EmrHandler {
         EmrCluster cluster = service.getClusterForInstances(text(request, "ClusterId"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Instances");
-        boolean terminated = "TERMINATED".equals(cluster.getState());
+        boolean terminated = EmrClusterLifecycle.isTerminated(cluster.getState());
         List<String> states = stringList(request.path("InstanceStates"));
         if ((!states.isEmpty() && !states.contains(terminated ? "TERMINATED" : "RUNNING"))
                 || (terminated && !withinTerminatedInstanceRetention(cluster.getEndDateTime(), Instant.now()))) {
@@ -665,6 +665,12 @@ public class EmrHandler {
         status.put("State", step.getState());
         if (step.getStateChangeReason() != null) {
             status.putObject("StateChangeReason").put("Message", step.getStateChangeReason());
+        }
+        if (step.getFailureReason() != null) {
+            ObjectNode failure = status.putObject("FailureDetails").put("Reason", step.getFailureReason());
+            if (step.getFailureMessage() != null) {
+                failure.put("Message", step.getFailureMessage());
+            }
         }
         ObjectNode timeline = status.putObject("Timeline");
         putEpoch(timeline, "CreationDateTime", step.getCreationDateTime());

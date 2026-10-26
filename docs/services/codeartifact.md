@@ -48,6 +48,9 @@ behind them yet.
 | `ListPackageVersions` | Lists a package's versions with status, revision, and origin, paginated and sorted most recently published first; `defaultDisplayVersion` is `dist-tags.latest` for npm, the most recently published version otherwise. |
 | `GetPackageVersionReadme` | Returns the readme text for a package version; `npm`, `pypi`, and `nuget` only, matching AWS's own restriction for this action. |
 | `CopyPackageVersions` | Copies one or more versions of a package from one repository to another in the same domain. |
+| `UpdatePackageVersionsStatus` | Moves one or more versions of a package to `Published`, `Unlisted`, or `Archived`; all-or-nothing per call, with `versionRevisions`/`expectedStatus` as optional preconditions. |
+| `DisposePackageVersions` | Permanently deletes a package version's assets and sets its status to `Disposed`; irreversible, and shares `UpdatePackageVersionsStatus`'s all-or-nothing batch semantics. |
+| `DeletePackageVersions` | Permanently removes one or more versions of a package, real assets included; unlike `DisposePackageVersions`, leaves no trace, the freed coordinates can be freely republished, and it is the one action allowed on an already-`Disposed` version. |
 | `TagResource` | Adds or updates tags on a domain or repository ARN. |
 | `UntagResource` | Removes tags by key from a domain or repository ARN. |
 | `ListTagsForResource` | Lists the tags on a domain or repository ARN. |
@@ -254,12 +257,21 @@ state.
   that is not the caller's own account looks up that account's domain/repository with no
   trust-policy or permissions-policy enforcement, consistent with Floci's IAM enforcement being
   opt-in elsewhere, but worth knowing if you rely on domain-sharing semantics.
-- **Package management beyond publish/describe/get-asset/list-assets/list-versions isn't
-  implemented.** `ListPackages`, `DeletePackageVersions`, `DisposePackageVersions`, and
-  `UpdatePackageVersionsStatus` don't exist yet; the only way to move a version from `Unfinished`
-  to `Published` today is a follow-up `PublishPackageVersion` call that omits the `unfinished`
-  flag. Every version `ListPackageVersions` reports is `Published` or `Unfinished` for this same
-  reason: nothing yet produces `Unlisted`, `Archived`, or `Disposed`.
+- **`ListPackages` isn't implemented.** Every package-version lifecycle action now is: a version
+  can be moved to `Unlisted`/`Archived`/`Published` with `UpdatePackageVersionsStatus`, to
+  `Disposed` (assets permanently deleted) with `DisposePackageVersions`, or removed outright,
+  from every status including `Disposed`, with `DeletePackageVersions`. The only way to move a
+  version out of `Unfinished` today is still either a follow-up `PublishPackageVersion` call that
+  omits the `unfinished` flag, or `UpdatePackageVersionsStatus` itself.
+- **A container-backed (`maven`/`npm`/`pypi`/`nuget`) version's status override does not survive a
+  Floci restart.** It's kept in memory only, for the same reason the byte-count and readme
+  bookkeeping those formats already need are: the sidecar content it describes doesn't survive a
+  restart either (no volume attached, removed on shutdown), so persisting the override alone would
+  leave it answering for a version that, after a restart, no longer exists anywhere real. A
+  restart effectively un-disposes/un-archives every container-backed version back to `Published`
+  (or, for one `DisposePackageVersions` already deleted the real assets of, back to not existing at
+  all once the sidecar itself restarts empty). `generic`'s status has no such gap: it's stored
+  directly on the version's own persisted record.
 - **`CopyPackageVersions` has no full cross-call rollback on a mid-copy sidecar failure.**
   (`generic`, `maven`, `npm`, `pypi`, and `nuget` are all supported — matching real AWS, which
   places no `format` restriction on this action at all, unlike `PublishPackageVersion`'s own

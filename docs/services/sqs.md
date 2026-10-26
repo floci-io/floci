@@ -106,6 +106,28 @@ A message older than the queue's `MessageRetentionPeriod` is no longer returned 
 
 `CreateQueue` and `SetQueueAttributes` reject a `MessageRetentionPeriod` outside 60 to 1209600 seconds with `InvalidAttributeValue`.
 
+## CloudWatch Metrics
+
+Floci publishes the `AWS/SQS` metrics of every active queue to CloudWatch once a minute, on the single `QueueName` dimension, as SQS does. Each publication runs just after a minute boundary and is stamped with the minute that ended, so a call counts in the minute it was made. Alarms, `GetMetricData`, `GetMetricStatistics` and `ListMetrics` see them with no `PutMetricData`. A queue is active while it holds a message, and for six hours after `CreateQueue`, `SendMessage`, `ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility`, `PurgeQueue`, `GetQueueAttributes` or `SetQueueAttributes` on it, batch forms included. Publication stops when `FLOCI_SERVICES_SQS_CLOUDWATCH_METRICS_ENABLED` is `false` or the CloudWatch Metrics service is disabled.
+
+| Metric | Unit | Samples each minute |
+|---|---|---|
+| `ApproximateNumberOfMessagesVisible` | `Count` | One |
+| `ApproximateNumberOfMessagesNotVisible` | `Count` | One |
+| `ApproximateNumberOfMessagesDelayed` | `Count` | One |
+| `ApproximateAgeOfOldestMessage` | `Seconds` | One, `0` for an empty queue |
+| `NumberOfMessagesSent` | `Count` | One per sent message, plus a zero |
+| `NumberOfMessagesReceived` | `Count` | One per `ReceiveMessage` call that returned messages, valued at their number, plus a zero |
+| `NumberOfEmptyReceives` | `Count` | One per `ReceiveMessage` call that returned none, plus a zero |
+| `NumberOfMessagesDeleted` | `Count` | One per delete with a valid receipt handle, repeats included, plus a zero |
+| `SentMessageSize` | `Bytes` | One per sent message, none in a minute without sends |
+| `ApproximateNumberOfGroupsWithInflightMessages` | `Count` | FIFO only: one |
+| `NumberOfDeduplicatedSentMessages` | `Count` | FIFO only: one per send, `1` when it was deduplicated, plus a zero |
+
+These match what AWS publishes. A deduplicated FIFO send still counts in `NumberOfMessagesSent`, and a message a redrive policy moves to a dead-letter queue does not. `ApproximateAgeOfOldestMessage` counts a message moved to a FIFO dead-letter queue or by `StartMessageMoveTask` from the move.
+
+Known differences: a `SendMessageBatch` or `DeleteMessageBatch` call adds one sample per entry where AWS adds one per call, so `Sum` matches while `SampleCount`, `Average`, `Minimum` and `Maximum` can differ. A message in a standard dead-letter queue keeps its original send time for its age, where AWS counts from the move, and a standard-queue message received three times or more still counts toward the age, where AWS leaves it out until it is deleted. Floci keeps these datapoints for the 15 days AWS keeps one-minute data and then drops them, where AWS goes on serving them at 5 minute and 1 hour resolution. The fair-queue metrics (`ApproximateNumberOfNoisyGroups` and the `InQuietGroups` variants) are not published, and the delay of up to 15 minutes AWS has before a newly active queue reports is not reproduced.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -116,6 +138,7 @@ A message older than the queue's `MessageRetentionPeriod` is no longer returned 
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | When `true`, `PurgeQueue` also clears the FIFO deduplication cache for the queue and any SNS FIFO topics subscribed to it |
 | `FLOCI_SERVICES_SQS_RECEIPT_HANDLE_SECRET` | `local-emulator-secret` | HMAC secret that signs receipt handles, so a handle that was edited or built by hand is rejected |
 | `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY` | `floci` | Shape of the returned `QueueUrl`, see [Queue URL Format](#queue-url-format) |
+| `FLOCI_SERVICES_SQS_CLOUDWATCH_METRICS_ENABLED` | `true` | Publish the `AWS/SQS` metrics of active queues to CloudWatch once a minute, see [CloudWatch Metrics](#cloudwatch-metrics) |
 
 ## Examples
 
@@ -181,3 +204,14 @@ https://sqs.<region>.amazonaws.com/000000000000/<queue-name>
 The region is the one the request was signed for, and the host carries that region's partition DNS suffix, so a queue in `cn-north-1` is reported as `https://sqs.cn-north-1.amazonaws.com.cn/...`. Use it for tooling that parses or compares queue URLs against the AWS form. Most SDKs send requests to the endpoint you configured and take only the path from the URL. Clients that send requests to the host in the returned URL, such as the AWS SDK for Java 1.x, need the default `floci` setting or DNS that points the `sqs.<region>` host at Floci.
 
 Under either setting every form is accepted as input. That covers the AWS URL, the Floci URL, any other host whose path ends in `/<account>/<queue-name>`, and the bare queue name. A queue is stored by account and name, so a base URL with a path of its own, such as `http://localhost:4566/sqs`, keeps the same queues under either setting. Existing queues, persisted ones included, are reported in the form the current setting and base URL give.
+
+## Persisted delivery state
+
+With file-backed storage, delayed messages keep their absolute delivery deadline across
+reloads. An in-flight message keeps its visibility deadline and receipt handle, so a FIFO
+group remains blocked until that delivery is deleted or becomes visible again. A restart
+does not begin a new delay or visibility period.
+
+Older stored messages without these fields still load as visible messages. Delivery state
+that an older version did not save cannot be reconstructed. Hybrid mode retains its
+configured flush window; this does not add synchronous durability to hybrid storage.

@@ -22,22 +22,28 @@ import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeChange;
 import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -47,11 +53,16 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.endsWith;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -61,6 +72,8 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class DynamoDbServiceTest {
+
+    private static final String USERS_ARN = "arn:aws:dynamodb:us-east-1:000000000000:table/Users";
 
     private DynamoDbService service;
     private ObjectMapper mapper;
@@ -4500,10 +4513,274 @@ class DynamoDbServiceTest {
         Map<String, Object> request = Map.of("TableArn", tableArn, "S3Bucket", "bucket");
 
         AwsException e = assertThrows(AwsException.class,
-                () -> service.exportTable(request, Instant.EPOCH, "us-east-1"));
+                () -> service.exportTable(request, Instant.EPOCH, null, "us-east-1"));
 
         assertEquals("TableNotFoundException", e.getErrorCode());
         assertEquals("Table not found: " + tableArn, e.getMessage());
+    }
+
+    @Test
+    void exportAbortsTheUploadOfAFileItCannotWrite() {
+        S3Service s3 = mock(S3Service.class);
+        MultipartUpload upload = new MultipartUpload("bucket", "_started", "application/octet-stream");
+        when(s3.initiateMultipartUpload(eq("bucket"), anyString(), eq("application/octet-stream"))).thenReturn(upload);
+        when(s3.uploadPart(eq("bucket"), anyString(), eq(upload.getUploadId()), eq(1), any(byte[].class)))
+                .thenThrow(new AwsException("InternalError", "We encountered an internal error. Please try again.", 500));
+        DynamoDbService svc = inlineExportService(s3);
+
+        String exportArn = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket"), null, null, "us-east-1")
+                .getExportArn();
+
+        verify(s3).abortMultipartUpload(eq("bucket"), endsWith("/_started"), eq(upload.getUploadId()));
+        assertEquals("FAILED", svc.describeExport(exportArn).getExportStatus());
+    }
+
+    @Test
+    void exportPutsItsFilesUnderThePrefix() {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = inlineExportService(s3);
+        String longest = "a".repeat(948);
+
+        String slashed = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", "ends-with/"),
+                null, null, "us-east-1").getExportArn();
+        svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", longest), null, null, "us-east-1");
+
+        String slashedId = slashed.substring(slashed.lastIndexOf('/') + 1);
+        verify(s3).initiateMultipartUpload("bucket", "ends-with/AWSDynamoDB/" + slashedId + "/_started",
+                "application/octet-stream");
+        assertEquals("COMPLETED", svc.describeExport(slashed).getExportStatus());
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+        verify(s3, atLeastOnce()).initiateMultipartUpload(eq("bucket"), keys.capture(), eq("application/octet-stream"));
+        assertEquals(1024, keys.getAllValues().stream().filter(key -> key.startsWith(longest))
+                .mapToInt(key -> key.getBytes(StandardCharsets.UTF_8).length).max().orElseThrow());
+    }
+
+    @Test
+    void ionExportWritesIonLines() throws Exception {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = inlineExportService(s3);
+        svc.putItem("Users", mapper.readTree("{\"userId\": {\"S\": \"u1\"}, \"total\": {\"N\": \"150\"}}"), "us-east-1");
+
+        String exportArn = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", "exports-ion",
+                "ExportFormat", "ION"), null, null, "us-east-1").getExportArn();
+
+        ExportDescription described = svc.describeExport(exportArn);
+        assertEquals("COMPLETED", described.getExportStatus());
+        assertEquals("ION", described.getExportFormat());
+        Map<String, byte[]> files = uploadedFiles(s3);
+        String dir = "exports-ion/AWSDynamoDB/" + exportArn.substring(exportArn.lastIndexOf('/') + 1) + "/";
+        String dataKey = files.keySet().stream().filter(key -> key.endsWith(".ion.gz")).findFirst().orElseThrow();
+        assertTrue(dataKey.matches(dir + "data/[a-z2-7]{26}\\.ion\\.gz"), dataKey);
+        assertEquals("$ion_1_0 {Item:{userId:\"u1\",total:15d1}}\n", gunzip(files.get(dataKey)));
+        assertEquals("ION", mapper.readTree(files.get(dir + "manifest-summary.json")).get("outputFormat").asText());
+    }
+
+    @Test
+    void jsonExportWritesCharactersAboveUffffAsUtf8() throws Exception {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = inlineExportService(s3);
+        svc.putItem("Users", item("userId", "u1", "😀", "😀"), "us-east-1");
+
+        svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket"), null, null, "us-east-1");
+
+        byte[] dataFile = uploadedFiles(s3).entrySet().stream().filter(file -> file.getKey().endsWith(".json.gz"))
+                .findFirst().orElseThrow().getValue();
+        assertEquals("{\"Item\":{\"userId\":{\"S\":\"u1\"},\"😀\":{\"S\":\"😀\"}}}\n", gunzip(dataFile));
+    }
+
+    @Test
+    void incrementalExportWritesARecordForEachChangedItem() throws Exception {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = incrementalExportService(s3);
+        for (String id : List.of("updated", "deleted", "same", "twice", "deletedThenPut")) {
+            svc.putItem("Users", item("userId", id, "v", "before"), "us-east-1");
+        }
+        clock.advance(Duration.ofSeconds(1));
+        Instant from = clock.instant();
+        svc.putItem("Users", item("userId", "updated", "v", "after"), "us-east-1");
+        svc.deleteItem("Users", item("userId", "deleted"), "us-east-1");
+        svc.putItem("Users", item("userId", "new", "v", "new 😀"), "us-east-1");
+        svc.putItem("Users", item("userId", "newThenDeleted", "v", "new"), "us-east-1");
+        svc.deleteItem("Users", item("userId", "newThenDeleted"), "us-east-1");
+        svc.putItem("Users", item("userId", "same", "v", "before"), "us-east-1");
+        svc.putItem("Users", item("userId", "twice", "v", "first"), "us-east-1");
+        Instant beforeLastWrite = clock.instant();
+        svc.putItem("Users", item("userId", "twice", "v", "second"), "us-east-1");
+        svc.deleteItem("Users", item("userId", "deletedThenPut"), "us-east-1");
+        svc.putItem("Users", item("userId", "deletedThenPut", "v", "put"), "us-east-1");
+        clock.advance(Duration.ofMinutes(15));
+        Instant to = clock.instant();
+        svc.putItem("Users", item("userId", "updated", "v", "after the period"), "us-east-1");
+
+        String exportArn = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", "inc",
+                "ExportType", "INCREMENTAL_EXPORT"), null, new DynamoDbService.IncrementalExportRequest(from, to, null),
+                "us-east-1").getExportArn();
+
+        assertTrue(exportArn.matches(".*/export/\\d{11}000-[0-9a-f]{8}"), exportArn);
+        ExportDescription described = svc.describeExport(exportArn);
+        assertEquals("COMPLETED", described.getExportStatus());
+        assertEquals("INCREMENTAL_EXPORT", described.getExportType());
+        assertNull(described.getExportTime());
+        assertEquals(BigDecimal.valueOf(from.toEpochMilli(), 3),
+                described.getIncrementalExportSpecification().getExportFromTime());
+        assertEquals(BigDecimal.valueOf(to.toEpochMilli(), 3), described.getIncrementalExportSpecification().getExportToTime());
+        assertEquals("NEW_AND_OLD_IMAGES", described.getIncrementalExportSpecification().getExportViewType());
+        Map<String, byte[]> files = uploadedFiles(s3);
+        String dataKey = files.keySet().stream().filter(key -> key.endsWith(".json.gz")).findFirst().orElseThrow();
+        assertTrue(dataKey.matches("inc/AWSDynamoDB/data/[a-z2-7]{26}\\.json\\.gz"), dataKey);
+        String[] records = gunzip(files.get(dataKey)).split("\n");
+        assertEquals(List.of(
+                "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"updated\"}},"
+                        + "\"OldImage\":{\"userId\":{\"S\":\"updated\"},\"v\":{\"S\":\"before\"}},"
+                        + "\"NewImage\":{\"userId\":{\"S\":\"updated\"},\"v\":{\"S\":\"after\"}}}",
+                "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"deleted\"}},"
+                        + "\"OldImage\":{\"userId\":{\"S\":\"deleted\"},\"v\":{\"S\":\"before\"}}}",
+                "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"new\"}},"
+                        + "\"NewImage\":{\"userId\":{\"S\":\"new\"},\"v\":{\"S\":\"new 😀\"}}}",
+                "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"twice\"}},"
+                        + "\"OldImage\":{\"userId\":{\"S\":\"twice\"},\"v\":{\"S\":\"before\"}},"
+                        + "\"NewImage\":{\"userId\":{\"S\":\"twice\"},\"v\":{\"S\":\"second\"}}}",
+                "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"deletedThenPut\"}},"
+                        + "\"OldImage\":{\"userId\":{\"S\":\"deletedThenPut\"},\"v\":{\"S\":\"before\"}},"
+                        + "\"NewImage\":{\"userId\":{\"S\":\"deletedThenPut\"},\"v\":{\"S\":\"put\"}}}"),
+                Arrays.stream(records).map(r -> r.replaceFirst("\"N\":\"\\d+\"", "\"N\":\"T\"")).toList());
+        assertEquals(5L, described.getItemCount());
+        assertEquals(10_000_000L, described.getBilledSizeBytes());
+        long lastWriteMicros = mapper.readTree(records[3]).at("/Metadata/WriteTimestampMicros/N").asLong();
+        assertTrue(ChronoUnit.MICROS.between(Instant.EPOCH, beforeLastWrite) < lastWriteMicros);
+        assertTrue(lastWriteMicros < ChronoUnit.MICROS.between(Instant.EPOCH, to));
+        String exportId = exportArn.substring(exportArn.lastIndexOf('/') + 1);
+        JsonNode summary = mapper.readTree(files.get("inc/AWSDynamoDB/" + exportId + "/manifest-summary.json"));
+        List<String> summaryFields = new ArrayList<>();
+        summary.fieldNames().forEachRemaining(summaryFields::add);
+        assertEquals(List.of("version", "exportArn", "startTime", "endTime", "tableArn", "tableId", "exportFromTime",
+                "exportToTime", "s3Bucket", "s3Prefix", "s3SseAlgorithm", "s3SseKmsKeyId", "manifestFilesS3Key",
+                "billedSizeBytes", "itemCount", "outputFormat", "outputView", "exportType"), summaryFields);
+        assertEquals("2023-08-01", summary.get("version").asText());
+        assertEquals("NEW_AND_OLD_IMAGES", summary.get("outputView").asText());
+        assertEquals("INCREMENTAL_EXPORT", summary.get("exportType").asText());
+    }
+
+    @Test
+    void incrementalIonExportOfNewImagesLeavesOutOldImages() throws Exception {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = incrementalExportService(s3);
+        svc.putItem("Users", item("userId", "updated", "v", "before"), "us-east-1");
+        svc.putItem("Users", item("userId", "deleted", "v", "before"), "us-east-1");
+        clock.advance(Duration.ofSeconds(1));
+        Instant from = clock.instant();
+        svc.putItem("Users", item("userId", "updated", "v", "after"), "us-east-1");
+        svc.deleteItem("Users", item("userId", "deleted"), "us-east-1");
+        clock.advance(Duration.ofMinutes(20));
+
+        String exportArn = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "ExportFormat", "ION",
+                "ExportType", "INCREMENTAL_EXPORT"), null,
+                new DynamoDbService.IncrementalExportRequest(from, null, "NEW_IMAGE"), "us-east-1").getExportArn();
+
+        ExportDescription described = svc.describeExport(exportArn);
+        assertEquals("COMPLETED", described.getExportStatus());
+        assertEquals(described.getStartTime(), described.getIncrementalExportSpecification().getExportToTime());
+        assertEquals(0, described.getStartTime().remainder(BigDecimal.ONE).signum());
+        Map<String, byte[]> files = uploadedFiles(s3);
+        String dataKey = files.keySet().stream().filter(key -> key.endsWith(".ion.gz")).findFirst().orElseThrow();
+        assertTrue(dataKey.matches("AWSDynamoDB/data/[a-z2-7]{26}\\.ion\\.gz"), dataKey);
+        assertEquals("""
+                $ion_1_0 {Record:{Keys:{userId:"updated"},Metadata:{WriteTimestampMicros:T},NewImage:{userId:"updated",v:"after"}}}
+                $ion_1_0 {Record:{Keys:{userId:"deleted"},Metadata:{WriteTimestampMicros:T}}}
+                """, gunzip(files.get(dataKey)).replaceAll("WriteTimestampMicros:\\d+d\\d+", "WriteTimestampMicros:T"));
+    }
+
+    @Test
+    void incrementalExportChecksThePeriodInTheAwsOrder() {
+        DynamoDbService svc = incrementalExportService(exportBucket());
+        svc.createTable("NoBackups", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, "us-east-1");
+        Instant creationSecond = svc.describeTable("NoBackups", "us-east-1").getCreationDateTime()
+                .truncatedTo(ChronoUnit.SECONDS);
+        clock.advance(Duration.ofHours(25));
+        Instant now = clock.instant();
+
+        Instant beforeCreation = creationSecond.minusMillis(1);
+        expectInvalidExportTime(svc, "NoBackups", beforeCreation, now.plusSeconds(60),
+                "Incremental export period from time cannot be less than the table creation time : " + beforeCreation);
+        Instant afterNow = now.plusSeconds(60);
+        expectInvalidExportTime(svc, "NoBackups", afterNow.plusSeconds(60), afterNow,
+                "Incremental export period to time cannot be greater than the current time : " + afterNow);
+        expectInvalidExportTime(svc, "NoBackups", creationSecond, creationSecond,
+                "Incremental export period from time should not be greater or equal to incremental export period to time");
+        expectInvalidExportTime(svc, "NoBackups", creationSecond, creationSecond.plus(Duration.ofMinutes(15)).minusMillis(1),
+                "Difference between export period from time and export period to time is less than 15 minutes");
+        Instant overADay = creationSecond.plus(Duration.ofHours(24)).plusSeconds(1);
+        String overADayMessage = "Difference between export period from time and export period to time is greater than 24 hours";
+        expectInvalidExportTime(svc, "NoBackups", creationSecond, overADay, overADayMessage);
+        for (Duration period : List.of(Duration.ofMinutes(15), Duration.ofHours(24).plusMillis(1))) {
+            AwsException noBackups = assertThrows(AwsException.class, () -> incrementalExport(svc, "NoBackups",
+                    creationSecond, creationSecond.plus(period)));
+            assertEquals("PointInTimeRecoveryUnavailableException", noBackups.getErrorCode());
+        }
+        svc.updateContinuousBackups("Users", false, null, "us-east-1");
+        svc.updateContinuousBackups("Users", true, null, "us-east-1");
+        expectInvalidExportTime(svc, "Users", creationSecond, overADay, overADayMessage);
+        expectInvalidExportTime(svc, "Users", creationSecond, creationSecond.plus(Duration.ofMinutes(15)),
+                "Export period from time cannot be earlier than the Point in Time Recovery window");
+    }
+
+    private static void expectInvalidExportTime(DynamoDbService svc, String table, Instant from, Instant to,
+                                                String message) {
+        AwsException e = assertThrows(AwsException.class, () -> incrementalExport(svc, table, from, to));
+        assertEquals("InvalidExportTimeException", e.getErrorCode());
+        assertEquals(message, e.getMessage());
+    }
+
+    private static ExportDescription incrementalExport(DynamoDbService svc, String table, Instant from, Instant to) {
+        return svc.exportTable(Map.of("TableArn", "arn:aws:dynamodb:us-east-1:000000000000:table/" + table,
+                "S3Bucket", "bucket", "ExportType", "INCREMENTAL_EXPORT"), null,
+                new DynamoDbService.IncrementalExportRequest(from, to, null), "us-east-1");
+    }
+
+    /** Every file the export uploaded, by key. */
+    private static Map<String, byte[]> uploadedFiles(S3Service s3) {
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<byte[]> parts = ArgumentCaptor.forClass(byte[].class);
+        verify(s3, atLeastOnce()).uploadPart(eq("bucket"), keys.capture(), anyString(), eq(1), parts.capture());
+        Map<String, byte[]> files = new LinkedHashMap<>();
+        for (int i = 0; i < keys.getAllValues().size(); i++) {
+            files.put(keys.getAllValues().get(i), parts.getAllValues().get(i));
+        }
+        return files;
+    }
+
+    private static String gunzip(byte[] data) throws IOException {
+        try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(data))) {
+            return new String(gzip.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    /** A bucket that takes every upload, each completing with a one-part ETag. */
+    private static S3Service exportBucket() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.initiateMultipartUpload(eq("bucket"), anyString(), eq("application/octet-stream")))
+                .thenAnswer(invocation -> new MultipartUpload("bucket", invocation.getArgument(1), "application/octet-stream"));
+        when(s3.completeMultipartUpload(eq("bucket"), anyString(), anyString(), eq(List.of(1)), isNull(), isNull()))
+                .thenReturn(new S3Object("bucket", "file", new byte[0], "application/octet-stream", "\"0123-1\""));
+        return s3;
+    }
+
+    /** Runs each export on the calling thread, with Users created and point-in-time recovery on. */
+    private DynamoDbService inlineExportService(S3Service s3) {
+        DynamoDbService svc = new DynamoDbService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), null, null, s3, mapper, 0, 0, 0, clock, Runnable::run);
+        svc.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, "us-east-1");
+        svc.updateContinuousBackups("Users", true, null, "us-east-1");
+        return svc;
+    }
+
+    /** Tables take their creation time from the system clock, so this clock starts after it. */
+    private DynamoDbService incrementalExportService(S3Service s3) {
+        clock.advance(Duration.between(clock.instant(), Instant.now()).plusSeconds(1));
+        return inlineExportService(s3);
     }
 
     @Test

@@ -87,7 +87,14 @@ class Ec2ImageCatalogTest {
                 "/aws/service/eks/optimized-ami/1.33/amazon-linux-2023/x86_64/standard/recommended/image_id",
                 "/aws/service/eks/optimized-ami/1.34/amazon-linux-2023/x86_64/standard/recommended/image_id",
                 "/aws/service/eks/optimized-ami/1.35/amazon-linux-2023/x86_64/standard/recommended/image_id",
-                "/aws/service/eks/optimized-ami/1.36/amazon-linux-2023/x86_64/standard/recommended/image_id"),
+                "/aws/service/eks/optimized-ami/1.36/amazon-linux-2023/x86_64/standard/recommended/image_id",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/schema_version",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_name",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/os",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/ecs_agent_version",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/ecs_runtime_version"),
                 x86.publicParameterNames());
 
         Ec2ImageCatalog.CatalogImage arm64 = imageCatalog.findByIdOrAlias("ami-amazonlinux2023-arm64").orElseThrow();
@@ -105,7 +112,14 @@ class Ec2ImageCatalogTest {
                 "/aws/service/eks/optimized-ami/1.33/amazon-linux-2023/arm64/standard/recommended/image_id",
                 "/aws/service/eks/optimized-ami/1.34/amazon-linux-2023/arm64/standard/recommended/image_id",
                 "/aws/service/eks/optimized-ami/1.35/amazon-linux-2023/arm64/standard/recommended/image_id",
-                "/aws/service/eks/optimized-ami/1.36/amazon-linux-2023/arm64/standard/recommended/image_id"),
+                "/aws/service/eks/optimized-ami/1.36/amazon-linux-2023/arm64/standard/recommended/image_id",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/schema_version",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_name",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/os",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/ecs_agent_version",
+                "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/ecs_runtime_version"),
                 arm64.publicParameterNames());
     }
 

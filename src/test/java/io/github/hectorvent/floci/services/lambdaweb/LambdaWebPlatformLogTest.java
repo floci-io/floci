@@ -55,8 +55,8 @@ class LambdaWebPlatformLogTest {
     @Test
     void aRequestIsReportedWithItsDurationInMillisecondsToThreeDecimals() {
         LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
-                logs.open("111122223333", "eu-west-1", GROUP, STREAM, "DEBUG"), "eu-west-1", "web", "rev-abcde",
-                "nodejs24.x", "INFO", this::datapoint);
+                logs.open("111122223333", "eu-west-1", "eu-west-1", GROUP, STREAM, "DEBUG"), "eu-west-1", "web",
+                "rev-abcde", "nodejs24.x", "INFO", this::datapoint);
 
         platform.requestComplete("KXH25FBDZ33GP4TQ4ARAUYSTSA", "dev", 504, "Runtime.RequestTimeout", 3_000_716_400L, 0);
 
@@ -71,8 +71,8 @@ class LambdaWebPlatformLogTest {
     @Test
     void eventsBelowTheSystemLogLevelAreDroppedAndAFailedReportIsWarn() {
         LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
-                logs.open("111122223333", "eu-west-1", GROUP, STREAM, "WARN"), "eu-west-1", "web", "rev-abcde",
-                "nodejs24.x", "INFO", this::datapoint);
+                logs.open("111122223333", "eu-west-1", "eu-west-1", GROUP, STREAM, "WARN"), "eu-west-1", "web",
+                "rev-abcde", "nodejs24.x", "INFO", this::datapoint);
         platform.initStart();
         platform.initReport(null, new LambdaWebPlatformLog.Usage(178_400, 142L * 1024 * 1024 + 5));
         platform.invokeStart(1);
@@ -92,8 +92,8 @@ class LambdaWebPlatformLogTest {
     @Test
     void theListenFailureIsDroppedAtFatal() {
         LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
-                logs.open("111122223333", "eu-west-1", GROUP, STREAM, "DEBUG"), "eu-west-1", "web", "rev-abcde",
-                "nodejs24.x", "FATAL", this::datapoint);
+                logs.open("111122223333", "eu-west-1", "eu-west-1", GROUP, STREAM, "DEBUG"), "eu-west-1", "web",
+                "rev-abcde", "nodejs24.x", "FATAL", this::datapoint);
 
         platform.applicationError("Application.TimeoutListenError: nothing was listening");
         platform.spinDownStart();
@@ -104,8 +104,8 @@ class LambdaWebPlatformLogTest {
     @Test
     void anEnvironmentPublishesItsMetricsAtInitAndForEachWindowWhateverTheSystemLogLevel() {
         LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
-                logs.open("111122223333", "eu-west-1", GROUP, STREAM, "WARN"), "eu-west-1", "web", "rev-abcde",
-                "nodejs24.x", "INFO", this::datapoint);
+                logs.open("111122223333", "eu-west-1", "eu-west-1", GROUP, STREAM, "WARN"), "eu-west-1", "web",
+                "rev-abcde", "nodejs24.x", "INFO", this::datapoint);
         platform.initStart();
         platform.initReport(null, new LambdaWebPlatformLog.Usage(178_400, 142L * 1024 * 1024 + 5));
         platform.invokeStart(1);
@@ -125,8 +125,8 @@ class LambdaWebPlatformLogTest {
     @Test
     void aFailedInitPublishesOneDatapoint() {
         LambdaWebPlatformLog platform = new LambdaWebPlatformLog(
-                logs.open("111122223333", "eu-west-1", GROUP, STREAM, "INFO"), "eu-west-1", "web", "rev-abcde",
-                "nodejs24.x", "INFO", this::datapoint);
+                logs.open("111122223333", "eu-west-1", "eu-west-1", GROUP, STREAM, "INFO"), "eu-west-1", "web",
+                "rev-abcde", "nodejs24.x", "INFO", this::datapoint);
         platform.initStart();
         platform.initReport("Runtime.ExitError", null);
 

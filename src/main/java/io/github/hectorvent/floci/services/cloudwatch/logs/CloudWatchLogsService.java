@@ -31,10 +31,8 @@ import jakarta.enterprise.event.Event;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -56,6 +54,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     private static final Logger LOG = Logger.getLogger(CloudWatchLogsService.class);
     private static final int MAX_REGEX_FILTERS_PER_LOG_GROUP = 5;
     private static final int MAX_FILTER_PATTERN_LENGTH = 1024;
+    private static final Set<String> LOG_GROUP_CLASSES = Set.of("STANDARD", "INFREQUENT_ACCESS", "DELIVERY");
 
     /**
      * Orders events by timestamp, then by ingestion sequence so that events sharing the same
@@ -273,6 +272,11 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         createLogGroupForAccount(null, name, retentionInDays, tags, deletionProtectionEnabled, kmsKeyId, region);
     }
 
+    public void createLogGroup(String name, Integer retentionInDays, Map<String, String> tags,
+                               boolean deletionProtectionEnabled, String kmsKeyId, String logGroupClass, String region) {
+        createLogGroupForAccount(null, name, retentionInDays, tags, deletionProtectionEnabled, kmsKeyId, logGroupClass, region);
+    }
+
     public void createLogGroupForAccount(
             String accountId, String name, Integer retentionInDays,
             Map<String, String> tags, String region) {
@@ -288,10 +292,17 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     public void createLogGroupForAccount(
             String accountId, String name, Integer retentionInDays,
             Map<String, String> tags, boolean deletionProtectionEnabled, String kmsKeyId, String region) {
+        createLogGroupForAccount(accountId, name, retentionInDays, tags, deletionProtectionEnabled, kmsKeyId, null, region);
+    }
+
+    public void createLogGroupForAccount(
+            String accountId, String name, Integer retentionInDays,
+            Map<String, String> tags, boolean deletionProtectionEnabled, String kmsKeyId, String logGroupClass, String region) {
         synchronized (metricFilterStore) {
             if (name == null || name.isBlank()) {
                 throw new AwsException("InvalidParameterException", "logGroupName is required.", 400);
             }
+            validateLogGroupClass(logGroupClass);
             String key = groupKey(region, name);
             if (getForAccount(groupStore, accountId, key).isPresent()) {
                 throw new AwsException("ResourceAlreadyExistsException",
@@ -299,6 +310,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
             }
             LogGroup group = new LogGroup();
             group.setLogGroupName(name);
+            group.setLogGroupClass(logGroupClass == null ? "STANDARD" : logGroupClass);
             group.setCreatedTime(System.currentTimeMillis());
             group.setRetentionInDays(retentionInDays);
             group.setDeletionProtectionEnabled(deletionProtectionEnabled);
@@ -316,10 +328,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     public void deleteLogGroup(String name, String region) {
         synchronized (metricFilterStore) {
             String key = groupKey(region, name);
-            LogGroup group = groupStore.get(key)
-                    .filter(stored -> name.equals(stored.getLogGroupName()))
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "The specified log group does not exist: " + name, 400));
+            LogGroup group = requireNamedLogGroup(region, name);
             if (group.isDeletionProtectionEnabled()) {
                 throw new AwsException("ValidationException",
                         "The specified log group has deletion protection enabled. "
@@ -369,6 +378,12 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     }
 
     PaginatedResult<LogGroup> describeLogGroups(String prefix, String region, int limit, String nextToken) {
+        return describeLogGroups(prefix, null, region, limit, nextToken);
+    }
+
+    PaginatedResult<LogGroup> describeLogGroups(String prefix, String logGroupClass, String region,
+                                               int limit, String nextToken) {
+        validateLogGroupClass(logGroupClass);
         if (limit < 1 || limit > 50) {
             String constraint = limit < 1 ? "greater than or equal to 1" : "less than or equal to 50";
             throw SmithyValidationErrors.exception("InvalidParameterException",
@@ -377,9 +392,21 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         if (nextToken != null && nextToken.isEmpty()) {
             throw invalidNextToken();
         }
-        return Pagination.paginate(matchingLogGroups(prefix, region), LogGroup::getLogGroupName, limit, nextToken,
-                "DescribeLogGroups:" + region + ":" + (prefix == null ? "" : prefix),
+        List<LogGroup> groups = matchingLogGroups(prefix, region).stream()
+                .filter(group -> logGroupClass == null || logGroupClass.equals(group.getLogGroupClass()))
+                .toList();
+        return Pagination.paginate(groups, LogGroup::getLogGroupName, limit, nextToken,
+                "DescribeLogGroups" + (logGroupClass == null ? "" : "/" + logGroupClass)
+                        + ":" + region + ":" + (prefix == null ? "" : prefix),
                 token -> invalidNextToken());
+    }
+
+    private static void validateLogGroupClass(String logGroupClass) {
+        if (logGroupClass != null && !LOG_GROUP_CLASSES.contains(logGroupClass)) {
+            throw SmithyValidationErrors.exception("InvalidParameterException",
+                    "Value '" + logGroupClass + "' at 'logGroupClass' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [STANDARD, INFREQUENT_ACCESS, DELIVERY]");
+        }
     }
 
     private List<LogGroup> matchingLogGroups(String prefix, String region) {
@@ -405,29 +432,21 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
 
     public void putLogGroupDeletionProtection(String groupName, boolean enabled, String region) {
         String key = groupKey(region, groupName);
-        LogGroup group = groupStore.get(key)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + groupName, 400));
+        LogGroup group = requireLogGroup(region, groupName);
         group.setDeletionProtectionEnabled(enabled);
         groupStore.put(key, group);
     }
 
     public void putRetentionPolicy(String groupName, int days, String region) {
         String key = groupKey(region, groupName);
-        LogGroup group = groupStore.get(key)
-                .filter(stored -> groupName.equals(stored.getLogGroupName()))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + groupName, 400));
+        LogGroup group = requireNamedLogGroup(region, groupName);
         group.setRetentionInDays(days);
         groupStore.put(key, group);
     }
 
     public void deleteRetentionPolicy(String groupName, String region) {
         String key = groupKey(region, groupName);
-        LogGroup group = groupStore.get(key)
-                .filter(stored -> groupName.equals(stored.getLogGroupName()))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + groupName, 400));
+        LogGroup group = requireNamedLogGroup(region, groupName);
         group.setRetentionInDays(null);
         groupStore.put(key, group);
     }
@@ -438,20 +457,14 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
 
     public void tagLogGroup(String groupName, Map<String, String> tags, String region) {
         String key = groupKey(region, groupName);
-        LogGroup group = groupStore.get(key)
-                .filter(stored -> groupName.equals(stored.getLogGroupName()))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + groupName, 400));
+        LogGroup group = requireNamedLogGroup(region, groupName);
         group.getTags().putAll(tags);
         groupStore.put(key, group);
     }
 
     public void untagLogGroup(String groupName, List<String> tagKeys, String region) {
         String key = groupKey(region, groupName);
-        LogGroup group = groupStore.get(key)
-                .filter(stored -> groupName.equals(stored.getLogGroupName()))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + groupName, 400));
+        LogGroup group = requireNamedLogGroup(region, groupName);
         tagKeys.forEach(group.getTags()::remove);
         groupStore.put(key, group);
     }
@@ -468,9 +481,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
             throw new AwsException("InvalidParameterException", "kmsKeyId required.", 400);
         }
         String key = groupKey(region, groupName);
-        LogGroup group = groupStore.get(key)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + groupName, 400));
+        LogGroup group = requireLogGroup(region, groupName);
         group.setKmsKeyId(kmsKeyId);
         groupStore.put(key, group);
         LOG.infov("Associated KMS key {0} with log group {1}", kmsKeyId, groupName);
@@ -478,20 +489,14 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
 
     public void disassociateKmsKey(String groupName, String region) {
         String key = groupKey(region, groupName);
-        LogGroup group = groupStore.get(key)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + groupName, 400));
+        LogGroup group = requireLogGroup(region, groupName);
         group.setKmsKeyId(null);
         groupStore.put(key, group);
         LOG.infov("Disassociated KMS key from log group {0}", groupName);
     }
 
     public Map<String, String> listTagsLogGroup(String groupName, String region) {
-        String key = groupKey(region, groupName);
-        LogGroup group = groupStore.get(key)
-                .filter(stored -> groupName.equals(stored.getLogGroupName()))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + groupName, 400));
+        LogGroup group = requireNamedLogGroup(region, groupName);
         return group.getTags();
     }
 
@@ -503,11 +508,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
 
     public void createLogStreamForAccount(
             String accountId, String groupName, String streamName, String region) {
-        String groupKey = groupKey(region, groupName);
-        getForAccount(groupStore, accountId, groupKey)
-                .filter(stored -> groupName.equals(stored.getLogGroupName()))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + groupName, 400));
+        requireLogGroupForAccount(accountId, region, groupName);
 
         String streamKey = streamKey(region, groupName, streamName);
         if (getForAccount(streamStore, accountId, streamKey).isPresent()) {
@@ -529,8 +530,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         streamStore.get(streamKey)
                 .filter(stored -> groupName.equals(stored.getLogGroupName())
                         && streamName.equals(stored.getLogStreamName()))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log stream does not exist: " + streamName, 400));
+                .orElseThrow(CloudWatchLogsService::logStreamNotFound);
 
         deleteStreamAndEvents(region, groupName, streamName, streamKey);
         LOG.infov("Deleted log stream: {0}/{1}", groupName, streamName);
@@ -558,9 +558,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         }
 
         // Verify group exists
-        groupStore.get(groupKey(region, groupName))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + groupName, 400));
+        requireLogGroup(region, groupName);
 
         int maxResults = Math.min(limit > 0 ? limit : 50, 50);
 
@@ -618,7 +616,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
                                                       int maxResults, String region) {
         String[] parts;
         try {
-            String raw = new String(Base64.getUrlDecoder().decode(nextToken), StandardCharsets.UTF_8);
+            String raw = Base64Url.decode(nextToken);
             parts = raw.split(":", 3);
         } catch (IllegalArgumentException e) {
             throw invalidNextToken();
@@ -674,6 +672,29 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         return new AwsException("InvalidParameterException", "The specified nextToken is invalid.", 400);
     }
 
+    private LogGroup requireLogGroup(String region, String name) {
+        return groupStore.get(groupKey(region, name))
+                .orElseThrow(CloudWatchLogsService::logGroupNotFound);
+    }
+
+    private LogGroup requireNamedLogGroup(String region, String name) {
+        return requireLogGroupForAccount(null, region, name);
+    }
+
+    private LogGroup requireLogGroupForAccount(String accountId, String region, String name) {
+        return getForAccount(groupStore, accountId, groupKey(region, name))
+                .filter(stored -> name.equals(stored.getLogGroupName()))
+                .orElseThrow(CloudWatchLogsService::logGroupNotFound);
+    }
+
+    static AwsException logGroupNotFound() {
+        return new AwsException("ResourceNotFoundException", "The specified log group does not exist.", 400);
+    }
+
+    static AwsException logStreamNotFound() {
+        return new AwsException("ResourceNotFoundException", "The specified log stream does not exist.", 400);
+    }
+
     // ──────────────────────────── Log Events ────────────────────────────
 
     public String putLogEvents(String groupName, String streamName,
@@ -684,10 +705,10 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     public String putLogEventsForAccount(
             String accountId, String groupName, String streamName,
             List<Map<String, Object>> events, String region) {
+        requireLogGroupForAccount(accountId, region, groupName);
         String streamKey = streamKey(region, groupName, streamName);
         getForAccount(streamStore, accountId, streamKey)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log stream does not exist: " + streamName, 400));
+                .orElseThrow(CloudWatchLogsService::logStreamNotFound);
 
         long now = System.currentTimeMillis();
         long totalBytes = 0;
@@ -721,8 +742,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
             // Again under the lock: DeleteLogStream removes the stream and its events while holding it,
             // and the stream's metadata is written here too, so a put can't bring a deleted stream back.
             LogStream stream = getForAccount(streamStore, accountId, streamKey)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "The specified log stream does not exist: " + streamName, 400));
+                    .orElseThrow(CloudWatchLogsService::logStreamNotFound);
             boolean done = false;
             try {
                 refillIfStale(index, accountId);
@@ -951,6 +971,8 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
                                                     Long startTime, Long endTime,
                                                     String filterPattern, int limit,
                                                     String nextToken, String region) {
+        requireNamedLogGroup(region, groupName);
+
         int maxEvents = Math.min(limit > 0 ? limit : Integer.MAX_VALUE,
                 maxEventsPerQuery);
         // The filter pattern syntax metric and subscription filters use: terms, quoted phrases,
@@ -1144,9 +1166,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         for (String groupName : distinctGroups) {
             // Real AWS StartQuery returns ResourceNotFoundException for a log group that does not exist,
             // rather than a successful empty query; mirror that instead of silently scanning nothing.
-            groupStore.get(groupKey(region, groupName)).orElseThrow(() ->
-                    new AwsException("ResourceNotFoundException",
-                            "The specified log group does not exist: " + groupName, 400));
+            requireLogGroup(region, groupName);
             String prefix = region + "::" + groupName + "::";
             for (LogEvent e : eventStore.scan(k -> k.startsWith(prefix))) {
                 if (e.getTimestamp() >= startMs && e.getTimestamp() <= endMs) {
@@ -1272,10 +1292,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
     public void putSubscriptionFilter(String logGroupName, String filterName, String filterPattern,
                                        String destinationArn, String distribution, String region) {
         synchronized (metricFilterStore) {
-            String groupKey = groupKey(region, logGroupName);
-            groupStore.get(groupKey)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "The specified log group does not exist: " + logGroupName, 400));
+            requireLogGroup(region, logGroupName);
             String normalizedPattern = filterPattern != null ? filterPattern : "";
             FilterPattern pattern = requireFilterPattern(normalizedPattern);
             validateFilterRegexQuota(logGroupName, filterName, pattern, false, region);
@@ -1298,10 +1315,7 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
 
     public DescribeSubscriptionFiltersResult describeSubscriptionFilters(String logGroupName, String filterNamePrefix,
                                                                           String nextToken, int limit, String region) {
-        String groupKey = groupKey(region, logGroupName);
-        groupStore.get(groupKey)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The specified log group does not exist: " + logGroupName, 400));
+        requireLogGroup(region, logGroupName);
 
         String prefix = subscriptionFilterKeyPrefix(region, logGroupName);
         List<SubscriptionFilter> all = subscriptionFilterStore.scan(k -> {
@@ -1330,15 +1344,12 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
 
     public void deleteSubscriptionFilter(String logGroupName, String filterName, String region) {
         synchronized (metricFilterStore) {
-            String groupKey = groupKey(region, logGroupName);
-            groupStore.get(groupKey)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "The specified log group does not exist: " + logGroupName, 400));
+            requireLogGroup(region, logGroupName);
 
             String filterKey = subscriptionFilterKey(region, logGroupName, filterName);
             subscriptionFilterStore.get(filterKey)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "The specified subscription filter does not exist: " + filterName, 400));
+                            "The specified subscription filter does not exist.", 400));
             subscriptionFilterStore.delete(filterKey);
             LOG.infov("Deleted subscription filter: {0} on log group: {1}", filterName, logGroupName);
         }

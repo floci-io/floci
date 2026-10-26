@@ -41,10 +41,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -330,6 +334,173 @@ class CodeArtifactNpmDataPlaneTest {
 
         assertEquals(201, response.statusCode());
         assertEquals(true, upstreamReceivedPut.get());
+    }
+
+    /**
+     * Qodo review finding: a real npm publish that republishes a coordinate an earlier
+     * updatePackageVersionsStatus/disposePackageVersions call left Archived or Disposed must not
+     * leave that override standing over the fresh content this publish just forwarded.
+     */
+    @Test
+    void aPublishOfANewVersionClearsAnyStaleStatusOverrideForThatVersion() throws Exception {
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> request.response().setStatusCode(201).end())
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
+                publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                        "fresh bytes".getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals(201, response.statusCode());
+        verify(service).forgetContainerBackedStatusOverrideIfUnchanged(eq("us-east-1"), eq(DOMAIN),
+                eq("000000000000"), eq(REPOSITORY), eq("npm"), isNull(), eq("my-pkg"), eq("1.0.0"), isNull());
+    }
+
+    /**
+     * hectorvent's review of this PR: the fix above only cleared a stale Archived/Disposed
+     * override after Verdaccio had already accepted the republished content, which the User
+     * Guide rules out unconditionally for both statuses. The publish must now be refused before it
+     * ever reaches Verdaccio.
+     */
+    @Test
+    void aPublishToAnArchivedOrDisposedVersionIsRejectedWithoutForwarding() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.PUT) {
+                        upstreamReceivedPut.set(true);
+                    }
+                    request.response().setStatusCode(201).end();
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        doThrow(new AwsException("ConflictException", "Package version '1.0.0' of package 'my-pkg' is Archived "
+                + "and cannot be republished.", 409))
+                .when(service).requireContainerBackedVersionNotArchivedOrDisposed(eq("us-east-1"), eq(DOMAIN),
+                        eq("000000000000"), eq(REPOSITORY), eq("npm"), isNull(), eq("my-pkg"), eq("1.0.0"));
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
+                publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                        "fresh bytes".getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals(409, response.statusCode());
+        assertEquals(false, upstreamReceivedPut.get());
+        verify(service, never()).forgetContainerBackedStatusOverrideIfUnchanged(any(), any(), any(), any(), any(),
+                any(), any(), any(), any());
+    }
+
+    /**
+     * Raised by Greptile's review: a real publish whose per-version {@code readme} exceeds
+     * {@code NpmPublishEnvelopeScanner}'s own stricter 1,000,000-character limit makes {@code
+     * checkRepublish}'s primary scan throw, the one case that used to forward unconditionally
+     * with no guard having run at all (nothing before this fix recovered the version names any
+     * other way). The lenient fallback scan must still let the guard see this exact version and
+     * refuse it, the same as a normal publish envelope already does.
+     */
+    @Test
+    void aPublishWhoseReadmeOverflowsTheStrictScanStillRunsTheGuard() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.PUT) {
+                        upstreamReceivedPut.set(true);
+                    }
+                    request.response().setStatusCode(201).end();
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        doThrow(new AwsException("ConflictException", "Package version '1.0.0' of package 'my-pkg' is Disposed "
+                + "and cannot be republished.", 409))
+                .when(service).requireContainerBackedVersionNotArchivedOrDisposed(eq("us-east-1"), eq(DOMAIN),
+                        eq("000000000000"), eq(REPOSITORY), eq("npm"), isNull(), eq("my-pkg"), eq("1.0.0"));
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        byte[] content = "fresh bytes".getBytes(StandardCharsets.UTF_8);
+        String oversizedReadme = "x".repeat(1_000_001);
+        String envelope = "{\"name\":\"my-pkg\",\"versions\":{\"1.0.0\":{\"name\":\"my-pkg\",\"version\":\"1.0.0\","
+                + "\"readme\":\"" + oversizedReadme + "\",\"dist\":{\"tarball\":\"http://ignored/my-pkg-1.0.0.tgz\","
+                + "\"integrity\":\"" + integrity(content) + "\"}}},\"_attachments\":{\"my-pkg-1.0.0.tgz\":{"
+                + "\"content_type\":\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(content) + "\",\"length\":" + content.length + "}}}";
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
+                envelope);
+
+        assertEquals(409, response.statusCode());
+        assertEquals(false, upstreamReceivedPut.get());
+    }
+
+    /**
+     * Raised by Greptile's review of the fix above: the guard passing is not the whole story.
+     * {@link CodeArtifactNpmDataPlane#forwardSpooled}'s own post-write bookkeeping, including the
+     * override-clearing call that undoes a concurrent dispose racing this exact write (see
+     * {@code CodeArtifactService#forgetContainerBackedStatusOverrideIfUnchanged}'s own javadoc),
+     * keys entirely off {@code readmeByVersion}. An earlier version of this fix left that map
+     * empty for the oversized-readme fallback, which let the guard run but then skipped every one
+     * of those for whichever version it let through, the exact gap a concurrent dispose could
+     * still exploit afterward. This version's own forward must still reach that bookkeeping.
+     */
+    @Test
+    void aPublishWhoseReadmeOverflowsTheStrictScanStillRunsPostWriteBookkeeping() throws Exception {
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> request.response().setStatusCode(201).end())
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        byte[] content = "fresh bytes".getBytes(StandardCharsets.UTF_8);
+        String oversizedReadme = "x".repeat(1_000_001);
+        String envelope = "{\"name\":\"my-pkg\",\"versions\":{\"1.0.0\":{\"name\":\"my-pkg\",\"version\":\"1.0.0\","
+                + "\"readme\":\"" + oversizedReadme + "\",\"dist\":{\"tarball\":\"http://ignored/my-pkg-1.0.0.tgz\","
+                + "\"integrity\":\"" + integrity(content) + "\"}}},\"_attachments\":{\"my-pkg-1.0.0.tgz\":{"
+                + "\"content_type\":\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(content) + "\",\"length\":" + content.length + "}}}";
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
+                envelope);
+
+        assertEquals(201, response.statusCode());
+        verify(service).forgetContainerBackedStatusOverrideIfUnchanged(eq("us-east-1"), eq(DOMAIN),
+                eq("000000000000"), eq(REPOSITORY), eq("npm"), isNull(), eq("my-pkg"), eq("1.0.0"), isNull());
     }
 
     /**

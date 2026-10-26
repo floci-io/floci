@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.pipes;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -18,6 +19,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -213,6 +215,90 @@ class PipesTargetInvokerTest {
     void inputTemplate_numericNotQuoted() {
         String result = invoker.applyInputTemplate("{\"count\": <$.count>}", "{\"count\": 42}");
         assertEquals("{\"count\": 42}", result);
+    }
+
+    @Test
+    void inputTemplate_quotedStringPlaceholderIsNotQuotedTwice() throws Exception {
+        String result = invoker.applyInputTemplate("{\"messageId\": \"<$.messageId>\"}",
+                "{\"messageId\": \"abc-123\"}");
+
+        assertEquals("abc-123", MAPPER.readTree(result).path("messageId").asText());
+    }
+
+    @Test
+    void inputTemplate_missingPathBecomesEmptyJsonString() throws Exception {
+        String result = invoker.applyInputTemplate("{\"taskType\": <$.body.missing>}",
+                "{\"body\": \"{\\\"taskType\\\":\\\"x\\\"}\"}");
+
+        assertEquals("", MAPPER.readTree(result).path("taskType").asText());
+    }
+
+    @Test
+    void inputTemplate_decodesJsonSqsBodyAtItsRoot() throws Exception {
+        String result = invoker.applyInputTemplate("{\"body\": <$.body>}",
+                "{\"body\": \"{\\\"taskType\\\":\\\"x\\\"}\"}");
+
+        JsonNode body = MAPPER.readTree(result).path("body");
+        assertTrue(body.isObject());
+        assertEquals("x", body.path("taskType").asText());
+    }
+
+    @Test
+    void inputTemplate_ingestionTimeIsAnIsoInstant() throws Exception {
+        Instant before = Instant.now().minusSeconds(1);
+        String result = invoker.applyInputTemplate("{\"t\": <aws.pipes.event.ingestion-time>}", "{}");
+        Instant after = Instant.now().plusSeconds(1);
+
+        Instant ingestionTime = Instant.parse(MAPPER.readTree(result).path("t").asText());
+        assertFalse(ingestionTime.isBefore(before));
+        assertFalse(ingestionTime.isAfter(after));
+    }
+
+    @Test
+    void extractJsonPath_messageAttributeJsonLookingStringRemainsString() throws Exception {
+        String result = invoker.extractJsonPath("$.messageAttributes.traceId.stringValue",
+                "{\"messageAttributes\":{\"traceId\":{\"stringValue\":\"{\\\"nested\\\":true}\"}}}");
+
+        JsonNode value = MAPPER.readTree(result);
+        assertTrue(value.isTextual());
+        assertEquals("{\"nested\":true}", value.asText());
+    }
+
+    @Test
+    void extractJsonPath_nestedBodyValueRemainsString() throws Exception {
+        ObjectNode body = MAPPER.createObjectNode();
+        body.put("Message", "{\"role\":\"admin\"}");
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("body", body.toString());
+        String result = invoker.extractJsonPath("$.body.Message",
+                payload.toString());
+
+        JsonNode value = MAPPER.readTree(result);
+        assertTrue(value.isTextual());
+        assertEquals("{\"role\":\"admin\"}", value.asText());
+    }
+
+    @Test
+    void extractJsonPath_doesNotDecodeNestedBodyValueTwice() throws Exception {
+        ObjectNode body = MAPPER.createObjectNode();
+        body.put("key", "{\"id\":1}");
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("body", body.toString());
+        String result = invoker.extractJsonPath("$.body.key", payload.toString());
+
+        JsonNode value = MAPPER.readTree(result);
+        assertTrue(value.isTextual());
+        assertEquals("{\"id\":1}", value.asText());
+    }
+
+    @Test
+    void inputTemplate_reusesIngestionTimeForRepeatedPlaceholders() throws Exception {
+        String result = invoker.applyInputTemplate(
+                "{\"first\": <aws.pipes.event.ingestion-time>, "
+                        + "\"second\": <aws.pipes.event.ingestion-time>}", "{}");
+
+        JsonNode document = MAPPER.readTree(result);
+        assertEquals(document.path("first").asText(), document.path("second").asText());
     }
 
     // ──────────────────────────── nested JSON string resolution ────────────────────────────

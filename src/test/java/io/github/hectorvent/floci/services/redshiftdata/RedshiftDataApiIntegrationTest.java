@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.redshiftdata;
 
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
+import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
@@ -12,14 +14,27 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
+import software.amazon.awssdk.services.cloudwatchlogs.model.GetLogEventsRequest;
+import software.amazon.awssdk.services.redshiftdata.RedshiftDataClient;
+import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementResponse;
+import software.amazon.awssdk.services.redshiftdata.model.ResourceNotFoundException;
 
+import java.net.URI;
 import java.time.Duration;
 import java.util.List;
+import java.util.UUID;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -30,6 +45,9 @@ class RedshiftDataApiIntegrationTest {
 
     @Inject
     RedshiftService redshift;
+
+    @TestHTTPResource("/")
+    URI endpoint;
 
     private String clusterId;
 
@@ -85,6 +103,93 @@ class RedshiftDataApiIntegrationTest {
 
     private static int asInt(Object value) {
         return ((Number) value).intValue();
+    }
+
+    @Test
+    void sdkSessionPreservesPostgresTemporaryTablesAcrossExecuteAndBatch() {
+        try (RedshiftDataClient data = RedshiftDataClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build()) {
+            ExecuteStatementResponse created = data.executeStatement(request -> request.clusterIdentifier(clusterId)
+                    .dbUser("admin").database("dev").sessionKeepAliveSeconds(60)
+                    .sql("CREATE TEMP TABLE session_rows(id integer)"));
+            assertNotNull(created.sessionId());
+            awaitFinished(created.id());
+            String session = created.sessionId();
+            awaitFinished(data.batchExecuteStatement(request -> request.sessionId(session)
+                    .sqls("INSERT INTO session_rows VALUES (41)", "INSERT INTO session_rows VALUES (42)")).id());
+            awaitFinished(data.executeStatement(request -> request.sessionId(session).sql("VACUUM")).id());
+            awaitFinished(data.executeStatement(request -> request.sessionId(session).sql("BEGIN")).id());
+            awaitFinished(data.executeStatement(request -> request.sessionId(session).sql("INSERT INTO session_rows VALUES (99)")).id());
+            awaitFinished(data.executeStatement(request -> request.sessionId(session).sql("ROLLBACK")).id());
+            String query = data.executeStatement(request -> request.sessionId(session).sql("SELECT id FROM session_rows ORDER BY id")).id();
+            awaitFinished(query);
+            assertEquals(session, data.describeStatement(request -> request.id(query)).sessionId());
+            assertEquals(2L, data.getStatementResult(request -> request.id(query)).totalNumRows());
+            assertEquals(41L, data.getStatementResult(request -> request.id(query)).records().getFirst().getFirst().longValue());
+            String last = data.executeStatement(request -> request.sessionId(session).sessionKeepAliveSeconds(0).sql("SELECT 1")).id();
+            awaitFinished(last);
+            assertThrows(ResourceNotFoundException.class,
+                    () -> data.executeStatement(request -> request.sessionId(session).sql("SELECT 1")));
+        }
+    }
+
+    @Test
+    void sdkExecuteStatementPublishesUserActivityToCloudWatchLogs() {
+        String parameterGroup = "it-rs-audit-" + clusterId;
+        redshift.createClusterParameterGroup(parameterGroup, "redshift-1.0", "Audit logging integration test");
+        redshift.modifyClusterParameterGroup(parameterGroup,
+                List.of(new Parameter("enable_user_activity_logging", "true")));
+        redshift.modifyCluster(clusterId, null, null, null, parameterGroup, null);
+        redshift.enableLogging(clusterId, null, null, "cloudwatch", List.of("useractivitylog"));
+        String group = "/aws/redshift/cluster/" + clusterId + "/useractivitylog";
+
+        try (RedshiftDataClient data = RedshiftDataClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build();
+             CloudWatchLogsClient logs = CloudWatchLogsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                     .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build()) {
+            String statementId = data.executeStatement(request -> request.clusterIdentifier(clusterId)
+                    .dbUser("admin").database("dev").sql("SELECT 741")).id();
+            awaitFinished(statementId);
+
+            Awaitility.await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(100)).until(() ->
+                    logs.getLogEvents(GetLogEventsRequest.builder().logGroupName(group).logStreamName(clusterId).build())
+                            .events().stream().anyMatch(event -> event.message().contains("LOG: SELECT 741")));
+        } finally {
+            redshift.disableLogging(clusterId);
+            redshift.modifyCluster(clusterId, null, null, null,
+                    "default.redshift-1.0", null);
+            redshift.deleteClusterParameterGroup(parameterGroup);
+        }
+    }
+
+    @Test
+    void sdkBatchSavepointRollbackOmitsTheRolledBackUserFromCloudWatchLogs() {
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String kept = "audit_kept_" + suffix;
+        String discarded = "audit_discarded_" + suffix;
+        String group = "/aws/redshift/cluster/" + clusterId + "/userlog";
+        redshift.enableLogging(clusterId, null, null, "cloudwatch", List.of("userlog"));
+        try (RedshiftDataClient data = RedshiftDataClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build();
+             CloudWatchLogsClient logs = CloudWatchLogsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                     .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build()) {
+            String batch = data.batchExecuteStatement(request -> request.clusterIdentifier(clusterId)
+                    .dbUser("admin").database("dev").sqls("CREATE USER " + kept + " PASSWORD 'Secret123'",
+                            "SAVEPOINT s; CREATE USER " + discarded + " PASSWORD 'Secret123'; ROLLBACK TO s")).id();
+            awaitFinished(batch);
+            String query = data.executeStatement(request -> request.clusterIdentifier(clusterId).dbUser("admin")
+                    .database("dev").sql("SELECT COUNT(*) FROM pg_user WHERE usename = '" + discarded + "'")).id();
+            awaitFinished(query);
+            assertEquals(0L, data.getStatementResult(request -> request.id(query)).records().getFirst().getFirst().longValue());
+            List<String> messages = logs.getLogEvents(GetLogEventsRequest.builder().logGroupName(group)
+                    .logStreamName(clusterId).build()).events().stream().map(event -> event.message()).toList();
+            assertTrue(messages.stream().anyMatch(message -> message.contains("," + kept + ",,Create,")));
+            assertFalse(messages.stream().anyMatch(message -> message.contains("," + discarded + ",")));
+        } finally {
+            redshift.disableLogging(clusterId);
+            executeAndWait("DROP USER IF EXISTS " + kept);
+            executeAndWait("DROP USER IF EXISTS " + discarded);
+        }
     }
 
     @Test

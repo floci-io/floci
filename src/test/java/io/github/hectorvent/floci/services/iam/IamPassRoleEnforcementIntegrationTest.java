@@ -21,6 +21,9 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.UUID;
 import java.util.zip.GZIPOutputStream;
 
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
@@ -53,6 +56,10 @@ class IamPassRoleEnforcementIntegrationTest {
     private static final String AUTOSCALING = "autoscaling.amazonaws.com";
     private static final String REDSHIFT = "redshift.amazonaws.com";
     private static final String REDSHIFT_SERVERLESS = "redshift-serverless.amazonaws.com";
+    private static final String RDS = "rds.amazonaws.com";
+    private static final String DMS = "dms.amazonaws.com";
+    private static final String SSM = "ssm.amazonaws.com";
+    private static final String SERVICE_CATALOG = "servicecatalog.amazonaws.com";
     private static final String SERVICE_LINKED_ROLES =
             "arn:aws:iam::" + ACCOUNT + ":role/aws-service-role/autoscaling.amazonaws.com/";
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
@@ -472,6 +479,83 @@ class IamPassRoleEnforcementIntegrationTest {
     }
 
     @Test
+    void anEksPodIdentityAssociationNeedsPassRoleOnItsRoleForPodIdentity() {
+        // Pod Identity hands the service account's pods the association role's credentials, so naming a role
+        // needs iam:PassRole on it, passed to Pod Identity rather than to EKS.
+        String role = role("eks-pod");
+        String other = role("eks-pod-other");
+        User user = user("passrole-eks-pod");
+        String path = "/clusters/" + eksCluster() + "/pod-identity-associations";
+        String create = "{\"namespace\":\"default\",\"serviceAccount\":\"app\",\"roleArn\":\"" + role + "\"}";
+        String pods = "pods.eks.amazonaws.com";
+
+        user.policy(allow("eks:CreatePodIdentityAssociation", "*") + "," + passRole(role, "eks.amazonaws.com"));
+        denied(user.rest("eks").body(create).post(path).then());
+        user.policy(allow("eks:CreatePodIdentityAssociation", "*") + "," + passRole(role, pods));
+        String id = user.rest("eks").body(create).post(path).then().statusCode(200)
+                .extract().path("association.associationId");
+
+        String update = "{\"roleArn\":\"" + other + "\"}";
+        user.policy(allow("eks:UpdatePodIdentityAssociation", "*") + "," + passRole(role, pods));
+        denied(user.rest("eks").body(update).post(path + "/" + id).then());
+        user.policy(allow("eks:UpdatePodIdentityAssociation", "*") + "," + passRole(other, pods));
+        user.rest("eks").body(update).post(path + "/" + id).then().statusCode(200);
+    }
+
+    @Test
+    void anEksClusterNodeGroupFargateProfileAndNodeAccessEntryNeedPassRoleOnTheirRoles() {
+        String clusterRole = role("eks-cluster");
+        String nodeRole = role("eks-node");
+        String podRole = role("eks-fargate");
+        User user = user("passrole-eks");
+        String eks = "eks.amazonaws.com";
+        String name = "passrole-eks-" + suffix();
+        String path = "/clusters/" + name;
+        String cluster = "{\"name\":\"" + name + "\",\"roleArn\":\"" + clusterRole
+                + "\",\"accessConfig\":{\"authenticationMode\":\"API\"}}";
+
+        user.policy(allow("eks:CreateCluster", "*"));
+        denied(user.rest("eks").body(cluster).post("/clusters").then());
+        user.policy(allow("eks:CreateCluster", "*") + "," + passRole(clusterRole, eks));
+        user.rest("eks").body(cluster).post("/clusters").then().statusCode(200);
+        cleanup.register(() -> admin("eks").delete(path));
+
+        String nodegroup = "{\"nodegroupName\":\"ng\",\"subnets\":[\"subnet-abc\"],\"nodeRole\":\"" + nodeRole + "\"}";
+        user.policy(allow("eks:CreateNodegroup", "*"));
+        denied(user.rest("eks").body(nodegroup).post(path + "/node-groups").then());
+        user.policy(allow("eks:CreateNodegroup", "*") + "," + passRole(nodeRole, eks));
+        user.rest("eks").body(nodegroup).post(path + "/node-groups").then().statusCode(200);
+        cleanup.register(() -> admin("eks").delete(path + "/node-groups/ng"));
+
+        String profile = "{\"fargateProfileName\":\"fp\",\"podExecutionRoleArn\":\"" + podRole + "\"}";
+        user.policy(allow("eks:CreateFargateProfile", "*"));
+        denied(user.rest("eks").body(profile).post(path + "/fargate-profiles").then());
+        user.policy(allow("eks:CreateFargateProfile", "*") + "," + passRole(podRole, eks));
+        user.rest("eks").body(profile).post(path + "/fargate-profiles").then().statusCode(200);
+        cleanup.register(() -> admin("eks").delete(path + "/fargate-profiles/fp"));
+
+        // A node access entry passes its role to EC2, whose instances join as it; a standard one passes nothing.
+        String node = "{\"principalArn\":\"" + nodeRole + "\",\"type\":\"EC2_LINUX\"}";
+        user.policy(allow("eks:CreateAccessEntry", "*") + "," + passRole(nodeRole, eks));
+        denied(user.rest("eks").body(node).post(path + "/access-entries").then());
+        user.policy(allow("eks:CreateAccessEntry", "*") + "," + passRole(nodeRole, "ec2.amazonaws.com"));
+        user.rest("eks").body(node).post(path + "/access-entries").then().statusCode(200);
+        user.policy(allow("eks:CreateAccessEntry", "*"));
+        user.rest("eks").body("{\"principalArn\":\"" + podRole + "\"}").post(path + "/access-entries").then()
+                .statusCode(200);
+    }
+
+    /** Creates an EKS cluster as the account's admin, removed afterwards, and returns its name. */
+    private String eksCluster() {
+        String name = "passrole-cluster-" + suffix();
+        admin("eks").contentType("application/json")
+                .body("{\"name\":\"" + name + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT + ":role/passrole-cluster\"}")
+                .post("/clusters").then().statusCode(200);
+        cleanup.register(() -> admin("eks").delete("/clusters/" + name));
+        return name;
+    }
+
+    @Test
     void aMicrovmImageAndANetworkConnectorNeedPassRoleOnTheRolesTheyName() {
         String build = role("microvm-build");
         String operator = role("connector-operator");
@@ -811,6 +895,90 @@ class IamPassRoleEnforcementIntegrationTest {
         serverless(user, "UpdateNamespace").body(defaultOnly).post("/").then().statusCode(200);
     }
 
+    @Test
+    void anRdsRequestNeedsPassRoleOnEachRoleItNamesForRds() {
+        String role = role("rds-feature");
+        User user = user("passrole-rds");
+        String missing = "passrole-missing-" + suffix();
+        String option = "OptionsToInclude.OptionConfiguration.1.";
+        Map<String, Map<String, String>> requests = new LinkedHashMap<>();
+        requests.put("AddRoleToDBInstance", Map.of("DBInstanceIdentifier", missing, "RoleArn", role,
+                "FeatureName", "s3Import"));
+        requests.put("RemoveRoleFromDBCluster", Map.of("DBClusterIdentifier", missing, "RoleArn", role,
+                "FeatureName", "s3Import"));
+        requests.put("ModifyDBProxy", Map.of("DBProxyName", missing, "RoleArn", role));
+        requests.put("ModifyDBInstance", Map.of("DBInstanceIdentifier", missing, "MonitoringInterval", "60",
+                "MonitoringRoleArn", role));
+        requests.put("RestoreDBClusterFromSnapshot", Map.of("DBClusterIdentifier", missing, "SnapshotIdentifier",
+                missing, "Engine", "aurora-postgresql", "AssociatedRoles.DBClusterAssociatedRole.1.RoleArn", role));
+        requests.put("ModifyOptionGroup", Map.of("OptionGroupName", missing, option + "OptionName",
+                "SQLSERVER_BACKUP_RESTORE", option + "OptionSettings.OptionSetting.1.Name", "IAM_ROLE_ARN",
+                option + "OptionSettings.OptionSetting.1.Value", role));
+        requests.put("StartExportTask", Map.of("ExportTaskIdentifier", missing, "SourceArn",
+                "arn:aws:rds:us-east-1:" + ACCOUNT + ":snapshot:" + missing, "S3BucketName", missing,
+                "IamRoleArn", role, "KmsKeyId", "alias/" + missing));
+
+        // A grant to pass the role to Redshift does not cover RDS; with one for RDS, each reaches RDS, which
+        // has no such resource.
+        user.policy(allow("rds:*", "*") + "," + passRole(role, REDSHIFT));
+        requests.forEach((action, params) -> denied(user.rds(action).formParams(params).post("/").then()));
+        user.policy(allow("rds:*", "*") + "," + passRole(role, RDS));
+        requests.forEach((action, params) -> user.rds(action).formParams(params).post("/").then()
+                .statusCode(not(403)).body(not(containsString("iam:PassRole"))));
+    }
+
+    @Test
+    void anRdsDirectoryRoleNamedByNameNeedsPassRoleOnTheArnIamHoldsItUnder() {
+        String role = role("/directory/", "rds-directory");
+        User user = user("passrole-rds-directory");
+        String pathless = "arn:aws:iam::" + ACCOUNT + ":role/" + roleName(role);
+        String cluster = "passrole-missing-" + suffix();
+
+        user.policy(allow("rds:ModifyDBCluster", "*") + "," + passRole(pathless, RDS));
+        denied(modifyClusterDirectoryRole(user, cluster, roleName(role)).then());
+        user.policy(allow("rds:ModifyDBCluster", "*") + "," + passRole(role, RDS));
+        modifyClusterDirectoryRole(user, cluster, roleName(role)).then()
+                .statusCode(404).body(containsString("DBClusterNotFound"));
+    }
+
+    private static Response modifyClusterDirectoryRole(User user, String cluster, String roleName) {
+        return user.rds("ModifyDBCluster").formParam("DBClusterIdentifier", cluster)
+                .formParam("DomainIAMRoleName", roleName).post("/");
+    }
+
+    @Test
+    void aDmsEndpointAndReplicationInstanceNeedPassRoleOnTheirRolesForDms() {
+        String role = role("dms-access");
+        User user = user("passrole-dms");
+        String endpoint = ("{\"EndpointIdentifier\":\"passrole-%s\",\"EndpointType\":\"target\",\"EngineName\":\"s3\","
+                + "\"S3Settings\":{\"ServiceAccessRoleArn\":\"%s\",\"BucketName\":\"passrole-bucket\"}}")
+                .formatted(suffix(), role);
+        String modifyEndpoint = ("{\"EndpointArn\":\"arn:aws:dms:us-east-1:%s:endpoint:PASSROLEMISSING\","
+                + "\"PostgreSQLSettings\":{\"SecretsManagerAccessRoleArn\":\"%s\"}}").formatted(ACCOUNT, role);
+        String modifyInstance = ("{\"ReplicationInstanceArn\":\"arn:aws:dms:us-east-1:%s:rep:PASSROLEMISSING\","
+                + "\"KerberosAuthenticationSettings\":{\"KeyCacheSecretIamArn\":\"%s\"}}").formatted(ACCOUNT, role);
+
+        // A grant to pass the role to RDS does not cover DMS.
+        user.policy(allow("dms:*", "*") + "," + passRole(role, RDS));
+        deniedJson(dms(user, "CreateEndpoint").body(endpoint).post("/").then());
+        deniedJson(dms(user, "ModifyEndpoint").body(modifyEndpoint).post("/").then());
+        deniedJson(dms(user, "ModifyReplicationInstance").body(modifyInstance).post("/").then());
+
+        user.policy(allow("dms:*", "*") + "," + passRole(role, DMS));
+        String endpointArn = dms(user, "CreateEndpoint").body(endpoint).post("/").then().statusCode(200)
+                .extract().path("Endpoint.EndpointArn");
+        cleanup.register(() -> admin("dms").header("X-Amz-Target", "AmazonDMSv20160101.DeleteEndpoint")
+                .contentType("application/x-amz-json-1.1").body("{\"EndpointArn\":\"" + endpointArn + "\"}").post("/"));
+        dms(user, "ModifyEndpoint").body(modifyEndpoint).post("/").then()
+                .statusCode(400).body(containsString("ResourceNotFoundFault"));
+        dms(user, "ModifyReplicationInstance").body(modifyInstance).post("/").then()
+                .statusCode(400).body(containsString("ResourceNotFoundFault"));
+    }
+
+    private static RequestSpecification dms(User user, String operation) {
+        return user.json("dms", "AmazonDMSv20160101." + operation);
+    }
+
     private static Response restore(User user, String cluster, String role) {
         return user.redshift("RestoreFromClusterSnapshot").formParam("ClusterIdentifier", cluster)
                 .formParam("SnapshotIdentifier", "passrole-no-snapshot").formParam("IamRoles.IamRoleArn.1", role)
@@ -954,6 +1122,353 @@ class IamPassRoleEnforcementIntegrationTest {
                 "{\"Resources\":{\"Q\":{\"Type\":\"AWS::SQS::Queue\"}}}");
     }
 
+    @Test
+    void anSsmAssociationAndACommandNeedPassRoleOnTheRolesTheyNameForSsm() {
+        String role = role("ssm-dispatch");
+        User user = user("passrole-ssm");
+        String association = "{\"Name\":\"passrole-missing-document\",\"InstanceId\":\"i-0123456789abcdef0\","
+                + "\"AssociationDispatchAssumeRole\":\"" + role + "\"}";
+        String update = "{\"AssociationId\":\"" + UUID.randomUUID() + "\",\"AssociationDispatchAssumeRole\":\""
+                + role + "\"}";
+        // The command names no instance, so SSM refuses it once it is authorized.
+        String command = "{\"DocumentName\":\"AWS-RunShellScript\",\"ServiceRoleArn\":\"" + role + "\"}";
+        String actions = allow("ssm:CreateAssociation", "*") + "," + allow("ssm:UpdateAssociation", "*") + ","
+                + allow("ssm:SendCommand", "*");
+
+        // A grant to pass the role to Lambda does not cover SSM.
+        user.policy(actions + "," + passRole(role, LAMBDA));
+        deniedJson(ssm(user, "CreateAssociation").body(association).post("/").then());
+        deniedJson(ssm(user, "UpdateAssociation").body(update).post("/").then());
+        deniedJson(ssm(user, "SendCommand").body(command).post("/").then());
+
+        user.policy(actions + "," + passRole(role, SSM));
+        ssm(user, "CreateAssociation").body(association).post("/").then()
+                .statusCode(400).body(containsString("InvalidDocument"));
+        ssm(user, "UpdateAssociation").body(update).post("/").then()
+                .statusCode(400).body(containsString("AssociationDoesNotExist"));
+        ssm(user, "SendCommand").body(command).post("/").then()
+                .statusCode(400).body(containsString("InvalidInstanceId"));
+    }
+
+    @Test
+    void aServiceCatalogLaunchRoleNeedsPassRoleForServiceCatalog() {
+        String role = role("catalog-launch");
+        User user = user("passrole-catalog");
+        String portfolio = catalogAdmin("CreatePortfolio", "{\"DisplayName\":\"passrole-" + suffix()
+                + "\",\"ProviderName\":\"floci\"}").extract().path("PortfolioDetail.Id");
+        cleanup.register(() -> deleteFromCatalog("DeletePortfolio", portfolio));
+        String product = catalogAdmin("CreateProduct", "{\"Name\":\"passrole-" + suffix() + "\",\"Owner\":\"floci\","
+                + "\"ProvisioningArtifactParameters\":[{\"Name\":\"v1\"}]}")
+                .extract().path("ProductViewDetail.ProductViewSummary.Id");
+        cleanup.register(() -> deleteFromCatalog("DeleteProduct", product));
+        String launch = catalogAdmin("CreateConstraint", constraint(portfolio, product, "LAUNCH", "{}"))
+                .extract().path("ConstraintDetail.ConstraintId");
+        String notification = catalogAdmin("CreateConstraint", constraint(portfolio, product, "NOTIFICATION",
+                "{\\\"NotificationArns\\\":[]}")).extract().path("ConstraintDetail.ConstraintId");
+        // Floci keeps a constraint's type as given, so one typed in lowercase is a launch constraint too.
+        String lowercase = catalogAdmin("CreateConstraint", constraint(portfolio, product, "launch", "{}"))
+                .extract().path("ConstraintDetail.ConstraintId");
+        cleanup.register(() -> deleteFromCatalog("DeleteConstraint", launch));
+        cleanup.register(() -> deleteFromCatalog("DeleteConstraint", notification));
+        cleanup.register(() -> deleteFromCatalog("DeleteConstraint", lowercase));
+        String launchRole = "{\\\"RoleArn\\\":\\\"" + role + "\\\"}";
+        String create = constraint(portfolio, product, "LAUNCH", launchRole);
+        String updateLaunch = "{\"Id\":\"" + launch + "\",\"Parameters\":\"" + launchRole + "\"}";
+        String updateNotification = "{\"Id\":\"" + notification + "\",\"Parameters\":\"" + launchRole + "\"}";
+        String createLowercase = constraint(portfolio, product, "launch", launchRole);
+        String updateLowercase = "{\"Id\":\"" + lowercase + "\",\"Parameters\":\"" + launchRole + "\"}";
+        String serviceAction = "{\"Name\":\"passrole-" + suffix() + "\",\"DefinitionType\":\"SSM_AUTOMATION\","
+                + "\"Definition\":{\"Name\":\"AWS-RestartEC2Instance\",\"Version\":\"1\",\"AssumeRole\":\""
+                + role + "\"},\"IdempotencyToken\":\"" + suffix() + "\"}";
+        String properties = "{\"ProvisionedProductId\":\"pp-passrolemissing\",\"IdempotencyToken\":\"" + suffix()
+                + "\",\"ProvisionedProductProperties\":{\"LAUNCH_ROLE\":\"" + role + "\"}}";
+        String actions = allow("servicecatalog:*", "*");
+
+        // A grant to pass the role to SSM does not cover Service Catalog.
+        user.policy(actions + "," + passRole(role, SSM));
+        deniedJson(catalog(user, "CreateConstraint").body(create).post("/").then());
+        deniedJson(catalog(user, "UpdateConstraint").body(updateLaunch).post("/").then());
+        deniedJson(catalog(user, "CreateConstraint").body(createLowercase).post("/").then());
+        deniedJson(catalog(user, "UpdateConstraint").body(updateLowercase).post("/").then());
+        deniedJson(catalog(user, "CreateServiceAction").body(serviceAction).post("/").then());
+        deniedJson(catalog(user, "UpdateProvisionedProductProperties").body(properties).post("/").then());
+        // The update goes by the constraint's own type: a notification constraint takes no launch role.
+        catalog(user, "UpdateConstraint").body(updateNotification).post("/").then().statusCode(200);
+
+        user.policy(actions + "," + passRole(role, SERVICE_CATALOG));
+        String created = catalog(user, "CreateConstraint").body(create).post("/").then().statusCode(200)
+                .extract().path("ConstraintDetail.ConstraintId");
+        cleanup.register(() -> deleteFromCatalog("DeleteConstraint", created));
+        catalog(user, "UpdateConstraint").body(updateLaunch).post("/").then().statusCode(200);
+        String action = catalog(user, "CreateServiceAction").body(serviceAction).post("/").then().statusCode(200)
+                .extract().path("ServiceActionDetail.ServiceActionSummary.Id");
+        cleanup.register(() -> deleteFromCatalog("DeleteServiceAction", action));
+        catalog(user, "UpdateProvisionedProductProperties").body(properties).post("/").then()
+                .statusCode(400).body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void aServiceCatalogLocalRoleNameNeedsPassRoleOnTheArnIamHoldsItUnder() {
+        String held = role("/catalog/", "catalog-local");
+        String pathless = "arn:aws:iam::" + ACCOUNT + ":role/" + roleName(held);
+        User user = user("passrole-catalog-local");
+        String update = "{\"Id\":\"cons-passrolemissing\",\"Parameters\":\"{\\\"LocalRoleName\\\":\\\""
+                + roleName(held) + "\\\"}\"}";
+        String create = constraint("port-passrolemissing", "prod-passrolemissing", "LAUNCH",
+                "{\\\"LocalRoleName\\\":\\\"" + roleName(held) + "\\\"}");
+
+        // The name carries no path, but the role it names is the one IAM holds under /catalog/.
+        user.policy(allow("servicecatalog:CreateConstraint", "*") + "," + passRole(pathless, SERVICE_CATALOG));
+        deniedJson(catalog(user, "CreateConstraint").body(create).post("/").then());
+        user.policy(allow("servicecatalog:CreateConstraint", "*") + "," + passRole(held, SERVICE_CATALOG));
+        catalog(user, "CreateConstraint").body(create).post("/").then()
+                .statusCode(400).body(containsString("ResourceNotFoundException"));
+
+        // A constraint Floci does not hold has no type to read a launch role by, and Service Catalog reports it.
+        user.policy(allow("servicecatalog:UpdateConstraint", "*"));
+        catalog(user, "UpdateConstraint").body(update).post("/").then()
+                .statusCode(400).body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void aRotationRoleABudgetActionsRoleAndAWorkflowsLambdaRoleNeedPassRoleForTheirService() {
+        String role = role("service-role");
+        User user = user("passrole-mixed");
+        String rotate = "{\"SecretId\":\"passrole-missing-secret\",\"ExternalSecretRotationRoleArn\":\"" + role + "\"}";
+        String budgetAction = ("{\"AccountId\":\"%s\",\"BudgetName\":\"passrole-missing\",\"NotificationType\":\"ACTUAL\","
+                + "\"ActionType\":\"APPLY_IAM_POLICY\",\"ActionThreshold\":{\"ActionThresholdValue\":80,"
+                + "\"ActionThresholdType\":\"PERCENTAGE\"},\"Definition\":{\"IamActionDefinition\":{\"PolicyArn\":"
+                + "\"arn:aws:iam::%s:policy/passrole-deny\",\"Roles\":[\"target\"]}},\"ExecutionRoleArn\":\"%s\","
+                + "\"ApprovalModel\":\"AUTOMATIC\",\"Subscribers\":[{\"SubscriptionType\":\"EMAIL\","
+                + "\"Address\":\"ops@example.com\"}]}").formatted(ACCOUNT, ACCOUNT, role);
+        String workflowType = "{\"domain\":\"passrole-missing\",\"name\":\"w\",\"version\":\"1\","
+                + "\"defaultLambdaRole\":\"" + role + "\"}";
+        String execution = "{\"domain\":\"passrole-missing\",\"workflowId\":\"w\",\"workflowType\":"
+                + "{\"name\":\"w\",\"version\":\"1\"},\"lambdaRole\":\"" + role + "\"}";
+        String decisions = "{\"taskToken\":\"passrole-missing\",\"decisions\":[{\"decisionType\":"
+                + "\"StartChildWorkflowExecution\",\"startChildWorkflowExecutionDecisionAttributes\":"
+                + "{\"workflowType\":{\"name\":\"w\",\"version\":\"1\"},\"workflowId\":\"child\","
+                + "\"lambdaRole\":\"" + role + "\"}}]}";
+        String actions = allow("secretsmanager:RotateSecret", "*") + "," + allow("budgets:CreateBudgetAction", "*")
+                + "," + allow("swf:*", "*");
+
+        // Each grant is for another service's principal.
+        user.policy(actions + "," + passRole(role, "budgets.amazonaws.com") + "," + passRole(role, SSM));
+        deniedJson(user.json("secretsmanager", "secretsmanager.RotateSecret").body(rotate).post("/").then());
+        user.policy(actions + "," + passRole(role, "secretsmanager.amazonaws.com") + "," + passRole(role, SSM));
+        deniedJson(user.json("budgets", "AWSBudgetServiceGateway.CreateBudgetAction").body(budgetAction).post("/")
+                .then());
+        user.policy(actions + "," + passRole(role, "secretsmanager.amazonaws.com") + ","
+                + passRole(role, "budgets.amazonaws.com"));
+        deniedJson(swf(user, "RegisterWorkflowType").body(workflowType).post("/").then());
+        deniedJson(swf(user, "StartWorkflowExecution").body(execution).post("/").then());
+        deniedJson(swf(user, "RespondDecisionTaskCompleted").body(decisions).post("/").then());
+
+        // With all three, each request reaches its service, which has nothing of that name.
+        user.policy(actions + "," + passRole(role, "secretsmanager.amazonaws.com") + ","
+                + passRole(role, "budgets.amazonaws.com") + "," + passRole(role, "swf.amazonaws.com"));
+        user.json("secretsmanager", "secretsmanager.RotateSecret").body(rotate).post("/").then()
+                .statusCode(400).body(containsString("ResourceNotFoundException"));
+        user.json("budgets", "AWSBudgetServiceGateway.CreateBudgetAction").body(budgetAction).post("/").then()
+                .statusCode(400).body(containsString("NotFoundException"));
+        swf(user, "RegisterWorkflowType").body(workflowType).post("/").then()
+                .statusCode(400).body(containsString("UnknownResourceFault"));
+        swf(user, "StartWorkflowExecution").body(execution).post("/").then()
+                .statusCode(400).body(containsString("UnknownResourceFault"));
+        swf(user, "RespondDecisionTaskCompleted").body(decisions).post("/").then()
+                .statusCode(400).body(containsString("Unknown or expired task token"));
+    }
+
+    @Test
+    void anSnsTopicsDeliveryStatusRoleNeedsPassRoleForSns() {
+        String role = role("sns-feedback");
+        User user = user("passrole-sns");
+        String topic = "passrole-topic-" + suffix();
+        String topicArn = "arn:aws:sns:us-east-1:" + ACCOUNT + ":" + topic;
+        String actions = allow("sns:CreateTopic", "*") + "," + allow("sns:SetTopicAttributes", "*");
+
+        user.policy(actions + "," + passRole(role, LAMBDA));
+        denied(user.query("sns", "CreateTopic").formParam("Name", topic)
+                .formParam("Attributes.entry.1.key", "LambdaFailureFeedbackRoleArn")
+                .formParam("Attributes.entry.1.value", role).post("/").then());
+        denied(user.query("sns", "SetTopicAttributes").formParam("TopicArn", topicArn)
+                .formParam("AttributeName", "SQSSuccessFeedbackRoleArn").formParam("AttributeValue", role)
+                .post("/").then());
+
+        user.policy(actions + "," + passRole(role, "sns.amazonaws.com"));
+        user.query("sns", "CreateTopic").formParam("Name", topic)
+                .formParam("Attributes.entry.1.key", "LambdaFailureFeedbackRoleArn")
+                .formParam("Attributes.entry.1.value", role).post("/").then().statusCode(200);
+        cleanup.register(() -> admin("sns").formParam("Action", "DeleteTopic").formParam("TopicArn", topicArn).post("/"));
+        user.query("sns", "SetTopicAttributes").formParam("TopicArn", topicArn)
+                .formParam("AttributeName", "SQSSuccessFeedbackRoleArn").formParam("AttributeValue", role)
+                .post("/").then().statusCode(200);
+
+        // A role attribute with no value names no role, so SNS answers it: a topic takes it, and a Firehose
+        // subscription refuses it.
+        user.policy(actions + "," + allow("sns:SetSubscriptionAttributes", "*"));
+        user.query("sns", "SetTopicAttributes").formParam("TopicArn", topicArn)
+                .formParam("AttributeName", "SQSSuccessFeedbackRoleArn").post("/").then().statusCode(200);
+        String subscription = admin("sns").formParam("Action", "Subscribe").formParam("TopicArn", topicArn)
+                .formParam("Protocol", "firehose")
+                .formParam("Endpoint", "arn:aws:firehose:us-east-1:" + ACCOUNT + ":deliverystream/passrole")
+                .formParam("Attributes.entry.1.key", "SubscriptionRoleArn")
+                .formParam("Attributes.entry.1.value", role).post("/").then().statusCode(200)
+                .extract().xmlPath().getString("SubscribeResponse.SubscribeResult.SubscriptionArn");
+        user.query("sns", "SetSubscriptionAttributes").formParam("SubscriptionArn", subscription)
+                .formParam("AttributeName", "SubscriptionRoleArn").post("/").then().statusCode(400)
+                .body(containsString("SubscriptionRoleArn must be a valid IAM role ARN"));
+    }
+
+    @Test
+    void aReceiptRulesRoleAndAMetricStreamsRoleInAQueryRequestNeedPassRoleForTheirService() {
+        String role = role("query-roles");
+        User user = user("passrole-query");
+        String stream = "passrole-stream-" + suffix();
+        String actions = allow("ses:CreateReceiptRule", "*") + "," + allow("cloudwatch:PutMetricStream", "*");
+
+        user.policy(actions + "," + passRole(role, LAMBDA));
+        denied(receiptRule(user, role).post("/").then());
+        denied(metricStream(user, stream, role).post("/").then());
+
+        user.policy(actions + "," + passRole(role, "ses.amazonaws.com") + ","
+                + passRole(role, "streams.metrics.cloudwatch.amazonaws.com"));
+        receiptRule(user, role).post("/").then().statusCode(400).body(containsString("RuleSetDoesNotExist"));
+        metricStream(user, stream, role).post("/").then().statusCode(200);
+        cleanup.register(() -> admin("monitoring").formParam("Action", "DeleteMetricStream").formParam("Name", stream)
+                .post("/"));
+    }
+
+    @Test
+    void aBuildProjectsServiceRoleAndADeliveryStreamsRoleNeedPassRoleForTheirService() {
+        String role = role("json-roles");
+        User user = user("passrole-json");
+        String project = "passrole-project-" + suffix();
+        String deliveryStream = "passrole-delivery-" + suffix();
+        String createProject = ("{\"name\":\"%s\",\"source\":{\"type\":\"NO_SOURCE\",\"buildspec\":\"version: 0.2\"},"
+                + "\"artifacts\":{\"type\":\"NO_ARTIFACTS\"},\"environment\":{\"type\":\"LINUX_CONTAINER\","
+                + "\"image\":\"aws/codebuild/standard:7.0\",\"computeType\":\"BUILD_GENERAL1_SMALL\"},"
+                + "\"serviceRole\":\"%s\"}").formatted(project, role);
+        String createStream = ("{\"DeliveryStreamName\":\"%s\",\"ExtendedS3DestinationConfiguration\":"
+                + "{\"RoleARN\":\"%s\",\"BucketARN\":\"arn:aws:s3:::passrole-bucket\"}}").formatted(deliveryStream, role);
+        String actions = allow("codebuild:CreateProject", "*") + "," + allow("firehose:CreateDeliveryStream", "*");
+
+        user.policy(actions + "," + passRole(role, LAMBDA));
+        deniedJson(user.json("codebuild", "CodeBuild_20161006.CreateProject").body(createProject).post("/").then());
+        deniedJson(user.json("firehose", "Firehose_20150804.CreateDeliveryStream").body(createStream).post("/").then());
+
+        user.policy(actions + "," + passRole(role, "codebuild.amazonaws.com") + ","
+                + passRole(role, "firehose.amazonaws.com"));
+        user.json("codebuild", "CodeBuild_20161006.CreateProject").body(createProject).post("/").then().statusCode(200);
+        cleanup.register(() -> admin("codebuild").header("X-Amz-Target", "CodeBuild_20161006.DeleteProject")
+                .contentType("application/x-amz-json-1.1").body("{\"name\":\"" + project + "\"}").post("/"));
+        user.json("firehose", "Firehose_20150804.CreateDeliveryStream").body(createStream).post("/").then()
+                .statusCode(200);
+        cleanup.register(() -> admin("firehose").header("X-Amz-Target", "Firehose_20150804.DeleteDeliveryStream")
+                .contentType("application/x-amz-json-1.1").body("{\"DeliveryStreamName\":\"" + deliveryStream + "\"}")
+                .post("/"));
+    }
+
+    @Test
+    void aGlueJobsRoleNamedByNameNeedsPassRoleOnTheArnIamHoldsItUnder() {
+        String role = role("/glue/", "glue-job");
+        String name = roleName(role);
+        User user = user("passrole-glue");
+        String job = "passrole-job-" + suffix();
+        String createJob = ("{\"Name\":\"%s\",\"Role\":\"%s\",\"Command\":{\"Name\":\"glueetl\","
+                + "\"ScriptLocation\":\"s3://passrole-bucket/job.py\"}}").formatted(job, name);
+
+        // The name carries no path; the role it names is the one IAM holds under /glue/.
+        user.policy(allow("glue:CreateJob", "*") + ","
+                + passRole("arn:aws:iam::" + ACCOUNT + ":role/" + name, "glue.amazonaws.com"));
+        deniedJson(user.json("glue", "AWSGlue.CreateJob").body(createJob).post("/").then());
+
+        user.policy(allow("glue:CreateJob", "*") + "," + passRole(role, "glue.amazonaws.com"));
+        user.json("glue", "AWSGlue.CreateJob").body(createJob).post("/").then().statusCode(200);
+        cleanup.register(() -> admin("glue").header("X-Amz-Target", "AWSGlue.DeleteJob")
+                .contentType("application/x-amz-json-1.1").body("{\"JobName\":\"" + job + "\"}").post("/"));
+    }
+
+    @Test
+    void aCognitoGroupsRoleIsPassedToNoNamedService() {
+        String role = role("cognito-group");
+        User user = user("passrole-cognito");
+        String group = "{\"UserPoolId\":\"us-east-1_passrolemissing\",\"GroupName\":\"g\",\"RoleArn\":\"" + role + "\"}";
+
+        // The Service Reference names no service for a group's role, so a grant naming one does not match.
+        user.policy(allow("cognito-idp:CreateGroup", "*") + "," + passRole(role, "cognito-idp.amazonaws.com"));
+        deniedJson(user.json("cognito-idp", "AWSCognitoIdentityProviderService.CreateGroup").body(group).post("/")
+                .then());
+
+        user.policy(allow("cognito-idp:CreateGroup", "*") + "," + allow("iam:PassRole", role));
+        user.json("cognito-idp", "AWSCognitoIdentityProviderService.CreateGroup").body(group).post("/").then()
+                .statusCode(400).body(containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void aSubscriptionFilterPolicysRoleNeedsPassRoleForLogs() {
+        String role = role("logs-delivery");
+        User user = user("passrole-logs");
+        String policy = "passrole-policy-" + suffix();
+        String body = ("{\"policyName\":\"%s\",\"policyType\":\"SUBSCRIPTION_FILTER_POLICY\",\"policyDocument\":"
+                + "\"{\\\"DestinationArn\\\":\\\"arn:aws:kinesis:us-east-1:%s:stream/passrole\\\","
+                + "\\\"RoleArn\\\":\\\"%s\\\"}\"}").formatted(policy, ACCOUNT, role);
+
+        // A subscription filter policy also needs logs:PutSubscriptionFilter, which Floci checks too.
+        String actions = allow("logs:PutAccountPolicy", "*") + "," + allow("logs:PutSubscriptionFilter", "*");
+        user.policy(actions + "," + passRole(role, LAMBDA));
+        deniedJson(user.json("logs", "Logs_20140328.PutAccountPolicy").body(body).post("/").then());
+
+        user.policy(actions + "," + passRole(role, "logs.amazonaws.com"));
+        user.json("logs", "Logs_20140328.PutAccountPolicy").body(body).post("/").then().statusCode(200);
+        cleanup.register(() -> admin("logs").header("X-Amz-Target", "Logs_20140328.DeleteAccountPolicy")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"policyName\":\"" + policy + "\",\"policyType\":\"SUBSCRIPTION_FILTER_POLICY\"}").post("/"));
+    }
+
+    private static RequestSpecification receiptRule(User user, String role) {
+        return user.query("ses", "CreateReceiptRule").formParam("RuleSetName", "passrole-missing")
+                .formParam("Rule.Name", "r").formParam("Rule.Enabled", "true")
+                .formParam("Rule.Actions.member.1.S3Action.BucketName", "passrole-bucket")
+                .formParam("Rule.Actions.member.1.S3Action.IamRoleArn", role);
+    }
+
+    private static RequestSpecification metricStream(User user, String name, String role) {
+        return user.query("monitoring", "PutMetricStream").formParam("Name", name)
+                .formParam("FirehoseArn", "arn:aws:firehose:us-east-1:" + ACCOUNT + ":deliverystream/passrole")
+                .formParam("RoleArn", role).formParam("OutputFormat", "json");
+    }
+
+    private static RequestSpecification ssm(User user, String operation) {
+        return user.json("ssm", "AmazonSSM." + operation);
+    }
+
+    private static RequestSpecification catalog(User user, String operation) {
+        return user.json("servicecatalog", "AWS242ServiceCatalogService." + operation);
+    }
+
+    private static ValidatableResponse catalogAdmin(String operation, String body) {
+        return admin("servicecatalog").header("X-Amz-Target", "AWS242ServiceCatalogService." + operation)
+                .contentType("application/x-amz-json-1.1").body(body).post("/").then().statusCode(200);
+    }
+
+    private static void deleteFromCatalog(String operation, String id) {
+        admin("servicecatalog").header("X-Amz-Target", "AWS242ServiceCatalogService." + operation)
+                .contentType("application/x-amz-json-1.1").body("{\"Id\":\"" + id + "\"}").post("/");
+    }
+
+    /** A CreateConstraint body; {@code parameters} is the document, its quotes escaped for the JSON string it sits in. */
+    private static String constraint(String portfolio, String product, String type, String parameters) {
+        return "{\"PortfolioId\":\"" + portfolio + "\",\"ProductId\":\"" + product + "\",\"Type\":\"" + type
+                + "\",\"Parameters\":\"" + parameters + "\",\"IdempotencyToken\":\"" + suffix() + "\"}";
+    }
+
+    /** SWF speaks JSON 1.0. */
+    private static RequestSpecification swf(User user, String operation) {
+        return given().header("Authorization", auth(user.accessKeyId(), "swf"))
+                .header("X-Amz-Target", "SimpleWorkflowService." + operation).contentType("application/x-amz-json-1.0");
+    }
+
     private static String roleName(String roleArn) {
         return roleArn.substring(roleArn.lastIndexOf('/') + 1);
     }
@@ -1079,6 +1594,10 @@ class IamPassRoleEnforcementIntegrationTest {
             return given().header("Authorization", auth(accessKeyId, "redshift")).formParam("Action", action);
         }
 
+        RequestSpecification rds(String action) {
+            return given().header("Authorization", auth(accessKeyId, "rds")).formParam("Action", action);
+        }
+
         RequestSpecification ecs(String action) {
             return json("ecs", "AmazonEC2ContainerServiceV20141113." + action);
         }
@@ -1101,6 +1620,10 @@ class IamPassRoleEnforcementIntegrationTest {
         RequestSpecification cbor(String service) {
             return given().header("Authorization", auth(accessKeyId, service)).header("smithy-protocol", "rpc-v2-cbor")
                     .contentType("application/cbor").accept("application/cbor");
+        }
+
+        RequestSpecification query(String service, String action) {
+            return given().header("Authorization", auth(accessKeyId, service)).formParam("Action", action);
         }
 
         RequestSpecification cfn(String action) {

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elbv2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -161,12 +162,14 @@ class ElbV2DefaultAttributesIntegrationTest {
     void aGatewayListenerRetainsItsControlPlaneWithoutAPort() {
         String arn = createLoadBalancer("attrs-gwlb-listener", "gateway", "10.120.");
         try {
-            String listener = given().header("Authorization", AUTH).formParam("Action", "CreateListener")
-                    .formParam("LoadBalancerArn", arn).formParam("Protocol", "GENEVE")
+            Response created = given().header("Authorization", AUTH).formParam("Action", "CreateListener")
+                    .formParam("LoadBalancerArn", arn)
                     .formParam("DefaultActions.member.1.Type", "fixed-response")
                     .formParam("DefaultActions.member.1.FixedResponseConfig.StatusCode", "200")
                     .when().post("/").then().statusCode(200).extract()
-                    .path("CreateListenerResponse.CreateListenerResult.Listeners.member.ListenerArn");
+                    .response();
+            String listener = created.path("CreateListenerResponse.CreateListenerResult.Listeners.member.ListenerArn");
+            assertEquals("GENEVE", created.path("CreateListenerResponse.CreateListenerResult.Listeners.member.Protocol"));
             given().header("Authorization", AUTH).formParam("Action", "ModifyListener")
                     .formParam("ListenerArn", listener)
                     .formParam("DefaultActions.member.1.Type", "fixed-response")
@@ -183,6 +186,55 @@ class ElbV2DefaultAttributesIntegrationTest {
         } finally {
             given().header("Authorization", AUTH).formParam("Action", "DeleteLoadBalancer")
                     .formParam("LoadBalancerArn", arn).when().post("/").then().statusCode(200);
+        }
+    }
+
+    @Test
+    void aGatewayListenerStackPreservesOmittedSettingsOnUpdate() {
+        String arn = createLoadBalancer("attrs-gwlb-stack", "gateway", "10.121.");
+        String stack = "gateway-listener-settings";
+        String template = """
+                {"Resources":{"Listener":{"Type":"AWS::ElasticLoadBalancingV2::Listener",
+                "Properties":{"LoadBalancerArn":"%s","DefaultActions":[{"Type":"fixed-response",
+                "FixedResponseConfig":{"StatusCode":"%s"}}]}}}}
+                """;
+        try {
+            given().formParam("Action", "CreateStack").formParam("StackName", stack)
+                    .formParam("TemplateBody", template.formatted(arn, "200"))
+                    .when().post("/").then().statusCode(200);
+            given().formParam("Action", "DescribeStacks").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200)
+                    .body("DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus", equalTo("CREATE_COMPLETE"));
+            String listener = given().header("Authorization", AUTH).formParam("Action", "DescribeListeners")
+                    .formParam("LoadBalancerArn", arn).when().post("/").then().statusCode(200)
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.Protocol", equalTo("GENEVE"))
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.Port.text()", equalTo(""))
+                    .extract().path("DescribeListenersResponse.DescribeListenersResult.Listeners.member.ListenerArn");
+
+            given().formParam("Action", "UpdateStack").formParam("StackName", stack)
+                    .formParam("TemplateBody", template.formatted(arn, "201"))
+                    .when().post("/").then().statusCode(200);
+            given().formParam("Action", "DescribeStacks").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200)
+                    .body("DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus", equalTo("UPDATE_COMPLETE"));
+            given().header("Authorization", AUTH).formParam("Action", "DescribeListeners")
+                    .formParam("LoadBalancerArn", arn).when().post("/").then().statusCode(200)
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.ListenerArn", equalTo(listener))
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.Protocol", equalTo("GENEVE"))
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.Port.text()", equalTo(""))
+                    .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.DefaultActions.member.FixedResponseConfig.StatusCode",
+                            equalTo("201"));
+        } finally {
+            try {
+                given().formParam("Action", "DeleteStack").formParam("StackName", stack)
+                        .when().post("/").then().statusCode(200);
+                given().header("Authorization", AUTH).formParam("Action", "DescribeListeners")
+                        .formParam("LoadBalancerArn", arn).when().post("/").then().statusCode(200)
+                        .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.size()", equalTo(0));
+            } finally {
+                given().header("Authorization", AUTH).formParam("Action", "DeleteLoadBalancer")
+                        .formParam("LoadBalancerArn", arn).when().post("/").then().statusCode(200);
+            }
         }
     }
 

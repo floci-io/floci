@@ -93,6 +93,8 @@ public class ElastiCacheQueryHandler {
             case "ModifyCacheParameterGroup" -> handleModifyCacheParameterGroup(params);
             case "DescribeCacheParameters" -> handleDescribeCacheParameters(params);
             case "DeleteCacheParameterGroup" -> handleDeleteCacheParameterGroup(params);
+            case "AddTagsToResource" -> handleAddTagsToResource(params, region);
+            case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params, region);
             case "ListTagsForResource" -> handleListTagsForResource(params);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.EC, 400);
@@ -248,7 +250,8 @@ public class ElastiCacheQueryHandler {
                     userGroupIdsToRemove.isEmpty() ? null : userGroupIdsToRemove,
                     Boolean.parseBoolean(params.getFirst("RemoveUserGroups")),
                     "DELETE".equals(params.getFirst("AuthTokenUpdateStrategy")),
-                    settings);
+                    settings,
+                    optionalSecurityGroupIds(params));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("ModifyReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
@@ -276,7 +279,8 @@ public class ElastiCacheQueryHandler {
             UserAuthentication auth = resolveUserAuthentication(params);
             AuthMode authMode = auth != null ? auth.mode() : AuthMode.NO_AUTH;
             List<String> passwords = auth != null ? auth.passwords() : List.of();
-            ElastiCacheUser user = service.createUser(userId, userName, authMode, passwords, accessString, engine);
+            ElastiCacheUser user = service.createUser(userId, userName, authMode, passwords, accessString, engine,
+                    parseTags(params));
             return Response.ok(AwsQueryResponse.envelope("CreateUser", AwsNamespaces.EC, userXml(user))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
@@ -342,7 +346,8 @@ public class ElastiCacheQueryHandler {
     private Response handleCreateUserGroup(MultivaluedMap<String, String> params, String region) {
         try {
             ElastiCacheUserGroup userGroup = service.createUserGroup(params.getFirst("UserGroupId"),
-                    params.getFirst("Engine"), extractMemberList(params, "UserIds.member."), region);
+                    params.getFirst("Engine"), extractMemberList(params, "UserIds.member."), region,
+                    parseTags(params));
             return Response.ok(AwsQueryResponse.envelope("CreateUserGroup", AwsNamespaces.EC,
                     userGroupXml(userGroup))).build();
         } catch (AwsException e) {
@@ -680,6 +685,15 @@ public class ElastiCacheQueryHandler {
         return securityGroupIds;
     }
 
+    /**
+     * A modify that names no SecurityGroupIds leaves the memberships untouched, so the absent
+     * list must read as null, never as the empty list a replace would mean.
+     */
+    private static List<String> optionalSecurityGroupIds(MultivaluedMap<String, String> params) {
+        List<String> securityGroupIds = parseSecurityGroupIds(params);
+        return securityGroupIds.isEmpty() ? null : securityGroupIds;
+    }
+
 private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> params) {
         try {
             CacheParameterGroup group = service.createCacheParameterGroup(
@@ -817,6 +831,20 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                                 arn[6] + " is not present", 404))
                         .getTags();
             }
+            if ("user".equals(arn[5])) {
+                ElastiCacheUser user = service.getUser(arn[6]);
+                if (user.getArn() != null && !user.getArn().equalsIgnoreCase(resourceName)) {
+                    throw new AwsException("UserNotFound", "User " + arn[6] + " not found.", 404);
+                }
+                tags = user.getTags();
+            }
+            if ("usergroup".equals(arn[5])) {
+                ElastiCacheUserGroup userGroup = service.getUserGroup(arn[6]);
+                if (userGroup.getArn() != null && !userGroup.getArn().equalsIgnoreCase(resourceName)) {
+                    throw new AwsException("UserGroupNotFound", "User group " + arn[6] + " not found.", 404);
+                }
+                tags = userGroup.getTags();
+            }
             XmlBuilder xml = new XmlBuilder().start("TagList");
             tags.forEach((key, value) -> xml.start("Tag")
                     .elem("Key", key)
@@ -826,6 +854,65 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             return Response.ok(AwsQueryResponse.envelope("ListTagsForResource", AwsNamespaces.EC, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleAddTagsToResource(MultivaluedMap<String, String> params, String region) {
+        try {
+            String resourceArn = requiredResourceArn(params);
+            Map<String, String> tags = parseMutationTags(params);
+            Map<String, String> updated = isServerlessResource(resourceArn)
+                    ? serverlessHandler.addTagsToResource(resourceArn, tags, region)
+                    : service.addTagsToResource(resourceArn, tags, region);
+            return Response.ok(AwsQueryResponse.envelope("AddTagsToResource", AwsNamespaces.EC,
+                    tagListXml(updated))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleRemoveTagsFromResource(MultivaluedMap<String, String> params, String region) {
+        try {
+            String resourceArn = requiredResourceArn(params);
+            List<String> tagKeys = extractMemberList(params, "TagKeys.member.");
+            if (tagKeys.isEmpty() || tagKeys.stream().anyMatch(key -> key == null || key.isBlank())) {
+                throw new AwsException("InvalidParameterValue", "TagKeys must contain at least one key.", 400);
+            }
+            Map<String, String> tags = isServerlessResource(resourceArn)
+                    ? serverlessHandler.removeTagsFromResource(resourceArn, tagKeys, region)
+                    : service.removeTagsFromResource(resourceArn, tagKeys, region);
+            return Response.ok(AwsQueryResponse.envelope("RemoveTagsFromResource", AwsNamespaces.EC,
+                    tagListXml(tags))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private static String tagListXml(Map<String, String> tags) {
+        XmlBuilder xml = new XmlBuilder().start("TagList");
+        tags.forEach((key, value) -> xml.start("Tag")
+                .elem("Key", key)
+                .elem("Value", value)
+                .end("Tag"));
+        return xml.end("TagList").build();
+    }
+
+    private static String requiredResourceArn(MultivaluedMap<String, String> params) {
+        String resourceArn = params.getFirst("ResourceName");
+        if (resourceArn == null || resourceArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
+        }
+        return resourceArn;
+    }
+
+    private static boolean isServerlessResource(String resourceArn) {
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+            String resource = arn.resource();
+            int separator = resource.indexOf(':');
+            return separator > 0 && "serverlesscache".equals(resource.substring(0, separator));
+        } catch (IllegalArgumentException e) {
+            return false;
         }
     }
 
@@ -875,6 +962,29 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
 
     private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {
         return parsePairs(params, List.of("Tags.Tag", "Tags.member", "Tag"), "Key", "Value");
+    }
+
+    private static Map<String, String> parseMutationTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = parseTags(params);
+        boolean memberPresent = false;
+        for (String prefix : List.of("Tags.Tag", "Tags.member", "Tag")) {
+            for (int index = 1; ; index++) {
+                String key = params.getFirst(prefix + "." + index + ".Key");
+                String value = params.getFirst(prefix + "." + index + ".Value");
+                if (key == null && value == null) {
+                    break;
+                }
+                memberPresent = true;
+                if (key == null || key.isBlank()) {
+                    throw new AwsException("InvalidParameterValue", "Tag key cannot be null or empty.", 400);
+                }
+                // The AWS model permits a null tag value, so only the key is required here.
+            }
+        }
+        if (!memberPresent || tags.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "At least one tag is required.", 400);
+        }
+        return tags;
     }
 
     private static Map<String, String> parseParameterNameValues(MultivaluedMap<String, String> params) {

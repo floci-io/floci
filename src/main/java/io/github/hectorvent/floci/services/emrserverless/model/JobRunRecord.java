@@ -6,7 +6,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 /**
  * A stored job run: the run as GetJobRun reports it, plus what only Floci needs. The client token
  * and the request it came with decide whether a repeated StartJobRun is a retry or a conflict; the
- * application type fills ListJobRuns' {@code type}.
+ * application type fills ListJobRuns' {@code type}. A container run is one the {@code docker} runner
+ * mode runs, whose state its container decides.
  */
 @RegisterForReflection
 public class JobRunRecord {
@@ -14,6 +15,7 @@ public class JobRunRecord {
     private String clientToken;
     private JsonNode request;
     private String applicationType;
+    private boolean containerRun;
 
     public JobRun getJobRun() { return jobRun; }
     public void setJobRun(JobRun jobRun) { this.jobRun = jobRun; }
@@ -23,4 +25,6 @@ public class JobRunRecord {
     public void setRequest(JsonNode request) { this.request = request; }
     public String getApplicationType() { return applicationType; }
     public void setApplicationType(String applicationType) { this.applicationType = applicationType; }
+    public boolean isContainerRun() { return containerRun; }
+    public void setContainerRun(boolean containerRun) { this.containerRun = containerRun; }
 }

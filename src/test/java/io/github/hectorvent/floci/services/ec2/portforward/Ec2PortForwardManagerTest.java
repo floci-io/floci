@@ -2,8 +2,11 @@ package io.github.hectorvent.floci.services.ec2.portforward;
 
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
@@ -13,17 +16,21 @@ import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -232,6 +239,44 @@ class Ec2PortForwardManagerTest {
         manager.reconcileNow(instance, Set.of(80));
 
         verify(portAllocator).allocate(30000, 30999);
+    }
+
+    @Test
+    void publishedForwardDisablesNagleOnBothSocatSockets() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(dockerClient.inspectContainerCmd(anyString())).thenThrow(new RuntimeException("docker down"));
+        PortAllocator portAllocator = mock(PortAllocator.class);
+        when(portAllocator.allocate(anyInt(), anyInt())).thenReturn(30000);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.create(any())).thenReturn("fwd-1");
+
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ec2().socatImage()).thenReturn("alpine/socat");
+        when(config.services().ec2().appPortRangeStart()).thenReturn(30000);
+        when(config.services().ec2().appPortRangeEnd()).thenReturn(30999);
+        when(config.docker().logMaxSize()).thenReturn("10m");
+        when(config.docker().logMaxFile()).thenReturn("3");
+
+        Ec2PortForwardManager manager = new Ec2PortForwardManager(
+                dockerClient,
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager, portAllocator, config);
+
+        Instance instance = new Instance();
+        instance.setInstanceId("i-1");
+        instance.setDockerContainerId("c1");
+        instance.setState(InstanceState.running());
+        instance.setContainerBridgeIp("172.17.0.3");
+
+        manager.reconcileNow(instance, Set.of(80));
+
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(spec.capture());
+        assertEquals("alpine/socat", spec.getValue().image());
+        assertEquals(List.of("socat"), spec.getValue().entrypoint());
+        assertEquals(List.of("TCP-LISTEN:80,fork,reuseaddr,nodelay", "TCP:172.17.0.3:80,nodelay"),
+                spec.getValue().cmd());
+        assertEquals(Map.of(80, 30000), spec.getValue().portBindings());
     }
 
     private static Set<Integer> extract(SecurityGroup sg) {

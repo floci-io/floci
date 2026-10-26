@@ -1570,6 +1570,30 @@ class IamServiceTest {
     }
 
     @Test
+    void provisionAccountAccessRoleCreatesTheRoleTrustedByTheManagementAccount() {
+        IamRole role = iamService.provisionAccountAccessRole(
+                "111111111111", "OrganizationAccountAccessRole", "000000000000");
+
+        assertEquals("OrganizationAccountAccessRole", role.getRoleName());
+        assertEquals("arn:aws:iam::000000000000:role/OrganizationAccountAccessRole", role.getArn());
+        assertTrue(role.getAssumeRolePolicyDocument()
+                .contains("\"Principal\":{\"AWS\":\"arn:aws:iam::000000000000:root\"}"));
+        assertTrue(role.getAssumeRolePolicyDocument().contains("sts:AssumeRole"));
+        assertEquals(List.of("arn:aws:iam::aws:policy/AdministratorAccess"),
+                iamService.getRole("OrganizationAccountAccessRole").getAttachedPolicyArns());
+    }
+
+    @Test
+    void provisionAccountAccessRoleReturnsTheRoleThatIsAlreadyThere() {
+        IamRole existing = iamService.createRole("OrganizationAccountAccessRole", "/", "{}", null, 3600, null);
+
+        IamRole role = iamService.provisionAccountAccessRole(
+                "000000000000", "OrganizationAccountAccessRole", "000000000000");
+
+        assertEquals(existing.getRoleId(), role.getRoleId());
+    }
+
+    @Test
     void updateAssumeRolePolicyWithMatchingExpectedIdApplies() {
         IamRole role = iamService.createRole("LambdaExec", "/", "{}", null, 3600, null);
         String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";

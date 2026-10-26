@@ -28,6 +28,15 @@ Auto Scaling groups over the Query protocol under the `autoscaling` signing name
 | `UntagResource` | Removes tags from a scalable target |
 <!-- floci:actions:end -->
 
+## Pagination
+
+`DescribeScalableTargets` accepts `MaxResults` from 1 to 50 and defaults to 50.
+`DescribeScalingPolicies` accepts `MaxResults` from 1 to 10 and defaults to 10.
+When more results remain, pass the returned `NextToken` with the same operation,
+region, and filters to retrieve the next page. An invalid token returns
+`InvalidNextTokenException`; an out-of-range page size returns `ValidationException`.
+Tokens expire when the emulator restarts.
+
 ## Identity
 
 A scalable target is keyed by the triple **(ServiceNamespace, ResourceId,
@@ -136,8 +145,6 @@ arn:aws:iam::<account>:role/aws-service-role/<namespace>.application-autoscaling
   implemented.
 - `PredictiveScalingPolicyConfiguration` is accepted only insofar as `PolicyType` is
   validated; the configuration block is not stored.
-- Pagination is not implemented — `DescribeScalableTargets` and `DescribeScalingPolicies`
-  return all matching results and never emit a `NextToken`.
 - **The evaluation range's exact width is an approximation.** Alarm evaluation follows
   CloudWatch's documented precedence: a wider "evaluation range" than
   `Period × EvaluationPeriods` is queried, and whenever enough *real* datapoints exist within

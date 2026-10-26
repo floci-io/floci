@@ -17,6 +17,7 @@ on:
       - 'src/main/java/**'
       - 'src/main/resources/aws/**'
       - 'tools/partition/**'
+      - 'tools/rename/**'
       - 'tools/aws/**'
       - 'tools/slr/**'
       - 'src/main/resources/iam/service-linked-roles.tsv'
@@ -32,6 +33,7 @@ on:
       - 'src/main/java/**'
       - 'src/main/resources/aws/**'
       - 'tools/partition/**'
+      - 'tools/rename/**'
       - 'tools/aws/**'
       - 'tools/slr/**'
       - 'src/main/resources/iam/service-linked-roles.tsv'
@@ -67,6 +69,9 @@ jobs:
 
       - name: Run partition tooling tests
         run: make partition-test
+
+      - name: Run package rename tool tests
+        run: make rename-test
 
       - name: Check partition literals against the baseline
         run: make partition-check

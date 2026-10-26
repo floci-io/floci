@@ -9,6 +9,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.stream.Stream;
 
 import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.EXPECTED_LIST;
+import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.EXPECTED_MAP;
 import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.EXPECTED_NULL;
 import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.LIST;
 import static io.github.hectorvent.floci.services.ses.SesV2SerializationErrors.NUMBER;
@@ -40,6 +41,7 @@ class SesMetricsJobsMemberTypeIntegrationTest {
                 Arguments.of("stringQuery", "{\"Queries\": [\"x\"]}", EXPECTED_NULL),
                 Arguments.of("numericId", "{\"Queries\": [{\"Id\": 1}]}", NUMBER),
                 Arguments.of("arrayDimensions", "{\"Queries\": [{\"Dimensions\": []}]}", LIST),
+                Arguments.of("stringDimensions", "{\"Queries\": [{\"Dimensions\": \"x\"}]}", EXPECTED_MAP),
                 Arguments.of("numericDimensionValue", "{\"Queries\": [{\"Dimensions\": {\"ISP\": 1}}]}", NUMBER));
     }
 
@@ -62,6 +64,8 @@ class SesMetricsJobsMemberTypeIntegrationTest {
                         "{\"ExportDataSource\": {\"MetricsDataSource\": {\"Metrics\": \"SEND\"}}}", EXPECTED_LIST),
                 Arguments.of("arrayDimensions",
                         "{\"ExportDataSource\": {\"MetricsDataSource\": {\"Dimensions\": []}}}", LIST),
+                Arguments.of("stringDimensions",
+                        "{\"ExportDataSource\": {\"MetricsDataSource\": {\"Dimensions\": \"x\"}}}", EXPECTED_MAP),
                 Arguments.of("numericDimensionValue",
                         "{\"ExportDataSource\": {\"MetricsDataSource\": {\"Dimensions\": {\"ISP\": [1]}}}}", NUMBER),
                 Arguments.of("objectIncludeFilter",

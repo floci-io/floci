@@ -75,6 +75,38 @@ class Ec2LaunchTemplateCfnProvisionerTest {
     }
 
     @Test
+    void retainsCapacityReservationPreferenceAndTarget() throws Exception {
+        when(ec2.createLaunchTemplate(eq("us-east-1"), eq("my-lt"), any(), any()))
+                .thenReturn(template("lt-capacity"));
+        JsonNode props = mapper.readTree("""
+                {"LaunchTemplateName":"my-lt","LaunchTemplateData":{
+                  "ImageId":"ami-test","CapacityReservationSpecification":{
+                    "CapacityReservationPreference":"open",
+                    "CapacityReservationTarget":{"CapacityReservationId":"cr-0123456789abcdef0"}}}}
+                """);
+
+        provisioner.provision(resource("Template"), props, ctx());
+
+        ArgumentCaptor<LaunchTemplateData> data = ArgumentCaptor.forClass(LaunchTemplateData.class);
+        verify(ec2).createLaunchTemplate(eq("us-east-1"), eq("my-lt"), data.capture(), any());
+        assertEquals("open", data.getValue().getCapacityReservationSpecification().getCapacityReservationPreference());
+        assertEquals("cr-0123456789abcdef0", data.getValue().getCapacityReservationSpecification()
+                .getCapacityReservationTarget().getCapacityReservationId());
+    }
+
+    @Test
+    void refusesMalformedCapacityReservationDeclarationBeforeCreatingTemplate() throws Exception {
+        JsonNode props = mapper.readTree("""
+                {"LaunchTemplateName":"my-lt","LaunchTemplateData":{
+                  "CapacityReservationSpecification":{"CapacityReservationPreference":["none"]}}}
+                """);
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource("Template"), props, ctx()));
+
+        verify(ec2, never()).createLaunchTemplate(any(), any(), any(), any());
+    }
+
+    @Test
     void setsPhysicalIdAndGetAttAttributes() {
         when(ec2.createLaunchTemplate(eq("us-east-1"), eq("my-lt"), any(), any()))
                 .thenReturn(template("lt-abc123"));

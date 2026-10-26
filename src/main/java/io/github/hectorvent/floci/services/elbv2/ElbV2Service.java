@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -44,6 +45,8 @@ import java.util.stream.Collectors;
 public class ElbV2Service implements ResourceProvider, ServerCertificateReferenceProvider, VpcDependencyProvider {
 
     private static final Logger LOG = Logger.getLogger(ElbV2Service.class);
+    /** {@code LoadBalancerTypeEnum}, in the model's order. */
+    private static final List<String> LOAD_BALANCER_TYPES = List.of("application", "network", "gateway");
 
     @Inject
     ElbV2DataPlane dataPlane;
@@ -225,12 +228,16 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     /**
      * Resolving the subnets and publishing the balancer happen under EC2's subnet lock, so a
      * DeleteSubnet cannot pass its dependency check in between and leave the balancer on a subnet
-     * that is gone.
+     * that is gone. A {@code Type} outside the model's enum is refused, as AWS refuses it, rather
+     * than read as an application load balancer, which is not the one IAM checks the request for.
      */
     public LoadBalancer createLoadBalancer(String region, String name, String scheme,
                                            String type, String ipAddressType,
                                            List<String> subnets, List<String> securityGroups,
                                            Map<String, String> initialTags) {
+        if (type != null && !LOAD_BALANCER_TYPES.contains(type)) {
+            throw SmithyValidationErrors.validationError(SmithyValidationErrors.notInEnum(type, "type", LOAD_BALANCER_TYPES));
+        }
         return ec2Service.supplyWithSubnetReferencesHeld(region, () -> createLoadBalancerWithSubnetsHeld(
                 region, name, scheme, type, ipAddressType, subnets, securityGroups, initialTags));
     }
@@ -473,7 +480,11 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                                           Integer healthyThreshold, Integer unhealthyThreshold,
                                           String matcher, String ipAddressType,
                                           Map<String, String> initialTags) {
+        validatePort(port, "port");
         validateName(name, "target group");
+        if (port == null && !"lambda".equals(targetType)) {
+            throw new AwsException("ValidationError", "A port must be specified", 400);
+        }
         validateHealthCheckPort(healthCheckPort);
         Map<String, TargetGroup> regionTgs = targetGroups.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
         boolean duplicate = regionTgs.values().stream()
@@ -598,7 +609,8 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                                     String sslPolicy, List<String> certificates,
                                     List<Action> defaultActions, List<String> alpnPolicy,
                                     Map<String, String> initialTags) {
-        requireLoadBalancer(region, lbArn);
+        validatePort(port, "port");
+        requireGatewayListenerSettings(requireLoadBalancer(region, lbArn), protocol, port);
 
         Map<String, Listener> regionListeners = listeners.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
 
@@ -626,7 +638,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         listener.setListenerArn(listenerArn);
         listener.setLoadBalancerArn(lbArn);
         listener.setPort(port);
-        listener.setProtocol(protocol != null ? protocol : "HTTP");
+        listener.setProtocol(protocol != null ? protocol : ("gateway".equals(lbType) ? "GENEVE" : "HTTP"));
         listener.setSslPolicy(sslPolicy);
         listener.setCertificates(certificates != null ? new ArrayList<>(certificates) : new ArrayList<>());
         listener.setDefaultActions(defaultActions != null ? new ArrayList<>(defaultActions) : new ArrayList<>());
@@ -737,9 +749,11 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     public Listener modifyListener(String region, String listenerArn, String protocol, Integer port,
                                     String sslPolicy, List<String> certificates,
                                     List<Action> defaultActions, List<String> alpnPolicy) {
+        validatePort(port, "port");
         while (true) {
             Listener initial = requireListener(region, listenerArn);
             LoadBalancer initialLb = requireLoadBalancer(region, initial.getLoadBalancerArn());
+            requireGatewayListenerSettings(initialLb, protocol, port);
             ListenerState initialState = listenerState(initial, initialLb);
             requireAvailableListenerPort(listeners.getOrDefault(region, Map.of()), initial.getLoadBalancerArn(),
                     listenerArn, port != null ? port : initialState.port());
@@ -987,7 +1001,9 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     // ── Targets ───────────────────────────────────────────────────────────────
 
     public void registerTargets(String region, String tgArn, List<TargetDescription> targets) {
+        validateTargetPorts(targets);
         TargetGroup tg = requireTargetGroup(region, tgArn);
+        validateLambdaTargetPorts(tg, targets);
         if (!"lambda".equals(tg.getTargetType())) {
             for (TargetDescription t : targets) {
                 requireNotMetadataAddress(t.getId());
@@ -995,8 +1011,12 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         }
         List<TargetDescription> existing = tg.getTargets();
         for (TargetDescription t : targets) {
+            if (!"lambda".equals(tg.getTargetType()) && t.getPort() == null && tg.getPort() != null) {
+                t.setPort(tg.getPort());
+            }
             // replace if same id+port already registered
-            existing.removeIf(e -> e.getId().equals(t.getId()) && Objects.equals(e.getPort(), t.getPort()));
+            existing.removeIf(e -> e.getId().equals(t.getId())
+                    && ElbV2HealthChecker.effectivePort(e, tg) == ElbV2HealthChecker.effectivePort(t, tg));
             existing.add(t);
         }
         persistRegion(targetGroups, region);
@@ -1016,9 +1036,12 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     }
 
     public void deregisterTargets(String region, String tgArn, List<TargetDescription> targets) {
+        validateTargetPorts(targets);
         TargetGroup tg = requireTargetGroup(region, tgArn);
+        validateLambdaTargetPorts(tg, targets);
         for (TargetDescription t : targets) {
-            tg.getTargets().removeIf(e -> e.getId().equals(t.getId()) && Objects.equals(e.getPort(), t.getPort()));
+            tg.getTargets().removeIf(e -> e.getId().equals(t.getId())
+                    && ElbV2HealthChecker.effectivePort(e, tg) == ElbV2HealthChecker.effectivePort(t, tg));
         }
         persistRegion(targetGroups, region);
         healthChecker.removeTargets(tgArn, targets, tg);
@@ -1026,7 +1049,9 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     public List<TargetHealth> describeTargetHealth(String region, String tgArn,
                                                      List<TargetDescription> filterTargets) {
+        validateTargetPorts(filterTargets);
         TargetGroup tg = requireTargetGroup(region, tgArn);
+        validateLambdaTargetPorts(tg, filterTargets);
         boolean hasFilterTargets = filterTargets != null && !filterTargets.isEmpty();
         List<TargetDescription> candidates = hasFilterTargets ? filterTargets : tg.getTargets();
 
@@ -1208,6 +1233,17 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 && !listenerArn.equals(listener.getListenerArn()) && Objects.equals(listener.getPort(), port))) {
             throw new AwsException("DuplicateListener",
                     "A listener already exists on port " + port + " for this load balancer.", 400);
+        }
+    }
+
+    private static void requireGatewayListenerSettings(LoadBalancer loadBalancer, String protocol, Integer port) {
+        if (port != null && "gateway".equals(loadBalancer.getType())) {
+            throw new AwsException("InvalidConfigurationRequest",
+                    "You can't specify a port for a Gateway Load Balancer.", 400);
+        }
+        if (protocol != null && "gateway".equals(loadBalancer.getType())) {
+            throw new AwsException("InvalidConfigurationRequest",
+                    "You can't specify a protocol for a Gateway Load Balancer.", 400);
         }
     }
 
@@ -1543,6 +1579,48 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                     try { return Integer.parseInt(r.getPriority()); } catch (NumberFormatException e) { return Integer.MAX_VALUE; }
                 }))
                 .collect(Collectors.toList());
+    }
+
+    private static void validateLambdaTargetPorts(TargetGroup group, List<TargetDescription> targets) {
+        if (!"lambda".equals(group.getTargetType()) || targets == null) {
+            return;
+        }
+        for (TargetDescription target : targets) {
+            if (target.getPort() != null) {
+                throw new AwsException("ValidationError", "Port cannot be specified for Lambda function targets", 400);
+            }
+        }
+    }
+
+    private static void validateTargetPorts(List<TargetDescription> targets) {
+        if (targets == null) {
+            return;
+        }
+        List<String> violations = new ArrayList<>();
+        for (int i = 0; i < targets.size(); i++) {
+            addPortViolation(violations, targets.get(i).getPort(), "targets." + (i + 1) + ".member.port");
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
+    }
+
+    static void validatePort(Integer port, String member) {
+        List<String> violations = new ArrayList<>();
+        addPortViolation(violations, port, member);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
+    }
+
+    private static void addPortViolation(List<String> violations, Integer port, String member) {
+        if (port == null) {
+            return;
+        }
+        String violation = SmithyValidationErrors.outOfRange(member, port, 1, 65535);
+        if (violation != null) {
+            violations.add(violation);
+        }
     }
 
     /** {@code HealthCheckPort} is either {@code traffic-port} or a port number from 1 to 65535. */

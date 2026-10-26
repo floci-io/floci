@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.ses;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -30,7 +29,6 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBoolean;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.coerceBooleanOrFalse;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireJsonObject;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
 /**
@@ -164,10 +162,7 @@ public class SesAccountController {
     public Response putAccountDetails(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
+            JsonNode request = readOptionBody(objectMapper, body);
 
             // Parse every member first (rejecting wrong JSON types as a serialization error, the way
             // AWS does before validation), then validate the parsed values together so all constraint
@@ -205,10 +200,6 @@ public class SesAccountController {
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (JsonProcessingException e) {
-            // AWS reports a malformed JSON body as a SerializationException, the same error type used
-            // for wrong-typed members above.
-            throw new AwsException("SerializationException", null, 400);
         }
     }
 
@@ -282,8 +273,7 @@ public class SesAccountController {
         if (node.isMissingNode() || node.isNull()) {
             if (required) {
                 throw SmithyValidationErrors.badRequest(
-                        "Value null at '" + path
-                                + "' failed to satisfy constraint: Member must not be null");
+                        SmithyValidationErrors.notNull(path));
             }
             return false;
         }

@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2UserDataDecoder;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -34,6 +35,9 @@ import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class AutoScalingService implements PassedRoleLookup {
+
+    /** The tag Auto Scaling puts on every instance it launches or attaches, valued with the group's name. */
+    static final String GROUP_NAME_TAG = "aws:autoscaling:groupName";
 
     private static final Logger LOG = Logger.getLogger(AutoScalingService.class);
     private static final String FULLY_FORMED_LAUNCH_TEMPLATE = "You must use a valid fully-formed launch template. ";
@@ -107,8 +111,7 @@ public class AutoScalingService implements PassedRoleLookup {
             "GroupAndWarmPoolDesiredCapacity", "GroupAndWarmPoolTotalCapacity");
     public static final String METRICS_GRANULARITY = "1Minute";
     static final String MISSING_GRANULARITY_MESSAGE =
-            "1 validation error detected: Value null at 'granularity' failed to satisfy constraint: "
-                    + "Member must not be null";
+            SmithyValidationErrors.message(List.of(SmithyValidationErrors.notNull("granularity")));
     public static final String INVALID_GRANULARITY_MESSAGE =
             "Granularity must be 1Minute. 1Minute is the only valid value.";
     static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
@@ -847,25 +850,77 @@ public class AutoScalingService implements PassedRoleLookup {
         return instanceId != null && asg.getInstances().stream().anyMatch(i -> instanceId.equals(i.getInstanceId()));
     }
 
+    /**
+     * The tags an instance carries as a member of {@code asg}: the launch template's instance tags,
+     * then the group's PropagateAtLaunch tags, which win a key both set, then the group-name tag,
+     * which names {@code asg} whatever the other two say.
+     */
+    static List<Tag> propagatedInstanceTags(AutoScalingGroup asg, List<Tag> templateTags) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        templateTags.forEach(tag -> tags.put(tag.getKey(), tag.getValue()));
+        asg.getTags().forEach((key, value) -> {
+            if (asg.getTagPropagateAtLaunch().getOrDefault(key, false)) {
+                tags.put(key, value);
+            }
+        });
+        tags.put(GROUP_NAME_TAG, asg.getAutoScalingGroupName());
+        return tags.entrySet().stream().map(entry -> new Tag(entry.getKey(), entry.getValue())).toList();
+    }
+
     public void attachInstances(String region, String name, List<String> instanceIds) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        for (String id : instanceIds) {
-            AsgInstance inst = new AsgInstance();
-            inst.setInstanceId(id);
-            inst.setLifecycleState("InService");
-            inst.setHealthStatus("Healthy");
-            inst.setAvailabilityZone(
-                    asg.getAvailabilityZones().isEmpty() ? region + "a" : asg.getAvailabilityZones().get(0));
-            inst.setLaunchConfigurationName(asg.getLaunchConfigurationName());
-            inst.setLaunchTemplateId(asg.getLaunchTemplateId());
-            inst.setLaunchTemplateName(asg.getLaunchTemplateName());
-            inst.setLaunchTemplateVersion(asg.getLaunchTemplateVersion());
-            asg.getInstances().add(inst);
+        // An instance joins once, however often the request names it.
+        List<String> requested = new ArrayList<>(new LinkedHashSet<>(instanceIds));
+        // The region lock keeps two groups from each attaching the same instance at once.
+        synchronized (lockFor(region)) {
+            synchronized (lockFor(asgKey(region, name))) {
+                AutoScalingGroup asg = requireGroup(region, name);
+                // An instance belongs to one group at a time, so the whole batch fails before any tag changes.
+                List<String> conflicts = new ArrayList<>();
+                for (AutoScalingGroup group : groups.values()) {
+                    if (group == null || !region.equals(group.getRegion())) {
+                        continue;
+                    }
+                    // Under the group's own lock, which guards its member list against the reconciler.
+                    synchronized (lockFor(asgKey(region, group.getAutoScalingGroupName()))) {
+                        for (AsgInstance member : group.getInstances()) {
+                            if (requested.contains(member.getInstanceId())) {
+                                conflicts.add("The Instance: " + member.getInstanceId()
+                                        + " is already part of AutoScalingGroup:" + group.getAutoScalingGroupName());
+                            }
+                        }
+                    }
+                }
+                if (!conflicts.isEmpty()) {
+                    throw new AwsException("ValidationError", conflicts.toString(), 400);
+                }
+                // Attaching does not yet refuse an ID EC2 has no instance for, as AWS does, so such
+                // an ID gets no tags: they would outlive it in EC2's DescribeTags.
+                List<String> existing = requested.stream()
+                        .filter(id -> ec2Service.findInstanceForAccount(regionResolver.getAccountId(), region, id)
+                                .isPresent())
+                        .toList();
+                if (!existing.isEmpty()) {
+                    ec2Service.createSystemTags(region, existing, propagatedInstanceTags(asg, List.of()));
+                }
+                for (String id : requested) {
+                    AsgInstance inst = new AsgInstance();
+                    inst.setInstanceId(id);
+                    inst.setLifecycleState("InService");
+                    inst.setHealthStatus("Healthy");
+                    inst.setAvailabilityZone(
+                            asg.getAvailabilityZones().isEmpty() ? region + "a" : asg.getAvailabilityZones().get(0));
+                    inst.setLaunchConfigurationName(asg.getLaunchConfigurationName());
+                    inst.setLaunchTemplateId(asg.getLaunchTemplateId());
+                    inst.setLaunchTemplateName(asg.getLaunchTemplateName());
+                    inst.setLaunchTemplateVersion(asg.getLaunchTemplateVersion());
+                    asg.getInstances().add(inst);
+                }
+                if (asg.getInstances().size() > asg.getDesiredCapacity()) {
+                    asg.setDesiredCapacity(asg.getInstances().size());
+                }
+                groups.put(asgKey(region, name), asg);
+            }
         }
-        if (asg.getInstances().size() > asg.getDesiredCapacity()) {
-            asg.setDesiredCapacity(asg.getInstances().size());
-        }
-        groups.put(asgKey(region, name), asg);
     }
 
     public void detachInstances(String region, String name, List<String> instanceIds,
@@ -875,6 +930,10 @@ public class AutoScalingService implements PassedRoleLookup {
             AutoScalingGroup asg = requireGroup(region, name);
             List<String> detached = asg.getInstances().stream().map(AsgInstance::getInstanceId)
                     .filter(instanceIds::contains).toList();
+            if (!detached.isEmpty()) {
+                // Detaching removes only the group-name tag, and only where it still names this group.
+                ec2Service.deleteSystemTag(region, detached, GROUP_NAME_TAG, name);
+            }
             releaseRefreshOwnership(asg, detached);
             asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
             if (decrementDesiredCapacity) {
@@ -1200,8 +1259,7 @@ public class AutoScalingService implements PassedRoleLookup {
     private static void validateLifecycleHookName(String hookName) {
         if (hookName == null) {
             throw SmithyValidationErrors.validationError(
-                    "Value null at 'lifecycleHookName' failed to satisfy constraint: "
-                            + "Member must not be null");
+                    SmithyValidationErrors.notNull("lifecycleHookName"));
         }
         if (hookName.length() > 255) {
             throw SmithyValidationErrors.validationError(
@@ -1627,7 +1685,7 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
-    private static void validateCapacityReservationSpecification(CapacityReservationSpecification specification) {
+    static void validateCapacityReservationSpecification(CapacityReservationSpecification specification) {
         if (specification == null) {
             return;
         }
@@ -1637,6 +1695,10 @@ public class AutoScalingService implements PassedRoleLookup {
         }
         if ("none".equals(preference) && specification.hasTarget()) {
             throw new AwsException("ValidationError", CAPACITY_RESERVATION_TARGET_WITH_NONE_MESSAGE, 400);
+        }
+        if (specification.getCapacityReservationIds().size()
+                + specification.getCapacityReservationResourceGroupArns().size() > 1) {
+            throw new AwsException("ValidationError", "Specify only one Capacity Reservation target.", 400);
         }
         for (String id : specification.getCapacityReservationIds()) {
             if (id == null || id.isEmpty() || id.length() > 255

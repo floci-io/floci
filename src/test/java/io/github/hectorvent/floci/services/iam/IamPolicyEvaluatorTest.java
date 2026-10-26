@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsCanonicalUserId;
 import io.github.hectorvent.floci.core.common.AwsServiceNamespaces;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
@@ -898,8 +899,11 @@ class IamPolicyEvaluatorTest {
     @Test
     void aCanonicalUserNamesTheIamIdentitiesOfItsAccount() {
         // S3 bucket policies can name an account by its canonical user ID (IAM User Guide, "AWS
-        // account principals"); Floci's canonical ID for an account is the account id.
-        String canonical = resourcePolicy("Allow", "\"Principal\":{\"CanonicalUser\":\"123456789012\"}");
+        // account principals"): the 64-hex value S3 reports as owner, which Floci derives from
+        // the account. The account ID itself still matches, for policies written when Floci
+        // reported the account as the canonical ID.
+        String canonical = resourcePolicy("Allow", "\"Principal\":{\"CanonicalUser\":\""
+                + AwsCanonicalUserId.forAccount("123456789012") + "\"}");
         assertEquals(ResourcePolicyDecision.ALLOW_ACCOUNT,
                 resourceDecision(canonical, RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice")));
         assertEquals(ResourcePolicyDecision.ALLOW_ACCOUNT, resourceDecision(canonical, RequestPrincipal.roleSession(
@@ -909,6 +913,13 @@ class IamPolicyEvaluatorTest {
         assertEquals(ResourcePolicyDecision.NEUTRAL,
                 resourceDecision(canonical, RequestPrincipal.service("sns.amazonaws.com")));
         assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(canonical, RequestPrincipal.anonymous()));
+    }
+
+    @Test
+    void anAccountWrittenAsTheCanonicalIdStillMatches() {
+        String legacy = resourcePolicy("Allow", "\"Principal\":{\"CanonicalUser\":\"123456789012\"}");
+        assertEquals(ResourcePolicyDecision.ALLOW_ACCOUNT,
+                resourceDecision(legacy, RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice")));
     }
 
     @Test

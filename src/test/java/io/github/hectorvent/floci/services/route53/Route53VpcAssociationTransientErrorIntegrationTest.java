@@ -4,23 +4,26 @@ import io.github.hectorvent.floci.testing.IndependentServiceSettingsProfile;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.quarkus.test.junit.mockito.InjectSpy;
+import io.restassured.response.ValidatableResponse;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
-import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
+import static org.mockito.Mockito.doAnswer;
 
 /**
  * Verifies that a VPC association or authorization change on a private hosted zone, made while the
  * previous one is still in progress, is refused with {@code PriorRequestNotComplete} or
  * {@code ConcurrentModification}, and that a retry succeeds once the previous change is done.
  *
- * <p>The 150 ms the previous change stays in progress comes from
- * {@link IndependentServiceSettingsProfile}, which this class shares with other classes that each
- * call a different service.
+ * <p>The configured delay comes from {@link IndependentServiceSettingsProfile}. The monotonic
+ * clock is controlled so HTTP transport time cannot consume the overlap window.
  */
 @QuarkusTest
 @TestProfile(IndependentServiceSettingsProfile.class)
@@ -30,6 +33,21 @@ class Route53VpcAssociationTransientErrorIntegrationTest {
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
+
+    @InjectSpy
+    Route53Service service;
+
+    private final AtomicLong timeNanos = new AtomicLong();
+
+    @BeforeEach
+    void controlMutationTime() {
+        timeNanos.set(0);
+        doAnswer(invocation -> timeNanos.get()).when(service).mutationTimeNanos();
+    }
+
+    private void completePreviousMutation() {
+        timeNanos.addAndGet(TimeUnit.MILLISECONDS.toNanos(150));
+    }
 
     @Test
     void associationOverlapReturnsPriorRequestNotCompleteThenRetrySucceeds() {
@@ -43,10 +61,8 @@ class Route53VpcAssociationTransientErrorIntegrationTest {
                 .statusCode(400)
                 .body(containsString("<Code>PriorRequestNotComplete</Code>"));
 
-        await().atMost(Duration.ofSeconds(2))
-                .pollInterval(Duration.ofMillis(25))
-                .untilAsserted(() -> associate(zoneId, "vpc-retry-tertiary")
-                        .statusCode(200));
+        completePreviousMutation();
+        associate(zoneId, "vpc-retry-tertiary").statusCode(200);
     }
 
     @Test
@@ -61,36 +77,32 @@ class Route53VpcAssociationTransientErrorIntegrationTest {
                 .statusCode(400)
                 .body(containsString("<Code>ConcurrentModification</Code>"));
 
-        await().atMost(Duration.ofSeconds(2))
-                .pollInterval(Duration.ofMillis(25))
-                .untilAsserted(() -> authorize(zoneId, "vpc-authz-two")
-                        .statusCode(200));
+        completePreviousMutation();
+        authorize(zoneId, "vpc-authz-two").statusCode(200);
 
         deauthorize(zoneId, "vpc-authz-one")
                 .statusCode(400)
                 .body(containsString("<Code>ConcurrentModification</Code>"));
 
-        await().atMost(Duration.ofSeconds(2))
-                .pollInterval(Duration.ofMillis(25))
-                .untilAsserted(() -> deauthorize(zoneId, "vpc-authz-one")
-                        .statusCode(200));
+        completePreviousMutation();
+        deauthorize(zoneId, "vpc-authz-one").statusCode(200);
     }
 
-    private static io.restassured.response.ValidatableResponse associate(String zoneId, String vpcId) {
+    private static ValidatableResponse associate(String zoneId, String vpcId) {
         return given().contentType(XML)
                 .body(vpcRequest("AssociateVPCWithHostedZoneRequest", vpcId))
                 .post("/2013-04-01/hostedzone/" + zoneId + "/associatevpc")
                 .then();
     }
 
-    private static io.restassured.response.ValidatableResponse authorize(String zoneId, String vpcId) {
+    private static ValidatableResponse authorize(String zoneId, String vpcId) {
         return given().contentType(XML)
                 .body(vpcRequest("CreateVPCAssociationAuthorizationRequest", vpcId))
                 .post("/2013-04-01/hostedzone/" + zoneId + "/authorizevpcassociation")
                 .then();
     }
 
-    private static io.restassured.response.ValidatableResponse deauthorize(String zoneId, String vpcId) {
+    private static ValidatableResponse deauthorize(String zoneId, String vpcId) {
         return given().contentType(XML)
                 .body(vpcRequest("DeleteVPCAssociationAuthorizationRequest", vpcId))
                 .post("/2013-04-01/hostedzone/" + zoneId + "/deauthorizevpcassociation")

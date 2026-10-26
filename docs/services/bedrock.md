@@ -44,6 +44,11 @@ guardrail and all of its versions.
 Both an id (`abc123def456`) and a full ARN are accepted wherever the API takes a
 `guardrailIdentifier` or a `resourceARN`.
 
+The three tag actions require a full ARN to match the stored guardrail ARN exactly,
+including partition, service, Region, account, and resource type. An ARN that only
+shares the guardrail ID returns `ResourceNotFoundException` (HTTP 404) without changing tags.
+The existing bare-ID form remains accepted.
+
 `kmsKeyId` on `CreateGuardrail` and `UpdateGuardrail` is a `KmsKeyId`: a key id, a key
 ARN, an alias name or an alias ARN. `kmsKeyArn` on the read shapes is a `KmsKeyArn`,
 which is only ever the full key ARN, so every accepted form is resolved through KMS to

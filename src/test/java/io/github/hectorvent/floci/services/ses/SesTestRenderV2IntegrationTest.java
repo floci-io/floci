@@ -134,9 +134,23 @@ class SesTestRenderV2IntegrationTest {
     static Stream<Arguments> malformedRenderBodies() {
         return Stream.of(
                 Arguments.of("null body", null),
-                Arguments.of("non-object body (array)", "[1,2,3]"),
                 Arguments.of("TemplateData as object", "{\"TemplateData\": {\"name\": \"Alice\"}}")
         );
+    }
+
+    @Test
+    @Order(8)
+    void testRenderEmailTemplate_arrayBody_isASerializationException() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("[1,2,3]")
+        .when()
+            .post("/v2/email/templates/v2-render-welcome/render")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("Start of list found where not expected"));
     }
 
     @Test

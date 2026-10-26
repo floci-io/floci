@@ -33,7 +33,13 @@
 filters combine with AND. Filtering also applies to public AMI parameters and
 respects `Path`, `Recursive`, and region selection. Unknown or missing keys and keys
 not allowed for this action are rejected with `InvalidFilterKey`.
-`Label` filters accept only `Equals`, but label matching and pagination are not currently modeled.
+`Label` filters accept only `Equals` and return the stored versions carrying the requested
+labels, including older versions. Moving or removing a label changes subsequent results.
+The same OR/AND rules apply to label filters, and a version matching several requested
+labels appears only once. Type and KeyId filters match the labeled version's metadata.
+Public AMI parameters have no stored labels and are excluded from label queries.
+`MaxResults` and `NextToken` paginate the matching versions in name/version order; queries
+without a label filter continue to return the latest version of each parameter.
 
 ### Run Command
 
@@ -146,9 +152,16 @@ architectures and Kubernetes versions, so `GetParameter`, `GetParameters` and `G
 resolve them to the catalog's AMI ids. As on AWS they are read-only and belong to no account,
 so they do not appear in `DescribeParameters`.
 
+Floci also answers the Amazon Linux 2023 ECS optimized AMI `recommended/image_id` and
+`recommended` parameters under `/aws/service/ecs/optimized-ami/`. The image ID points to
+the catalog's x86_64 Amazon Linux 2023 image. The `recommended` value is JSON with the
+matching image ID and name; its ECS agent and runtime versions are `unknown` because
+the catalog image is synthetic and does not represent an installed ECS runtime.
+
 ```bash
 aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id
+aws ssm get-parameter --name /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
 ```
 
 ## Secrets Manager References

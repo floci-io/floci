@@ -12,17 +12,22 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -49,7 +54,7 @@ class RedshiftServerlessRuntimeTest {
     }
 
     private PasswordValidator startAndCaptureValidator(RedshiftServerlessRuntime.AdminCredentials admin) {
-        when(containers.start(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics")).thenReturn(handle());
+        when(containers.start(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics", "serverless")).thenReturn(handle());
         runtime.start(ACCOUNT, REGION, "my-wg", "root", "Secret123", "analytics", ENDPOINT, false,
                 () -> Optional.ofNullable(admin));
         ArgumentCaptor<PasswordValidator> validator = ArgumentCaptor.forClass(PasswordValidator.class);
@@ -60,17 +65,17 @@ class RedshiftServerlessRuntimeTest {
 
     @Test
     void startRunsTheContainerThenFrontsItWithTheProxyOnTheAllocatedEndpoint() {
-        when(containers.start(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics")).thenReturn(handle());
+        when(containers.start(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics", "serverless")).thenReturn(handle());
 
         RedshiftServerlessRuntime.Backend backend = runtime.start(ACCOUNT, REGION, "my-wg", "root", "Secret123",
                 "analytics", ENDPOINT, false, Optional::empty);
 
         assertEquals(new RedshiftServerlessRuntime.Backend("172.17.0.5", 5432), backend);
         InOrder order = inOrder(containers, proxies);
-        order.verify(containers).start(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics");
+        order.verify(containers).start(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics", "serverless");
         order.verify(proxies).startProxy(eq(RELAY_KEY), eq(7100), eq("172.17.0.5"), eq(5432), eq("localhost"),
                 eq("root"), eq("Secret123"), eq("analytics"), any(PasswordValidator.class), eq(List.of()));
-        verify(containers, never()).adoptOrStart(any(), any(), any(), any(), any());
+        verify(containers, never()).adoptOrStart(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -109,19 +114,57 @@ class RedshiftServerlessRuntimeTest {
     }
 
     @Test
+    void credentialFailureKeepsSafetyDumpUntilDataIsRestored() {
+        Path dump = Path.of("/tmp/dump.sql");
+        AtomicReference<Path> safety = new AtomicReference<>();
+        doAnswer(invocation -> {
+            safety.set(invocation.getArgument(4, Path.class));
+            return null;
+        }).when(containers).takeSnapshot(any(), any(), any(), any(), any(), eq(true));
+        AwsException failure = new AwsException("InvalidRequestException", "Secret has replicas", 400);
+
+        assertSame(failure, assertThrows(AwsException.class, () -> runtime.restoreSnapshot(
+                ACCOUNT, REGION, "my-wg", "root", "analytics", dump, () -> {
+                    assertTrue(Files.exists(safety.get()));
+                    throw failure;
+                })));
+
+        InOrder order = inOrder(containers);
+        order.verify(containers).resetUserSchemas(ACCOUNT, BACKEND_ID, "root", "analytics");
+        order.verify(containers).restoreSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", dump, true);
+        order.verify(containers).resetUserSchemas(ACCOUNT, BACKEND_ID, "root", "analytics");
+        order.verify(containers).restoreSnapshot(ACCOUNT, BACKEND_ID, "root", "analytics", safety.get(), true);
+        assertFalse(Files.exists(safety.get()));
+    }
+
+    @Test
+    void failedAdoptedProxyUsesRecoveryRollback() {
+        when(containers.adoptOrStart(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics", "serverless")).thenReturn(handle());
+        doThrow(new RuntimeException("port in use")).when(proxies).startProxy(any(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any(PasswordValidator.class), any());
+
+        assertThrows(RuntimeException.class, () -> runtime.start(ACCOUNT, REGION, "my-wg", "root", "Secret123",
+                "analytics", ENDPOINT, true, Optional::empty));
+
+        verify(proxies).stopProxy(RELAY_KEY);
+        verify(containers).rollbackStartup(ACCOUNT, BACKEND_ID);
+        verify(containers, never()).stop(ACCOUNT, BACKEND_ID);
+    }
+
+    @Test
     void adoptReattachesToASurvivingContainer() {
-        when(containers.adoptOrStart(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics")).thenReturn(handle());
+        when(containers.adoptOrStart(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics", "serverless")).thenReturn(handle());
 
         runtime.start(ACCOUNT, REGION, "my-wg", "root", "Secret123", "analytics", ENDPOINT, true, Optional::empty);
 
-        verify(containers, never()).start(any(), any(), any(), any(), any());
+        verify(containers, never()).start(any(), any(), any(), any(), any(), any());
         verify(proxies).startProxy(eq(RELAY_KEY), eq(7100), any(), anyInt(), any(), any(), any(), any(),
                 any(PasswordValidator.class), any());
     }
 
     @Test
     void aProxyThatFailsToStartRollsBackTheContainerAndCredentials() {
-        when(containers.start(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics")).thenReturn(handle());
+        when(containers.start(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics", "serverless")).thenReturn(handle());
         doThrow(new RuntimeException("port in use")).when(proxies).startProxy(any(), anyInt(), any(), anyInt(),
                 any(), any(), any(), any(), any(PasswordValidator.class), any());
         broker.issue(ACCOUNT, BACKEND_ID, "IAM:alice", List.of(), 900);
@@ -130,7 +173,7 @@ class RedshiftServerlessRuntimeTest {
                 "analytics", ENDPOINT, false, Optional::empty));
 
         verify(proxies).stopProxy(RELAY_KEY);
-        verify(containers).stop(ACCOUNT, BACKEND_ID);
+        verify(containers).rollbackStartup(ACCOUNT, BACKEND_ID);
         assertTrue(broker.resolve(ACCOUNT, BACKEND_ID, "IAM:alice").isEmpty());
     }
 

@@ -5,6 +5,10 @@
 
 Floci emulates the AWS Glue Data Catalog (databases, tables, partitions, functions, connections) and Glue Schema Registry, allowing you to manage local data lake metadata and schema-version workflows.
 
+Table and partition column-statistics reads fill omitted required numeric members with `0` for
+string, binary, long, double, decimal, date, and boolean statistics. Supplied values and stored
+records are preserved; optional minimum and maximum values remain absent when omitted.
+
 ## Supported Actions
 
 ### Data Catalog
@@ -130,7 +134,7 @@ retroactively.
 |--------|-------------|
 | CreateSecurityConfiguration | Creates a named security configuration. |
 | GetSecurityConfiguration | Returns a named security configuration. |
-| GetSecurityConfigurations | Lists stored security configurations. `MaxResults` and `NextToken` are currently ignored, so the complete list is returned. |
+| GetSecurityConfigurations | Lists stored security configurations with `MaxResults` (1 to 200) and `NextToken` pagination, scoped to the account and region. |
 | DeleteSecurityConfiguration | Deletes a named security configuration. |
 
 #### Jobs

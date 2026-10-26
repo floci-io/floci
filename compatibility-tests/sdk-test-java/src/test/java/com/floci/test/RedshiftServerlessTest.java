@@ -1,5 +1,7 @@
 package com.floci.test;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -29,8 +31,11 @@ import software.amazon.awssdk.services.redshiftserverless.model.UsageLimitUsageT
 import software.amazon.awssdk.services.redshiftserverless.model.ValidationException;
 import software.amazon.awssdk.services.redshiftserverless.model.Workgroup;
 import software.amazon.awssdk.services.redshiftserverless.model.WorkgroupStatus;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.SecretsManagerException;
 
 import java.time.Instant;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -41,6 +46,58 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 class RedshiftServerlessTest {
 
     private static final Logger LOG = Logger.getLogger(RedshiftServerlessTest.class);
+
+    @Test
+    void managedNamespaceSecretAuthenticatesDataApiAndIsRemovedWhenManagementIsDisabled() throws Exception {
+        assumeFalse(TestFixtures.isRealAws(), "Creates local resources and verifies immediate secret cleanup");
+
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient();
+             SecretsManagerClient secrets = TestFixtures.secretsManagerClient();
+             RedshiftDataClient data = TestFixtures.redshiftDataClient()) {
+            String suffix = UUID.randomUUID().toString().substring(0, 8);
+            String namespaceName = "floci-managed-ns-" + suffix;
+            String workgroupName = "floci-managed-wg-" + suffix;
+            try {
+                Namespace created = client.createNamespace(request -> request.namespaceName(namespaceName)
+                        .adminUsername("admin").dbName("analytics").manageAdminPassword(true)).namespace();
+                String secretArn = created.adminPasswordSecretArn();
+                assertThat(secretArn).isNotBlank();
+                assertThat(client.getNamespace(request -> request.namespaceName(namespaceName))
+                        .namespace().adminPasswordSecretArn()).isEqualTo(secretArn);
+                JsonNode credentials = new ObjectMapper().readTree(secrets.getSecretValue(request -> request
+                        .secretId(secretArn)).secretString());
+                assertThat(credentials.path("username").asText()).isEqualTo("admin");
+                assertThat(credentials.path("password").asText()).isNotBlank();
+                assertThat(credentials.path("dbname").asText()).isEqualTo("analytics");
+                assertThat(credentials.path("engine").asText()).isEqualTo("redshift");
+                assertThat(secrets.describeSecret(request -> request.secretId(secretArn)).owningService())
+                        .isEqualTo("redshift");
+
+                client.createWorkgroup(request -> request.workgroupName(workgroupName).namespaceName(namespaceName));
+                ExecuteStatementResponse executed = data.executeStatement(request -> request
+                        .workgroupName(workgroupName).secretArn(secretArn).database("analytics")
+                        .sql("SELECT 1").waitTimeSeconds(30));
+                DescribeStatementResponse described = data.describeStatement(request -> request.id(executed.id()));
+                assertThat(described.status()).as(described.error()).isEqualTo(StatusString.FINISHED);
+                assertThat(data.getStatementResult(request -> request.id(executed.id()))
+                        .records().get(0).get(0).longValue()).isEqualTo(1L);
+
+                Namespace updated = client.updateNamespace(request -> request.namespaceName(namespaceName)
+                        .manageAdminPassword(false).adminUserPassword("Replacement123!")).namespace();
+                assertThat(updated.adminPasswordSecretArn()).isNull();
+                assertThat(updated.adminPasswordSecretKmsKeyId()).isNull();
+                assertThat(client.getNamespace(request -> request.namespaceName(namespaceName))
+                        .namespace().adminPasswordSecretArn()).isNull();
+                assertThatThrownBy(() -> secrets.getSecretValue(request -> request.secretId(secretArn)))
+                        .isInstanceOfSatisfying(SecretsManagerException.class,
+                                error -> assertThat(error.awsErrorDetails().errorCode())
+                                        .isEqualTo("ResourceNotFoundException"));
+            } finally {
+                deleteWorkgroupBestEffort(client, workgroupName);
+                deleteBestEffort(client, namespaceName);
+            }
+        }
+    }
 
     @Test
     void namespaceLifecycleUsesAwsSdk() {

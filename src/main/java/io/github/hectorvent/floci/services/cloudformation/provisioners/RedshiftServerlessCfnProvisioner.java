@@ -4,9 +4,11 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService.NamespaceUpdateSnapshot;
 import io.github.hectorvent.floci.services.redshiftserverless.WorkgroupSettings;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
@@ -20,6 +22,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+import static io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback.REDSHIFT_SERVERLESS_NAMESPACE_UPDATE_SNAPSHOT_ATTR;
 
 /**
  * Provisions {@code AWS::RedshiftServerless::Namespace} and {@code AWS::RedshiftServerless::Workgroup}.
@@ -35,7 +39,7 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
 
     private static final Logger LOG = Logger.getLogger(RedshiftServerlessCfnProvisioner.class);
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = new ObjectMapper().findAndRegisterModules();
     private static final String NAMESPACE = "AWS::RedshiftServerless::Namespace";
     private static final String WORKGROUP = "AWS::RedshiftServerless::Workgroup";
     private static final int NAME_MAX_LENGTH = 64;
@@ -90,16 +94,40 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        if (resource.getAttributes().containsKey(REDSHIFT_SERVERLESS_NAMESPACE_UPDATE_SNAPSHOT_ATTR)
+                && !ReplacementCleanup.hasReplacement(resource)) {
+            return new UpdateCleanupResult(true, true, null, 0, null);
+        }
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(REDSHIFT_SERVERLESS_NAMESPACE_UPDATE_SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
     @Override
+    public boolean retainsFailedUpdateState(StackResource resource) {
+        return resource.getAttributes().containsKey(REDSHIFT_SERVERLESS_NAMESPACE_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    @Override
     public boolean rollbackUpdate(StackResource resource) {
+        String raw = resource.getAttributes().get(REDSHIFT_SERVERLESS_NAMESPACE_UPDATE_SNAPSHOT_ATTR);
+        if (raw != null) {
+            try {
+                JsonNode snapshot = MAPPER.readTree(raw);
+                service.restoreNamespaceUpdate(MAPPER.treeToValue(snapshot.path("state"), NamespaceUpdateSnapshot.class),
+                        snapshot.path("region").asText());
+                resource.getAttributes().clear();
+                snapshot.path("attributes").fields().forEachRemaining(entry ->
+                        resource.getAttributes().put(entry.getKey(), entry.getValue().asText()));
+                return true;
+            } catch (JsonProcessingException e) {
+                throw new IllegalStateException("Could not read the Redshift Serverless namespace update snapshot", e);
+            }
+        }
         return ReplacementCleanup.rollback(resource, this::delete);
     }
 
@@ -108,6 +136,10 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
                 r.getLogicalId(), NAME_MAX_LENGTH, true);
         String adminUsername = ctx.resolveOptional(props, "AdminUsername");
         String adminUserPassword = ctx.resolveOptional(props, "AdminUserPassword");
+        String manageAdminPasswordProperty = ctx.resolveOptional(props, "ManageAdminPassword");
+        Boolean manageAdminPassword = manageAdminPasswordProperty == null
+                ? null : Boolean.parseBoolean(manageAdminPasswordProperty);
+        String adminPasswordSecretKmsKeyId = ctx.resolveOptional(props, "AdminPasswordSecretKmsKeyId");
         String kmsKeyId = ctx.resolveOptional(props, "KmsKeyId");
         String defaultIamRoleArn = ctx.resolveOptional(props, "DefaultIamRoleArn");
         List<String> iamRoles = ctx.resolveStringList(props, "IamRoles");
@@ -124,13 +156,21 @@ public class RedshiftServerlessCfnProvisioner implements CfnResourceProvisioner 
                                 + "remove the namespace from the template and add it back",
                         400);
             }
+            if (r.getAttributes().containsKey(REDSHIFT_SERVERLESS_NAMESPACE_UPDATE_SNAPSHOT_ATTR)) {
+                throw new AwsException("ConflictException", "Namespace update rollback is still pending.", 400);
+            }
+            ObjectNode snapshot = MAPPER.createObjectNode().put("region", ctx.region());
+            snapshot.set("attributes", MAPPER.valueToTree(r.getAttributes()));
+            snapshot.set("state", MAPPER.valueToTree(service.snapshotNamespaceUpdate(name, ctx.region())));
+            r.getAttributes().put(REDSHIFT_SERVERLESS_NAMESPACE_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
             namespace = service.reconcileNamespace(name, adminUsername, adminUserPassword, kmsKeyId,
-                    defaultIamRoleArn, iamRoles, logExports, ctx.region());
+                    defaultIamRoleArn, iamRoles, logExports, Boolean.TRUE.equals(manageAdminPassword),
+                    adminPasswordSecretKmsKeyId, ctx.region());
             reconcileTags(namespace.getNamespaceArn(), tags, ctx);
         } else {
             namespace = service.createNamespace(name, adminUsername, adminUserPassword,
-                    ctx.resolveOptional(props, "DbName"), kmsKeyId, defaultIamRoleArn, iamRoles, logExports, tags,
-                    ctx.region());
+                    ctx.resolveOptional(props, "DbName"), kmsKeyId, defaultIamRoleArn, iamRoles, logExports,
+                    tags, manageAdminPassword, adminPasswordSecretKmsKeyId, ctx.region());
         }
 
         r.setPhysicalId(name);

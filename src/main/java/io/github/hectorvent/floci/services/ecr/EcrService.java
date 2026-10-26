@@ -33,6 +33,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -130,6 +131,10 @@ public class EcrService implements ResourceProvider {
         this.config = config;
         this.regionResolver = regionResolver;
         this.registryManager.setReconcileHook(this::reconcileFromCatalog);
+    }
+
+    public boolean isDisabled() {
+        return !config.services().ecr().enabled();
     }
 
     // ============================================================
@@ -396,6 +401,28 @@ public class EcrService implements ResourceProvider {
         return out;
     }
 
+    public record ScanningConfigurationFailure(String repositoryName, String failureCode, String failureReason) {}
+
+    public record BatchScanningConfigurationResult(List<Repository> repositories,
+                                                    List<ScanningConfigurationFailure> failures) {}
+
+    public BatchScanningConfigurationResult batchGetRepositoryScanningConfiguration(
+            List<String> repositoryNames, String registryId, String region) {
+        String account = effectiveAccount(registryId);
+        List<Repository> repositories = new ArrayList<>();
+        List<ScanningConfigurationFailure> failures = new ArrayList<>();
+        for (String name : repositoryNames) {
+            Optional<Repository> repository = repoStore.get(key(region, account, name));
+            if (repository.isPresent()) {
+                repositories.add(refreshRepositoryUri(repository.get(), region));
+            } else {
+                failures.add(new ScanningConfigurationFailure(name, "REPOSITORY_NOT_FOUND",
+                        notFound(name, account).getMessage()));
+            }
+        }
+        return new BatchScanningConfigurationResult(repositories, failures);
+    }
+
     // ============================================================
     // DeleteRepository
     // ============================================================
@@ -482,23 +509,35 @@ public class EcrService implements ResourceProvider {
     // ListImages / DescribeImages / BatchGetImage / BatchDeleteImage
     // ============================================================
 
-    public List<ImageIdentifier> listImages(String repositoryName, String registryId, String region) {
+    public PaginatedResult<ImageIdentifier> listImages(String repositoryName, String registryId, String region,
+                                                       Integer maxResults, String nextToken) {
+        int limit = maxResults != null ? maxResults : 100;
+        if (limit < 1 || limit > 1000) {
+            throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 1000", 400);
+        }
+        String namespace = "ListImages:" + region + ":" + effectiveAccount(registryId) + ":" + repositoryName;
         Repository repo = requireRepo(repositoryName, registryId, region);
         requireRegistry();
         String internal = resolveRegistryRepoName(repo.getRegistryId(), region, repositoryName);
         try {
             RegistryHttpClient http = registryManager.httpClient();
-            List<String> tags = http.listTags(internal);
-            List<ImageIdentifier> out = new ArrayList<>();
-            for (String tag : tags) {
-                String digest = http.headManifestDigest(internal, tag, null);
-                out.add(new ImageIdentifier(tag, digest));
-            }
-            return out;
-        } catch (Exception e) {
+            PaginatedResult<String> page = Pagination.paginate(http.listTags(internal), Function.identity(),
+                    limit, nextToken, namespace,
+                    token -> new AwsException("InvalidParameterException", "Invalid nextToken", 400));
+            return new PaginatedResult<>(imageIdentifiers(http, internal, page.items()), page.nextToken());
+        } catch (IOException | InterruptedException e) {
             LOG.warnv("ListImages registry query failed for {0}: {1}", repositoryName, e.getMessage());
-            return List.of();
+            return new PaginatedResult<>(List.of(), null);
         }
+    }
+
+    private static List<ImageIdentifier> imageIdentifiers(RegistryHttpClient http, String internal, List<String> tags)
+            throws IOException, InterruptedException {
+        List<ImageIdentifier> identifiers = new ArrayList<>();
+        for (String tag : tags) {
+            identifiers.add(new ImageIdentifier(tag, http.headManifestDigest(internal, tag, null)));
+        }
+        return identifiers;
     }
 
     public DescribeImagesResult describeImages(String repositoryName,

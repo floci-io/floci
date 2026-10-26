@@ -62,6 +62,7 @@ public abstract class AbstractRedisAuthProxy {
     private final int backendPort;
     private final int handshakeTimeoutMillis;
     private final Set<Socket> handshakingClients = ConcurrentHashMap.newKeySet();
+    private final Set<Socket> unencryptedClients = ConcurrentHashMap.newKeySet();
 
     private volatile boolean running;
     private ServerSocket serverSocket;
@@ -93,12 +94,35 @@ public abstract class AbstractRedisAuthProxy {
     /** Closes a socket, tolerating errors. Implementations may add their own logging. */
     protected abstract void closeQuietly(Socket socket);
 
+    /** Establishes the client transport before reading credentials. */
+    protected ClientTransport clientTransport(Socket client) throws IOException {
+        return ClientTransport.unencrypted(client);
+    }
+
+    /**
+     * The connection a client's commands arrive on: the socket to answer and close, and the stream
+     * to read, which replays any bytes already read to choose the transport.
+     */
+    protected record ClientTransport(Socket socket, InputStream input, boolean encrypted) {
+        static ClientTransport unencrypted(Socket socket) throws IOException {
+            return new ClientTransport(socket, socket.getInputStream(), false);
+        }
+
+        static ClientTransport encrypted(Socket socket) throws IOException {
+            return new ClientTransport(socket, socket.getInputStream(), true);
+        }
+    }
+
     public void start(int proxyPort) throws IOException {
         serverSocket = new ServerSocket(proxyPort);
         running = true;
         Thread.ofVirtual().name(threadPrefix + "-proxy-accept-" + resourceId).start(this::acceptLoop);
         log.infov("{0} proxy started for {1} on port {2} → {3}:{4}",
                 serviceName, resourceId, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
+    }
+
+    int localPort() {
+        return serverSocket.getLocalPort();
     }
 
     public void stop() {
@@ -114,6 +138,13 @@ public abstract class AbstractRedisAuthProxy {
             closeQuietly(client);
         }
         handshakingClients.clear();
+    }
+
+    /** Closes every connection that is not encrypted, as AWS does once transit encryption is required. */
+    public void dropUnencryptedConnections() {
+        for (Socket client : unencryptedClients) {
+            closeQuietly(client);
+        }
     }
 
     private void acceptLoop() {
@@ -140,7 +171,21 @@ public abstract class AbstractRedisAuthProxy {
         try {
             client.setTcpNoDelay(true);
             client.setSoTimeout(handshakeTimeoutMillis);
-            RespReader reader = new RespReader(client.getInputStream());
+            ClientTransport transport = clientTransport(client);
+            if (transport.socket() != client) {
+                handshakingClients.add(transport.socket());
+                handshakingClients.remove(client);
+                client = transport.socket();
+            }
+            if (!transport.encrypted()) {
+                unencryptedClients.add(client);
+            }
+            if (!running) {
+                closeQuietly(client);
+                return;
+            }
+            InputStream input = transport.input();
+            RespReader reader = new RespReader(input);
             while (true) {
                 String[] cmd = reader.readCommand();
 
@@ -150,17 +195,17 @@ public abstract class AbstractRedisAuthProxy {
                 }
 
                 if (cmd[0].equalsIgnoreCase("AUTH")) {
-                    handleAuth(client, cmd);
+                    handleAuth(client, input, cmd);
                     return;
                 }
                 if (cmd[0].equalsIgnoreCase("HELLO")) {
                     if (authRequired() || hasAuthOption(cmd)) {
-                        if (handleHello(client, cmd)) {
+                        if (handleHello(client, input, cmd)) {
                             return;
                         }
                         continue;
                     }
-                    bridgeCommand(client, cmd);
+                    bridgeCommand(client, input, cmd);
                     return;
                 }
                 if (authRequired()) {
@@ -169,7 +214,7 @@ public abstract class AbstractRedisAuthProxy {
                     return;
                 }
 
-                bridgeCommand(client, cmd);
+                bridgeCommand(client, input, cmd);
                 return;
             }
         } catch (Exception e) {
@@ -177,10 +222,11 @@ public abstract class AbstractRedisAuthProxy {
             closeQuietly(client);
         } finally {
             handshakingClients.remove(client);
+            unencryptedClients.remove(client);
         }
     }
 
-    private void handleAuth(Socket client, String[] cmd) throws IOException {
+    private void handleAuth(Socket client, InputStream input, String[] cmd) throws IOException {
         String username;
         String password;
 
@@ -207,10 +253,10 @@ public abstract class AbstractRedisAuthProxy {
         }
 
         writeResponse(client, OK_RESPONSE);
-        bridgeCommand(client, null);
+        bridgeCommand(client, input, null);
     }
 
-    private boolean handleHello(Socket client, String[] cmd) throws IOException {
+    private boolean handleHello(Socket client, InputStream input, String[] cmd) throws IOException {
         if (cmd.length > 1) {
             long protocolVersion;
             try {
@@ -272,7 +318,7 @@ public abstract class AbstractRedisAuthProxy {
             return false;
         }
 
-        bridgeCommand(client, forwarded.toArray(String[]::new));
+        bridgeCommand(client, input, forwarded.toArray(String[]::new));
         return true;
     }
 
@@ -293,7 +339,7 @@ public abstract class AbstractRedisAuthProxy {
         return true;
     }
 
-    private void bridgeCommand(Socket client, String[] command) throws IOException {
+    private void bridgeCommand(Socket client, InputStream input, String[] command) throws IOException {
         Socket backend = new Socket(backendHost, backendPort);
         try {
             backend.setTcpNoDelay(true);
@@ -302,7 +348,7 @@ public abstract class AbstractRedisAuthProxy {
             }
             client.setSoTimeout(0);
             handshakingClients.remove(client);
-            bridge(client, backend);
+            bridge(client, input, backend);
         } catch (IOException e) {
             closeQuietly(backend);
             throw e;
@@ -319,12 +365,13 @@ public abstract class AbstractRedisAuthProxy {
      * from {@code handleConnection} blocks in {@code join} here; scheduling nested virtual-thread
      * relays under load can stall delivery of backend responses (e.g. PING/PONG) to the client.
      */
-    private void bridge(Socket client, Socket backend) {
+    private void bridge(Socket client, InputStream clientInput, Socket backend) throws IOException {
+        InputStream backendInput = backend.getInputStream();
         CountDownLatch firstRelayDone = new CountDownLatch(1);
         Thread t1 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-c2b-" + resourceId)
                 .start(() -> {
                     try {
-                        relay(client, backend);
+                        relay(clientInput, backend);
                     } finally {
                         firstRelayDone.countDown();
                     }
@@ -332,7 +379,7 @@ public abstract class AbstractRedisAuthProxy {
         Thread t2 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-b2c-" + resourceId)
                 .start(() -> {
                     try {
-                        relay(backend, client);
+                        relay(backendInput, client);
                     } finally {
                         firstRelayDone.countDown();
                     }
@@ -349,10 +396,9 @@ public abstract class AbstractRedisAuthProxy {
         }
     }
 
-    private static void relay(Socket from, Socket to) {
+    private static void relay(InputStream in, Socket to) {
         byte[] buf = new byte[8192];
         try {
-            InputStream in = from.getInputStream();
             OutputStream out = to.getOutputStream();
             int n;
             while ((n = in.read(buf)) != -1) {

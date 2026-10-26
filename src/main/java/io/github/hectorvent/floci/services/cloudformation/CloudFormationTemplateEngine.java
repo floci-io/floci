@@ -51,6 +51,18 @@ public class CloudFormationTemplateEngine {
         String resolve(String stackName, String outputName, String region, String roleArn);
     }
 
+    /**
+     * Internal attribute on a stub whose type is served by a provisioner whose service is turned
+     * off. The template engine reads it to refuse {@code Fn::GetAtt} on an attribute the stub
+     * does not have, instead of publishing the unresolved placeholder.
+     */
+    public static final String SERVICE_DISABLED_ATTR = "__FlociServiceDisabled";
+
+    @FunctionalInterface
+    public interface AttributeValueResolver {
+        JsonNode resolve(String logicalId, String attributeName, String value);
+    }
+
     private final String accountId;
     private final String region;
     private final String stackName;
@@ -65,10 +77,11 @@ public class CloudFormationTemplateEngine {
     private final UnaryOperator<String> dynamicReferenceResolver;
     private final StackOutputResolver stackOutputResolver;
     private final Map<String, String> parameterTypes;
+    private final AttributeValueResolver attributeValueResolver;
     private final List<String> unresolvedIntrinsics = new ArrayList<>();
     /**
-     * Above zero while {@code Fn::GetStackOutput}'s arguments resolve: CloudFormation hands them on
-     * with their dynamic references unresolved.
+     * Above zero while an intrinsic-only property or {@code Fn::GetStackOutput}'s arguments resolve,
+     * including nested intrinsic calls.
      */
     private int dynamicReferencesSuspended;
 
@@ -156,6 +169,23 @@ public class CloudFormationTemplateEngine {
                                  UnaryOperator<String> dynamicReferenceResolver,
                                  StackOutputResolver stackOutputResolver,
                                  Map<String, String> parameterTypes) {
+        this(accountId, region, stackName, stackId, parameters, physicalIds, resourceAttributes,
+                conditions, mappings, objectMapper, importValueResolver, dynamicReferenceResolver,
+                stackOutputResolver, parameterTypes, (logicalId, attributeName, value) -> TextNode.valueOf(value));
+    }
+
+    CloudFormationTemplateEngine(String accountId, String region, String stackName, String stackId,
+                                 Map<String, String> parameters,
+                                 Map<String, String> physicalIds,
+                                 Map<String, Map<String, String>> resourceAttributes,
+                                 Map<String, Boolean> conditions,
+                                 Map<String, JsonNode> mappings,
+                                 ObjectMapper objectMapper,
+                                 Function<String, String> importValueResolver,
+                                 UnaryOperator<String> dynamicReferenceResolver,
+                                 StackOutputResolver stackOutputResolver,
+                                 Map<String, String> parameterTypes,
+                                 AttributeValueResolver attributeValueResolver) {
         this.accountId = accountId;
         this.region = region;
         this.stackName = stackName;
@@ -170,6 +200,7 @@ public class CloudFormationTemplateEngine {
         this.dynamicReferenceResolver = dynamicReferenceResolver;
         this.stackOutputResolver = stackOutputResolver;
         this.parameterTypes = parameterTypes;
+        this.attributeValueResolver = attributeValueResolver;
     }
 
     /** The id of the stack this engine resolves for, as {@code AWS::StackId} returns it. */
@@ -188,6 +219,12 @@ public class CloudFormationTemplateEngine {
         return resolveDynamicReferences(resolveIntrinsic(node)).asText();
     }
 
+    /** Resolves a string-only context, preserving literal and parameter coercion. */
+    public String resolveString(JsonNode node, String errorMessage) {
+        requireStringAttribute(node, errorMessage);
+        return resolve(node);
+    }
+
     /**
      * Resolves intrinsics only, leaving any {@code {{resolve:...}}} dynamic reference syntax in the
      * result untouched. For the one property family where {@code ssm-secure} is a valid dynamic
@@ -197,7 +234,12 @@ public class CloudFormationTemplateEngine {
      * only that property is allowed.
      */
     public String resolveWithoutDynamicReferences(JsonNode node) {
-        return resolveIntrinsic(node);
+        dynamicReferencesSuspended++;
+        try {
+            return resolveIntrinsic(node);
+        } finally {
+            dynamicReferencesSuspended--;
+        }
     }
 
     private String resolveIntrinsic(JsonNode node) {
@@ -230,6 +272,8 @@ public class CloudFormationTemplateEngine {
                 return resolveIf(node.get("Fn::If"));
             }
             if (node.has("Fn::Base64")) {
+                requireStringAttribute(node.get("Fn::Base64"),
+                        "Template error: every Fn::Base64 object must have a String-typed value.");
                 return Base64.getEncoder().encodeToString(resolve(node.get("Fn::Base64")).getBytes());
             }
             if (node.has("Fn::Split")) {
@@ -279,6 +323,13 @@ public class CloudFormationTemplateEngine {
             }
             if (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")) {
                 return objectMapper.valueToTree(resolveList(node));
+            }
+            if (node.has("Fn::GetAtt")) {
+                JsonNode attribute = resolveGetAttNode(node.get("Fn::GetAtt"));
+                return attribute.isTextual() ? resolveDynamicReferences(attribute.textValue()) : attribute;
+            }
+            if (node.has("Fn::Select")) {
+                return resolveNode(selectedElement(node.get("Fn::Select")));
             }
             if (callsIntrinsic(node)) {
                 return TextNode.valueOf(resolve(node));
@@ -456,7 +507,12 @@ public class CloudFormationTemplateEngine {
             template = sub.get(0).textValue();
             JsonNode varMap = sub.get(1);
             if (varMap.isObject()) {
-                varMap.fields().forEachRemaining(e -> vars.put(e.getKey(), resolve(e.getValue())));
+                varMap.fields().forEachRemaining(e -> {
+                    requireStringAttribute(e.getValue(),
+                            "Template error: every value of the context object of every Fn::Sub object"
+                                    + " must be a string or a function that returns a string.");
+                    vars.put(e.getKey(), resolve(e.getValue()));
+                });
             }
         } else {
             return sub.asText();
@@ -482,6 +538,10 @@ public class CloudFormationTemplateEngine {
                     // Fn::GetAtt shorthand: ${LogicalId.Attr}. A logical id and a parameter name
                     // are both alphanumeric, so a dot can only mean an attribute reference.
                     String[] parts = varName.split("\\.", 2);
+                    JsonNode attribute = objectMapper.createArrayNode().add(parts[0]).add(parts[1]);
+                    requireStringAttribute(objectMapper.createObjectNode().set("Fn::GetAtt", attribute),
+                            "Template error: variable " + varName
+                                    + " in Fn::Sub expression does not resolve to a string.");
                     result.append(resolveGetAttParts(parts[0], parts.length > 1 ? parts[1] : ""));
                 } else {
                     result.append(resolveRef(varName));
@@ -500,6 +560,10 @@ public class CloudFormationTemplateEngine {
             return "";
         }
         String delimiter = join.get(0).asText("");
+        requireStringAttribute(join.get(1),
+                "Template error: every Fn::Join object requires two parameters, (1) a string delimiter"
+                        + " and (2) a list of strings to be joined or a function that returns a list"
+                        + " of strings (such as Fn::GetAZs) to be joined.");
         // CDK splices a dynamic reference across fragments, for example
         // ["{{resolve:secretsmanager:", {"Ref": "Secret"}, ":SecretString:password::}}"], so the
         // fragments are only intrinsic-resolved here and the caller resolves dynamic references on
@@ -507,16 +571,61 @@ public class CloudFormationTemplateEngine {
         return String.join(delimiter, resolveList(join.get(1), false));
     }
 
+    private void requireStringAttribute(JsonNode node, String message) {
+        if (node == null) {
+            return;
+        }
+        if (node.has("Fn::GetAtt") && !isStringAttribute(node.get("Fn::GetAtt"))) {
+            throw new AwsException("ValidationError", message, 400);
+        }
+        if (node.has("Fn::If")) {
+            requireStringAttribute(selectIfBranch(node.get("Fn::If")), message);
+        } else if (node.has("Fn::Select")) {
+            requireStringAttribute(selectedElement(node.get("Fn::Select")), message);
+        } else if (node.isArray()) {
+            node.forEach(item -> requireStringAttribute(item, message));
+        }
+    }
+
+    private boolean isStringAttribute(JsonNode getAtt) {
+        String[] parts = getAttParts(getAtt);
+        if (parts == null) {
+            return true;
+        }
+        Map<String, String> attributes = findAttributeSource(parts[0], parts[1]);
+        return attributes == null
+                || attributeValueResolver.resolve(parts[0], parts[1], attributes.get(parts[1])).isTextual();
+    }
+
     private String resolveSelect(JsonNode select) {
+        return resolve(selectedElement(select));
+    }
+
+    private JsonNode selectedElement(JsonNode select) {
         if (!select.isArray() || select.size() < 2) {
-            return "";
+            return TextNode.valueOf("");
         }
         int index = parseInt(resolve(select.get(0)), 0);
-        List<String> items = resolveList(select.get(1));
+        JsonNode source = select.get(1);
+        while (source != null && source.has("Fn::If")) {
+            source = selectIfBranch(source.get("Fn::If"));
+        }
+        List<JsonNode> items = new ArrayList<>();
+        if (source != null && source.isArray()) {
+            for (JsonNode element : source) {
+                if (isListValuedIntrinsic(element)) {
+                    resolveList(element).forEach(value -> items.add(TextNode.valueOf(value)));
+                } else {
+                    items.add(element);
+                }
+            }
+        } else {
+            resolveList(source).forEach(value -> items.add(TextNode.valueOf(value)));
+        }
         if (index >= 0 && index < items.size()) {
             return items.get(index);
         }
-        return "";
+        return TextNode.valueOf("");
     }
 
     /**
@@ -688,6 +797,8 @@ public class CloudFormationTemplateEngine {
         if (!split.isArray() || split.size() < 2) {
             return List.of();
         }
+        requireStringAttribute(split.get(1), "Template error: every Fn::Split object requires two parameters, "
+                + "(1) a string delimiter and (2) a string to be split or a function that returns a string to be split.");
         String delimiter = resolve(split.get(0));
         String source = resolve(split.get(1));
         if (delimiter.isEmpty()) {
@@ -782,21 +893,50 @@ public class CloudFormationTemplateEngine {
     }
 
     private String resolveGetAtt(JsonNode getAtt) {
+        return resolveGetAttNode(getAtt).asText();
+    }
+
+    private JsonNode resolveGetAttNode(JsonNode getAtt) {
+        String[] parts = getAttParts(getAtt);
+        return parts == null ? TextNode.valueOf("") : resolveGetAttNodeParts(parts[0], parts[1]);
+    }
+
+    private static String[] getAttParts(JsonNode getAtt) {
         if (getAtt.isArray() && getAtt.size() == 2) {
-            return resolveGetAttParts(getAtt.get(0).asText(), getAtt.get(1).asText());
+            return new String[] {getAtt.get(0).asText(), getAtt.get(1).asText()};
         }
         if (getAtt.isTextual()) {
             String[] parts = getAtt.textValue().split("\\.", 2);
-            return resolveGetAttParts(parts[0], parts.length > 1 ? parts[1] : "");
+            return new String[] {parts[0], parts.length > 1 ? parts[1] : ""};
         }
-        return "";
+        return null;
+    }
+
+    private Map<String, String> findAttributeSource(String logicalId, String attrName) {
+        Map<String, String> attributes = resourceAttributes.get(logicalId);
+        // Provisioners keep private state under __Floci keys; AWS resolves no such attribute.
+        return attributes != null && attributes.containsKey(attrName) && !attrName.startsWith("__Floci")
+                ? attributes : null;
+    }
+
+    private JsonNode resolveGetAttNodeParts(String logicalId, String attrName) {
+        String value = resolveGetAttParts(logicalId, attrName);
+        if (findAttributeSource(logicalId, attrName) != null) {
+            return attributeValueResolver.resolve(logicalId, attrName, value);
+        }
+        return TextNode.valueOf(value);
     }
 
     private String resolveGetAttParts(String logicalId, String attrName) {
+        Map<String, String> attributes = findAttributeSource(logicalId, attrName);
+        if (attributes != null) {
+            return attributes.get(attrName);
+        }
         Map<String, String> attrs = resourceAttributes.get(logicalId);
-        // Provisioners keep private state under __Floci keys; AWS resolves no such attribute.
-        if (attrs != null && attrs.containsKey(attrName) && !attrName.startsWith("__Floci")) {
-            return attrs.get(attrName);
+        if (attrs != null && attrs.containsKey(SERVICE_DISABLED_ATTR)) {
+            throw new AwsException("ValidationError", "Template error: " + logicalId
+                    + " was stubbed because its service is disabled, so attribute " + attrName
+                    + " is unavailable.", 400);
         }
         LOG.warnv("Unresolved GetAtt: {0}.{1}", logicalId, attrName);
         unresolvedIntrinsics.add("Fn::GetAtt " + logicalId + "." + attrName);
@@ -906,12 +1046,7 @@ public class CloudFormationTemplateEngine {
         if (value == null || value.isNull()) {
             return "";
         }
-        dynamicReferencesSuspended++;
-        try {
-            return resolveIntrinsic(value);
-        } finally {
-            dynamicReferencesSuspended--;
-        }
+        return resolveWithoutDynamicReferences(value);
     }
 
     /**

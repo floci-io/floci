@@ -55,6 +55,12 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 Set `limit` to an integer from 1 to 50 and pass the returned `nextToken` with the same region
 and name prefix to continue. The final page omits `nextToken`.
 
+`CreateLogGroup` stores `logGroupClass` as `STANDARD` (the default), `INFREQUENT_ACCESS`, or
+`DELIVERY`. `DescribeLogGroups` returns the stored class and applies an optional `logGroupClass`
+filter before pagination. Continue with the same class filter when using `nextToken`.
+Stored groups without a class default to `STANDARD`. Class metadata does not change retention,
+delivery behavior, or the features available on a group.
+
 Log group deletion protection defaults to disabled and is persisted with the log group. When it is
 enabled, `DeleteLogGroup` returns `ValidationException` until protection is explicitly disabled
 with `PutLogGroupDeletionProtection`.
@@ -364,6 +370,26 @@ HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action p
 
 **Endpoint:** `http://localhost:4566/`. Query: GET or POST; JSON: POST.
 
+JSON 1.0 requests name their operation in `X-Amz-Target` with the `GraniteServiceVersion20100801.`
+prefix the AWS SDKs send, or with `CloudWatchVersion20130116.`, the prefix of the CloudWatch
+console's API. Both get the same signature validation and IAM checks. The console prefix serves
+four operations on the same metrics and alarms, with these request members: `ListMetrics`
+(`Namespace`, `MetricName`, `Dimensions`, `NextToken`), `DescribeAlarms` (`AlarmNames`,
+`AlarmNamePrefix`, `MaxRecords`, `NextToken`), `GetMetricStatistics` (`Namespace`, `MetricName`,
+`Dimensions`, `StartTime`, `EndTime`, `Period`, `Statistics`, `Unit`) and `DeleteAlarms`
+(`AlarmNames`). Every result comes back at once, so `MaxRecords` and `NextToken` change nothing.
+It returns HTTP 400 `UnsupportedOperation` for every other operation, such as the console's
+`GetMetricData` with `Defaults` and `Metrics`; for a request that sets any other member, such as
+`StateValue`, `ExtendedStatistics` or the console's `CountOnlyRequest`, to a value other than
+`false` or `null`; and for a `DescribeAlarms` answer that would list an alarm defined with
+`Metrics`, whose items the console's API shapes differently. Such an alarm makes every listing
+that includes it fail, so filter by `AlarmNames` or `AlarmNamePrefix` to list the others.
+The console prefix is JSON only: a CBOR request naming it returns HTTP 404
+`UnknownOperationException`, and a Smithy RPC v2 request HTTP 404. Only the bare prefix over
+`application/x-amz-json-1.0` is accepted; the fully qualified
+`com.amazonaws.cloudwatch.v2013_01_16.CloudWatchVersion20130116.` form over `application/json`
+returns HTTP 404.
+
 ### Supported Actions
 
 | Action | Description |
@@ -373,6 +399,7 @@ HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action p
 | `GetMetricStatistics` | Get metric statistics (Average, Sum, etc.) |
 | `GetMetricData` | Query metrics with math expressions |
 | `PutMetricAlarm` | Create a metric alarm |
+| `PutCompositeAlarm` | Create or update a composite alarm rule |
 | `DescribeAlarms` | List alarms |
 | `DeleteAlarms` | Delete alarms |
 | `SetAlarmState` | Manually set alarm state |
@@ -392,6 +419,25 @@ HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action p
 
 Metric streams are stored as definitions with their `running` or `stopped` state. Floci never
 delivers metrics to the Firehose delivery stream a metric stream names.
+
+SQS publishes its queue metrics under `AWS/SQS` once a minute; see
+[SQS CloudWatch Metrics](sqs.md#cloudwatch-metrics).
+
+Composite alarms support boolean rules over alarm states. Request `AlarmTypes` containing
+`CompositeAlarm` when describing them; the default describes metric alarms. Composite
+action lists are stored but not executed. Action suppression is not implemented and is
+rejected with `ValidationError`.
+
+### Metric alarm updates
+
+Updating a metric alarm preserves its current state, state reason, state timestamp and tags.
+Tags supplied to `PutMetricAlarm` apply only when creating an alarm; use `TagResource` and
+`UntagResource` to change existing tags. `SetAlarmState` requires `StateReason` and rejects
+missing or unknown state values before changing the alarm.
+
+`SetAlarmState` enforces the modeled maximum lengths of 1023 characters for
+`StateReason` and 4000 characters for `StateReasonData` before changing alarm state.
+Length checks count Unicode code points and preserve empty and whitespace values.
 
 ### SNS alarm actions
 

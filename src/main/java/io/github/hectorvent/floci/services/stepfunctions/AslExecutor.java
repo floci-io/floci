@@ -59,7 +59,10 @@ import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
+import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService.TokenTimeout;
+import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService.TokenWait;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
+import io.github.hectorvent.floci.services.stepfunctions.model.ExecutionStatusSubscription;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.MapRun;
 import io.github.hectorvent.floci.services.stepfunctions.model.MockedResponseStep;
@@ -125,6 +128,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -183,8 +187,9 @@ public class AslExecutor {
     private static final int INLINE_MAP_MAX_CONCURRENCY = 40;
     private static final int DISTRIBUTED_MAP_MAX_CONCURRENCY = 10_000;
 
-    // How often a .sync integration (ecs:runTask, elasticmapreduce, states:startExecution) re-reads the job
-    // it waits on. The wait itself is bounded by the Task's TimeoutSeconds and the execution's budget.
+    // How often a .sync integration (ecs:runTask, elasticmapreduce, emr-serverless, states:startExecution)
+    // re-reads the job it waits on. The wait itself is bounded by the Task's TimeoutSeconds and the
+    // execution's budget.
     private static final long SYNC_POLL_INTERVAL_MS = 100;
 
     // AWS caps the string input of States.Base64Encode/Base64Decode/Hash at 10,000 characters
@@ -268,17 +273,21 @@ public class AslExecutor {
     private final WebClient webClient;
     private final ApiGatewayTaskInvoker apiGatewayTaskInvoker;
     private final EmrTaskInvoker emrTaskInvoker;
+    private final EmrServerlessTaskInvoker emrServerlessTaskInvoker;
     private final EmulatorConfig config;
     private final NestedTaskCredentials nestedTaskCredentials;
     private final CustomResourceLiveness customResourceLiveness;
     private final Clock clock;
     private final Sleeper sleeper;
+    private final NestedWaiter nestedWaiter;
     // Null in production, where the ceiling comes from the Step Functions config. Tests pin it.
     private final Integer maxWaitSecondsOverride;
     private final Duration expressMaxExecutionTime;
     // The monotonic clock every execution and task deadline is measured on. Tests move it forward.
     private final LongSupplier nanoTime;
     private final Map<String, ActiveMockExecution> activeMocks = new ConcurrentHashMap<>();
+    private final Set<ExecutionStatusSubscription> nestedWaits = new HashSet<>();
+    private long nestedWaitGeneration;
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "sfn-executor");
         t.setDaemon(true);
@@ -299,14 +308,15 @@ public class AslExecutor {
                        CustomResourceLiveness customResourceLiveness, RedshiftDataJsonHandler redshiftDataHandler,
                        ServiceRegistry serviceRegistry, NestedTaskCredentials nestedTaskCredentials,
                        LambdaTaskAuthorizer lambdaTaskAuthorizer, ApiGatewayTaskInvoker apiGatewayTaskInvoker,
-                       EmrTaskInvoker emrTaskInvoker) {
+                       EmrTaskInvoker emrTaskInvoker, EmrServerlessTaskInvoker emrServerlessTaskInvoker) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
-                nestedTaskCredentials, lambdaTaskAuthorizer, null, null, apiGatewayTaskInvoker, emrTaskInvoker);
+                nestedTaskCredentials, lambdaTaskAuthorizer, null, null, apiGatewayTaskInvoker, emrTaskInvoker,
+                emrServerlessTaskInvoker, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -324,9 +334,11 @@ public class AslExecutor {
                 RedshiftDataJsonHandler redshiftDataHandler, ServiceRegistry serviceRegistry,
                 NestedTaskCredentials nestedTaskCredentials, LambdaTaskAuthorizer lambdaTaskAuthorizer,
                 Duration expressMaxExecutionTimeOverride, LongSupplier nanoTimeOverride,
-                ApiGatewayTaskInvoker apiGatewayTaskInvoker, EmrTaskInvoker emrTaskInvoker) {
+                ApiGatewayTaskInvoker apiGatewayTaskInvoker, EmrTaskInvoker emrTaskInvoker,
+                EmrServerlessTaskInvoker emrServerlessTaskInvoker, NestedWaiter nestedWaiter) {
         this.apiGatewayTaskInvoker = apiGatewayTaskInvoker;
         this.emrTaskInvoker = emrTaskInvoker;
+        this.emrServerlessTaskInvoker = emrServerlessTaskInvoker;
         this.nestedTaskCredentials = nestedTaskCredentials;
         this.serviceRegistry = serviceRegistry;
         this.lambdaTaskAuthorizer = lambdaTaskAuthorizer;
@@ -359,6 +371,7 @@ public class AslExecutor {
         this.config = config;
         this.clock = clock;
         this.sleeper = sleeper;
+        this.nestedWaiter = nestedWaiter != null ? nestedWaiter : ExecutionStatusSubscription::awaitChange;
         this.maxWaitSecondsOverride = maxWaitSecondsOverride;
         this.nanoTime = nanoTimeOverride != null ? nanoTimeOverride : System::nanoTime;
         this.expressMaxExecutionTime = expressMaxExecutionTimeOverride != null
@@ -389,7 +402,8 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null, null, null, null);
+                Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null, null, null, null,
+                null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -410,7 +424,7 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null);
+                clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null, null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -430,6 +444,13 @@ public class AslExecutor {
                 ecsService, ecsJsonHandler, eventBridgeHandler, schedulerService,
                 schedulerController, null, objectMapper, jsonataEvaluator, sfnService, config,
                 vertx, customResourceLiveness, clock, sleeper, maxWaitSecondsOverride);
+    }
+
+    /** Test seam paired with the monotonic clock for nested deadline and cut coordination. */
+    @FunctionalInterface
+    interface NestedWaiter {
+        void awaitChange(ExecutionStatusSubscription subscription, long observed, long timeoutNanos)
+                throws InterruptedException;
     }
 
     /** Test seam: lets Wait states be exercised without real time passing. */
@@ -1073,7 +1094,7 @@ public class AslExecutor {
      * picks the task up, which is the instant it emits ActivityStarted; Floci emits that event at
      * schedule time, so there is no later instant to anchor on here.
      */
-    private JsonNode awaitToken(CompletableFuture<JsonNode> future, JsonNode stateDef, String taskToken,
+    JsonNode awaitToken(CompletableFuture<JsonNode> future, JsonNode stateDef, String taskToken,
                                 long executionDeadlineNanos, long timeoutDeadlineNanos) throws Exception {
         int heartbeatSeconds = stateDef.path("HeartbeatSeconds").asInt(0);
         try {
@@ -1083,22 +1104,20 @@ public class AslExecutor {
                 try {
                     return future.get(wakeAtNanos - nanoTime.getAsLong(), TimeUnit.NANOSECONDS);
                 } catch (java.util.concurrent.TimeoutException e) {
-                    // The execution's budget is read first: when it is the clock that ran out, the
-                    // execution ends as TIMED_OUT and the task's own timeout never applies.
-                    if (nanoTime.getAsLong() >= executionDeadlineNanos) {
-                        future.cancel(true);
-                        throw new ExecutionTimedOutException();
+                    TokenWait decision = sfnService.get().expirePendingToken(taskToken, nanoTime.getAsLong(),
+                            executionDeadlineNanos, timeoutDeadlineNanos, heartbeatSeconds);
+                    if (decision.timeout() == TokenTimeout.CLAIMED) {
+                        return decision.result().get();
                     }
-                    if (nanoTime.getAsLong() >= timeoutDeadlineNanos) {
+                    RuntimeException timeout = switch (decision.timeout()) {
+                        case EXECUTION -> new ExecutionTimedOutException();
+                        case TASK -> new TaskTimedOutException("States.Timeout");
+                        case HEARTBEAT -> new TaskTimedOutException("States.HeartbeatTimeout");
+                        case NONE, CLAIMED -> null;
+                    };
+                    if (timeout != null) {
                         future.cancel(true);
-                        throw new TaskTimedOutException("States.Timeout");
-                    }
-                    // Read the gap again rather than trusting the one this thread parked on: a
-                    // heartbeat that landed meanwhile has already moved it past now, and the task
-                    // goes back to waiting on the later deadline.
-                    if (nanoTime.getAsLong() >= heartbeatDeadlineNanos(taskToken, heartbeatSeconds)) {
-                        future.cancel(true);
-                        throw new TaskTimedOutException("States.HeartbeatTimeout");
+                        throw timeout;
                     }
                 }
             }
@@ -1269,7 +1288,8 @@ public class AslExecutor {
             AwsArnUtils.Arn stateMachineArn = AwsArnUtils.parse(sm.getStateMachineArn());
             LambdaArnUtils.ResolvedFunctionRef ref;
             try {
-                ref = LambdaArnUtils.resolve(functionRef);
+                ref = LambdaArnUtils.resolveWithQualifier(functionRef,
+                        optimizedLambdaInvoke ? input.path("Qualifier").asText(null) : null);
             } catch (AwsException e) {
                 throw new FailStateException("Lambda." + e.getErrorCode(), e.getMessage());
             }
@@ -1284,6 +1304,7 @@ public class AslExecutor {
             String region = ref.region() != null ? ref.region() : stateMachineArn.region();
             String accountId = ref.account() == null || ref.account().equals(stateMachineArn.accountId())
                     ? null : ref.account();
+            String invokedQualifier = ref.qualifier();
             // The task invokes the function as its role: the execution role, or the role its
             // Credentials name once the execution role has assumed it. The role's policies or the
             // function's have to allow the call, and both when the function is in another account.
@@ -1299,13 +1320,15 @@ public class AslExecutor {
                 }
                 String functionArn = LambdaArnUtils.functionArn(functionRef, stateMachineArn.partition(), region,
                         stateMachineArn.accountId());
+                if (invokedQualifier != null && extractLambdaQualifier(functionRef) == null) {
+                    functionArn += ":" + invokedQualifier;
+                }
                 Optional<String> refusal = lambdaTaskAuthorizer.refusal(invokingRoleArn, functionArn);
                 if (refusal.isPresent()) {
                     throw new FailStateException("Lambda.AccessDeniedException", refusal.get());
                 }
             }
-            LambdaFunction fn = resolveLambdaFunction(accountId, region, functionName,
-                    extractLambdaQualifier(functionRef));
+            LambdaFunction fn = resolveLambdaFunction(accountId, region, functionName, invokedQualifier);
             if (fn == null) {
                 // A missing function is a task failure on AWS, so it must stay reachable for
                 // Retry and Catch instead of surfacing as States.Runtime.
@@ -1317,7 +1340,9 @@ public class AslExecutor {
             reportCustomResourceLiveness(payloadBytes);
             InvokeResult result;
             try {
-                result = lambdaExecutor.invoke(fn, payloadBytes, InvocationType.RequestResponse);
+                result = invokedQualifier == null
+                        ? lambdaExecutor.invoke(fn, payloadBytes, InvocationType.RequestResponse)
+                        : lambdaExecutor.invoke(fn, payloadBytes, InvocationType.RequestResponse, 0, invokedQualifier);
             } catch (AwsException e) {
                 throw new FailStateException("Lambda." + e.getErrorCode(), e.getMessage());
             }
@@ -1454,6 +1479,14 @@ public class AslExecutor {
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeEmr(integration, input, region, executionArn, executionDeadlineNanos, taskDeadlineNanos,
                     jobSubmitted);
+        }
+
+        // EMR Serverless optimized integrations: request-response and .sync, with no .waitForTaskToken
+        // variant either.
+        if (integration.isOptimizedService("emr-serverless") && taskToken == null) {
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeEmrServerless(integration, input, region, executionArn, executionDeadlineNanos,
+                    taskDeadlineNanos, jobSubmitted);
         }
 
         // AWS SDK service integrations: Step Functions
@@ -1910,6 +1943,7 @@ public class AslExecutor {
                                               long executionDeadlineNanos, long taskDeadlineNanos,
                                               JsonNode rawParameters, Consumer<JsonNode> jobSubmitted)
             throws Exception {
+        long waitGeneration = nestedWaitGeneration();
         String smArn = input.path("StateMachineArn").asText(null);
         if (smArn == null || smArn.isBlank()) {
             throw new FailStateException("States.TaskFailed",
@@ -1936,7 +1970,7 @@ public class AslExecutor {
             childName = null;
         }
 
-        io.github.hectorvent.floci.services.stepfunctions.model.Execution exec;
+        Execution exec;
         try {
             exec = sfnService.get().startExecution(smArn, childName, childInput, region);
         } catch (AwsException e) {
@@ -1966,44 +2000,98 @@ public class AslExecutor {
             throw e;
         }
 
-        // .sync or .sync:2 polls until terminal. Whatever else ends the wait aborts the child, the way
+        // .sync or .sync:2 waits for terminal publication. Whatever else ends the wait aborts the child, the way
         // AWS does (measured: child ABORTED, no error, the cause below): the Task's own TimeoutSeconds,
         // which fails the state with States.Timeout; the parent execution's budget, which ends it
         // TIMED_OUT; a failure in a sibling Parallel branch, which interrupts this one; and a
-        // StopExecution on the parent, so a stopped execution does not keep a polling worker.
-        while (true) {
-            try {
-                sleepOrTimeOutTask(TimeUnit.MILLISECONDS.toNanos(SYNC_POLL_INTERVAL_MS),
-                        executionDeadlineNanos, taskDeadlineNanos);
-            } catch (TaskTimedOutException | ExecutionTimedOutException | InterruptedException e) {
-                abortChildExecution(execArn, executionArn);
-                throw e;
+        // StopExecution on the parent. Register before reading either execution to cover
+        // completion during registration and between a state read and parking.
+        ExecutionStatusSubscription waiting = new ExecutionStatusSubscription(exec, nestedWaitParent(executionArn));
+        registerNestedWait(waiting, waitGeneration);
+        try (waiting) {
+            while (true) {
+                if (waiting.cancelled()) {
+                    abortChildExecution(execArn, executionArn);
+                    throw new FailStateException("States.TaskFailed", "StepFunctionsService cleared");
+                }
+                long observed = waiting.version();
+                checkNestedTaskDeadline(executionDeadlineNanos, taskDeadlineNanos);
+                if (abortedByCaller(executionArn)) {
+                    abortChildExecution(execArn, executionArn);
+                    throw new ExecutionAbortedException();
+                }
+                Execution current = sfnService.get().describeExecution(execArn);
+                String status;
+                // Terminal fields are written under this monitor, status last.
+                synchronized (current) {
+                    status = current.getStatus();
+                }
+                if ("SUCCEEDED".equals(status)) {
+                    return nestedExecutionEnvelope(current, true, ".sync:2".equals(mode));
+                }
+                if (!"RUNNING".equals(status)) {
+                    throw new FailStateException("States.TaskFailed",
+                            nestedExecutionEnvelope(current, false, false).toString());
+                }
+                nestedWaiter.awaitChange(waiting, observed,
+                        Math.min(executionDeadlineNanos, taskDeadlineNanos) - nanoTime.getAsLong());
             }
-            if (abortedByCaller(executionArn)) {
-                abortChildExecution(execArn, executionArn);
-                throw new ExecutionAbortedException();
+        } catch (TaskTimedOutException | ExecutionTimedOutException | InterruptedException e) {
+            abortChildExecution(execArn, executionArn);
+            throw e;
+        } finally {
+            synchronized (nestedWaits) {
+                nestedWaits.remove(waiting);
             }
-            io.github.hectorvent.floci.services.stepfunctions.model.Execution current =
-                    sfnService.get().describeExecution(execArn);
-            String status;
-            // The child's worker and StopExecution write its terminal fields under this monitor,
-            // status last. Reading the status under it makes everything written before it visible,
-            // so a terminal status is never seen without the error, cause and stop date behind it.
-            synchronized (current) {
-                status = current.getStatus();
+        }
+    }
+
+    private long nestedWaitGeneration() {
+        synchronized (nestedWaits) {
+            return nestedWaitGeneration;
+        }
+    }
+
+    private void registerNestedWait(ExecutionStatusSubscription waiting, long generation) {
+        synchronized (nestedWaits) {
+            if (generation != nestedWaitGeneration) {
+                waiting.cancel();
+            } else {
+                nestedWaits.add(waiting);
             }
-            if ("RUNNING".equals(status)) {
-                continue;
+        }
+    }
+
+    void clearNestedExecutionWaits() {
+        synchronized (nestedWaits) {
+            nestedWaitGeneration++;
+            for (ExecutionStatusSubscription waiting : nestedWaits) {
+                waiting.cancel();
             }
-            if ("SUCCEEDED".equals(status)) {
-                // Both modes return the envelope (measured); .sync:2 differs only in carrying
-                // Input and Output as JSON values where .sync carries them as JSON strings.
-                return nestedExecutionEnvelope(current, true, ".sync:2".equals(mode));
-            }
-            // However the child ended, FAILED, TIMED_OUT or ABORTED, and whatever its own error, the
-            // parent sees States.TaskFailed (measured), so a Catch on the child's error never fires.
-            throw new FailStateException("States.TaskFailed",
-                    nestedExecutionEnvelope(current, false, false).toString());
+            nestedWaits.clear();
+        }
+    }
+
+    private Execution nestedWaitParent(String executionArn) {
+        if (executionArn == null) {
+            return null;
+        }
+        try {
+            return RequestScopes.callAs(AwsArnUtils.parse(executionArn).accountId(),
+                    () -> sfnService.get().describeExecution(executionArn));
+        } catch (AwsException e) {
+            LOG.warnv("Parent execution {0} vanished before its nested wait: {1}", executionArn, e.getMessage());
+            return null;
+        }
+    }
+
+    private void checkNestedTaskDeadline(long executionDeadlineNanos, long taskDeadlineNanos) {
+        long now = nanoTime.getAsLong();
+        if (now >= executionDeadlineNanos) {
+            throw new ExecutionTimedOutException();
+        }
+        if (now >= taskDeadlineNanos) {
+            throw new TaskTimedOutException("States.Timeout");
         }
     }
 
@@ -2209,11 +2297,7 @@ public class AslExecutor {
         }
     }
 
-    /**
-     * The {@code elasticmapreduce:} integrations. A {@code .sync} Task records its call's response as
-     * submitted and polls the cluster or step as {@code ecs:runTask.sync} polls its tasks, bounded by
-     * the same two clocks; whatever ends the wait first abandons the job.
-     */
+    /** The {@code elasticmapreduce:} integrations; a {@code .sync} Task waits on its cluster or step. */
     private JsonNode invokeEmr(StatesIntegration integration, JsonNode input, String region, String executionArn,
                                long executionDeadlineNanos, long taskDeadlineNanos,
                                Consumer<JsonNode> jobSubmitted) throws Exception {
@@ -2221,10 +2305,36 @@ public class AslExecutor {
         if (integration.suffix().isEmpty()) {
             return job.response();
         }
+        return awaitSyncJob(job.response(), () -> emrTaskInvoker.poll(job, region),
+                () -> emrTaskInvoker.abandon(job, region), executionArn, executionDeadlineNanos, taskDeadlineNanos,
+                jobSubmitted);
+    }
+
+    /** The {@code emr-serverless:} integrations; a {@code .sync} Task waits on its application or job run. */
+    private JsonNode invokeEmrServerless(StatesIntegration integration, JsonNode input, String region,
+                                         String executionArn, long executionDeadlineNanos, long taskDeadlineNanos,
+                                         Consumer<JsonNode> jobSubmitted) throws Exception {
+        EmrServerlessTaskInvoker.Job job = emrServerlessTaskInvoker.start(integration, input, region);
+        if (integration.suffix().isEmpty()) {
+            return job.response();
+        }
+        return awaitSyncJob(job.response(), () -> emrServerlessTaskInvoker.poll(job, region),
+                () -> emrServerlessTaskInvoker.abandon(job, region), executionArn, executionDeadlineNanos,
+                taskDeadlineNanos, jobSubmitted);
+    }
+
+    /**
+     * The wait of a {@code .sync} Task whose job has started: records the call's response as submitted
+     * and polls the job as {@code ecs:runTask.sync} polls its tasks, bounded by the same two clocks;
+     * whatever ends the wait first abandons the job.
+     */
+    private JsonNode awaitSyncJob(JsonNode submitted, Supplier<Optional<JsonNode>> poll, Runnable abandon,
+                                  String executionArn, long executionDeadlineNanos, long taskDeadlineNanos,
+                                  Consumer<JsonNode> jobSubmitted) throws Exception {
         try {
-            jobSubmitted.accept(job.response());
+            jobSubmitted.accept(submitted);
         } catch (RuntimeException e) {
-            emrTaskInvoker.abandon(job, region);
+            abandon.run();
             throw e;
         }
         while (true) {
@@ -2232,14 +2342,14 @@ public class AslExecutor {
                 sleepOrTimeOutTask(TimeUnit.MILLISECONDS.toNanos(SYNC_POLL_INTERVAL_MS),
                         executionDeadlineNanos, taskDeadlineNanos);
             } catch (TaskTimedOutException | ExecutionTimedOutException | InterruptedException e) {
-                emrTaskInvoker.abandon(job, region);
+                abandon.run();
                 throw e;
             }
             if (abortedByCaller(executionArn)) {
-                emrTaskInvoker.abandon(job, region);
+                abandon.run();
                 throw new ExecutionAbortedException();
             }
-            Optional<JsonNode> result = emrTaskInvoker.poll(job, region);
+            Optional<JsonNode> result = poll.get();
             if (result.isPresent()) {
                 return result.get();
             }

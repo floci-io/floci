@@ -355,7 +355,34 @@ class SnsIntegrationTest {
         .when()
             .post("/")
         .then()
+            .statusCode(200)
+            .body(containsString("<TagResourceResult"));
+    }
+
+    @Test
+    @Order(11)
+    void untagResource() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "TagResource")
+            .formParam("ResourceArn", topicArn)
+            .formParam("Tags.member.1.Key", "short-lived")
+            .formParam("Tags.member.1.Value", "yes")
+        .when()
+            .post("/")
+        .then()
             .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UntagResource")
+            .formParam("ResourceArn", topicArn)
+            .formParam("TagKeys.member.1", "short-lived")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<UntagResourceResult"));
     }
 
     @Test
@@ -408,7 +435,8 @@ class SnsIntegrationTest {
             .statusCode(200)
             .body("Attributes.SubscriptionArn", equalTo(subscriptionArn))
             .body("Attributes.Protocol", equalTo("sqs"))
-            .body("Attributes.TopicArn", equalTo(topicArn));
+            .body("Attributes.TopicArn", equalTo(topicArn))
+            .body("Attributes", not(hasKey("FilterPolicyScope")));
     }
 
     @Test

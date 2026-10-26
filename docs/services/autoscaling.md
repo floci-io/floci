@@ -72,11 +72,23 @@ EC2 instance can use a default subnet in a different zone.
 | `SetInstanceHealth` | Updates an instance's health status immediately; accepts but does not enforce the grace-period flag |
 | `SetInstanceProtection` | Enables or disables scale-in protection for named instances in a group |
 | `SetDesiredCapacity` | Updates desired count; reconciler handles scale-out / scale-in within 10 s |
-| `AttachInstances` | Attaches existing EC2 instances to a group; sets lifecycle state to `InService` |
+| `AttachInstances` | Attaches existing EC2 instances to a group; sets lifecycle state to `InService`. Refuses the whole batch with `ValidationError` when an instance already belongs to a group |
 | `DetachInstances` | Detaches instances from a group; optionally decrements desired capacity |
 | `TerminateInstanceInAutoScalingGroup` | Terminates a specific instance; optionally decrements desired capacity |
 | `SuspendProcesses` | Records suspended scaling processes (empty list suspends all); reported back by `DescribeAutoScalingGroups` |
 | `ResumeProcesses` | Clears suspended processes (empty list resumes all) |
+
+Member instances carry the tags the
+[EC2 instance tagging lifecycle](https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-tagging.html#tag-lifecycle)
+describes. An instance the group launches gets its launch template's instance tags, then the
+group's `PropagateAtLaunch` tags, which win a key both set, then `aws:autoscaling:groupName` with
+the group's name. `AttachInstances` adds the same group tags and `aws:autoscaling:groupName`,
+overwriting existing tags with the same keys. `DetachInstances` removes only
+`aws:autoscaling:groupName`, and only while it names the group being detached from.
+
+`AttachInstances` does not yet refuse what AWS refuses for the instance's state or zone or for
+the group's `MaxSize`, and does not grow desired capacity by the number of instances attached.
+An ID EC2 has no instance for joins the group without tags.
 
 ### Instance Refresh
 
@@ -273,10 +285,18 @@ never set a field omits it from the response rather than reporting a default.
 | `ServiceLinkedRoleARN` | Stored and echoed as given, 1 to 1600 characters. Floci does not check that the role exists, and a group that never set it omits it rather than reporting the default `AWSServiceRoleForAutoScaling` role |
 | `InstanceMaintenancePolicy` | `MinHealthyPercentage` 0 to 100 and `MaxHealthyPercentage` 100 to 200, both required, at most 100 apart. `-1` on both clears a policy already set. Any other combination raises `ValidationError` |
 | `AvailabilityZoneDistribution` | `CapacityDistributionStrategy` is one of `balanced-only`, `balanced-best-effort`, `reservations-then-balanced` |
-| `CapacityReservationSpecification` | `CapacityReservationPreference` is one of `capacity-reservations-only`, `capacity-reservations-first`, `none`, `default`. `CapacityReservationTarget` (`CapacityReservationIds`, `CapacityReservationResourceGroupArns`) round-trips, and is rejected alongside `none`. Each ID is 1 to 255 characters of `[A-Za-z0-9-_/]` and each resource group ARN is 1 to 1600 characters |
+| `CapacityReservationSpecification` | `CapacityReservationPreference` is one of `capacity-reservations-only`, `capacity-reservations-first`, `none`, `default`. `CapacityReservationTarget` (`CapacityReservationIds`, `CapacityReservationResourceGroupArns`) round-trips, accepts at most one ID or resource group ARN, and is rejected alongside `none`. Each ID is 1 to 255 characters of `[A-Za-z0-9-_/]` and each resource group ARN is 1 to 1600 characters |
 
-These fields are stored and reported only. Floci's capacity reconciler does not change how it
-launches or replaces instances because of them.
+Except for `CapacityReservationSpecification`, these fields are stored and reported only.
+
+The group capacity reservation preference applies to scale-out and replacement launches.
+`default` or an omitted preference retains the launch template specification. `none` launches
+without consuming reservations. `capacity-reservations-only` requires matching reserved capacity;
+`capacity-reservations-first` falls back to unreserved On-Demand capacity on a capacity shortage.
+An omitted group target inherits the template target; with neither target, matching open
+reservations are eligible. Updating the group affects subsequent launches, not existing instances.
+Missing or invalid targets do not trigger On-Demand fallback. Resource group targeting remains
+unsupported, as in EC2, and reports a failed scaling activity without allocating an instance.
 
 ## Scaling Policy Compatibility
 

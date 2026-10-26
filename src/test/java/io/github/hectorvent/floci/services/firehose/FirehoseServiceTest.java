@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
@@ -236,6 +237,34 @@ class FirehoseServiceTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void aPersistedRedshiftBackupGetsTheDefaultsOnDescribe() {
+        S3Destination intermediate = new S3Destination();
+        intermediate.setBucketArn("arn:aws:s3:::stage");
+        S3Destination backup = new S3Destination();
+        backup.setBucketArn("arn:aws:s3:::bk");
+        RedshiftDestination redshift = new RedshiftDestination();
+        redshift.setS3BackupMode("Enabled");
+        redshift.setS3(intermediate);
+        redshift.setS3Backup(backup);
+        // Built the way Jackson reads a stored stream: the no-arg constructor fills no defaults.
+        DeliveryStreamDescription persisted = new DeliveryStreamDescription();
+        persisted.setDeliveryStreamName("persisted");
+        persisted.setDeliveryStreamARN("arn:aws:firehose:us-east-1:000000000000:deliverystream/persisted");
+        persisted.setAccountId("000000000000");
+        persisted.setDestinations(List.of(new DeliveryStreamDescription.Destination(redshift)));
+        AccountAwareStorageBackend<DeliveryStreamDescription> streams =
+                (AccountAwareStorageBackend<DeliveryStreamDescription>) backends.get("firehose/streams.json");
+        streams.putForAccount("000000000000", "us-east-1/persisted", persisted);
+
+        S3Destination described = firehoseService.describeDeliveryStream("persisted").getDestinations().get(0)
+                .getRedshiftDestinationDescription().getS3Backup();
+
+        assertEquals(false, described.getCloudWatchLoggingOptions().getEnabled());
+        assertEquals("UNCOMPRESSED", described.getCompressionFormat());
+    }
+
+    @Test
     void isolatesSameStreamNameAcrossAccountsAndRegionsIncludingFlushAndDelete() {
         String firstArn = firehoseService.createDeliveryStream("us-east-1", "111111111111", "shared", null,
                 List.of(), null, null);
@@ -385,6 +414,107 @@ class FirehoseServiceTest {
         putRecordsAndFlush("my-stream");
         String key = deliveredKey("custom-bucket");
         assertTrue(key.matches("events/2026/01/01/09/my-stream-3-2026-01-01-09-00-00-" + UUID_REGEX), key);
+    }
+
+    @Test
+    void cloudWatchLoggingOptionsDefaultToDisabledAndMergeMemberWise() {
+        S3Destination s3 = new S3Destination();
+        s3.setBucketArn("arn:aws:s3:::logging-bucket");
+        firehoseService.createDeliveryStream("logged-stream", s3);
+        DeliveryStreamDescription.CloudWatchLoggingOptions logging =
+                firehoseService.describeDeliveryStream("logged-stream").s3Destination().getCloudWatchLoggingOptions();
+        assertEquals(Boolean.FALSE, logging.getEnabled());
+        assertNull(logging.getLogGroupName());
+
+        S3Destination enable = new S3Destination();
+        enable.setCloudWatchLoggingOptions(logging(true, "group", "stream"));
+        firehoseService.updateDestination("logged-stream", "1", "destinationId-000000000001", enable);
+
+        S3Destination disableOnly = new S3Destination();
+        disableOnly.setCloudWatchLoggingOptions(logging(false, null, null));
+        firehoseService.updateDestination("logged-stream", "2", "destinationId-000000000001", disableOnly);
+
+        logging = firehoseService.describeDeliveryStream("logged-stream").s3Destination().getCloudWatchLoggingOptions();
+        assertEquals(Boolean.FALSE, logging.getEnabled());
+        assertEquals("group", logging.getLogGroupName(), "an update naming only Enabled keeps the stored group");
+        assertEquals("stream", logging.getLogStreamName());
+    }
+
+    private static final String LOG_GROUP_REQUIRED =
+            "CloudWatch Log Group Name is required if CloudWatch Logging is enabled";
+    private static final String LOG_STREAM_REQUIRED =
+            "CloudWatch Log Stream Name is required if CloudWatch Logging is enabled";
+
+    @Test
+    void enabledLoggingRequiresTheGroupThenTheStreamName() {
+        assertLoggingRefused(LOG_GROUP_REQUIRED, () -> firehoseService.createDeliveryStream("no-names",
+                loggedDestination(logging(true, null, null))));
+        assertLoggingRefused(LOG_STREAM_REQUIRED, () -> firehoseService.createDeliveryStream("group-only",
+                loggedDestination(logging(true, "g", null))));
+        assertLoggingRefused(LOG_GROUP_REQUIRED, () -> firehoseService.createDeliveryStream("empty-names",
+                loggedDestination(logging(true, "", ""))));
+
+        firehoseService.createDeliveryStream("disabled-no-names", loggedDestination(logging(false, null, null)));
+        assertEquals(Boolean.FALSE, firehoseService.describeDeliveryStream("disabled-no-names")
+                .s3Destination().getCloudWatchLoggingOptions().getEnabled());
+    }
+
+    @Test
+    void anUpdateEnablingLoggingIsCheckedAgainstTheStoredNames() {
+        S3Destination s3 = new S3Destination();
+        s3.setBucketArn("arn:aws:s3:::logging-bucket");
+        firehoseService.createDeliveryStream("enable-later", s3);
+
+        assertLoggingRefused(LOG_GROUP_REQUIRED, () -> firehoseService.updateDestination("enable-later", "1",
+                "destinationId-000000000001", loggedDestination(logging(true, null, null))));
+        assertEquals("1", firehoseService.describeDeliveryStream("enable-later").getVersionId());
+
+        firehoseService.updateDestination("enable-later", "1", "destinationId-000000000001",
+                loggedDestination(logging(false, "g", "s")));
+        firehoseService.updateDestination("enable-later", "2", "destinationId-000000000001",
+                loggedDestination(logging(true, null, null)));
+        DeliveryStreamDescription.CloudWatchLoggingOptions logging =
+                firehoseService.describeDeliveryStream("enable-later").s3Destination().getCloudWatchLoggingOptions();
+        assertEquals(Boolean.TRUE, logging.getEnabled());
+        assertEquals("g", logging.getLogGroupName());
+        assertEquals("s", logging.getLogStreamName());
+
+        assertLoggingRefused(LOG_STREAM_REQUIRED, () -> firehoseService.updateDestination("enable-later", "3",
+                "destinationId-000000000001", loggedDestination(logging(null, null, ""))));
+        assertEquals("s", firehoseService.describeDeliveryStream("enable-later")
+                .s3Destination().getCloudWatchLoggingOptions().getLogStreamName());
+    }
+
+    @Test
+    void theLoggingErrorPrecedesTheBufferingHintsOne() {
+        S3Destination s3 = loggedDestination(logging(true, null, null));
+        DeliveryStreamDescription.BufferingHints hints = new DeliveryStreamDescription.BufferingHints();
+        hints.setSizeInMBs(5);
+        s3.setBufferingHints(hints);
+
+        assertLoggingRefused(LOG_GROUP_REQUIRED, () -> firehoseService.createDeliveryStream("partial-hints", s3));
+    }
+
+    private static S3Destination loggedDestination(DeliveryStreamDescription.CloudWatchLoggingOptions logging) {
+        S3Destination s3 = new S3Destination();
+        s3.setBucketArn("arn:aws:s3:::logging-bucket");
+        s3.setCloudWatchLoggingOptions(logging);
+        return s3;
+    }
+
+    private static void assertLoggingRefused(String message, Runnable call) {
+        AwsException e = assertThrows(AwsException.class, call::run);
+        assertEquals("InvalidArgumentException", e.getErrorCode());
+        assertEquals(message, e.getMessage());
+    }
+
+    private static DeliveryStreamDescription.CloudWatchLoggingOptions logging(Boolean enabled, String group,
+                                                                             String stream) {
+        DeliveryStreamDescription.CloudWatchLoggingOptions options = new DeliveryStreamDescription.CloudWatchLoggingOptions();
+        options.setEnabled(enabled);
+        options.setLogGroupName(group);
+        options.setLogStreamName(stream);
+        return options;
     }
 
     @Test

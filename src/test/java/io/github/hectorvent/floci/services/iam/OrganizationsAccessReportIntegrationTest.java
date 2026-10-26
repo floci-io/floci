@@ -460,4 +460,38 @@ class OrganizationsAccessReportIntegrationTest {
         assertEquals("OrganizationalUnitNotFoundException",
                 report.getString(result("ErrorDetails.Code")));
     }
+
+    /**
+     * The ordering DRIFT-3 was about, on this reader. {@code jobIDType} is a fixed 36 characters,
+     * so the shape is refused before anything is resolved: no organization is built here, and none
+     * has to be, which is the point.
+     */
+    @Test
+    void aJobIdOutsideItsDeclaredLengthIsRefusedWithoutAnOrganization() {
+        iam(MANAGEMENT_ACCOUNT, "GetOrganizationsAccessReport").formParam("JobId", "nope")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value at 'jobId' failed to satisfy constraint: "
+                            + "Member must have length equal to 36"));
+    }
+
+    /**
+     * A well-formed id no job carries, with a {@code MaxItems} the model refuses: the paging
+     * members are read before the job lookup, so this is a 400 rather than the 404 the missing job
+     * would answer first.
+     */
+    @Test
+    void anUnknownJobWithAMalformedMaxItemsIsAValidationErrorRatherThanNotFound() {
+        iam(MANAGEMENT_ACCOUNT, "GetOrganizationsAccessReport")
+            .formParam("JobId", "00000000-0000-4000-8000-000000000000")
+            .formParam("MaxItems", "1001")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value '1001' at 'maxItems' failed to satisfy "
+                            + "constraint: Member must have value less than or equal to 1000"));
+    }
 }

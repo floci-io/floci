@@ -35,7 +35,7 @@ public final class SqlParameterParser {
      */
     public record Options(boolean allowBackticks, boolean backslashEscapes, boolean escapeStrings,
                           boolean numericNames, boolean mysqlComments) {
-        public static final Options REDSHIFT = new Options(false, false, true, false, false);
+        public static final Options REDSHIFT = new Options(false, false, true, true, false);
         public static final Options RDS_MYSQL = new Options(true, true, false, true, true);
         public static final Options RDS_POSTGRESQL = new Options(true, false, false, true, false);
     }

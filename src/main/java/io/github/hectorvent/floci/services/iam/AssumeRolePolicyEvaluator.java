@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -12,6 +13,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -237,10 +239,10 @@ public class AssumeRolePolicyEvaluator {
     }
 
     /**
-     * Checks a service trust policy in the context of an AppSync API. AWS supports narrowing
-     * service trust with aws:SourceAccount and aws:SourceArn, which form the request context here;
-     * a condition on any other key finds it absent and does not match, so it never turns a
-     * conditional Allow into an unconditional one.
+     * Checks a service trust policy against the context of a call the service makes: its principal
+     * keys, and aws:SourceArn and aws:SourceAccount when it names them. A condition on any other
+     * key finds it absent and does not match, so it never turns a conditional Allow into an
+     * unconditional one.
      */
     public boolean allowsService(String trustPolicyDocument, String servicePrincipal,
                                  String sourceArn, String sourceAccount) {
@@ -259,13 +261,8 @@ public class AssumeRolePolicyEvaluator {
             return false;
         }
         String version = root.path("Version").asText(null);
-        Map<String, List<String>> context = new HashMap<>();
-        if (sourceArn != null) {
-            context.put("aws:SourceArn", List.of(sourceArn));
-        }
-        if (sourceAccount != null) {
-            context.put("aws:SourceAccount", List.of(sourceAccount));
-        }
+        Map<String, List<String>> context = IamConditionContextResolver.serviceCallContext(
+                servicePrincipal, null, null, sourceArn, sourceAccount);
         boolean allow = false;
         if (statements.isArray()) {
             for (JsonNode statement : statements) {
@@ -377,20 +374,32 @@ public class AssumeRolePolicyEvaluator {
         if (principalNode == null || servicePrincipal == null) {
             return false;
         }
-        JsonNode service = principalNode.isObject() ? principalNode.get("Service") : null;
-        if (service == null) {
+        // "*" and {"AWS": "*"} name every principal, a service among them.
+        if (principalNode.isTextual()) {
+            return "*".equals(principalNode.asText());
+        }
+        if (!principalNode.isObject()) {
             return false;
         }
         // A policy may name the service in the universal form or the partition form AWS accepted
         // before it (elasticmapreduce.amazonaws.com.cn); both sides are folded to the universal
         // one so either matches, still exactly and case-sensitively.
         String wanted = ServicePrincipals.canonical(servicePrincipal);
-        if (service.isTextual()) {
-            return ServicePrincipals.canonical(service.asText()).equals(wanted);
+        return anyEntry(principalNode.get("AWS"), "*"::equals)
+                || anyEntry(principalNode.get("Service"), name -> ServicePrincipals.canonical(name).equals(wanted));
+    }
+
+    /** True if {@code node}, a string or an array of them, holds one that {@code matches} accepts. */
+    private static boolean anyEntry(JsonNode node, Predicate<String> matches) {
+        if (node == null) {
+            return false;
         }
-        if (service.isArray()) {
-            for (JsonNode entry : service) {
-                if (entry.isTextual() && ServicePrincipals.canonical(entry.asText()).equals(wanted)) {
+        if (node.isTextual()) {
+            return matches.test(node.asText());
+        }
+        if (node.isArray()) {
+            for (JsonNode entry : node) {
+                if (entry.isTextual() && matches.test(entry.asText())) {
                     return true;
                 }
             }

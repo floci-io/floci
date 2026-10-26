@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,14 +23,17 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -782,6 +786,439 @@ class ReposiliteSidecarClientTest {
         assertEquals(List.of("1.0", "2.0-SNAPSHOT"), XmlParser.extractAll(xml, "version"));
         assertEquals("2.0-SNAPSHOT", XmlParser.extractFirst(xml, "latest", null));
         assertEquals("1.0", XmlParser.extractFirst(xml, "release", null));
+    }
+
+    /**
+     * {@link io.github.hectorvent.floci.services.codeartifact.ReposiliteSidecarClient#recordVersionDisposed}'s
+     * dispose-time counterpart to {@link #recordVersionAvailableAppendsToExistingVersionsAndAdvancesReleaseForANonSnapshot}:
+     * removing a non-latest version must leave {@code latest}/{@code release} exactly as they
+     * were, since the metadata's own append-order list is untouched past the removed entry.
+     */
+    @Test
+    void recordVersionDisposedRemovesTheVersionAndLeavesLatestAndReleaseUntouchedWhenItWasNeitherOne() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>2.0</latest><release>2.0</release><versions><version>1.0</version>"
+                + "<version>2.0</version></versions><lastUpdated>20260101000000</lastUpdated></versioning>"
+                + "</metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                // This context path-matches the checksum siblings this emulator now also
+                // rewrites alongside the metadata file itself (see
+                // ReposiliteSidecarClient#recordVersionDisposed), so only the exact metadata
+                // path's own PUT is captured into putBody.
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0");
+
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("2.0"), XmlParser.extractAll(xml, "version"));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "latest", null));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "release", null));
+    }
+
+    /**
+     * Removing the current {@code latest}/{@code release} version itself must recompute both from
+     * whatever remains, in the same append order the metadata already preserves: the last
+     * surviving entry becomes the new {@code latest}, and the last surviving non-{@code -SNAPSHOT}
+     * entry becomes the new {@code release} (here, that is the same entry since neither remaining
+     * version is a snapshot).
+     */
+    @Test
+    void recordVersionDisposedRecomputesLatestAndReleaseWhenTheDisposedVersionWasTheLatest() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>3.0</latest><release>3.0</release><versions><version>1.0</version>"
+                + "<version>2.0</version><version>3.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                // This context path-matches the checksum siblings this emulator now also
+                // rewrites alongside the metadata file itself (see
+                // ReposiliteSidecarClient#recordVersionDisposed), so only the exact metadata
+                // path's own PUT is captured into putBody.
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "3.0");
+
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("1.0", "2.0"), XmlParser.extractAll(xml, "version"));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "latest", null));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "release", null));
+    }
+
+    /**
+     * {@code release} skips back past a surviving {@code -SNAPSHOT} entry to the last real release,
+     * the same rule {@link #recordVersionAvailableLeavesTheExistingReleaseUntouchedForASnapshotVersion}
+     * already proves for the add path.
+     */
+    @Test
+    void recordVersionDisposedSkipsASnapshotWhenRecomputingRelease() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>2.0-SNAPSHOT</latest><release>1.0</release><versions><version>1.0</version>"
+                + "<version>2.0-SNAPSHOT</version></versions><lastUpdated>20260101000000</lastUpdated>"
+                + "</versioning></metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                // This context path-matches the checksum siblings this emulator now also
+                // rewrites alongside the metadata file itself (see
+                // ReposiliteSidecarClient#recordVersionDisposed), so only the exact metadata
+                // path's own PUT is captured into putBody.
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0");
+
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("2.0-SNAPSHOT"), XmlParser.extractAll(xml, "version"));
+        assertEquals("2.0-SNAPSHOT", XmlParser.extractFirst(xml, "latest", null));
+        assertNull(XmlParser.extractFirst(xml, "release", null), "no real release survives, so release must be "
+                + "omitted rather than naming a snapshot");
+    }
+
+    /**
+     * Raised by Greptile's review: a real {@code mvn deploy} always also PUTs {@code
+     * maven-metadata.xml.sha1}/{@code .md5}, so {@link
+     * io.github.hectorvent.floci.services.codeartifact.ReposiliteSidecarClient#recordVersionDisposed}'s
+     * own rewrite of the metadata must carry fresh checksums of whatever it just wrote, not leave
+     * the pre-dispose checksums standing over content that no longer matches them.
+     */
+    @Test
+    void recordVersionDisposedRewritesTheSha1AndMd5ChecksumsToMatchTheNewMetadata() {
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>2.0</latest><release>2.0</release><versions><version>1.0</version>"
+                + "<version>2.0</version></versions><lastUpdated>20260101000000</lastUpdated></versioning>"
+                + "</metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        AtomicReference<byte[]> sha1Body = new AtomicReference<>();
+        AtomicReference<byte[]> md5Body = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        server.createContext(metadataPath + ".sha1", exchange -> {
+            sha1Body.set(exchange.getRequestBody().readAllBytes());
+            respond(exchange, 200, "");
+        });
+        server.createContext(metadataPath + ".md5", exchange -> {
+            md5Body.set(exchange.getRequestBody().readAllBytes());
+            respond(exchange, 200, "");
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0");
+
+        assertEquals(Digests.sha1Hex(putBody.get()), new String(sha1Body.get(), StandardCharsets.UTF_8));
+        assertEquals(Digests.md5Hex(putBody.get()), new String(md5Body.get(), StandardCharsets.UTF_8));
+    }
+
+    /** The counterpart to the rewrite case above: the metadata PUT itself failing must not be swallowed. */
+    @Test
+    void recordVersionDisposedThrowsWhenTheMetadataRewriteItselfFails() {
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>2.0</latest><release>2.0</release><versions><version>1.0</version>"
+                + "<version>2.0</version></versions><lastUpdated>20260101000000</lastUpdated></versioning>"
+                + "</metadata>";
+        server.createContext("/dom--repo/com/example/a/maven-metadata.xml", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                respond(exchange, 500, "");
+            }
+        });
+
+        assertThrows(IllegalStateException.class,
+                () -> client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0"));
+    }
+
+    /**
+     * Greptile's review again: {@link
+     * io.github.hectorvent.floci.services.codeartifact.ReposiliteSidecarClient#recordVersionDisposed}
+     * also removes the two checksum siblings when the metadata file itself is removed outright
+     * (every version disposed), not just the metadata file.
+     */
+    @Test
+    void recordVersionDisposedDeletesTheChecksumSiblingsWhenTheMetadataFileIsDeleted() {
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        List<String> deletedPaths = new CopyOnWriteArrayList<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                deletedPaths.add(exchange.getRequestURI().getPath());
+                respond(exchange, 200, "");
+            }
+        });
+        server.createContext(metadataPath + ".sha1", exchange -> {
+            // deleteArtifactIfPresent checks existence with a HEAD first; only the real DELETE
+            // that follows is the one this test cares about recording.
+            if ("DELETE".equals(exchange.getRequestMethod())) {
+                deletedPaths.add(exchange.getRequestURI().getPath());
+            }
+            respond(exchange, 200, "");
+        });
+        server.createContext(metadataPath + ".md5", exchange -> {
+            if ("DELETE".equals(exchange.getRequestMethod())) {
+                deletedPaths.add(exchange.getRequestURI().getPath());
+            }
+            respond(exchange, 200, "");
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0");
+
+        assertThat(deletedPaths, containsInAnyOrder(metadataPath, metadataPath + ".sha1", metadataPath + ".md5"));
+    }
+
+    /** A checksum sibling missing entirely (never pushed, or a sidecar restored from an older snapshot) is a no-op. */
+    @Test
+    void recordVersionDisposedToleratesAMissingChecksumSiblingOnDelete() {
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        server.createContext(metadataPath + ".sha1", exchange -> respond(exchange, 404, ""));
+        server.createContext(metadataPath + ".md5", exchange -> respond(exchange, 404, ""));
+
+        assertDoesNotThrow(() -> client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0"));
+    }
+
+    /**
+     * Raised by Greptile's review: a HEAD failing with something other than a confirmed 404 (a
+     * genuine sidecar error, not a clean "it's not there" answer) must not be treated the same as
+     * a confirmed-absent checksum; silently skipping the delete there would report a successful
+     * disposal while the sidecar's own real error was never surfaced or retried.
+     */
+    @Test
+    void recordVersionDisposedThrowsWhenTheChecksumExistenceCheckFails() {
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        server.createContext(metadataPath + ".sha1", exchange -> respond(exchange, 500, ""));
+        server.createContext(metadataPath + ".md5", exchange -> respond(exchange, 200, ""));
+
+        assertThrows(IllegalStateException.class,
+                () -> client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0"));
+    }
+
+    /**
+     * Raised by Greptile's review: a retry whose first attempt already deleted the metadata file
+     * itself, but then failed on exactly a checksum delete, used to hit the {@code existing.isEmpty()}
+     * early return and report success leaving that checksum behind, since there was no metadata
+     * left for it to compare against. The checksum siblings are now cleaned up on this path too.
+     */
+    @Test
+    void recordVersionDisposedCleansUpLingeringChecksumsEvenWhenTheMetadataFileIsAlreadyGone() {
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        List<String> deletedPaths = new CopyOnWriteArrayList<>();
+        server.createContext(metadataPath, exchange -> respond(exchange, 404, ""));
+        server.createContext(metadataPath + ".sha1", exchange -> {
+            // deleteArtifactIfPresent checks existence with a HEAD first; only the real DELETE
+            // that follows is the one this test cares about recording.
+            if ("DELETE".equals(exchange.getRequestMethod())) {
+                deletedPaths.add(exchange.getRequestURI().getPath());
+            }
+            respond(exchange, 200, "");
+        });
+        server.createContext(metadataPath + ".md5", exchange -> {
+            if ("DELETE".equals(exchange.getRequestMethod())) {
+                deletedPaths.add(exchange.getRequestURI().getPath());
+            }
+            respond(exchange, 200, "");
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0");
+
+        assertThat(deletedPaths, containsInAnyOrder(metadataPath + ".sha1", metadataPath + ".md5"));
+    }
+
+    /**
+     * Raised by Greptile's review: {@code fetchArtifact} itself returns empty for every non-200
+     * response, 500 included, which must not be read as "the metadata file is confirmed gone."
+     * A transient read failure here must surface, not silently report a successful disposal while
+     * the metadata on disk still lists the version this was supposed to remove.
+     */
+    @Test
+    void recordVersionDisposedThrowsWhenTheMetadataReadFails() {
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        server.createContext(metadataPath, exchange -> respond(exchange, 500, ""));
+
+        assertThrows(IllegalStateException.class,
+                () -> client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0"));
+    }
+
+    /**
+     * A metadata file that would end up naming no versions at all is deleted outright, matching
+     * how a package that never had a version published has no metadata file at all.
+     */
+    @Test
+    void recordVersionDisposedDeletesTheMetadataFileWhenNoVersionsAreLeft() {
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        AtomicReference<String> deletedMethod = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/maven-metadata.xml", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                deletedMethod.set(exchange.getRequestMethod());
+                respond(exchange, 200, "");
+            }
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "1.0");
+
+        assertEquals("DELETE", deletedMethod.get());
+    }
+
+    /**
+     * A version the metadata never named to begin with (already removed by an earlier call, or
+     * disposed before {@code maven-metadata.xml} ever existed) leaves the metadata itself
+     * untouched: nothing is written back to that exact path.
+     *
+     * <p>Raised by Greptile's review: this same early return used to skip the checksum siblings
+     * too, so a retry whose first attempt removed the version but then failed on exactly the
+     * checksum write never got another chance to repair it. The checksums are now repaired every
+     * time this returns here, idempotently (the metadata content itself did not change), not just
+     * the one call that happened to also rewrite the metadata.
+     */
+    @Test
+    void recordVersionDisposedIsANoOpWhenTheMetadataNeverNamedTheVersion() {
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<String> writeMethod = new AtomicReference<>();
+        AtomicReference<byte[]> sha1Body = new AtomicReference<>();
+        AtomicReference<byte[]> md5Body = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                writeMethod.set(exchange.getRequestMethod());
+                respond(exchange, 200, "");
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        server.createContext(metadataPath + ".sha1", exchange -> {
+            sha1Body.set(exchange.getRequestBody().readAllBytes());
+            respond(exchange, 200, "");
+        });
+        server.createContext(metadataPath + ".md5", exchange -> {
+            md5Body.set(exchange.getRequestBody().readAllBytes());
+            respond(exchange, 200, "");
+        });
+
+        client.recordVersionDisposed("dom--repo", "com.example", "a", "9.9");
+
+        assertNull(writeMethod.get(), "expected no PUT/DELETE of the metadata file itself");
+        assertEquals(Digests.sha1Hex(existing.getBytes(StandardCharsets.UTF_8)),
+                new String(sha1Body.get(), StandardCharsets.UTF_8));
+        assertEquals(Digests.md5Hex(existing.getBytes(StandardCharsets.UTF_8)),
+                new String(md5Body.get(), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Raised by Greptile's review: {@code deployArtifact}'s own idempotent short-circuit (the
+     * checksum already on the sidecar matches byte for byte, so nothing is actually sent) also
+     * reports {@code wroteNewContent() == false}, the exact same signal a genuine failure gives.
+     * A disposal retry whose {@code .sha1} already landed on an earlier attempt, but then failed
+     * on {@code .md5}, must not treat that already-correct, unchanged {@code .sha1} as a failure
+     * all over again: that would stop the retry before it ever reached {@code .md5} a second
+     * time, getting stuck on the one checksum that was already fine.
+     */
+    @Test
+    void recordVersionDisposedRepairsTheRemainingChecksumEvenWhenTheOtherAlreadyMatches() {
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        String correctSha1 = Digests.sha1Hex(existing.getBytes(StandardCharsets.UTF_8));
+        AtomicReference<byte[]> md5Body = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        server.createContext(metadataPath + ".sha1", exchange -> {
+            // Already correct: a GET returns exactly what the retry is about to compute and PUT,
+            // so deployArtifact's own existingArtifactMatches short-circuits (200, wroteNewContent
+            // false) without ever reaching a real PUT here.
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, correctSha1);
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        server.createContext(metadataPath + ".md5", exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 404, "");
+            } else {
+                md5Body.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            }
+        });
+
+        assertDoesNotThrow(() -> client.recordVersionDisposed("dom--repo", "com.example", "a", "9.9"));
+
+        assertEquals(Digests.md5Hex(existing.getBytes(StandardCharsets.UTF_8)),
+                new String(md5Body.get(), StandardCharsets.UTF_8));
     }
 
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {

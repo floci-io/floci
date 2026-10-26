@@ -10,9 +10,11 @@ import jakarta.ws.rs.core.HttpHeaders;
 
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /** Verifies Cognito user-pool tokens for REST execute-api methods. */
 @ApplicationScoped
@@ -75,7 +77,10 @@ public class CognitoUserPoolAuthorizer {
                 }
             }
             String principalId = String.valueOf(verified.claims().getOrDefault("sub", "unknown"));
-            return new Result(null, principalId, Map.of("claims", verified.claims()));
+            Map<String, Object> claims = new LinkedHashMap<>(verified.claims());
+            claims.replaceAll((key, value) -> value instanceof List<?> items
+                    ? items.stream().map(String::valueOf).collect(Collectors.joining(",")) : value);
+            return new Result(null, principalId, Map.of("claims", claims));
         } catch (AwsException e) {
             return new Result(Failure.UNAUTHORIZED, null, null);
         }

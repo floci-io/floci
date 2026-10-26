@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.emrserverless.model.Application;
@@ -21,11 +22,13 @@ import jakarta.inject.Inject;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -40,7 +43,17 @@ public class EmrServerlessService {
     private static final int MAX_TAGS = 50;
     private static final String RESERVED_PREFIX = "aws:";
     private static final Pattern TAG_TEXT = Pattern.compile("[A-Za-z0-9 /_.:=+@-]*");
-    private static final Pattern RESOURCE = Pattern.compile("/applications/([0-9a-zA-Z]+)(?:/jobruns/([0-9a-zA-Z]+))?");
+    // ResourceArn's resource: an application, or one of its job runs or sessions.
+    private static final Pattern RESOURCE =
+            Pattern.compile("/applications/([0-9a-zA-Z]+)(?:/(jobruns|sessions)/([0-9a-zA-Z]+))?");
+    private static final List<String> APPLICATION_STATES =
+            List.of("CREATING", "CREATED", "STARTING", "STARTED", "STOPPING", "STOPPED", "TERMINATED");
+    // ApplicationStateSet holds at most 7 states; a ListApplications page holds 1 to 50 applications.
+    private static final int MAX_APPLICATION_STATES = 7;
+    private static final int MAX_LIST_RESULTS = 50;
+
+    /** What an EMR Serverless resource ARN names: an application, or one of its job runs. */
+    public record ResourceArn(String arn, String applicationId, String jobRunId) {}
 
     private final EmulatorConfig config;
     private final AccountAwareStorageBackend<Application> storage;
@@ -107,6 +120,13 @@ public class EmrServerlessService {
         app.setNetworkConfiguration(request.getNetworkConfiguration());
         app.setImageConfiguration(request.getImageConfiguration());
         app.setWorkerTypeSpecifications(request.getWorkerTypeSpecifications());
+        app.setMonitoringConfiguration(request.getMonitoringConfiguration());
+        app.setRuntimeConfiguration(request.getRuntimeConfiguration());
+        app.setSchedulerConfiguration(request.getSchedulerConfiguration());
+        app.setDiskEncryptionConfiguration(request.getDiskEncryptionConfiguration());
+        app.setInteractiveConfiguration(request.getInteractiveConfiguration());
+        app.setIdentityCenterConfiguration(request.getIdentityCenterConfiguration());
+        app.setJobLevelCostAllocationConfiguration(request.getJobLevelCostAllocationConfiguration());
 
         storage.put(id, app);
         return app;
@@ -119,6 +139,18 @@ public class EmrServerlessService {
     }
 
     public PaginatedResult<ApplicationSummary> listApplications(ListApplicationsRequest request) {
+        List<String> violations = new ArrayList<>();
+        if (request.getMaxResults() != null) {
+            String violation = SmithyValidationErrors.outOfRange("maxResults", request.getMaxResults(), 1,
+                    MAX_LIST_RESULTS);
+            if (violation != null) {
+                violations.add(violation);
+            }
+        }
+        violations.addAll(statesViolations(request.getStates(), APPLICATION_STATES, MAX_APPLICATION_STATES));
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
         String region = regionResolver.getRegion();
         List<Application> all = storage.scan(k -> true).stream()
                 .filter(app -> inRegion(app, region)).collect(Collectors.toList());
@@ -128,7 +160,7 @@ public class EmrServerlessService {
             all = all.stream().filter(app -> !"TERMINATED".equals(app.getState())).collect(Collectors.toList());
         }
         
-        PaginatedResult<Application> page = Pagination.paginate(all, Application::getApplicationId, request.getMaxResults(), request.getNextToken(), 50, "ValidationException");
+        PaginatedResult<Application> page = Pagination.paginate(all, Application::getApplicationId, request.getMaxResults(), request.getNextToken(), MAX_LIST_RESULTS, "ValidationException");
         
         return new PaginatedResult<>(
                 page.items().stream().map(this::toSummary).collect(Collectors.toList()),
@@ -241,15 +273,18 @@ public class EmrServerlessService {
      * Admits a job run to the application and returns what {@code admit} builds from it. An
      * application "only accepts jobs when it's in" STARTED, and auto-start, on unless the
      * application turns it off, starts a CREATED or STOPPED one "on job submission" (EMR Serverless
-     * user guide, "Application states" and "Default application behavior"). This service's lock is
-     * held throughout, so the application cannot be stopped or deleted while the run is admitted.
+     * user guide, "Application states" and "Default application behavior"). {@code check} refuses a
+     * run against the application before auto-start can change it. This service's lock is held
+     * throughout, so the application cannot be updated, stopped or deleted while the run is admitted.
      */
-    public synchronized <T> T admitJobRun(String applicationId, Function<Application, T> admit) {
+    public synchronized <T> T admitJobRun(String applicationId, Consumer<Application> check,
+                                          Function<Application, T> admit) {
         Application app = getApplication(applicationId);
         String state = app.getState();
         if ("TERMINATED".equals(state)) {
             throw new AwsException("ValidationException", "Application is terminated.", 400);
         }
+        check.accept(app);
         if (!"STARTED".equals(state)) {
             if (!autoStartEnabled(app)) {
                 throw new AwsException("ValidationException", "Application " + applicationId
@@ -269,52 +304,33 @@ public class EmrServerlessService {
 
     // ---- Tags ---------------------------------------------------------------------------------
 
-    public synchronized Map<String, String> listTags(String arn) {
-        Application app = applicationFor(arn);
+    public synchronized Map<String, String> listTags(ResourceArn resource) {
+        Application app = applicationFor(resource);
         return app.getTags() != null ? new LinkedHashMap<>(app.getTags()) : new LinkedHashMap<>();
     }
 
-    /** Adds the tags to the application's, replacing any with the same key. */
-    public synchronized void tagResource(String arn, Map<String, String> tags) {
-        Application app = applicationFor(arn);
-        // An empty map is a valid TagMap (min 0) and changes nothing; the dispatcher already refuses a
-        // missing one.
-        if (tags == null) {
-            throw new AwsException("ValidationException", "tags is required", 400);
-        }
-        validateTags(tags);
-        Map<String, String> merged = app.getTags() != null ? new LinkedHashMap<>(app.getTags()) : new LinkedHashMap<>();
-        merged.putAll(tags);
-        if (merged.size() > MAX_TAGS) {
-            throw new AwsException("ValidationException",
-                    "A resource can have at most " + MAX_TAGS + " tags.", 400);
-        }
-        app.setTags(merged);
+    public synchronized void tagResource(ResourceArn resource, Map<String, String> tags) {
+        Application app = applicationFor(resource);
+        app.setTags(withTags(app.getTags(), tags));
         storage.put(app.getApplicationId(), app);
     }
 
-    public synchronized void untagResource(String arn, List<String> tagKeys) {
-        Application app = applicationFor(arn);
-        if (tagKeys == null || tagKeys.isEmpty()) {
-            throw new AwsException("ValidationException", "tagKeys is required", 400);
-        }
-        tagKeys.forEach(EmrServerlessService::validateTagKey);
+    public synchronized void untagResource(ResourceArn resource, List<String> tagKeys) {
+        Application app = applicationFor(resource);
+        Map<String, String> remaining = withoutTags(app.getTags(), tagKeys);
         if (app.getTags() == null || app.getTags().isEmpty()) {
             return;
         }
-        Map<String, String> remaining = new LinkedHashMap<>(app.getTags());
-        tagKeys.forEach(remaining::remove);
         app.setTags(remaining);
         storage.put(app.getApplicationId(), app);
     }
 
     /**
-     * The application an EMR Serverless ARN names:
-     * {@code arn:<partition>:emr-serverless:<region>:<account>:/applications/<id>}, the form
-     * CreateApplication returns. A job run ARN ({@code .../jobruns/<id>}) is refused, as job run tags
-     * are not emulated yet.
+     * Parses a tagging ARN: {@code arn:<partition>:emr-serverless:<region>:<account>:/applications/<id>},
+     * the form CreateApplication returns, with {@code /jobruns/<id>} for a job run. An ARN of another
+     * Region names nothing here, and neither does a session's, as sessions are not emulated.
      */
-    private Application applicationFor(String arn) {
+    public ResourceArn resourceArn(String arn) {
         AwsArnUtils.Arn parsed;
         try {
             parsed = AwsArnUtils.parse(arn);
@@ -325,16 +341,75 @@ public class EmrServerlessService {
         if (!"emr-serverless".equals(parsed.service()) || !matcher.matches()) {
             throw new AwsException("ValidationException", "Invalid resourceArn: " + arn, 400);
         }
-        if (!parsed.region().equals(regionResolver.getRegion())) {
-            throw new AwsException("ResourceNotFoundException", "Resource " + arn + " not found", 404);
+        if (!parsed.region().equals(regionResolver.getRegion()) || "sessions".equals(matcher.group(2))) {
+            throw resourceNotFound(arn);
         }
-        if (matcher.group(2) != null) {
-            throw new AwsException("ResourceNotFoundException", "Job run " + matcher.group(2) + " not found", 404);
-        }
-        return storage.get(matcher.group(1))
-                .filter(app -> arn.equals(app.getArn()))
+        return new ResourceArn(arn, matcher.group(1), matcher.group(3));
+    }
+
+    /** Whether the application exists and has not been deleted, which leaves it TERMINATED. */
+    public synchronized boolean isLive(String applicationId) {
+        return storage.get(applicationId).filter(app -> !"TERMINATED".equals(app.getState())).isPresent();
+    }
+
+    static AwsException resourceNotFound(String arn) {
+        return new AwsException("ResourceNotFoundException", "Resource " + arn + " not found", 404);
+    }
+
+    private Application applicationFor(ResourceArn resource) {
+        return storage.get(resource.applicationId())
+                .filter(app -> resource.arn().equals(app.getArn()))
                 .filter(app -> !"TERMINATED".equals(app.getState()))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Resource " + arn + " not found", 404));
+                .orElseThrow(() -> resourceNotFound(resource.arn()));
+    }
+
+    /**
+     * A resource's tags once TagResource adds {@code added}, which replace any with the same key. An
+     * empty map is a valid TagMap (min 0) and changes nothing; the dispatcher already refuses a missing
+     * one.
+     */
+    static Map<String, String> withTags(Map<String, String> current, Map<String, String> added) {
+        if (added == null) {
+            throw new AwsException("ValidationException", "tags is required", 400);
+        }
+        validateTags(added);
+        Map<String, String> merged = current != null ? new LinkedHashMap<>(current) : new LinkedHashMap<>();
+        merged.putAll(added);
+        if (merged.size() > MAX_TAGS) {
+            throw new AwsException("ValidationException",
+                    "A resource can have at most " + MAX_TAGS + " tags.", 400);
+        }
+        return merged;
+    }
+
+    /** A resource's tags once UntagResource removes {@code tagKeys}. */
+    static Map<String, String> withoutTags(Map<String, String> current, List<String> tagKeys) {
+        if (tagKeys == null || tagKeys.isEmpty()) {
+            throw new AwsException("ValidationException", "tagKeys is required", 400);
+        }
+        tagKeys.forEach(EmrServerlessService::validateTagKey);
+        Map<String, String> remaining = current != null ? new LinkedHashMap<>(current) : new LinkedHashMap<>();
+        tagKeys.forEach(remaining::remove);
+        return remaining;
+    }
+
+    /**
+     * The violations of a {@code states} filter: at most {@code max} states, each one of
+     * {@code allowed}. A typo would otherwise match nothing and list nothing.
+     */
+    static List<String> statesViolations(List<String> states, List<String> allowed, int max) {
+        List<String> violations = new ArrayList<>();
+        if (states == null) {
+            return violations;
+        }
+        if (states.size() > max) {
+            violations.add("Value '" + states + "' at 'states' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to " + max);
+        }
+        if (!allowed.containsAll(states)) {
+            violations.add(SmithyValidationErrors.notAllInEnum(states, "states", allowed));
+        }
+        return violations;
     }
 
     /** At most 50 tags, each key and value within TagKey and TagValue and free of the reserved prefix. */

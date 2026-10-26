@@ -6,7 +6,6 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
-import java.util.Base64;
 
 /**
  * Pagination markers that name a cursor, as AWS's opaque tokens do. Each marker is signed with a
@@ -27,7 +26,7 @@ public final class SignedMarkers {
     public String cursorOf(String marker) {
         String decoded;
         try {
-            decoded = new String(Base64.getUrlDecoder().decode(marker), StandardCharsets.UTF_8);
+            decoded = Base64Url.decode(marker);
         } catch (IllegalArgumentException notIssued) {
             // Not base64url, so not a marker this instance issued.
             return null;
