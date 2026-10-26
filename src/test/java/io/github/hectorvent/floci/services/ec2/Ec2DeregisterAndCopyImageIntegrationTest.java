@@ -462,6 +462,20 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         }
     }
 
+    @Test
+    void aTagSpecificationTagWinsOverACopiedTagOfTheSameKey() {
+        // Both reach the copy; the one the request names explicitly is the value it keeps.
+        String sourceId = registerViaHttp(EAST_AUTH, uniqueName("floci-copy-tags-and-spec-src"));
+        ec2(EAST_AUTH, "CreateTags", "ResourceId.1", sourceId,
+                "Tag.1.Key", "Team", "Tag.1.Value", "images", "Tag.2.Key", "Stage", "Tag.2.Value", "dev");
+
+        String copied = copyToWest(sourceId, uniqueName("floci-copy-tags-and-spec-dst"), "CopyImageTags", "true",
+                "TagSpecification.1.ResourceType", "image",
+                "TagSpecification.1.Tag.1.Key", "Stage", "TagSpecification.1.Tag.1.Value", "prod");
+
+        assertEquals(Map.of("Team", "images", "Stage", "prod"), tagsOf(WEST_AUTH, copied));
+    }
+
     private String copyToWest(String sourceId, String name, String... extraParams) {
         List<String> params = new ArrayList<>(List.of("SourceRegion", EAST, "SourceImageId", sourceId, "Name", name));
         params.addAll(List.of(extraParams));
