@@ -382,9 +382,11 @@ class Ec2KeyPairCfnProvisionerTest {
     }
 
     /**
-     * Once ContinueUpdateRollback skipped the replacement it could not delete, rolling back a later
-     * update that failed before creating anything undoes that update alone; the next committed
-     * update still deletes the replacement.
+     * Pins the {@link ReplacementCleanup#endRollbackRetry} contract: a rollback of a later update
+     * that failed before creating anything does not retry the delete an earlier rollback left, and
+     * the next committed update still deletes that replacement. The engine does not reach this today,
+     * since it restores the previous resource when a key pair update fails instead of rolling the
+     * attempt back; it would once the provisioner kept its failed update state.
      */
     @Test
     void aLaterFailedUpdateDoesNotRetryTheDeleteAnEarlierRollbackLeft() throws Exception {
