@@ -128,9 +128,20 @@ public class AppConfigService {
     public synchronized void deleteEnvironment(String applicationIdentifier, String environmentIdentifier) {
         Application application = resolveApplication(applicationIdentifier);
         Environment environment = resolveEnvironment(application.getId(), environmentIdentifier);
-        String appId = application.getId();
-        String envId = environment.getId();
+        removeEnvironment(application.getId(), environment.getId());
+    }
 
+    /**
+     * Deletes the environment whose ID is exactly {@code environmentId}, with its deployments,
+     * without resolving its application, which may already be deleted; nothing happens when there
+     * is no such environment. The CloudFormation provisioner deletes environments this way, since a
+     * stack can delete an application before an environment it displaced from it.
+     */
+    public synchronized void deleteEnvironmentById(String environmentId) {
+        environmentStore.get(environmentId).ifPresent(env -> removeEnvironment(env.getApplicationId(), env.getId()));
+    }
+
+    private void removeEnvironment(String appId, String envId) {
         StorageOperations.deleteByPrefix(deploymentStore, appId + "::" + envId + "::");
         StorageOperations.deleteByPrefix(activeConfigStore, envId + "::");
 
@@ -284,7 +295,21 @@ public class AppConfigService {
         if (profile == null) {
             return;
         }
-        String profileId = profile.getId();
+        removeConfigurationProfile(appId, profile.getId());
+    }
+
+    /**
+     * Deletes the configuration profile whose ID is exactly {@code profileId}, with its hosted
+     * configuration versions, without resolving its application, which may already be deleted;
+     * nothing happens when there is no such profile. The CloudFormation provisioner deletes profiles
+     * this way, since a stack can delete an application before a profile it displaced from it.
+     */
+    public void deleteConfigurationProfileById(String profileId) {
+        profileStore.get(profileId)
+                .ifPresent(profile -> removeConfigurationProfile(profile.getApplicationId(), profile.getId()));
+    }
+
+    private void removeConfigurationProfile(String appId, String profileId) {
         // A hosted configuration version isn't independently addressable outside its profile's
         // lifecycle - cascade the delete so a caller can't still fetch versions for a profile
         // that's supposedly gone.

@@ -1,12 +1,15 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appconfig.AppConfigService;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
+import io.github.hectorvent.floci.services.appconfig.model.Deployment;
 import io.github.hectorvent.floci.services.appconfig.model.DeploymentStrategy;
 import io.github.hectorvent.floci.services.appconfig.model.Environment;
+import io.github.hectorvent.floci.services.appconfig.model.HostedConfigurationVersion;
 import io.github.hectorvent.floci.services.appconfig.model.Monitor;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -28,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -51,13 +55,15 @@ class AppConfigCfnProvisionerTest {
     private static final String ALARM = "arn:aws:cloudwatch:us-east-1:000000000000:alarm:configuration-errors";
     private static final String ALARM_ROLE = "arn:aws:iam::000000000000:role/appconfig-monitor";
 
+    private InMemoryStorageFactory storage;
     private AppConfigService service;
     private AppConfigCfnProvisioner provisioner;
     private CloudFormationTemplateEngine engine;
 
     @BeforeEach
     void setUp() {
-        service = spy(new AppConfigService(new InMemoryStorageFactory(ACCOUNT), null));
+        storage = new InMemoryStorageFactory(ACCOUNT);
+        service = spy(new AppConfigService(storage, null));
         provisioner = new AppConfigCfnProvisioner(service);
         engine = CloudFormationTemplateEngine.standalone(ACCOUNT, REGION, STACK, MAPPER, value -> value);
     }
@@ -139,6 +145,43 @@ class AppConfigCfnProvisionerTest {
         assertEquals("tagging failed", failure.getMessage(), "the stack reports the update's own failure");
         assertTrue(app.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)
                 .startsWith("Could not restore " + app.getPhysicalId()));
+    }
+
+    /**
+     * The engine puts the previous resource back over an attempt whose undo failed; that resource
+     * then carries the attempt's snapshot, the state the update started from, in place of the one an
+     * earlier committed update left on it, so a ContinueUpdateRollback restores the right state.
+     */
+    @Test
+    void anUndoThatFailedLeavesItsSnapshotOnTheRestoredResource() {
+        StackResource app = create(APPLICATION, props("Name", "first", "Tags", List.of(tag("stage", "1"))));
+        update(app, props("Name", "second", "Tags", List.of(tag("stage", "2"))));
+        StackResource committed = copy(app);
+        StackResource attempt = copy(committed);
+        doThrow(new AwsException("InternalServerException", "tagging failed", 500))
+                .when(service).tagApplication(anyString(), any());
+        assertThrows(AwsException.class, () -> update(attempt, props("Name", "third",
+                "Tags", List.of(tag("stage", "3")))));
+
+        provisioner.mergeFailedUpdateResourceTracking(committed, attempt);
+        doCallRealMethod().when(service).tagApplication(anyString(), any());
+        assertTrue(provisioner.rollbackUpdate(committed));
+
+        Application restored = service.getApplication(app.getPhysicalId());
+        assertEquals("second", restored.getName());
+        assertEquals(Map.of("stage", "2"), restored.getTags());
+    }
+
+    @Test
+    void anUndoThatCompletedLeavesTheRestoredResourceAlone() {
+        StackResource app = create(APPLICATION, props("Name", "first"));
+        StackResource committed = copy(app);
+        StackResource attempt = copy(committed);
+        update(attempt, props("Name", "second"));
+
+        provisioner.mergeFailedUpdateResourceTracking(committed, attempt);
+
+        assertEquals(app.getAttributes(), committed.getAttributes());
     }
 
     @Test
@@ -405,12 +448,41 @@ class AppConfigCfnProvisionerTest {
         assertEquals(List.of(namedLikeAnId.getId()), service.listApplications().stream().map(Application::getId).toList());
     }
 
+    /**
+     * An update that moves an environment and a profile to another application can delete the old
+     * application first, so their deletes must not depend on it; they still take their deployments
+     * and hosted configuration versions with them.
+     */
+    @Test
+    void anEnvironmentAndAProfileWhoseApplicationIsGoneAreStillDeleted() {
+        String appId = create(APPLICATION, props("Name", "orders")).getPhysicalId();
+        StackResource env = create(ENVIRONMENT, props("ApplicationId", appId, "Name", "beta"));
+        StackResource profile = create(PROFILE, props("ApplicationId", appId, "Name", "settings",
+                "LocationUri", "hosted"));
+        service.createHostedConfigurationVersion(appId, profile.getPhysicalId(), "{}".getBytes(), "application/json",
+                null);
+        service.startDeployment(appId, env.getPhysicalId(), Map.of("ConfigurationProfileId", profile.getPhysicalId(),
+                "ConfigurationVersion", "1", "DeploymentStrategyId", "AppConfig.AllAtOnce"));
+        service.deleteApplication(appId);
+
+        provisioner.delete(ENVIRONMENT, env.getPhysicalId(), REGION);
+        provisioner.delete(PROFILE, profile.getPhysicalId(), REGION);
+
+        assertTrue(service.findEnvironment(env.getPhysicalId()).isEmpty());
+        assertTrue(service.findConfigurationProfile(profile.getPhysicalId()).isEmpty());
+        assertTrue(storage.create("appconfig", "appconfig-deployments.json",
+                new TypeReference<Map<String, Deployment>>() {}).scan(key -> key.startsWith(appId + "::")).isEmpty());
+        assertTrue(storage.create("appconfig", "appconfig-versions.json",
+                new TypeReference<Map<String, HostedConfigurationVersion>>() {})
+                .scan(key -> key.startsWith(appId + "::")).isEmpty());
+    }
+
     @Test
     void aDeleteFailureOtherThanNotFoundPropagates() {
         String appId = create(APPLICATION, props("Name", "orders")).getPhysicalId();
         StackResource env = create(ENVIRONMENT, props("ApplicationId", appId, "Name", "beta"));
         AwsException storage = new AwsException("InternalServerException", "storage failed", 500);
-        doThrow(storage).when(service).deleteEnvironment(appId, env.getPhysicalId());
+        doThrow(storage).when(service).deleteEnvironmentById(env.getPhysicalId());
 
         assertSame(storage, assertThrows(AwsException.class, () -> provisioner.delete(env, REGION)));
     }
@@ -423,7 +495,7 @@ class AppConfigCfnProvisionerTest {
 
         provisioner.delete(stub, REGION);
 
-        verify(service, never()).findEnvironment(anyString());
+        verify(service, never()).deleteEnvironmentById(anyString());
         verify(service, never()).deleteEnvironment(anyString(), anyString());
     }
 
@@ -448,6 +520,14 @@ class AppConfigCfnProvisionerTest {
     /** Provisions {@code resource} again with {@code properties}, as an UpdateStack does. */
     private void update(StackResource resource, Map<String, Object> properties) {
         provisioner.provision(resource, MAPPER.valueToTree(properties), context(resource.getPhysicalId()));
+    }
+
+    /** The resource as the stack stores it, so a provision of the copy leaves the original alone. */
+    private static StackResource copy(StackResource resource) {
+        StackResource copy = resource(resource.getResourceType());
+        copy.setPhysicalId(resource.getPhysicalId());
+        copy.getAttributes().putAll(resource.getAttributes());
+        return copy;
     }
 
     private static StackResource resource(String type) {

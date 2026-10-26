@@ -391,8 +391,10 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
     /**
      * Deletes the entity whose ID is exactly {@code physicalId}, so a name AppConfig would also take
      * never selects another one, and the displaced entity of a replacement is found by its ID alone.
-     * One already gone counts as deleted. An environment takes its deployments with it, and a profile
-     * its hosted configuration versions.
+     * An environment or profile is deleted without looking up its application, which the stack may
+     * already have deleted: an update that moves them to a new application deletes the old one
+     * before the entities it displaced. One already gone counts as deleted. An environment takes its
+     * deployments with it, and a profile its hosted configuration versions.
      */
     @Override
     public void delete(String resourceType, String physicalId, String region) {
@@ -405,14 +407,8 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
                     service.deleteApplication(physicalId);
                 }
             }
-            case ENVIRONMENT -> service.findEnvironment(physicalId).ifPresent(env ->
-                    CfnDeletes.safeDelete("AppConfig environment", physicalId,
-                            () -> service.deleteEnvironment(env.getApplicationId(), physicalId),
-                            "ResourceNotFoundException"));
-            case PROFILE -> service.findConfigurationProfile(physicalId).ifPresent(profile ->
-                    CfnDeletes.safeDelete("AppConfig configuration profile", physicalId,
-                            () -> service.deleteConfigurationProfile(profile.getApplicationId(), physicalId),
-                            "ResourceNotFoundException"));
+            case ENVIRONMENT -> service.deleteEnvironmentById(physicalId);
+            case PROFILE -> service.deleteConfigurationProfileById(physicalId);
             case STRATEGY -> service.deleteDeploymentStrategy(physicalId);
             default -> throw new IllegalArgumentException("Unsupported AppConfig resource type " + resourceType);
         }
@@ -437,6 +433,20 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(CfnRollback.APPCONFIG_UPDATE_SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
+    }
+
+    /**
+     * Keeps the snapshot of an in-place update whose own undo did not complete. The engine restores
+     * the previous resource and reports the rollback failure once; with the snapshot of the state
+     * the update started from, a ContinueUpdateRollback restores that state, instead of finding
+     * nothing to undo or an older snapshot a committed update left on the previous resource.
+     */
+    @Override
+    public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        String snapshot = attempted.getAttributes().get(CfnRollback.APPCONFIG_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot != null && attempted.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)) {
+            previous.getAttributes().put(CfnRollback.APPCONFIG_UPDATE_SNAPSHOT_ATTR, snapshot);
+        }
     }
 
     /**
