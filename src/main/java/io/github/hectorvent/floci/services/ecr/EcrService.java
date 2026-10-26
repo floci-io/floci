@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.concurrent.KeyedWriteLocks;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -48,8 +49,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
@@ -99,7 +98,7 @@ public class EcrService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final EcrLayerUploads layerUploads = new EcrLayerUploads(this::discardUpload);
     private final Set<String> inFlightImmutableTags = ConcurrentHashMap.newKeySet();
-    private final Map<String, RepositoryWriteLock> repositoryWriteLocks = new ConcurrentHashMap<>();
+    private final KeyedWriteLocks<String> repositoryWriteLocks = new KeyedWriteLocks<>();
 
     @Inject
     public EcrService(StorageFactory factory,
@@ -1258,92 +1257,33 @@ public class EcrService implements ResourceProvider {
      * that drops a shared manifest by digest and writes it back under its surviving tags. A
      * write that lands between that sequence's steps would otherwise be overwritten by the
      * restore of the older manifest. Keyed by the repository name as the backing registry
-     * stores it, the only namespace in which two writes address the same manifests. A
-     * semaphore rather than a monitor because the data plane releases on the thread its
-     * exchange ends on, which is not the thread the lock was taken on.
-     *
-     * <p>Each writer is counted on the lock's entry from before it tries the semaphore until
-     * it has released it or given up, so an entry cannot be removed and replaced while any
-     * writer still coordinates on it. The entry is collected once its last writer is done,
-     * which keeps pushes to distinct or missing repositories, and repositories that are later
-     * deleted, from leaving entries behind for the life of the service.
+     * stores it, the only namespace in which two writes address the same manifests. The
+     * lock's entry counting, its cross-thread release and its interruption behavior are
+     * {@link KeyedWriteLocks}' contract.
      */
     public void lockRepositoryWrites(String storageRepositoryName) {
-        RepositoryWriteLock lock = retainRepositoryWriteLock(storageRepositoryName);
-        try {
-            lock.permits.acquire();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            departRepositoryWriteLock(storageRepositoryName, lock);
-            throw new AwsException("ServerException",
-                    "Interrupted while waiting to write images to repository " + storageRepositoryName, 500);
-        }
+        repositoryWriteLocks.acquire(storageRepositoryName);
     }
 
     /**
      * One try at {@link #lockRepositoryWrites}, for callers that must not block a thread. The
-     * caller that succeeds owns the entry's count until its {@code unlockRepositoryWrites}.
+     * caller that succeeds owns the lock until its {@code unlockRepositoryWrites}.
      */
     public boolean tryLockRepositoryWrites(String storageRepositoryName) {
-        RepositoryWriteLock lock = retainRepositoryWriteLock(storageRepositoryName);
-        if (lock.permits.tryAcquire()) {
-            return true;
-        }
-        departRepositoryWriteLock(storageRepositoryName, lock);
-        return false;
+        return repositoryWriteLocks.tryAcquire(storageRepositoryName);
     }
 
     /**
-     * Ends one writer's hold: the semaphore goes back and, with it, the writer's count on the
-     * entry. The holder's own count keeps the entry in the map until here, so the lookup meets
-     * the instance the writer acquired.
+     * Ends one writer's hold of the repository's write lock; see
+     * {@link #lockRepositoryWrites}.
      */
     public void unlockRepositoryWrites(String storageRepositoryName) {
-        RepositoryWriteLock lock = repositoryWriteLocks.get(storageRepositoryName);
-        lock.permits.release();
-        departRepositoryWriteLock(storageRepositoryName, lock);
-    }
-
-    /**
-     * The repository's entry with this writer counted on it: from before the writer tries the
-     * semaphore until it releases it or gives up, the entry cannot be removed, so every writer
-     * reaching the lock in that window meets the same instance and a waiter can never be
-     * mutual-excluded against a fresh instance a later arrival takes.
-     */
-    private RepositoryWriteLock retainRepositoryWriteLock(String storageRepositoryName) {
-        return repositoryWriteLocks.compute(storageRepositoryName, (name, existing) -> {
-            RepositoryWriteLock lock = existing != null ? existing : new RepositoryWriteLock();
-            lock.participants.incrementAndGet();
-            return lock;
-        });
-    }
-
-    /**
-     * Ends one writer's count on the entry. The decrement and the removal decision run inside
-     * the map's own per-key computation, so a writer arriving on the same key cannot slip
-     * between the count reaching zero and the entry leaving, and cannot end up counted on an
-     * instance the map no longer holds.
-     */
-    private void departRepositoryWriteLock(String storageRepositoryName, RepositoryWriteLock lock) {
-        repositoryWriteLocks.compute(storageRepositoryName, (name, existing) ->
-                lock.participants.decrementAndGet() > 0 || existing != lock ? existing : null);
+        repositoryWriteLocks.release(storageRepositoryName);
     }
 
     /** The repository write lock entries still counting writers, for tests. */
     int liveRepositoryWriteLocks() {
         return repositoryWriteLocks.size();
-    }
-
-    /**
-     * One repository's write semaphore and the count of writers still participating on it:
-     * the one holding the semaphore and every one waiting on it. While the count is positive
-     * the instance stays the map's entry for the repository, so a waiter that has fetched it
-     * cannot be divided from a later arrival by the entry being removed and a fresh instance
-     * created in its place.
-     */
-    private static final class RepositoryWriteLock {
-        private final Semaphore permits = new Semaphore(1);
-        private final AtomicInteger participants = new AtomicInteger();
     }
 
     /** The media type sent, else the manifest's own {@code mediaType}; with neither, the request is refused. */

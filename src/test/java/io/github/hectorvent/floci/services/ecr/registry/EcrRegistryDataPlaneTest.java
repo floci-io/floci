@@ -51,6 +51,7 @@ class EcrRegistryDataPlaneTest {
 
     private Vertx vertx;
     private Semaphore repositoryWriteLock;
+    private CountDownLatch repositoryWriteLockRefused;
 
     @BeforeEach
     void setUp() {
@@ -429,9 +430,8 @@ class EcrRegistryDataPlaneTest {
                     .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertEquals(200, readStatus, "a read answers while a write waits for the lock");
 
-            for (int i = 0; i < 50 && manifestWrites.get() == 0; i++) {
-                Thread.sleep(10);
-            }
+            assertTrue(repositoryWriteLockRefused.await(5, TimeUnit.SECONDS),
+                    "the push is parked waiting for the repository's write lock");
             assertEquals(0, manifestWrites.get(),
                     "the push must not reach the registry while the repository's delete holds the lock");
 
@@ -847,10 +847,18 @@ class EcrRegistryDataPlaneTest {
             return null;
         })
                 .when(ecrService).releaseImmutableTag(anyString());
-        // The repository write lock lives in EcrService too, so the mock holds a real one.
+        // The repository write lock lives in EcrService too, so the mock holds a real one,
+        // and counts a latch each time it refuses a writer.
         repositoryWriteLock = new Semaphore(1);
+        repositoryWriteLockRefused = new CountDownLatch(1);
         when(ecrService.tryLockRepositoryWrites(anyString()))
-                .thenAnswer(call -> repositoryWriteLock.tryAcquire());
+                .thenAnswer(call -> {
+                    if (repositoryWriteLock.tryAcquire()) {
+                        return true;
+                    }
+                    repositoryWriteLockRefused.countDown();
+                    return false;
+                });
         Mockito.doAnswer(call -> {
             repositoryWriteLock.release();
             return null;
