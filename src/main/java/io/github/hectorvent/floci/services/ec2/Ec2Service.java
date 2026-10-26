@@ -8938,7 +8938,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public Image copyImage(String destinationRegion, String sourceRegion, String sourceImageId,
                            String name, String description) {
-        return copyImage(destinationRegion, sourceRegion, sourceImageId, name, description, false);
+        return copyImage(destinationRegion, sourceRegion, sourceImageId, name, description, false, List.of());
     }
 
     /**
@@ -8957,11 +8957,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * the copy gets the caller's tags on the source, less the {@code aws:} system tags, which AWS
      * does not copy either. Floci keeps each account's tags apart and does not model shared
      * ({@code ec2:SharedTag/}) tags, so no other account's tag is visible to the caller or copied.
+     * {@code requestedImageTags} are the image tags the request's TagSpecification will add after
+     * the copy; with the copied ones they must stay within the per-resource limit, which is
+     * checked before anything is created so a refused copy leaves no AMI or snapshot behind.
      *
      * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CopyImage.html">CopyImage</a>
      */
     public Image copyImage(String destinationRegion, String sourceRegion, String sourceImageId,
-                           String name, String description, boolean copyImageTags) {
+                           String name, String description, boolean copyImageTags,
+                           List<Tag> requestedImageTags) {
         if (sourceImageId == null || sourceImageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter SourceImageId", 400);
         }
@@ -8995,6 +8999,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
 
             List<Tag> copiedTags = copyImageTags ? copiedImageTags(sourceRegion, source) : List.of();
+            if (!copiedTags.isEmpty() && requestedImageTags != null && !requestedImageTags.isEmpty()) {
+                Set<String> userKeys = userTagKeys(copiedTags);
+                userKeys.addAll(userTagKeys(requestedImageTags));
+                requireWithinTagLimit(userKeys);
+            }
             // Fresh snapshot ids: two AMIs sharing one snapshot would make deleting either appear
             // to take the other's backing with it, and the copy's snapshots live in the
             // destination region anyway.

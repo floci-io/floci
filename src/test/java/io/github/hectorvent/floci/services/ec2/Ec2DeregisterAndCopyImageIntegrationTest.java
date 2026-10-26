@@ -464,7 +464,8 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
 
     @Test
     void aTagSpecificationTagWinsOverACopiedTagOfTheSameKey() {
-        // Both reach the copy; the one the request names explicitly is the value it keeps.
+        // Both reach the copy; Floci keeps the value the request names explicitly. The public
+        // CopyImage reference does not say how AWS settles a key given both ways.
         String sourceId = registerViaHttp(EAST_AUTH, uniqueName("floci-copy-tags-and-spec-src"));
         ec2(EAST_AUTH, "CreateTags", "ResourceId.1", sourceId,
                 "Tag.1.Key", "Team", "Tag.1.Value", "images", "Tag.2.Key", "Stage", "Tag.2.Value", "dev");
@@ -474,6 +475,35 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 "TagSpecification.1.Tag.1.Key", "Stage", "TagSpecification.1.Tag.1.Value", "prod");
 
         assertEquals(Map.of("Team", "images", "Stage", "prod"), tagsOf(WEST_AUTH, copied));
+    }
+
+    @Test
+    void copiedAndSpecifiedTagsOverTheLimitRefuseTheCopyAndLeaveNothingBehind() {
+        // The copy's tags are the copied ones plus the TagSpecification's; past 50 the request
+        // fails, and it must fail before the AMI and its snapshot exist.
+        Image source = service.registerImage(EAST, uniqueName("floci-copy-tag-limit-src"), null,
+                "x86_64", "/dev/xvda", List.of(mapping("/dev/xvda", "snap-" + hex())));
+        List<String> sourceTags = new ArrayList<>(List.of("ResourceId.1", source.getImageId()));
+        for (int i = 1; i <= 30; i++) {
+            sourceTags.addAll(List.of("Tag." + i + ".Key", "copied-" + i, "Tag." + i + ".Value", "v"));
+        }
+        ec2(EAST_AUTH, "CreateTags", sourceTags.toArray(String[]::new));
+        String name = uniqueName("floci-copy-tag-limit-dst");
+        int snapshotsBefore = service.describeSnapshots(WEST, List.of(), null, Map.of()).size();
+        RequestSpecification copy = given().formParam("Action", "CopyImage").header("Authorization", WEST_AUTH)
+                .formParam("SourceRegion", EAST).formParam("SourceImageId", source.getImageId())
+                .formParam("Name", name).formParam("CopyImageTags", "true")
+                .formParam("TagSpecification.1.ResourceType", "image");
+        for (int i = 1; i <= 30; i++) {
+            copy = copy.formParam("TagSpecification.1.Tag." + i + ".Key", "specified-" + i);
+        }
+
+        copy.when().post("/").then().statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']", equalTo("TagLimitExceeded")));
+
+        assertFalse(ec2(WEST_AUTH, "DescribeImages", "Owner.1", "self").contains(name),
+                "a refused copy must not be registered");
+        assertEquals(snapshotsBefore, service.describeSnapshots(WEST, List.of(), null, Map.of()).size());
     }
 
     private String copyToWest(String sourceId, String name, String... extraParams) {

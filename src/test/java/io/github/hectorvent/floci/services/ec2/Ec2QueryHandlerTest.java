@@ -42,6 +42,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -409,7 +410,8 @@ class Ec2QueryHandlerTest {
         Image image = new Image();
         image.setImageId("ami-0123456789abcdef2");
         image.setBlockDeviceMappings(List.of(deviceMapping("/dev/sda1", "snap-0123456789abcdef3")));
-        when(service.copyImage("us-east-1", "us-west-2", "ami-source", "name", null, false)).thenReturn(image);
+        when(service.copyImage(eq("us-east-1"), eq("us-west-2"), eq("ami-source"), eq("name"), isNull(), eq(false),
+                anyList())).thenReturn(image);
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("SourceRegion", "us-west-2");
         params.putSingle("SourceImageId", "ami-source");
