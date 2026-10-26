@@ -48,6 +48,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
@@ -97,6 +98,7 @@ public class EcrService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final EcrLayerUploads layerUploads = new EcrLayerUploads(this::discardUpload);
     private final Set<String> inFlightImmutableTags = ConcurrentHashMap.newKeySet();
+    private final Map<String, Semaphore> repositoryWriteLocks = new ConcurrentHashMap<>();
 
     @Inject
     public EcrService(StorageFactory factory,
@@ -856,10 +858,15 @@ public class EcrService implements ResourceProvider {
         if (imageIds == null) imageIds = List.of();
         for (ImageIdentifier id : imageIds) {
             try {
-                if (id.getImageDigest() == null && id.getImageTag() != null) {
-                    deleteImageTag(repo, repositoryName, internal, http, id, region, deleted, failures);
-                } else {
-                    deleteImageDigest(repo, repositoryName, internal, http, id, region, deleted, failures);
+                lockRepositoryWrites(internal);
+                try {
+                    if (id.getImageDigest() == null && id.getImageTag() != null) {
+                        deleteImageTag(repo, repositoryName, internal, http, id, region, deleted, failures);
+                    } else {
+                        deleteImageDigest(repo, repositoryName, internal, http, id, region, deleted, failures);
+                    }
+                } finally {
+                    unlockRepositoryWrites(internal);
                 }
             } catch (Exception e) {
                 failures.add(new ImageFailure(id, "ImageNotFound", e.getMessage()));
@@ -873,7 +880,10 @@ public class EcrService implements ResourceProvider {
      * other tag still references the shared digest. The backing registry deletes manifests by
      * digest only, and that untags every tag the digest has, so while another tag remains the
      * manifest is dropped and immediately written back under the surviving tags from a copy
-     * read before the drop, which restores the identical digest.
+     * read before the drop, which restores the identical digest. The repository's write lock
+     * (see {@link #lockRepositoryWrites}) is held across the whole sequence, so a manifest
+     * pushed to the repository between the drop and the write-back cannot be overwritten by
+     * the restore.
      */
     private void deleteImageTag(Repository repo, String repositoryName, String internal,
                                 RegistryHttpClient http, ImageIdentifier id, String region,
@@ -1032,8 +1042,13 @@ public class EcrService implements ResourceProvider {
             throw imageTagAlreadyExists(imageTag, repositoryName);
         }
         try {
-            return callRegistry(() -> writeManifest(repo, repositoryName, storage, http, imageManifest, mediaType,
-                    imageTag, digest, guarded, region), EcrService::putImageError);
+            lockRepositoryWrites(storage);
+            try {
+                return callRegistry(() -> writeManifest(repo, repositoryName, storage, http, imageManifest, mediaType,
+                        imageTag, digest, guarded, region), EcrService::putImageError);
+            } finally {
+                unlockRepositoryWrites(storage);
+            }
         } finally {
             if (guarded != null) {
                 releaseImmutableTag(guarded);
@@ -1234,6 +1249,35 @@ public class EcrService implements ResourceProvider {
 
     public void releaseImmutableTag(String key) {
         inFlightImmutableTags.remove(key);
+    }
+
+    /**
+     * The write lock every manifest write to one backing registry repository takes: the data
+     * plane's manifest PUTs and deletes, {@code PutImage}, and the BatchDeleteImage sequence
+     * that drops a shared manifest by digest and writes it back under its surviving tags. A
+     * write that lands between that sequence's steps would otherwise be overwritten by the
+     * restore of the older manifest. Keyed by the repository name as the backing registry
+     * stores it, the only namespace in which two writes address the same manifests. A
+     * semaphore rather than a monitor because the data plane releases on the thread its
+     * exchange ends on, which is not the thread the lock was taken on.
+     */
+    public void lockRepositoryWrites(String storageRepositoryName) {
+        try {
+            repositoryWriteLocks.computeIfAbsent(storageRepositoryName, k -> new Semaphore(1)).acquire();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AwsException("ServerException",
+                    "Interrupted while waiting to write images to repository " + storageRepositoryName, 500);
+        }
+    }
+
+    /** One try at {@link #lockRepositoryWrites}, for callers that must not block a thread. */
+    public boolean tryLockRepositoryWrites(String storageRepositoryName) {
+        return repositoryWriteLocks.computeIfAbsent(storageRepositoryName, k -> new Semaphore(1)).tryAcquire();
+    }
+
+    public void unlockRepositoryWrites(String storageRepositoryName) {
+        repositoryWriteLocks.get(storageRepositoryName).release();
     }
 
     /** The media type sent, else the manifest's own {@code mediaType}; with neither, the request is refused. */

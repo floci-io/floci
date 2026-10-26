@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -49,6 +50,7 @@ import static org.mockito.Mockito.when;
 class EcrRegistryDataPlaneTest {
 
     private Vertx vertx;
+    private Semaphore repositoryWriteLock;
 
     @BeforeEach
     void setUp() {
@@ -372,6 +374,85 @@ class EcrRegistryDataPlaneTest {
     }
 
     /**
+     * A manifest push takes its repository's write lock before anything of it reaches the
+     * registry, the same lock a BatchDeleteImage holds while it drops a shared manifest and
+     * writes it back under its surviving tags: a push that arrives during such a delete waits
+     * for it instead of landing between the drop and the write-back, where the restore would
+     * overwrite it. Reads take no lock and answer while the push waits.
+     */
+    @Test
+    void aManifestPushWaitsForTheRepositoryWriteLockAndCompletesAfterIt() throws Exception {
+        AtomicInteger manifestWrites = new AtomicInteger();
+        HttpServer registry = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.PUT) {
+                        request.bodyHandler(body -> {
+                            manifestWrites.incrementAndGet();
+                            request.response().setStatusCode(201).end();
+                        });
+                    } else if (request.method() == HttpMethod.HEAD) {
+                        request.response().setStatusCode(404).end();
+                    } else {
+                        request.response().setStatusCode(200).end();
+                    }
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        HttpServer dataPlane = null;
+        HttpClient client = null;
+        try {
+            dataPlane = dataPlane(registry, false);
+            client = vertx.createHttpClient();
+            assertTrue(repositoryWriteLock.tryAcquire(), "the test takes the lock a delete would hold");
+
+            Future<HttpClientResponse> push = client.request(new RequestOptions()
+                            .setHost("127.0.0.1")
+                            .setPort(dataPlane.actualPort())
+                            .setMethod(HttpMethod.PUT)
+                            .setURI("/v2/platform/api/manifests/v1"))
+                    .compose(request -> {
+                        request.putHeader("Host", "000000000000.dkr.ecr.us-east-1.localhost:4566");
+                        request.setChunked(true);
+                        return request.send(Buffer.buffer("{}"));
+                    });
+
+            Integer readStatus = client.request(new RequestOptions()
+                            .setHost("127.0.0.1")
+                            .setPort(dataPlane.actualPort())
+                            .setMethod(HttpMethod.GET)
+                            .setURI("/v2/platform/api/manifests/v1"))
+                    .compose(request -> {
+                        request.putHeader("Host", "000000000000.dkr.ecr.us-east-1.localhost:4566");
+                        return request.send().map(HttpClientResponse::statusCode);
+                    })
+                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertEquals(200, readStatus, "a read answers while a write waits for the lock");
+
+            for (int i = 0; i < 50 && manifestWrites.get() == 0; i++) {
+                Thread.sleep(10);
+            }
+            assertEquals(0, manifestWrites.get(),
+                    "the push must not reach the registry while the repository's delete holds the lock");
+
+            repositoryWriteLock.release();
+            HttpClientResponse response = push.toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(201, response.statusCode());
+            assertEquals(1, manifestWrites.get());
+            assertTrue(acquiredWithin(repositoryWriteLock, 5_000),
+                    "the exchange returns the write lock with its answer");
+        } finally {
+            if (client != null) {
+                client.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            if (dataPlane != null) {
+                dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            registry.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
      * An HTTP/2 client such as crane sends every upload of a push as a stream on one
      * connection, and the data plane needs a registry connection for each. An upload left
      * waiting for one stays paused, and its unread bytes hold the client connection's
@@ -651,6 +732,14 @@ class EcrRegistryDataPlaneTest {
             return null;
         })
                 .when(ecrService).releaseImmutableTag(anyString());
+        // The repository write lock lives in EcrService too, so the mock holds a real one.
+        repositoryWriteLock = new Semaphore(1);
+        when(ecrService.tryLockRepositoryWrites(anyString()))
+                .thenAnswer(call -> repositoryWriteLock.tryAcquire());
+        Mockito.doAnswer(call -> {
+            repositoryWriteLock.release();
+            return null;
+        }).when(ecrService).unlockRepositoryWrites(anyString());
         when(ecrService.registryRepositoryName("platform/api", "000000000000", "us-east-1"))
                 .thenReturn("legacy/platform-api");
 
@@ -662,6 +751,21 @@ class EcrRegistryDataPlaneTest {
     }
 
     private record ManifestResponse(int statusCode, String body) {
+    }
+
+    /**
+     * Takes the semaphore within {@code millis}, for assertions that follow an exchange whose
+     * end, and with it its lock release, runs on the event loop after its answer is seen.
+     */
+    private static boolean acquiredWithin(Semaphore semaphore, long millis) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + millis;
+        while (!semaphore.tryAcquire()) {
+            if (System.currentTimeMillis() >= deadline) {
+                return false;
+            }
+            Thread.sleep(10);
+        }
+        return true;
     }
 
     private ManifestResponse putManifest(int port) throws Exception {

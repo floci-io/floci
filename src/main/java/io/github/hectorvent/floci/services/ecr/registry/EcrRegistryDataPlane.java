@@ -37,6 +37,7 @@ public class EcrRegistryDataPlane {
     private static final Pattern ECR_HOST = Pattern.compile(
             "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.localhost(?:\\.floci\\.io)?(?::[0-9]+)?$");
     private static final String MANIFESTS_PATH = "/manifests/";
+    private static final long REPOSITORY_LOCK_POLL_MILLIS = 5;
     private static final Set<String> HOP_BY_HOP_HEADERS = Set.of(
             "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
             "te", "trailers", "transfer-encoding", "upgrade");
@@ -86,14 +87,52 @@ public class EcrRegistryDataPlane {
             return;
         }
 
-        Exchange exchange = new Exchange(immutableTag);
+        Exchange exchange = new Exchange(immutableTag, manifestWriteRepository(context, registryRequest));
         // A client that goes away, by resetting its HTTP/2 stream or closing the connection, ends
         // the exchange at any point, the registry check included: otherwise the registry keeps
         // waiting for the rest of a body with a Content-Length, and the exchange's connection,
         // client and immutable tag lock stay.
         context.response().closeHandler(closed -> exchange.end());
         context.request().exceptionHandler(failure -> exchange.end());
-        checkTagAndProxy(context, registryRequest, exchange);
+        lockRepositoryWritesThenCheck(context, registryRequest, exchange);
+    }
+
+    /**
+     * The repository a manifest write must hold the write lock of, or null when the request
+     * moves no manifest: only PUT and DELETE below a repository's {@code manifests/} path change
+     * which manifest a tag resolves to, so blob uploads and reads pass untouched.
+     */
+    private static String manifestWriteRepository(RoutingContext context, RegistryRequest request) {
+        String method = context.request().method().name();
+        if (!"PUT".equals(method) && !"DELETE".equals(method)) {
+            return null;
+        }
+        return request.backendUri().startsWith("/v2/" + request.storageRepositoryName() + MANIFESTS_PATH)
+                ? request.storageRepositoryName()
+                : null;
+    }
+
+    /**
+     * A manifest write takes its repository's write lock before anything of it reaches the
+     * registry. That is the same lock BatchDeleteImage holds across the sequence that drops a
+     * shared manifest by digest and writes it back under its surviving tags, so a push that
+     * arrives during such a delete waits here instead of landing between the drop and the
+     * write-back and being overwritten by the restore. The event loop thread must not block on
+     * the lock, so the request stays paused and each poll rechecks; a client that goes away
+     * ends the exchange and the polling with it.
+     */
+    private void lockRepositoryWritesThenCheck(RoutingContext context, RegistryRequest request, Exchange exchange) {
+        if (exchange.ended()) {
+            return;
+        }
+        String repository = exchange.writeLockRepository();
+        if (repository == null || ecrService.tryLockRepositoryWrites(repository)) {
+            exchange.writeLockAcquired();
+            checkTagAndProxy(context, request, exchange);
+            return;
+        }
+        vertx.setTimer(REPOSITORY_LOCK_POLL_MILLIS,
+                ignored -> lockRepositoryWritesThenCheck(context, request, exchange));
     }
 
     private String immutableTag(RoutingContext context, RegistryRequest request) {
@@ -255,23 +294,37 @@ public class EcrRegistryDataPlane {
     }
 
     /**
-     * One proxied request: the registry client it opens once it gets that far, and the immutable
-     * tag it holds. It ends once, at whichever comes first of the registry's answer, a failure and
-     * the client going away; the close handler also fires after an exchange that ended normally,
-     * when another exchange may already hold the same tag.
+     * One proxied request: the registry client it opens once it gets that far, the immutable
+     * tag it holds, and the repository write lock it holds once a manifest write has it. It
+     * ends once, at whichever comes first of the registry's answer, a failure and the client
+     * going away; the close handler also fires after an exchange that ended normally, when
+     * another exchange may already hold the same tag.
      */
     private final class Exchange {
 
         private final String immutableTag;
+        private final String writeLockRepository;
+        private final AtomicBoolean writeLockHeld = new AtomicBoolean();
         private final AtomicBoolean ended = new AtomicBoolean();
         private HttpClient client;
 
-        private Exchange(String immutableTag) {
+        private Exchange(String immutableTag, String writeLockRepository) {
             this.immutableTag = immutableTag;
+            this.writeLockRepository = writeLockRepository;
         }
 
         private boolean ended() {
             return ended.get();
+        }
+
+        private String writeLockRepository() {
+            return writeLockRepository;
+        }
+
+        private void writeLockAcquired() {
+            if (writeLockRepository != null) {
+                writeLockHeld.set(true);
+            }
         }
 
         private HttpClient open(HttpClient registryClient) {
@@ -283,6 +336,7 @@ public class EcrRegistryDataPlane {
             if (!ended.compareAndSet(false, true)) {
                 return;
             }
+            releaseWriteLock();
             if (client == null) {
                 release(immutableTag);
                 return;
@@ -291,6 +345,12 @@ public class EcrRegistryDataPlane {
             // sees and aborts on. The tag is free only once it is closed, so another write of the
             // tag cannot start its check while this one can still reach the registry.
             client.close().onComplete(closed -> release(immutableTag));
+        }
+
+        private void releaseWriteLock() {
+            if (writeLockRepository != null && writeLockHeld.compareAndSet(true, false)) {
+                ecrService.unlockRepositoryWrites(writeLockRepository);
+            }
         }
     }
 
