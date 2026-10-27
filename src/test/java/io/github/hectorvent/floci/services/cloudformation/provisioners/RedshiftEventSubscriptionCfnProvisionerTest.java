@@ -77,25 +77,38 @@ class RedshiftEventSubscriptionCfnProvisionerTest {
     }
 
     @Test
-    void inPlaceRollbackRestoresFiltersAndTags() {
+    void inPlaceRollbackRestoresFiltersTagsAndSavedAttributes() {
         EventSubscription prior = subscription("watcher");
         prior.setSnsTopicArn(TOPIC);
         prior.setSourceType("cluster");
         prior.setSeverity("INFO");
         prior.setEnabled(true);
         prior.setTags(Map.of("phase", "prior"));
+        prior.setStatus("topic-not-exist");
         when(redshift.describeEventSubscriptions("watcher", null, null, null, null))
                 .thenReturn(new PaginatedResult<>(List.of(prior), null));
+        EventSubscription updated = subscription("watcher");
+        updated.setSourceIdsList(List.of("replacement"));
+        updated.setEventCategoriesList(List.of("configuration"));
         when(redshift.reconcileEventSubscription(eq("watcher"), any(), any(), any(), any(), any(), any(), any()))
-                .thenReturn(subscription("watcher"));
+                .thenReturn(updated);
         StackResource resource = resource();
         resource.setPhysicalId("watcher");
+        Map<String, String> priorAttributes = Map.of(
+                "CustomerAwsId", "000000000000", "CustSubscriptionId", "watcher", "Status", "topic-not-exist",
+                "SubscriptionCreationTime", "2026-10-26T12:00:00Z", "SourceIdsList", "[\"warehouse\"]",
+                "EventCategoriesList", "[\"management\"]", CfnRollback.USES_ATTR_PREFIX + "Test", "retained");
+        resource.getAttributes().putAll(priorAttributes);
         provisioner.provision(resource, properties("watcher").put("Enabled", false), context("watcher"));
+        assertEquals("active", resource.getAttributes().get("Status"));
+        assertEquals("[\"replacement\"]", resource.getAttributes().get("SourceIdsList"));
+        assertEquals("[\"configuration\"]", resource.getAttributes().get("EventCategoriesList"));
 
         assertTrue(provisioner.rollbackUpdate(resource));
 
+        assertEquals(priorAttributes, resource.getAttributes());
         verify(redshift).restoreEventSubscription("watcher", TOPIC, "cluster", List.of("warehouse"),
-                List.of("management"), "INFO", true, Map.of("phase", "prior"), "active");
+                List.of("management"), "INFO", true, Map.of("phase", "prior"), "topic-not-exist");
     }
 
     @Test

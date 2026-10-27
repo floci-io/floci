@@ -44,7 +44,7 @@ public class RedshiftApiEventPublisher {
             return;
         }
         try {
-            if (!registry.isServiceEnabled("eventbridge")) {
+            if (!registry.isServiceEnabled("events")) {
                 return;
             }
             String region = regionResolver.getRegion();

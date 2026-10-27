@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.redshift;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ResolvedServiceCatalog;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
@@ -19,6 +21,20 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 class RedshiftApiEventPublisherTest {
+
+    @Test
+    void disabledEventBridgeInTheServiceCatalogPreventsPublishing() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().eventbridge().enabled()).thenReturn(false);
+        ServiceRegistry registry = new ServiceRegistry(new ResolvedServiceCatalog(config));
+        EventBridgeService events = mock(EventBridgeService.class);
+        RedshiftApiEventPublisher publisher = new RedshiftApiEventPublisher(events, new ObjectMapper(), registry,
+                new RegionResolver("us-east-1", "111111111111"));
+
+        publisher.publish("CreateCluster");
+
+        verifyNoInteractions(events);
+    }
 
     @Test
     @SuppressWarnings("unchecked")
@@ -61,7 +77,7 @@ class RedshiftApiEventPublisherTest {
                 new RegionResolver("us-east-1", "111111111111"));
 
         publisher.publish("CreateCluster");
-        when(registry.isServiceEnabled("eventbridge")).thenReturn(true);
+        when(registry.isServiceEnabled("events")).thenReturn(true);
         publisher.publish("DescribeEvents");
         publisher.publish("ListRecommendations");
         publisher.publish("GetClusterCredentials");
@@ -87,7 +103,7 @@ class RedshiftApiEventPublisherTest {
 
     private static ServiceRegistry enabledRegistry() {
         ServiceRegistry registry = mock(ServiceRegistry.class);
-        when(registry.isServiceEnabled("eventbridge")).thenReturn(true);
+        when(registry.isServiceEnabled("events")).thenReturn(true);
         return registry;
     }
 }

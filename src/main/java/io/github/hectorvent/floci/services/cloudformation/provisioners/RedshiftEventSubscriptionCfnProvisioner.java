@@ -53,7 +53,7 @@ public class RedshiftEventSubscriptionCfnProvisioner implements CfnResourceProvi
         Map<String, String> attributesBefore = Map.copyOf(resource.getAttributes());
         if (ctx.reusesPriorEntity(name)) {
             EventSubscription prior = redshift.describeEventSubscriptions(name, null, null, null, null).items().getFirst();
-            resource.getAttributes().put(UPDATE_SNAPSHOT, snapshot(prior).toString());
+            resource.getAttributes().put(UPDATE_SNAPSHOT, snapshot(prior, attributesBefore).toString());
         }
         EventSubscription subscription = ctx.reusesPriorEntity(name)
                 ? redshift.reconcileEventSubscription(name, topic, type, ids, categories, severity, enabled, tags)
@@ -126,14 +126,16 @@ public class RedshiftEventSubscriptionCfnProvisioner implements CfnResourceProvi
                     snapshot.path("type").asText(null), readStrings(snapshot.path("ids")),
                     readStrings(snapshot.path("categories")), snapshot.path("severity").asText(null),
                     snapshot.path("enabled").asBoolean(), tags, snapshot.path("status").asText());
-            resource.getAttributes().remove(UPDATE_SNAPSHOT);
+            resource.getAttributes().clear();
+            snapshot.path("attributes").fields().forEachRemaining(entry ->
+                    resource.getAttributes().put(entry.getKey(), entry.getValue().asText()));
             return true;
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Invalid Redshift event subscription update snapshot", e);
         }
     }
 
-    private static ObjectNode snapshot(EventSubscription subscription) {
+    private static ObjectNode snapshot(EventSubscription subscription, Map<String, String> attributes) {
         ObjectNode snapshot = MAPPER.createObjectNode();
         snapshot.put("topic", subscription.getSnsTopicArn());
         snapshot.put("type", subscription.getSourceType());
@@ -144,6 +146,7 @@ public class RedshiftEventSubscriptionCfnProvisioner implements CfnResourceProvi
         snapshot.set("categories", array(subscription.getEventCategoriesList()));
         ObjectNode tags = snapshot.putObject("tags");
         subscription.getTags().forEach(tags::put);
+        snapshot.set("attributes", MAPPER.valueToTree(attributes));
         return snapshot;
     }
 
