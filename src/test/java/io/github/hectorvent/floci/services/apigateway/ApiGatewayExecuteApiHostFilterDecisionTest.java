@@ -19,6 +19,7 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
 
     private static final String API_ID = "abc123";
     private static final String REGION = "us-east-1";
+    private static final String OWNER_REGION = "eu-west-1";
     private static final String VIEWER_ACCOUNT = "000000000000";
     private static final String OWNER_ACCOUNT = "111122223333";
     private static final String HOST = API_ID + ".execute-api." + REGION + ".amazonaws.com";
@@ -31,7 +32,7 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
 
     @Test
     void httpApiOfAnotherAccountIsLookedUpUnderTheOwnerAndTheViewerContextIsRestored() {
-        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION);
+        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, OWNER_REGION);
         lookup.httpApi = true;
 
         ApiGatewayExecuteApiHostFilter.RouteDecision decision = filter.decide(HOST, "/dev/accounts", null);
@@ -46,12 +47,13 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
 
     @Test
     void viewerContextIsRestoredWhenALookupFails() {
-        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION);
+        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, OWNER_REGION);
 
         ApiGatewayExecuteApiHostFilter.RouteDecision decision = filter.decide(HOST, "/dev/accounts", null);
 
         assertEquals(ApiGatewayExecuteApiHostFilter.RouteKind.NONE, decision.kind());
         assertEquals(VIEWER_ACCOUNT, viewer.getAccountId());
+        assertEquals(REGION, viewer.getRegion());
     }
 
     @Test
@@ -132,7 +134,7 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
 
     @Test
     void viewerContextIsRestoredWhenALookupThrowsUnexpectedly() {
-        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION);
+        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, OWNER_REGION);
         lookup.crash = true;
 
         assertThrows(IllegalStateException.class, () -> filter.decide(HOST, "/dev/accounts", null));
