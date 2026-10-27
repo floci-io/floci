@@ -3002,7 +3002,8 @@ public class DynamoDbService {
         }
         ConcurrentSkipListMap<String, JsonNode> liveItems = itemsByTable.get(scopedItemsKey(storageKey));
         List<JsonNode> items = pointInTimeRecovery.itemsAt(accountId, storageKey,
-                liveItems != null ? liveItems : Map.of(), time);
+                liveItems != null ? liveItems : Map.of(), time,
+                (itemKey, read) -> withItemLock(storageKey, itemKey, read));
         return new PointInTimeState(snapshotOf(table), items, time);
     }
 
@@ -5095,7 +5096,8 @@ public class DynamoDbService {
                         storageKey, liveItems, exportFromTime, exportToTime,
                         (itemKey, read) -> withItemLock(storageKey, itemKey, read)), table,
                         "NEW_IMAGE".equals(incremental.viewType()))
-                : pointInTimeRecovery.itemsAt(regionResolver.getAccountId(), storageKey, liveItems, time);
+                : pointInTimeRecovery.itemsAt(regionResolver.getAccountId(), storageKey, liveItems, time,
+                        (itemKey, read) -> withItemLock(storageKey, itemKey, read));
 
         // The worker gets its own copy so the object serialized into this response never
         // changes underneath the handler, and the request account so its writes land there.

@@ -69,6 +69,69 @@ class DynamoDbPointInTimeRecoveryTest {
         assertEquals(item("B"), changes.getFirst().newItem());
     }
 
+    @Test
+    void itemsAtWaitsForAWriteThatIsRecordedButNotYetWritten() {
+        table.setPointInTimeRecoveryEnabled(true);
+        live.put("k", item("A"));
+        recovery.recordItem(ACCOUNT, TABLE_KEY, table, "k", item("A"));
+
+        List<JsonNode> items = recovery.itemsAt(ACCOUNT, TABLE_KEY, live, clock.instant(),
+                (itemKey, read) -> {
+                    live.put(itemKey, item("B"));
+                    return read.get();
+                });
+
+        assertEquals(List.of(item("B")), items);
+    }
+
+    @Test
+    void itemsAtWaitsForADeleteThatIsRecordedButNotYetDone() {
+        table.setPointInTimeRecoveryEnabled(true);
+        live.put("k", item("A"));
+        recovery.recordItem(ACCOUNT, TABLE_KEY, table, "k", item("A"));
+
+        List<JsonNode> items = recovery.itemsAt(ACCOUNT, TABLE_KEY, live, clock.instant(),
+                (itemKey, read) -> {
+                    live.remove(itemKey);
+                    return read.get();
+                });
+
+        assertEquals(List.of(), items);
+    }
+
+    @Test
+    void itemsAtLeavesOutAWriteAfterTheTimeThatFinishesBeforeTheItemIsRead() {
+        table.setPointInTimeRecoveryEnabled(true);
+        recovery.recordItem(ACCOUNT, TABLE_KEY, table, "k", null);
+        live.put("k", item("A"));
+        Instant time = clock.instant();
+
+        List<JsonNode> items = recovery.itemsAt(ACCOUNT, TABLE_KEY, live, time,
+                (itemKey, read) -> {
+                    clock.advance(Duration.ofSeconds(1));
+                    recovery.recordItem(ACCOUNT, TABLE_KEY, table, itemKey, live.get(itemKey));
+                    live.put(itemKey, item("B"));
+                    return read.get();
+                });
+
+        assertEquals(List.of(item("A")), items);
+    }
+
+    @Test
+    void itemsAtGivesTheSameItemsLaterWhenAWriteFollowsInTheSameMillisecond() {
+        table.setPointInTimeRecoveryEnabled(true);
+        // MutableClock moves on 1 ms at each read, so the write below reads this time.
+        Instant time = clock.instant().plusMillis(1);
+
+        List<JsonNode> first = recovery.itemsAt(ACCOUNT, TABLE_KEY, live, time, (itemKey, read) -> read.get());
+        recovery.recordItem(ACCOUNT, TABLE_KEY, table, "k", null);
+        live.put("k", item("A"));
+        List<JsonNode> later = recovery.itemsAt(ACCOUNT, TABLE_KEY, live, time, (itemKey, read) -> read.get());
+
+        assertEquals(List.of(), first);
+        assertEquals(first, later);
+    }
+
     private static JsonNode item(String value) {
         ObjectNode item = MAPPER.createObjectNode();
         item.putObject("pk").put("S", "k");
