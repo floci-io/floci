@@ -972,6 +972,8 @@ Launch templates store versioned launch data. New template versions can be creat
 `ModifyLaunchTemplate` honors `DryRun` for requests by template ID or name. A valid
 dry run returns `DryRunOperation` with HTTP 412 and leaves the default version,
 latest version, and stored launch data unchanged.
+Exactly one of `LaunchTemplateId` and `LaunchTemplateName` is required, including
+on a dry run; missing or conflicting selectors fail before any state changes.
 
 #### Launch template data members
 
