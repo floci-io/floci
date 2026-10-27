@@ -278,7 +278,9 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
     /**
      * The resolved property, or null when it is absent or {@code AWS::NoValue}, directly or as the
      * {@code Fn::If} branch its condition chooses. Every other value is kept as resolved, so a blank
-     * string a parameter supplies is a value, as the same string written literally is.
+     * string a parameter supplies is a value, as the same string written literally is. The stack
+     * engine already leaves such properties out before provisioning; omitting them here as well keeps
+     * the same answer for callers that hand over properties directly.
      */
     private static JsonNode resolved(JsonNode props, String name, ProvisionContext ctx) {
         if (props == null || !props.has(name)) {

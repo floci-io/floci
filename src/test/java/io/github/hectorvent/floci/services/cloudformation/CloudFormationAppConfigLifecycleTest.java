@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.appconfig.AppConfigService;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.services.appconfig.model.Deployment;
+import io.github.hectorvent.floci.services.appconfig.model.DeploymentSummary;
 import io.github.hectorvent.floci.services.appconfig.model.HostedConfigurationVersion;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AppConfigCfnProvisioner;
@@ -41,8 +42,9 @@ import static org.mockito.Mockito.when;
 
 /**
  * AppConfig resources through the real stack engine, for the paths that need it: the order the
- * engine deletes a removed application and its displaced children in, and a ContinueUpdateRollback
- * after an in-place undo that failed. The AppConfig service runs on in-memory storage, whose stores
+ * engine deletes a removed application and its displaced children in, a ContinueUpdateRollback
+ * after an in-place undo that failed, and what earlier deployments report once stack updates change
+ * or replace the strategy and profile they used. The AppConfig service runs on in-memory storage, whose stores
  * the test also reads directly to see what the API can no longer reach.
  */
 class CloudFormationAppConfigLifecycleTest {
@@ -134,6 +136,51 @@ class CloudFormationAppConfigLifecycleTest {
         Application restored = appConfig.getApplication(app);
         assertEquals("second", restored.getName());
         assertEquals(Map.of("stage", "2"), restored.getTags());
+    }
+
+    /**
+     * A deployment reports the profile name and strategy settings it started with: an in-place stack
+     * update that renames the profile and slows the strategy leaves it as it was, and so does a
+     * replacement that deletes the strategy, after which ListDeployments still answers.
+     */
+    @Test
+    void earlierDeploymentsKeepTheirSettingsThroughInPlaceUpdatesAndAStrategyReplacement() throws Exception {
+        String template = """
+                {"Resources":{
+                  "App":{"Type":"AWS::AppConfig::Application","Properties":{"Name":"orders"}},
+                  "Env":{"Type":"AWS::AppConfig::Environment","Properties":{"ApplicationId":{"Ref":"App"},"Name":"beta"}},
+                  "Profile":{"Type":"AWS::AppConfig::ConfigurationProfile","Properties":{
+                    "ApplicationId":{"Ref":"App"},"Name":"%s","LocationUri":"hosted"}},
+                  "Strategy":{"Type":"AWS::AppConfig::DeploymentStrategy","Properties":{
+                    "Name":"%s","ReplicateTo":"NONE","DeploymentDurationInMinutes":%d,"GrowthFactor":%d}}
+                }}""";
+        deploy("history", "CREATE", template.formatted("settings", "gradual", 0, 100));
+        Stack stack = stack("history");
+        String app = stack.getResources().get("App").getPhysicalId();
+        String env = stack.getResources().get("Env").getPhysicalId();
+        String profile = stack.getResources().get("Profile").getPhysicalId();
+        String strategy = stack.getResources().get("Strategy").getPhysicalId();
+        appConfig.createHostedConfigurationVersion(app, profile, "{}".getBytes(StandardCharsets.UTF_8),
+                "application/json", null);
+        appConfig.startDeployment(app, env, Map.of("ConfigurationProfileId", profile, "ConfigurationVersion", "1",
+                "DeploymentStrategyId", strategy));
+
+        deploy("history", "UPDATE", template.formatted("renamed", "gradual", 10, 20));
+        assertEquals("UPDATE_COMPLETE", stack("history").getStatus(), stack("history").getStatusReason());
+        assertEquals(strategy, stack("history").getResources().get("Strategy").getPhysicalId(), "changed in place");
+        assertStartedWith(app, env);
+
+        deploy("history", "UPDATE", template.formatted("renamed", "faster", 10, 20));
+        assertEquals("UPDATE_COMPLETE", stack("history").getStatus(), stack("history").getStatusReason());
+        assertNotEquals(strategy, stack("history").getResources().get("Strategy").getPhysicalId(), "replaced");
+        assertStartedWith(app, env);
+    }
+
+    private void assertStartedWith(String app, String env) {
+        DeploymentSummary deployment = appConfig.listDeployments(app, env, null, null).items().getFirst();
+        assertEquals("settings", deployment.getConfigurationName());
+        assertEquals(0, deployment.getDeploymentDurationInMinutes());
+        assertEquals(100f, deployment.getGrowthFactor());
     }
 
     private <V> StorageBackend<String, V> store(String fileName, TypeReference<Map<String, V>> type) {

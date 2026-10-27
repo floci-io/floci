@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.appconfig;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -44,6 +45,7 @@ public class AppConfigService {
     private static final int MAX_DEPLOYMENT_PAGE_TOKENS = 1000;
     private static final int MAX_MONITORS = 5;
     private static final int MAX_ARN_LENGTH = 2048;
+    private static final ObjectMapper COPIER = new ObjectMapper();
     private static final Pattern ROLE_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::\\d{12}:role/.*");
 
     @Inject
@@ -101,8 +103,8 @@ public class AppConfigService {
      * is the only caller.
      */
     public synchronized Application updateApplication(String applicationId, String name, String description) {
-        Application app = applicationStore.get(applicationId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application not found", 404));
+        Application app = copy(applicationStore.get(applicationId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application not found", 404)));
         app.setName(name);
         app.setDescription(description);
         applicationStore.put(app.getId(), app);
@@ -187,9 +189,9 @@ public class AppConfigService {
     public synchronized Environment updateEnvironment(String applicationId, String environmentId, String name,
                                                       String description, Object monitors) {
         List<Monitor> checked = monitors(monitors);
-        Environment env = environmentStore.get(environmentId)
+        Environment env = copy(environmentStore.get(environmentId)
                 .filter(e -> applicationId.equals(e.getApplicationId()))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Environment not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Environment not found", 404)));
         env.setName(name);
         env.setDescription(description);
         env.setMonitors(checked);
@@ -271,9 +273,9 @@ public class AppConfigService {
      */
     public synchronized ConfigurationProfile updateConfigurationProfile(String applicationId, String profileId,
                                                                         String name, String description) {
-        ConfigurationProfile profile = profileStore.get(profileId)
+        ConfigurationProfile profile = copy(profileStore.get(profileId)
                 .filter(p -> applicationId.equals(p.getApplicationId()))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Configuration profile not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Configuration profile not found", 404)));
         profile.setName(name);
         profile.setDescription(description);
         profileStore.put(profile.getId(), profile);
@@ -436,8 +438,8 @@ public class AppConfigService {
                                                                     int deploymentDurationInMinutes,
                                                                     int finalBakeTimeInMinutes, float growthFactor,
                                                                     String growthType) {
-        DeploymentStrategy strategy = strategyStore.get(id)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Deployment strategy not found", 404));
+        DeploymentStrategy strategy = copy(strategyStore.get(id)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Deployment strategy not found", 404)));
         strategy.setDescription(description);
         strategy.setDeploymentDurationInMinutes(deploymentDurationInMinutes);
         strategy.setFinalBakeTimeInMinutes(finalBakeTimeInMinutes);
@@ -656,15 +658,26 @@ public class AppConfigService {
     }
 
     public synchronized void tagApplication(String appId, Map<String, String> tags) {
-        Application app = getApplication(appId);
+        Application app = copy(getApplication(appId));
         app.getTags().putAll(tags);
         applicationStore.put(app.getId(), app);
     }
 
     public synchronized void untagApplication(String appId, List<String> tagKeys) {
-        Application app = getApplication(appId);
+        Application app = copy(getApplication(appId));
         tagKeys.forEach(app.getTags()::remove);
         applicationStore.put(app.getId(), app);
+    }
+
+    /**
+     * A copy of a stored entity for a write to change and put back. The in-memory stores hand out the
+     * stored instance itself, so changing it in place would let a concurrent reader, such as a
+     * ListDeployments reading a strategy, see some fields changed and others not. The models are plain
+     * Jackson beans, as storage persists them, so a round trip copies every field.
+     */
+    @SuppressWarnings("unchecked")
+    private static <T> T copy(T entity) {
+        return (T) COPIER.convertValue(entity, entity.getClass());
     }
 
     private static String shortId(int length) {
