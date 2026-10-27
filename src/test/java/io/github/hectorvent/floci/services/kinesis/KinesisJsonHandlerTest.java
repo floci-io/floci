@@ -21,6 +21,7 @@ import java.nio.ByteBuffer;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -1520,7 +1521,7 @@ class KinesisJsonHandlerTest {
         assertEquals(3, shards.size());
 
         ObjectNode parent = (ObjectNode) shards.get(0);
-        List<ObjectNode> children = new java.util.ArrayList<>();
+        List<ObjectNode> children = new ArrayList<>();
         for (JsonNode s : shards) {
             if (s.has("ParentShardId") && s.get("ParentShardId").asText().equals(parent.get("ShardId").asText())) {
                 children.add((ObjectNode) s);

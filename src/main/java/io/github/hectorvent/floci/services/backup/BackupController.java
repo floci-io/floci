@@ -19,6 +19,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -586,7 +587,7 @@ public class BackupController {
     private Map<String, String> readStringMap(JsonNode node, String field) {
         JsonNode mapNode = node.path(field);
         if (mapNode.isMissingNode() || mapNode.isNull()) {
-            return new java.util.HashMap<>();
+            return new HashMap<>();
         }
         return objectMapper.convertValue(mapNode, Map.class);
     }

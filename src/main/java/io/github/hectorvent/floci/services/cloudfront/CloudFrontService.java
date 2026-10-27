@@ -827,7 +827,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     public ResponseHeadersPolicy getResponseHeadersPolicy(String id) {
         return rhpStore.get(id)
-                .or(() -> java.util.Optional.ofNullable(MANAGED_RESPONSE_HEADERS_POLICIES.get(id)))
+                .or(() -> Optional.ofNullable(MANAGED_RESPONSE_HEADERS_POLICIES.get(id)))
                 .orElseThrow(() -> new AwsException("NoSuchResponseHeadersPolicy",
                         "The specified response headers policy does not exist.", 404));
     }
@@ -927,7 +927,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         if (config == null) {
             return;
         }
-        Set<String> policyIds = new java.util.LinkedHashSet<>();
+        Set<String> policyIds = new LinkedHashSet<>();
         if (config.getDefaultCacheBehavior() != null) {
             addResponseHeadersPolicyId(
                     policyIds,

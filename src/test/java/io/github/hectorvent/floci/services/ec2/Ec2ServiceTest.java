@@ -93,6 +93,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -7537,11 +7538,11 @@ class Ec2ServiceTest {
             Ec2Service service = prefixListService();
             String[] fixture = attachmentFixture(service);
             int threads = 6;
-            java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-            java.util.concurrent.ExecutorService pool =
-                    java.util.concurrent.Executors.newFixedThreadPool(threads);
-            List<String> created = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
-            List<String> errors = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+            CountDownLatch start = new CountDownLatch(1);
+            ExecutorService pool =
+                    Executors.newFixedThreadPool(threads);
+            List<String> created = Collections.synchronizedList(new ArrayList<>());
+            List<String> errors = Collections.synchronizedList(new ArrayList<>());
 
             for (int i = 0; i < threads; i++) {
                 pool.submit(() -> {
@@ -7559,7 +7560,7 @@ class Ec2ServiceTest {
             }
             start.countDown();
             pool.shutdown();
-            assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
             assertEquals(1, created.size(), "trial " + trial + ": exactly one create may win");
             assertEquals(threads - 1, errors.size(), "every loser is told the VPC is already attached");
@@ -7581,9 +7582,9 @@ class Ec2ServiceTest {
             for (int trial = 0; trial < 10; trial++) {
                 Ec2Service service = prefixListService();
                 String[] fixture = attachmentFixture(service);
-                java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-                java.util.concurrent.ExecutorService pool =
-                        java.util.concurrent.Executors.newFixedThreadPool(2);
+                CountDownLatch start = new CountDownLatch(1);
+                ExecutorService pool =
+                        Executors.newFixedThreadPool(2);
 
                 pool.submit(() -> {
                     try {
@@ -7609,7 +7610,7 @@ class Ec2ServiceTest {
                 });
                 start.countDown();
                 pool.shutdown();
-                assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+                assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
                 List<TransitGatewayVpcAttachment> attachments =
                         service.describeTransitGatewayVpcAttachments("us-east-1", List.of(), Map.of());
@@ -7646,9 +7647,9 @@ class Ec2ServiceTest {
                 if (!attachment) {
                     service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId);
                 }
-                java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-                java.util.concurrent.ExecutorService pool =
-                        java.util.concurrent.Executors.newFixedThreadPool(2);
+                CountDownLatch start = new CountDownLatch(1);
+                ExecutorService pool =
+                        Executors.newFixedThreadPool(2);
 
                 pool.submit(() -> {
                     try {
@@ -7672,7 +7673,7 @@ class Ec2ServiceTest {
                 });
                 start.countDown();
                 pool.shutdown();
-                assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+                assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
                 String what = attachment ? "attachment" : "gateway";
                 if (attachment) {
@@ -8140,9 +8141,9 @@ class Ec2ServiceTest {
             String[] fixture = attachmentFixture(service);
             String spare = service.createTransitGatewayRouteTable("us-east-1", fixture[0], List.of())
                     .getTransitGatewayRouteTableId();
-            java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-            java.util.concurrent.ExecutorService pool =
-                    java.util.concurrent.Executors.newFixedThreadPool(2);
+            CountDownLatch start = new CountDownLatch(1);
+            ExecutorService pool =
+                    Executors.newFixedThreadPool(2);
 
             pool.submit(() -> {
                 try {
@@ -8165,7 +8166,7 @@ class Ec2ServiceTest {
             });
             start.countDown();
             pool.shutdown();
-            assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
             boolean tableExists = service.describeTransitGatewayRouteTables("us-east-1", List.of(), Map.of())
                     .stream().anyMatch(rt -> rt.getTransitGatewayRouteTableId().equals(spare));
@@ -8561,7 +8562,7 @@ class Ec2ServiceTest {
                 return (AccountAwareStorageBackend<V>) override;
             }
             AccountAwareStorageBackend<V> backend = requestContextInstance != null
-                    ? new AccountAwareStorageBackend<>(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(),
+                    ? new AccountAwareStorageBackend<>(new InMemoryStorage<>(),
                             requestContextInstance, "000000000000")
                     : AccountAwareStorageBackend.inMemory("000000000000");
             created.add(backend);
@@ -8580,7 +8581,7 @@ class Ec2ServiceTest {
         private int putCount;
 
         private DetachedImageStorage() {
-            super(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(), null, "000000000000");
+            super(new InMemoryStorage<>(), null, "000000000000");
         }
 
         @Override
@@ -8634,8 +8635,8 @@ class Ec2ServiceTest {
             copy.setCreationSourceInstanceId(source.getCreationSourceInstanceId());
             copy.setDockerImage(source.getDockerImage());
             copy.setBlockDeviceMappings(source.getBlockDeviceMappings() == null
-                    ? List.of() : new java.util.ArrayList<>(source.getBlockDeviceMappings()));
-            copy.setTags(source.getTags() == null ? List.of() : new java.util.ArrayList<>(source.getTags()));
+                    ? List.of() : new ArrayList<>(source.getBlockDeviceMappings()));
+            copy.setTags(source.getTags() == null ? List.of() : new ArrayList<>(source.getTags()));
             return copy;
         }
     }
