@@ -174,6 +174,101 @@ class Ec2VolumeKmsKeyIdIntegrationTest {
         call("TerminateInstances", "InstanceId.1", instanceId);
     }
 
+    /**
+     * A launch's encrypted volumes keep the key their block device mapping names, the root
+     * included, and one that names none gets the region's default.
+     */
+    @Test
+    void launchVolumesKeepTheKeyTheirMappingNames() {
+        String instanceId = launch(
+                "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
+                "BlockDeviceMapping.1.Ebs.Encrypted", "true",
+                "BlockDeviceMapping.1.Ebs.KmsKeyId", KEY_ARN,
+                "BlockDeviceMapping.2.DeviceName", "/dev/sdf",
+                "BlockDeviceMapping.2.Ebs.VolumeSize", "1",
+                "BlockDeviceMapping.2.Ebs.Encrypted", "true",
+                "BlockDeviceMapping.2.Ebs.KmsKeyId", DEFAULT_KEY_ARN,
+                "BlockDeviceMapping.3.DeviceName", "/dev/sdg",
+                "BlockDeviceMapping.3.Ebs.VolumeSize", "1",
+                "BlockDeviceMapping.3.Ebs.Encrypted", "true");
+        try {
+            assertEquals(List.of(KEY_ARN), XmlParser.extractAll(attachedVolume(instanceId, "/dev/xvda"), "kmsKeyId"));
+            assertEquals(List.of(DEFAULT_KEY_ARN),
+                    XmlParser.extractAll(attachedVolume(instanceId, "/dev/sdf"), "kmsKeyId"));
+            assertEquals(List.of("alias/aws/ebs"),
+                    XmlParser.extractAll(attachedVolume(instanceId, "/dev/sdg"), "kmsKeyId"));
+        } finally {
+            call("TerminateInstances", "InstanceId.1", instanceId);
+        }
+    }
+
+    /** A launch template's mapping key reaches the volume a launch from the template creates. */
+    @Test
+    void aLaunchTemplateMappingKeyReachesTheVolume() {
+        String templateId = ec2("CreateLaunchTemplate", "LaunchTemplateName", "kms-key-" + System.nanoTime(),
+                "LaunchTemplateData.BlockDeviceMapping.1.DeviceName", "/dev/sdf",
+                "LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeSize", "1",
+                "LaunchTemplateData.BlockDeviceMapping.1.Ebs.Encrypted", "true",
+                "LaunchTemplateData.BlockDeviceMapping.1.Ebs.KmsKeyId", KEY_ARN)
+                .when().post("/").then().statusCode(200)
+                .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+        String instanceId = launch("LaunchTemplate.LaunchTemplateId", templateId);
+        try {
+            assertEquals(List.of(KEY_ARN), XmlParser.extractAll(attachedVolume(instanceId, "/dev/sdf"), "kmsKeyId"));
+        } finally {
+            call("TerminateInstances", "InstanceId.1", instanceId);
+        }
+    }
+
+    /** With encryption by default on, a launch's volumes that name no key get the default key. */
+    @Test
+    void launchVolumesEncryptedByDefaultGetTheDefaultKey() {
+        call("EnableEbsEncryptionByDefault");
+        try {
+            call("ModifyEbsDefaultKmsKeyId", "KmsKeyId", DEFAULT_KEY_ARN);
+            String instanceId = launch();
+            try {
+                assertEquals(List.of(DEFAULT_KEY_ARN),
+                        XmlParser.extractAll(attachedVolume(instanceId, "/dev/xvda"), "kmsKeyId"));
+            } finally {
+                call("TerminateInstances", "InstanceId.1", instanceId);
+            }
+        } finally {
+            try {
+                call("DisableEbsEncryptionByDefault");
+            } finally {
+                call("ResetEbsDefaultKmsKeyId");
+            }
+        }
+    }
+
+    private static String launch(String... extraParams) {
+        String[] params = new String[extraParams.length + 8];
+        params[0] = "ImageId";
+        params[1] = "ami-0abcdef1234567890";
+        params[2] = "InstanceType";
+        params[3] = "t3.micro";
+        params[4] = "MinCount";
+        params[5] = "1";
+        params[6] = "MaxCount";
+        params[7] = "1";
+        System.arraycopy(extraParams, 0, params, 8, extraParams.length);
+        return ec2("RunInstances", params).when().post("/").then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+    }
+
+    /** DescribeVolumes for the one volume attached to the instance at the device. */
+    private static String attachedVolume(String instanceId, String device) {
+        String xml = ec2("DescribeVolumes",
+                "Filter.1.Name", "attachment.instance-id", "Filter.1.Value.1", instanceId,
+                "Filter.2.Name", "attachment.device", "Filter.2.Value.1", device)
+                .when().post("/").then().statusCode(200)
+                .extract().asString();
+        assertEquals(1, XmlParser.extractAll(xml, "size").size(), xml);
+        assertEquals(List.of("true"), XmlParser.extractAll(xml, "encrypted"), xml);
+        return xml;
+    }
+
     @Test
     void theAwsSdkReadsTheKeyFromCreateVolumeAndDescribeVolumes() {
         try (Ec2Client client = Ec2Client.builder()

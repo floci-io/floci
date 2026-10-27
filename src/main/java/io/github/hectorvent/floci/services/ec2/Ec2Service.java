@@ -4225,7 +4225,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         inst.setRootDeviceName(rootDeviceName);
                         for (LaunchVolume planned : launchVolumes) {
                             Volume volume = newVolume(region, az, planned.volumeType(), planned.size(),
-                                    planned.encrypted(), null, planned.iops(), planned.throughput(),
+                                    planned.encrypted(), planned.kmsKeyId(), planned.iops(), planned.throughput(),
                                     planned.snapshotId());
                             volume.setState("in-use");
                             VolumeAttachment attachment = new VolumeAttachment();
@@ -8678,7 +8678,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /** One EBS volume a launch creates, settled before anything of the launch is stored. */
     private record LaunchVolume(String deviceName, String snapshotId, int size, String volumeType,
-                                int iops, Integer throughput, boolean encrypted, boolean deleteOnTermination) {}
+                                int iops, Integer throughput, boolean encrypted, String kmsKeyId,
+                                boolean deleteOnTermination) {}
 
     /**
      * The EBS volumes a launch creates, one per device: the AMI's block device mappings with the
@@ -8767,7 +8768,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             Integer throughput = "gp3".equals(volumeType) ? ebs.getThroughput() : null;
             planned.add(new LaunchVolume(mapping.getDeviceName(), snapshotId, size, volumeType, iops, throughput,
                     Boolean.TRUE.equals(ebs.getEncrypted()) || snapshot != null && snapshot.isEncrypted(),
-                    !Boolean.FALSE.equals(ebs.getDeleteOnTermination())));
+                    ebs.getKmsKeyId(), !Boolean.FALSE.equals(ebs.getDeleteOnTermination())));
         }
         return planned;
     }
