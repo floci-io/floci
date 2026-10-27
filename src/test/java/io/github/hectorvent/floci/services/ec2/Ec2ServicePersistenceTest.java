@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.Address;
@@ -700,13 +701,12 @@ class Ec2ServicePersistenceTest {
         String keyArn = "arn:aws:kms:us-east-1:000000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab";
         String created = query(newService(dir), "CreateVolume", "AvailabilityZone", "us-east-1a", "Size", "1",
                 "Encrypted", "true", "KmsKeyId", keyArn);
-        String volumeId = created.substring(created.indexOf("<volumeId>") + "<volumeId>".length(),
-                created.indexOf("</volumeId>"));
+        String volumeId = XmlParser.extractFirst(created, "volumeId", null);
 
         String described = query(newService(dir), "DescribeVolumes", "VolumeId.1", volumeId);
 
-        assertTrue(described.contains("<encrypted>true</encrypted>"), described);
-        assertTrue(described.contains("<kmsKeyId>" + keyArn + "</kmsKeyId>"), described);
+        assertEquals(List.of("true"), XmlParser.extractAll(described, "encrypted"), described);
+        assertEquals(List.of(keyArn), XmlParser.extractAll(described, "kmsKeyId"), described);
     }
 
     /**
@@ -781,10 +781,11 @@ class Ec2ServicePersistenceTest {
         assertFalse(restored.get("vol-0bbbbbbbbbbbbbbbb").isEncrypted());
 
         String described = query(restarted, "DescribeVolumes");
-        assertTrue(described.contains("<volumeId>vol-0aaaaaaaaaaaaaaaa</volumeId>"), described);
-        assertTrue(described.contains("<volumeId>vol-0bbbbbbbbbbbbbbbb</volumeId>"), described);
-        assertTrue(described.contains("<encrypted>true</encrypted>"), described);
-        assertFalse(described.contains("kmsKeyId"), described);
+        List<String> volumeIds = XmlParser.extractAll(described, "volumeId");
+        assertTrue(volumeIds.contains("vol-0aaaaaaaaaaaaaaaa"), described);
+        assertTrue(volumeIds.contains("vol-0bbbbbbbbbbbbbbbb"), described);
+        assertTrue(XmlParser.extractAll(described, "encrypted").contains("true"), described);
+        assertEquals(List.of(), XmlParser.extractAll(described, "kmsKeyId"), described);
     }
 
     private static String query(Ec2Service service, String action, String... params) {

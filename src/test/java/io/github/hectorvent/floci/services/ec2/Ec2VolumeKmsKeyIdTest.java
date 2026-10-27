@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
@@ -14,14 +15,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -106,11 +105,11 @@ class Ec2VolumeKmsKeyIdTest {
                 : ok("CreateVolume", "AvailabilityZone", AZ, "Size", "1", "Encrypted", encrypted,
                         "KmsKeyId", KEY_ARN);
         assertEquals("false", first(created, "encrypted"));
-        assertFalse(created.contains("kmsKeyId"), created);
+        assertEquals(List.of(), XmlParser.extractAll(created, "kmsKeyId"), created);
 
         String described = ok("DescribeVolumes", "VolumeId.1", first(created, "volumeId"));
         assertEquals("false", first(described, "encrypted"));
-        assertFalse(described.contains("kmsKeyId"), described);
+        assertEquals(List.of(), XmlParser.extractAll(described, "kmsKeyId"), described);
     }
 
     @Test
@@ -138,9 +137,9 @@ class Ec2VolumeKmsKeyIdTest {
     }
 
     private static String first(String xml, String element) {
-        Matcher matcher = Pattern.compile("<" + element + ">([^<]*)</" + element + ">").matcher(xml);
-        assertTrue(matcher.find(), "no <" + element + "> in " + xml);
-        return matcher.group(1).trim();
+        List<String> values = XmlParser.extractAll(xml, element);
+        assertFalse(values.isEmpty(), "no <" + element + "> in " + xml);
+        return values.getFirst();
     }
 
     private static final class MemoryFactory extends StorageFactory {

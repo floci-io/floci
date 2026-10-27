@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.specification.RequestSpecification;
@@ -13,11 +14,10 @@ import software.amazon.awssdk.services.ec2.model.CreateVolumeResponse;
 import software.amazon.awssdk.services.ec2.model.Volume;
 
 import java.net.URI;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -75,6 +75,10 @@ class Ec2VolumeKmsKeyIdIntegrationTest {
                 .extract().xmlPath().getString("DescribeVolumesResponse.volumeSet.item.kmsKeyId");
     }
 
+    private static void assertNoKmsKeyId(String xml) {
+        assertEquals(List.of(), XmlParser.extractAll(xml, "kmsKeyId"), xml);
+    }
+
     private static void call(String action, String... params) {
         ec2(action, params).when().post("/").then().statusCode(200);
     }
@@ -97,16 +101,16 @@ class Ec2VolumeKmsKeyIdIntegrationTest {
 
     @Test
     void aVolumeThatIsNotEncryptedHasNoKmsKeyIdElement() {
-        String volumeId = createVolume("KmsKeyId", KEY_ARN)
+        String created = createVolume("KmsKeyId", KEY_ARN)
                 .when().post("/").then().statusCode(200)
                 .body("CreateVolumeResponse.encrypted", equalTo("false"))
-                .body(not(containsString("kmsKeyId")))
-                .extract().path("CreateVolumeResponse.volumeId");
+                .extract().asString();
+        assertNoKmsKeyId(created);
 
-        ec2("DescribeVolumes", "VolumeId.1", volumeId)
+        assertNoKmsKeyId(ec2("DescribeVolumes", "VolumeId.1", XmlParser.extractFirst(created, "volumeId", null))
                 .when().post("/").then().statusCode(200)
                 .body("DescribeVolumesResponse.volumeSet.item.encrypted", equalTo("false"))
-                .body(not(containsString("kmsKeyId")));
+                .extract().asString());
     }
 
     /**
@@ -163,10 +167,10 @@ class Ec2VolumeKmsKeyIdIntegrationTest {
                 .extract().path("DescribeInstancesResponse.reservationSet.item.instancesSet.item"
                         + ".blockDeviceMapping.item.ebs.volumeId");
 
-        ec2("DescribeVolumes", "VolumeId.1", rootVolumeId)
+        assertNoKmsKeyId(ec2("DescribeVolumes", "VolumeId.1", rootVolumeId)
                 .when().post("/").then().statusCode(200)
                 .body("DescribeVolumesResponse.volumeSet.item.encrypted", equalTo("false"))
-                .body(not(containsString("kmsKeyId")));
+                .extract().asString());
         call("TerminateInstances", "InstanceId.1", instanceId);
     }
 
