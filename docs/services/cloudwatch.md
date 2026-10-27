@@ -453,8 +453,9 @@ existing child, or a `SetAlarmState` to the state a child already has, is not a 
 so a composite alarm set with `SetAlarmState` keeps that state until a child really changes. An
 update that leaves the state unchanged also keeps the state reason, reason data and timestamps.
 A composite alarm on a cycle of rules is not evaluated, not even by the update that closes the
-cycle, where CloudWatch evaluates that alarm and the ones after it; composite alarms above a cycle
-are still evaluated. A change of state records the `StateReason` CloudWatch writes:
+cycle, where CloudWatch evaluates that alarm and the ones after it. One above a cycle is still
+evaluated when one of its children changes state. A change of state records the `StateReason`
+CloudWatch writes:
 
 - `<alarm ARN> was created and its alarm rule evaluates to OK` when the alarm is created,
 - `<alarm ARN> was updated and its new alarm rule evaluates to ALARM` when an update changes it,

@@ -642,6 +642,10 @@ public class CloudWatchMetricsService {
                 progress = true;
             }
         } while (progress && !pending.isEmpty());
+        if (!pending.isEmpty()) {
+            // A cycle the name lookup above misses, as when an alarm is named like another's ARN.
+            LOG.debugv("Composite alarm evaluation stopped with alarms still pending: {0}", pending.keySet());
+        }
     }
 
     /** The child {@code rule} names that changed state most recently in this evaluation, or null if none resolves. */
