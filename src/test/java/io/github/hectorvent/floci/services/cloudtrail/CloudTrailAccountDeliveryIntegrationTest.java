@@ -48,12 +48,7 @@ class CloudTrailAccountDeliveryIntegrationTest {
         String name = "account-events-" + UUID.randomUUID();
         Map<String, String> buckets = Map.of(FIRST_ACCOUNT, name + "-first", SECOND_ACCOUNT, name + "-second");
         try {
-            buckets.forEach((account, bucket) -> RequestScopes.runAs(account, REGION, () -> {
-                s3.createBucket(bucket, REGION);
-                trails.createTrail(REGION, name, bucket, null, null, false, false, false, false);
-                trails.putEventSelectors(REGION, name, List.of(new EventSelector("All", false,
-                        List.of(new DataResource("AWS::S3::Object", List.of("arn:aws:s3:::source/"))), List.of())));
-            }));
+            buckets.forEach((account, bucket) -> createS3DataTrail(account, REGION, name, bucket));
             RequestScopes.runAs(FIRST_ACCOUNT, REGION, () -> trails.startLogging(REGION, name));
             RequestScopes.runAs(SECOND_ACCOUNT, REGION, () -> {
                 trails.emitS3DataEvent(event());
@@ -74,41 +69,24 @@ class CloudTrailAccountDeliveryIntegrationTest {
                     trails.pendingRecordCount(new CloudTrailService.TrailKey(REGION, name, REGION)),
                     "deleting one account's trail must preserve the other account's pending records"));
 
-            try (ExecutorService worker = Executors.newSingleThreadExecutor()) {
-                worker.submit(writer::flushNow).get(10, TimeUnit.SECONDS);
-            }
+            flushLogsOnWorker();
 
             for (String account : buckets.keySet()) {
-                List<S3Object> objects = RequestScopes.callAs(account, REGION,
-                        () -> s3.listObjects(buckets.get(account), null, null, 100));
                 if (deleteFirstTrail && FIRST_ACCOUNT.equals(account)) {
-                    assertTrue(objects.isEmpty());
+                    RequestScopes.runAs(account, REGION, () -> assertTrue(
+                            s3.listObjects(buckets.get(account), null, null, 100).isEmpty()));
                     continue;
                 }
-                assertEquals(1, objects.size(), "each account must receive its own log file");
-                assertTrue(objects.getFirst().getKey().startsWith("AWSLogs/" + account + "/CloudTrail/" + REGION + "/"));
-                byte[] content = RequestScopes.callAs(account, REGION,
-                        () -> s3.getObject(buckets.get(account), objects.getFirst().getKey()).getData());
-                try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(content))) {
-                    JsonNode records = mapper.readTree(gzip).path("Records");
-                    assertEquals(1, records.size());
-                    assertEquals("Data", records.get(0).path("eventCategory").asText());
-                    assertEquals(account, records.get(0).path("recipientAccountId").asText());
-                    assertEquals(account, records.get(0).path("userIdentity").path("accountId").asText());
-                }
+                JsonNode records = readDeliveredRecords(account, REGION, buckets.get(account));
+                assertEquals(1, records.size());
+                assertEquals("Data", records.get(0).path("eventCategory").asText());
+                assertEquals(account, records.get(0).path("recipientAccountId").asText());
+                assertEquals(account, records.get(0).path("userIdentity").path("accountId").asText());
                 RequestScopes.runAs(account, REGION, () -> assertEquals(0,
                         trails.pendingRecordCount(new CloudTrailService.TrailKey(REGION, name, REGION))));
             }
         } finally {
-            buckets.forEach((account, bucket) -> RequestScopes.runAs(account, REGION, () -> {
-                if (trails.getTrail(REGION, name) != null) {
-                    trails.deleteTrail(REGION, name);
-                }
-                for (S3Object object : s3.listObjects(bucket, null, null, 100)) {
-                    s3.deleteObject(bucket, object.getKey());
-                }
-                s3.deleteBucket(bucket);
-            }));
+            buckets.forEach((account, bucket) -> deleteTrailAndBucket(account, REGION, name, bucket));
         }
     }
 
@@ -118,15 +96,14 @@ class CloudTrailAccountDeliveryIntegrationTest {
         String name = "region-events-" + UUID.randomUUID();
         Map<String, String> buckets = Map.of(REGION, name + "-deleted", retainedRegion, name + "-retained");
         try {
-            buckets.forEach((region, bucket) -> RequestScopes.runAs(FIRST_ACCOUNT, region, () -> {
-                s3.createBucket(bucket, region);
-                trails.createTrail(region, name, bucket, null, null, false, false, false, false);
-                trails.putEventSelectors(region, name, List.of(new EventSelector("All", false,
-                        List.of(new DataResource("AWS::S3::Object", List.of("arn:aws:s3:::source/"))), List.of())));
-                trails.startLogging(region, name);
-                trails.emitS3DataEvent(event(region));
-                assertEquals(1, trails.pendingRecordCount(new CloudTrailService.TrailKey(region, name, region)));
-            }));
+            buckets.forEach((region, bucket) -> {
+                createS3DataTrail(FIRST_ACCOUNT, region, name, bucket);
+                RequestScopes.runAs(FIRST_ACCOUNT, region, () -> {
+                    trails.startLogging(region, name);
+                    trails.emitS3DataEvent(event(region));
+                    assertEquals(1, trails.pendingRecordCount(new CloudTrailService.TrailKey(region, name, region)));
+                });
+            });
             String deletedArn = RequestScopes.callAs(FIRST_ACCOUNT, REGION,
                     () -> trails.getTrail(REGION, name).trailArn());
             RequestScopes.runAs(FIRST_ACCOUNT, retainedRegion, () -> {
@@ -136,38 +113,59 @@ class CloudTrailAccountDeliveryIntegrationTest {
                         "deleting by ARN must preserve the same account's other home-region buffer");
             });
 
-            try (ExecutorService worker = Executors.newSingleThreadExecutor()) {
-                worker.submit(writer::flushNow).get(10, TimeUnit.SECONDS);
-            }
+            flushLogsOnWorker();
 
             RequestScopes.runAs(FIRST_ACCOUNT, REGION, () -> assertTrue(
                     s3.listObjects(buckets.get(REGION), null, null, 100).isEmpty()));
-            List<S3Object> objects = RequestScopes.callAs(FIRST_ACCOUNT, retainedRegion,
-                    () -> s3.listObjects(buckets.get(retainedRegion), null, null, 100));
-            assertEquals(1, objects.size(), "the surviving home-region trail must receive its log");
-            assertTrue(objects.getFirst().getKey().startsWith("AWSLogs/" + FIRST_ACCOUNT + "/CloudTrail/" + retainedRegion + "/"));
-            byte[] content = RequestScopes.callAs(FIRST_ACCOUNT, retainedRegion,
-                    () -> s3.getObject(buckets.get(retainedRegion), objects.getFirst().getKey()).getData());
-            try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(content))) {
-                JsonNode records = mapper.readTree(gzip).path("Records");
-                assertEquals(1, records.size());
-                assertEquals(FIRST_ACCOUNT, records.get(0).path("recipientAccountId").asText());
-                assertEquals(retainedRegion, records.get(0).path("awsRegion").asText());
-                assertEquals("PutObject", records.get(0).path("eventName").asText());
-            }
+            JsonNode records = readDeliveredRecords(FIRST_ACCOUNT, retainedRegion, buckets.get(retainedRegion));
+            assertEquals(1, records.size());
+            assertEquals(FIRST_ACCOUNT, records.get(0).path("recipientAccountId").asText());
+            assertEquals(retainedRegion, records.get(0).path("awsRegion").asText());
+            assertEquals("PutObject", records.get(0).path("eventName").asText());
             RequestScopes.runAs(FIRST_ACCOUNT, retainedRegion, () -> assertEquals(0,
                     trails.pendingRecordCount(new CloudTrailService.TrailKey(retainedRegion, name, retainedRegion))));
         } finally {
-            buckets.forEach((region, bucket) -> RequestScopes.runAs(FIRST_ACCOUNT, region, () -> {
-                if (trails.getTrail(region, name) != null) {
-                    trails.deleteTrail(region, name);
-                }
-                for (S3Object object : s3.listObjects(bucket, null, null, 100)) {
-                    s3.deleteObject(bucket, object.getKey());
-                }
-                s3.deleteBucket(bucket);
-            }));
+            buckets.forEach((region, bucket) -> deleteTrailAndBucket(FIRST_ACCOUNT, region, name, bucket));
         }
+    }
+
+    private void createS3DataTrail(String account, String region, String name, String bucket) {
+        RequestScopes.runAs(account, region, () -> {
+            s3.createBucket(bucket, region);
+            trails.createTrail(region, name, bucket, null, null, false, false, false, false);
+            trails.putEventSelectors(region, name, List.of(new EventSelector("All", false,
+                    List.of(new DataResource("AWS::S3::Object", List.of("arn:aws:s3:::source/"))), List.of())));
+        });
+    }
+
+    private void flushLogsOnWorker() throws Exception {
+        try (ExecutorService worker = Executors.newSingleThreadExecutor()) {
+            worker.submit(writer::flushNow).get(10, TimeUnit.SECONDS);
+        }
+    }
+
+    private JsonNode readDeliveredRecords(String account, String region, String bucket) throws Exception {
+        List<S3Object> objects = RequestScopes.callAs(account, region,
+                () -> s3.listObjects(bucket, null, null, 100));
+        assertEquals(1, objects.size(), "each trail must receive its own log file");
+        assertTrue(objects.getFirst().getKey().startsWith("AWSLogs/" + account + "/CloudTrail/" + region + "/"));
+        byte[] content = RequestScopes.callAs(account, region,
+                () -> s3.getObject(bucket, objects.getFirst().getKey()).getData());
+        try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(content))) {
+            return mapper.readTree(gzip).path("Records");
+        }
+    }
+
+    private void deleteTrailAndBucket(String account, String region, String name, String bucket) {
+        RequestScopes.runAs(account, region, () -> {
+            if (trails.getTrail(region, name) != null) {
+                trails.deleteTrail(region, name);
+            }
+            for (S3Object object : s3.listObjects(bucket, null, null, 100)) {
+                s3.deleteObject(bucket, object.getKey());
+            }
+            s3.deleteBucket(bucket);
+        });
     }
 
     private CloudTrailService.S3EventInput event() {
