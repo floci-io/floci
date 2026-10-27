@@ -108,11 +108,13 @@ class CloudWatchCompositeAlarmTest {
         });
     }
 
+    /** TreatMissingData=ignore keeps the emulator's alarm evaluator from resetting the states these tests set. */
     private String metricAlarm(String prefix) {
         String name = TestFixtures.uniqueName(prefix);
         cloudWatch.putMetricAlarm(request -> request.alarmName(name).namespace("Compat/Composite")
                 .metricName("Errors").statistic(Statistic.SUM).period(3600).evaluationPeriods(1).threshold(1.0)
-                .comparisonOperator(ComparisonOperator.GREATER_THAN_THRESHOLD).actionsEnabled(false));
+                .comparisonOperator(ComparisonOperator.GREATER_THAN_THRESHOLD).treatMissingData("ignore")
+                .actionsEnabled(false));
         metricAlarms.add(name);
         return name;
     }

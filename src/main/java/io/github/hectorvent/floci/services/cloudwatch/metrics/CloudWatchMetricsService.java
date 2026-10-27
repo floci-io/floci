@@ -380,9 +380,17 @@ public class CloudWatchMetricsService {
         };
     }
 
+    /**
+     * Creates or updates a metric alarm. An update keeps the alarm's state, so composite alarms
+     * above it are not evaluated: one set with SetAlarmState returns to its actual state only once
+     * a child changes state.
+     */
     public synchronized void putMetricAlarm(MetricAlarm alarm, String region) {
+        boolean created = alarmStore.get(region + "::" + alarm.getAlarmName()).isEmpty();
         putAlarm(alarm, region);
-        evaluateComposites(region, Set.of(alarm.getAlarmName()));
+        if (created) {
+            evaluateComposites(region, Set.of(alarm.getAlarmName()));
+        }
     }
 
     public void putCompositeAlarm(CompositeAlarm alarm, String region) {
@@ -601,27 +609,29 @@ public class CloudWatchMetricsService {
                     if (stateOrder == null) {
                         stateOrder = stateOrder(region);
                     }
-                    String reason;
+                    String reason = null;
                     Long since = null;
                     if (next.getKey().equals(newAlarm)) {
                         reason = alarm.getAlarmArn() + (created ? " was created and its alarm rule evaluates to "
                                 : " was updated and its new alarm rule evaluates to ") + state;
                     } else {
-                        Map<String, Long> order = stateOrder;
-                        Alarm trigger = rule.references().stream().map(alarms::get).filter(Objects::nonNull)
-                                .filter(child -> changed.contains(child.getAlarmName())
-                                        || changed.contains(child.getAlarmArn()))
-                                .max(Comparator.comparingLong(child -> orderOf(child, order))).orElseThrow();
-                        reason = trigger.getAlarmArn() + " transitioned to " + trigger.getStateValue() + " at "
-                                + REASON_TIME.format(Instant.ofEpochSecond(trigger.lastTransitionTimestamp()));
-                        since = orderOf(alarm, stateOrder);
+                        Alarm trigger = latestChangedChild(rule, alarms, changed, stateOrder);
+                        if (trigger != null) {
+                            reason = trigger.getAlarmArn() + " transitioned to " + trigger.getStateValue() + " at "
+                                    + REASON_TIME.format(Instant.ofEpochSecond(trigger.lastTransitionTimestamp()));
+                            since = orderOf(alarm, stateOrder);
+                        }
                     }
-                    String data = triggeringAlarms(rule.agreeing(states, triggered), alarms, stateOrder, since);
-                    changeState(alarm, region, state, reason, data);
-                    // The transition is now the newest history entry.
-                    stateOrder.put(alarm.getAlarmName(), lastHistorySequence);
-                    changed.add(alarm.getAlarmName());
-                    changed.add(alarm.getAlarmArn());
+                    // No reason means the changed child no longer resolves, as one stored under another ARN
+                    // would not: nothing explains a change, so the alarm keeps its state.
+                    if (reason != null) {
+                        String data = triggeringAlarms(rule.agreeing(states, triggered), alarms, stateOrder, since);
+                        changeState(alarm, region, state, reason, data);
+                        // The transition is now the newest history entry.
+                        stateOrder.put(alarm.getAlarmName(), lastHistorySequence);
+                        changed.add(alarm.getAlarmName());
+                        changed.add(alarm.getAlarmArn());
+                    }
                 }
                 iterator.remove();
                 progress = true;
@@ -630,6 +640,14 @@ public class CloudWatchMetricsService {
         if (!pending.isEmpty()) {
             LOG.debugv("Composite alarm evaluation stopped at cyclic dependencies: {0}", pending.keySet());
         }
+    }
+
+    /** The child {@code rule} names that changed state most recently in this evaluation, or null if none resolves. */
+    private static Alarm latestChangedChild(CompositeAlarmRule.Rule rule, Map<String, Alarm> alarms, Set<String> changed,
+                                            Map<String, Long> stateOrder) {
+        return rule.references().stream().map(alarms::get).filter(Objects::nonNull)
+                .filter(child -> changed.contains(child.getAlarmName()) || changed.contains(child.getAlarmArn()))
+                .max(Comparator.comparingLong(child -> orderOf(child, stateOrder))).orElse(null);
     }
 
     /**
@@ -772,7 +790,9 @@ public class CloudWatchMetricsService {
 
             String oldState = alarm.getStateValue();
             changeState(alarm, region, stateValue, stateReason, stateReasonData);
-            evaluateComposites(region, Set.of(alarmName));
+            if (!stateValue.equals(oldState)) {
+                evaluateComposites(region, Set.of(alarmName));
+            }
             LOG.infov("SetAlarmState: {0} -> {1}", alarmName, stateValue);
             if (alarmSnsNotifier != null && alarm instanceof MetricAlarm metricAlarm) {
                 notifications = alarmSnsNotifier.prepareTransition(metricAlarm, oldState);

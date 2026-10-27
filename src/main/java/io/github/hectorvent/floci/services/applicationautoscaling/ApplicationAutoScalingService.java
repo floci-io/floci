@@ -408,16 +408,18 @@ public class ApplicationAutoScalingService {
         return alarms;
     }
 
+    /**
+     * Deletes the policy's alarms one at a time: CloudWatch refuses a whole DeleteAlarms request
+     * that names an alarm a composite alarm still names, and the others should go regardless.
+     */
     private void deleteAlarms(ScalingPolicy policy, String region) {
-        List<String> names = policy.getAlarms().stream().map(Alarm::getAlarmName).toList();
-        if (names.isEmpty()) {
-            return;
-        }
-        try {
-            cloudWatchMetricsService.deleteAlarms(names, region);
-        } catch (RuntimeException e) {
-            // Alarm cleanup is best-effort: a user may have deleted them out of band.
-            LOG.debugv(e, "Could not delete target-tracking alarms {0} in {1}", names, region);
+        for (Alarm alarm : policy.getAlarms()) {
+            try {
+                cloudWatchMetricsService.deleteAlarms(List.of(alarm.getAlarmName()), region);
+            } catch (RuntimeException e) {
+                // Alarm cleanup is best-effort: a composite alarm may still name this one.
+                LOG.debugv(e, "Could not delete target-tracking alarm {0} in {1}", alarm.getAlarmName(), region);
+            }
         }
     }
 

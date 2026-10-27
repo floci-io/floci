@@ -448,9 +448,13 @@ Length checks count Unicode code points and preserve empty and whitespace values
 ### Composite alarm evaluation
 
 A composite alarm is evaluated when it is created, when `PutCompositeAlarm` updates it, and when
-one of its children changes state, up through nested composite alarms. A composite alarm on a
-cycle of rules is not evaluated. An update that leaves the state unchanged also keeps the state
-reason, reason data and timestamps. A change of state records the `StateReason` CloudWatch writes:
+one of its children changes state, up through nested composite alarms. A child's own update, or a
+`SetAlarmState` to the state it already has, is not a change of state, so a composite alarm set
+with `SetAlarmState` keeps that state until a child really changes. An update that leaves the
+state unchanged also keeps the state reason, reason data and timestamps. A composite alarm on a
+cycle of rules is not evaluated, not even by the update that closes the cycle, where CloudWatch
+evaluates that alarm and the ones after it. A change of state records the `StateReason`
+CloudWatch writes:
 
 - `<alarm ARN> was created and its alarm rule evaluates to OK` when the alarm is created,
 - `<alarm ARN> was updated and its new alarm rule evaluates to ALARM` when an update changes it,

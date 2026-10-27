@@ -217,9 +217,10 @@ class CompositeAlarmIntegrationTest {
         String parent = prefix + "-parent";
         String other = prefix + "-other";
         String arn = "arn:aws-cn:cloudwatch:cn-north-1:000000000000:alarm:";
+        // TreatMissingData=ignore keeps the alarm evaluator from resetting the state this test sets.
         call(json, "PutMetricAlarm", Map.of("AlarmName", child, "Namespace", "Wire/Fidelity", "MetricName", "Errors",
                 "Statistic", "Sum", "Period", 60, "EvaluationPeriods", 1, "Threshold", 1,
-                "ComparisonOperator", "GreaterThanThreshold")).then().statusCode(200);
+                "ComparisonOperator", "GreaterThanThreshold", "TreatMissingData", "ignore")).then().statusCode(200);
         call(json, "PutCompositeAlarm", Map.of("AlarmName", parent, "AlarmRule", "ALARM(\"" + child + "\")"))
                 .then().statusCode(200);
         Map<String, String> created = composite(json, parent);

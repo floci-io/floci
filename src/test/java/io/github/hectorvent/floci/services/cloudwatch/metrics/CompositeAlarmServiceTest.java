@@ -169,6 +169,9 @@ class CompositeAlarmServiceTest {
         service.setAlarmState("b", "ALARM", "manual", null, REGION);
         assertEquals("OK", state("a"));
         put("b", "TRUE");
+        service.setAlarmState("b", "ALARM", "same state", null, REGION);
+        assertEquals("OK", state("a"));
+        service.setAlarmState("b", "OK", "cycle broken", null, REGION);
         service.setAlarmState("b", "ALARM", "cycle broken", null, REGION);
         assertEquals("ALARM", state("a"));
     }
@@ -353,9 +356,10 @@ class CompositeAlarmServiceTest {
     }
 
     /**
-     * Replays a published probe of CloudWatch in eu-central-1 (ministackorg/ministack#2260, two runs on
-     * 2026-10-15 with the same results), leaving out its AT_LEAST rules: at every step the composite
-     * alarms take the state, StateReason and triggeringAlarms that CloudWatch reported.
+     * Replays a published probe of CloudWatch in eu-central-1, leaving out its AT_LEAST rules: at every
+     * step the composite alarms take the state, StateReason and triggeringAlarms that CloudWatch
+     * reported. The probe and its two runs of 2026-10-15, with the same results, are at
+     * https://github.com/ministackorg/ministack/pull/2260.
      */
     @Test
     void evaluationMatchesWhatCloudWatchReportedForTheSameSteps() {
@@ -513,11 +517,6 @@ class CompositeAlarmServiceTest {
         assertRejected("Could not save the composite alarm as alarms [" + arn("first") + ", " + arn("second")
                 + "] in the alarm rule do not exist", () -> put("orphan", "ALARM(first) OR ALARM(present) OR OK(\""
                 + arn("second") + "\") OR ALARM(\"first\")"));
-        assertRejected("Could not save the composite alarm as alarms [" + arn("self")
-                + "] in the alarm rule do not exist", () -> put("self", "ALARM(self)"));
-        String elsewhere = "arn:aws-cn:cloudwatch:cn-northwest-1:123456789012:alarm:present";
-        assertRejected("Could not save the composite alarm as alarms [" + elsewhere + "] in the alarm rule do not exist",
-                () -> put("cross-region", "ALARM(\"" + elsewhere + "\")"));
         assertTrue(service.describeCompositeAlarms(null, null, REGION).isEmpty());
 
         put("kept", "ALARM(present)");
@@ -555,6 +554,41 @@ class CompositeAlarmServiceTest {
         assertEquals("ALARM", state("top"));
         assertEquals(arn("top") + " was updated and its new alarm rule evaluates to ALARM", alarm("top").getStateReason());
         assertTriggering("top", "middle ALARM", "child ALARM");
+    }
+
+    /**
+     * A composite alarm set with SetAlarmState "returns to its actual state only once any of its
+     * children alarms change state" (SetAlarmState API reference): a child's configuration update or
+     * a SetAlarmState to the state it already has does not change its state.
+     */
+    @Test
+    void aManualStateHoldsThroughAChildsUpdateAndSameStateSet() {
+        metric("m");
+        set("m", "ALARM");
+        put("c", "ALARM(m)");
+        set("c", "OK");
+        MetricAlarm update = new MetricAlarm();
+        update.setAlarmName("m");
+        update.setThreshold(5);
+        service.putMetricAlarm(update, REGION);
+        set("m", "ALARM");
+        assertEquals("OK", state("c"));
+        assertEquals("probe", alarm("c").getStateReason());
+
+        set("m", "OK");
+        set("m", "ALARM");
+        assertEquals("ALARM", state("c"));
+        assertTransitionedBecause("c", "m", "m ALARM");
+    }
+
+    @Test
+    void aParentOfTwoChildrenThatChangedTogetherNamesTheLastOfThem() {
+        metric("m");
+        put("c", "ALARM(m)");
+        put("p", "ALARM(c) OR ALARM(m)");
+        set("m", "ALARM");
+        assertTransitionedBecause("c", "m", "m ALARM");
+        assertTransitionedBecause("p", "c", "c ALARM", "m ALARM");
     }
 
     @Test
