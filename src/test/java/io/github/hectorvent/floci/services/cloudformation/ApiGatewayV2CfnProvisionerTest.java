@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.VpcLink;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFormationResourceRegistry;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,8 +25,12 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -33,9 +38,11 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -141,6 +148,94 @@ class ApiGatewayV2CfnProvisionerTest {
 
         assertEquals("CREATE_FAILED", failed.getStatus());
         assertEquals("partial-route", failed.getAttributes().get("__FlociApiGatewayV2BodyRouteIds"));
+    }
+
+    @Test
+    void apiCreateDeletesTheApiItCreatedWhenItsBodyIsRefused() throws Exception {
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(route("partial-route", "GET /first"));
+
+        StackResource failed = provision(body("""
+                {"paths":{"/first":{"get":{}},"/second":{"get":{"security":"not-an-array"}}}}
+                """), null, Map.of());
+
+        assertEquals("CREATE_FAILED", failed.getStatus());
+        assertEquals("security must be an array", failed.getStatusReason());
+        // The Body's own cleanup runs first, then the API goes, with every child it still has.
+        InOrder order = inOrder(apiGatewayV2Service);
+        order.verify(apiGatewayV2Service).deleteRoute(REGION, API_ID, "partial-route");
+        order.verify(apiGatewayV2Service).deleteApi(REGION, API_ID);
+        // Already deleted, so the engine's create rollback has nothing left to delete.
+        assertFalse(failed.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void apiCreateLeavesTheApiToTheStackRollbackWhenItCannotDeleteIt() throws Exception {
+        doThrow(new AwsException("TooManyRequestsException", "Too Many Requests", 429)).doNothing()
+                .when(apiGatewayV2Service).deleteApi(REGION, API_ID);
+
+        StackResource failed = provision(body("""
+                {"paths":{"/items":{"get":{"security":"not-an-array"}}}}
+                """), null, Map.of());
+
+        assertEquals("CREATE_FAILED", failed.getStatus());
+        assertEquals("security must be an array", failed.getStatusReason());
+        // Marked as created by this stack, so the create rollback, or DeleteStack, deletes it again.
+        assertEquals(API_ID, failed.getPhysicalId());
+        assertEquals("true", failed.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+        provisioner.delete(failed, REGION);
+        verify(apiGatewayV2Service, times(2)).deleteApi(REGION, API_ID);
+    }
+
+    @Test
+    void apiCreateWithABodyItCannotReadCreatesNoApi() throws Exception {
+        StackResource failed = provision(mapper.readTree("""
+                {"Name":"test-api","ProtocolType":"HTTP","BodyS3Location":"not-s3"}
+                """), null, Map.of());
+
+        assertEquals("CREATE_FAILED", failed.getStatus());
+        assertEquals("BodyS3Location must resolve to a non-empty S3 location", failed.getStatusReason());
+        assertNull(failed.getPhysicalId());
+        verify(apiGatewayV2Service, never()).createApi(anyString(), anyMap());
+        verify(apiGatewayV2Service, never()).deleteApi(anyString(), anyString());
+    }
+
+    @Test
+    void apiUpdateWithABodyItCannotReadLeavesTheApiAsItWas() throws Exception {
+        StackResource failed = provision(mapper.readTree("""
+                {"Name":"renamed-api","ProtocolType":"HTTP","BodyS3Location":"not-s3"}
+                """), API_ID, Map.of("ApiId", API_ID));
+
+        assertEquals("CREATE_FAILED", failed.getStatus());
+        verify(apiGatewayV2Service, never()).updateApi(anyString(), anyString(), anyMap());
+        verify(apiGatewayV2Service, never()).deleteApi(anyString(), anyString());
+    }
+
+    @Test
+    void apiUpdateKeepsTheApiWhenItsBodyIsRefused() throws Exception {
+        StackResource failed = provision(body("""
+                {"paths":{"/items":{"get":{"security":"not-an-array"}}}}
+                """), API_ID, Map.of("ApiId", API_ID));
+
+        assertEquals("CREATE_FAILED", failed.getStatus());
+        verify(apiGatewayV2Service).updateApi(eq(REGION), eq(API_ID), anyMap());
+        verify(apiGatewayV2Service, never()).deleteApi(anyString(), anyString());
+        assertFalse(failed.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void apiDeleteToleratesOnlyAnApiAlreadyGone() {
+        StackResource api = new StackResource();
+        api.setResourceType("AWS::ApiGatewayV2::Api");
+        api.setPhysicalId(API_ID);
+        doThrow(new AwsException("NotFoundException", "Invalid API id specified", 404))
+                .when(apiGatewayV2Service).deleteApi(REGION, API_ID);
+
+        assertDoesNotThrow(() -> provisioner.delete(api, REGION));
+
+        AwsException throttled = new AwsException("TooManyRequestsException", "Too Many Requests", 429);
+        doThrow(throttled).when(apiGatewayV2Service).deleteApi(REGION, API_ID);
+        assertSame(throttled, assertThrows(AwsException.class, () -> provisioner.delete(api, REGION)));
     }
 
     @Test
