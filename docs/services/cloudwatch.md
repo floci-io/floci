@@ -445,6 +445,31 @@ Alarms stored before Floci recorded it report their last state update.
 `StateReason` and 4000 characters for `StateReasonData` before changing alarm state.
 Length checks count Unicode code points and preserve empty and whitespace values.
 
+### Composite alarm evaluation
+
+A composite alarm is evaluated when it is created, when `PutCompositeAlarm` updates it, and when
+one of its children changes state, up through nested composite alarms. A composite alarm on a
+cycle of rules is not evaluated. An update that leaves the state unchanged also keeps the state
+reason, reason data and timestamps. A change of state records the `StateReason` CloudWatch writes:
+
+- `<alarm ARN> was created and its alarm rule evaluates to OK` when the alarm is created,
+- `<alarm ARN> was updated and its new alarm rule evaluates to ALARM` when an update changes it,
+- `<child ARN> transitioned to ALARM at Monday 14 September, 2026 06:29:58 UTC` when a child does.
+
+`StateReasonData` lists under `triggeringAlarms` the children whose state agrees with the new one,
+the most recently changed first, each with its state and when it took it. After a child's change
+it lists only the children that changed state since the composite alarm last did. The list stops
+before the 4000 characters `StateReasonData` can hold. Floci keeps state times to the second, so
+the timestamps end in `.000`.
+
+Every alarm a rule names must exist, or `PutCompositeAlarm` fails with `ValidationError` and
+`Could not save the composite alarm as alarms [<ARN>] in the alarm rule do not exist`.
+`DeleteAlarms` deletes nothing when it names more than one composite alarm
+(`Cannot delete [2] Composite Alarms as only one composite alarm delete is allowed in single request`)
+or an alarm that a composite alarm's rule names, even when it deletes that composite alarm too
+(`Cannot delete <name> as there are composite alarm(s) depending on it.`), so delete composite
+alarms before their children. Names that match no alarm are ignored.
+
 ### SNS alarm actions
 
 State transitions publish to same-account standard SNS topics in `AlarmActions`, `OKActions`, or

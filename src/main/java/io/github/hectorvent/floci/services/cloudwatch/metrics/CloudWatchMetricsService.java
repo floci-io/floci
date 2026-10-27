@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
@@ -48,6 +49,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -66,6 +68,11 @@ public class CloudWatchMetricsService {
     /** The form of {@code java.util.Date#toString} in UTC, which AWS's date range error prints. */
     private static final DateTimeFormatter HISTORY_DATE_FORMAT = DateTimeFormatter
             .ofPattern("EEE MMM dd HH:mm:ss 'UTC' yyyy", Locale.ROOT).withZone(ZoneOffset.UTC);
+    /** A child's transition time in a composite alarm's StateReason: "Monday 14 September, 2026 06:29:58 UTC". */
+    private static final DateTimeFormatter REASON_TIME = DateTimeFormatter
+            .ofPattern("EEEE dd MMMM, yyyy HH:mm:ss 'UTC'", Locale.ENGLISH).withZone(ZoneOffset.UTC);
+    /** The most an alarm's StateReasonData can hold. */
+    private static final int MAX_STATE_REASON_DATA = 4000;
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .setSerializationInclusion(JsonInclude.Include.NON_NULL)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -375,7 +382,7 @@ public class CloudWatchMetricsService {
 
     public synchronized void putMetricAlarm(MetricAlarm alarm, String region) {
         putAlarm(alarm, region);
-        evaluateComposites(region, Set.of(alarm.getAlarmName()), null);
+        evaluateComposites(region, Set.of(alarm.getAlarmName()));
     }
 
     public void putCompositeAlarm(CompositeAlarm alarm, String region) {
@@ -399,18 +406,23 @@ public class CloudWatchMetricsService {
                 throw new AwsException("LimitExceeded", "An alarm can be referenced by at most 150 composite alarms", 400);
             }
         }
+        Map<String, Alarm> alarms = alarmIndex(region);
+        List<String> missing = references.stream().filter(reference -> !alarms.containsKey(reference)).toList();
+        if (!missing.isEmpty()) {
+            throw new AwsException("ValidationError", "Could not save the composite alarm as alarms " + missing
+                    + " in the alarm rule do not exist", 400);
+        }
         boolean created = alarmStore.get(region + "::" + alarm.getAlarmName()).isEmpty();
         putAlarm(alarm, region);
-        if (created) {
-            evaluateComposites(region, Set.of(), alarm.getAlarmName());
-        }
+        evaluateComposites(region, Set.of(), alarm.getAlarmName(), created);
     }
 
+    /** The ARN of each alarm the rule names, in the order it first names them. */
     private Set<String> alarmReferences(CompositeAlarm alarm, String region) {
         return CompositeAlarmRule.parse(alarm.getAlarmRule()).references().stream()
                 .map(reference -> AwsArnUtils.isArn(reference) ? reference
                         : regionResolver.buildArn("cloudwatch", region, "alarm:" + reference))
-                .collect(Collectors.toSet());
+                .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     private void putAlarm(Alarm alarm, String region) {
@@ -448,7 +460,7 @@ public class CloudWatchMetricsService {
         ObjectNode data = MAPPER.createObjectNode().put("version", "1.0");
         if (before == null) {
             data.put("type", "Create").set("createdAlarm", after);
-            recordHistory(alarm, region, "ConfigurationUpdate", "Alarm \"" + name + "\" created", data);
+            recordHistory(alarm, region, "ConfigurationUpdate", createdSummary(name), data);
         } else {
             data.put("type", "Update").set("updatedAlarm", after);
             ObjectNode original = data.putObject("originalUpdatedFields");
@@ -515,7 +527,17 @@ public class CloudWatchMetricsService {
         return alarms;
     }
 
-    private void evaluateComposites(String region, Set<String> changedAlarmNames, String newAlarm) {
+    private void evaluateComposites(String region, Set<String> changedAlarmNames) {
+        evaluateComposites(region, changedAlarmNames, null, false);
+    }
+
+    /**
+     * Evaluates {@code newAlarm}, a composite alarm just created or updated, and the composite alarms
+     * above it and above {@code changedAlarmNames}, each after its composite children and only when
+     * one of its children changed. A composite alarm on a cycle is not evaluated. A change of state
+     * carries the reason and the triggering children CloudWatch reports.
+     */
+    private void evaluateComposites(String region, Set<String> changedAlarmNames, String newAlarm, boolean created) {
         if (changedAlarmNames.isEmpty() && newAlarm == null) {
             return;
         }
@@ -549,6 +571,11 @@ public class CloudWatchMetricsService {
         } while (discovered);
         Set<String> cycles = pending.keySet().stream()
                 .filter(name -> isCyclic(name, alarms)).collect(Collectors.toSet());
+        Function<String, String> states = reference -> {
+            Alarm child = alarms.get(reference);
+            return child == null ? null : child.getStateValue();
+        };
+        Map<String, Long> stateOrder = null;
         boolean progress;
         do {
             progress = false;
@@ -567,13 +594,32 @@ public class CloudWatchMetricsService {
                     continue;
                 }
                 Alarm alarm = alarms.get(next.getKey());
-                boolean triggered = next.getValue().evaluate(reference -> {
-                    Alarm child = alarms.get(reference);
-                    return child == null ? null : child.getStateValue();
-                });
+                CompositeAlarmRule.Rule rule = next.getValue();
+                boolean triggered = rule.evaluate(states);
                 String state = triggered ? "ALARM" : "OK";
                 if (!state.equals(alarm.getStateValue())) {
-                    changeState(alarm, region, state, "AlarmRule evaluated to " + state, null);
+                    if (stateOrder == null) {
+                        stateOrder = stateOrder(region);
+                    }
+                    String reason;
+                    Long since = null;
+                    if (next.getKey().equals(newAlarm)) {
+                        reason = alarm.getAlarmArn() + (created ? " was created and its alarm rule evaluates to "
+                                : " was updated and its new alarm rule evaluates to ") + state;
+                    } else {
+                        Map<String, Long> order = stateOrder;
+                        Alarm trigger = rule.references().stream().map(alarms::get).filter(Objects::nonNull)
+                                .filter(child -> changed.contains(child.getAlarmName())
+                                        || changed.contains(child.getAlarmArn()))
+                                .max(Comparator.comparingLong(child -> orderOf(child, order))).orElseThrow();
+                        reason = trigger.getAlarmArn() + " transitioned to " + trigger.getStateValue() + " at "
+                                + REASON_TIME.format(Instant.ofEpochSecond(trigger.lastTransitionTimestamp()));
+                        since = orderOf(alarm, stateOrder);
+                    }
+                    String data = triggeringAlarms(rule.agreeing(states, triggered), alarms, stateOrder, since);
+                    changeState(alarm, region, state, reason, data);
+                    // The transition is now the newest history entry.
+                    stateOrder.put(alarm.getAlarmName(), lastHistorySequence);
                     changed.add(alarm.getAlarmName());
                     changed.add(alarm.getAlarmArn());
                 }
@@ -586,29 +632,95 @@ public class CloudWatchMetricsService {
         }
     }
 
+    /**
+     * The StateReasonData of a composite alarm's change of state: the {@code agreeing} children,
+     * the one whose state is newest first, each with its state and when it took it, within what
+     * StateReasonData can hold. For a change a child caused, CloudWatch lists only the children that
+     * changed state after the composite alarm last did, which was at {@code since}.
+     */
+    private static String triggeringAlarms(Set<String> agreeing, Map<String, Alarm> alarms,
+                                           Map<String, Long> stateOrder, Long since) {
+        Map<String, Alarm> children = new LinkedHashMap<>();
+        for (String reference : agreeing) {
+            Alarm child = alarms.get(reference);
+            if (child != null && (since == null || orderOf(child, stateOrder) > since)) {
+                children.putIfAbsent(child.getAlarmName(), child);
+            }
+        }
+        List<Alarm> newestFirst = new ArrayList<>(children.values());
+        newestFirst.sort(Comparator.comparingLong((Alarm child) -> orderOf(child, stateOrder)).reversed());
+        ObjectNode data = MAPPER.createObjectNode();
+        ArrayNode list = data.putArray("triggeringAlarms");
+        for (Alarm child : newestFirst) {
+            ObjectNode entry = list.addObject().put("arn", child.getAlarmArn());
+            entry.putObject("state").put("value", child.getStateValue()).put("timestamp",
+                    AlarmSnsNotifier.TIMESTAMP_FORMAT.format(Instant.ofEpochSecond(child.lastTransitionTimestamp())));
+            if (data.toString().length() > MAX_STATE_REASON_DATA) {
+                list.remove(list.size() - 1);
+                break;
+            }
+        }
+        return data.toString();
+    }
+
+    /**
+     * The order in which the region's alarms took their current states, as alarm history sequences:
+     * each alarm's latest StateUpdate entry, or its creation if its state never changed. History
+     * orders state changes to the microsecond, where alarms keep their state times to the second.
+     */
+    private Map<String, Long> stateOrder(String region) {
+        Map<String, Long> order = new HashMap<>();
+        for (AlarmHistoryItem item : historyStore.scan(k -> k.startsWith(region + "::"))) {
+            if ("StateUpdate".equals(item.historyItemType())
+                    || createdSummary(item.alarmName()).equals(item.historySummary())) {
+                order.merge(item.alarmName(), item.sequence(), Math::max);
+            }
+        }
+        return order;
+    }
+
+    /** Where {@code alarm} falls in {@link #stateOrder}; one whose entries aged out of history, at its last transition. */
+    private static long orderOf(Alarm alarm, Map<String, Long> stateOrder) {
+        Long sequence = stateOrder.get(alarm.getAlarmName());
+        return sequence != null ? sequence : epochMicros(Instant.ofEpochSecond(alarm.lastTransitionTimestamp()));
+    }
+
+    private static String createdSummary(String name) {
+        return "Alarm \"" + name + "\" created";
+    }
+
+    /**
+     * Deletes the named alarms, or none of them: CloudWatch refuses a request that names more than one
+     * composite alarm, or an alarm that a composite alarm's rule names, even when the request deletes
+     * that composite alarm too. Names that match no alarm are ignored.
+     */
     public synchronized void deleteAlarms(List<String> alarmNames, String region) {
-        Map<String, Alarm> alarms = alarmIndex(region);
-        long composites = alarmNames.stream().map(alarms::get).filter(CompositeAlarm.class::isInstance).count();
+        List<Alarm> existing = alarmNames.stream().distinct()
+                .map(name -> alarmStore.get(region + "::" + name).orElse(null)).filter(Objects::nonNull).toList();
+        long composites = existing.stream().filter(CompositeAlarm.class::isInstance).count();
         if (composites > 1) {
-            throw new AwsException("ValidationError", "DeleteAlarms accepts at most one composite alarm", 400);
+            throw new AwsException("ValidationError", "Cannot delete [" + composites
+                    + "] Composite Alarms as only one composite alarm delete is allowed in single request", 400);
         }
-        for (String name : alarmNames) {
-            if (isCyclic(name, alarms)) {
-                throw new AwsException("ValidationError", "Break the composite alarm cycle before deleting " + name, 400);
+        Map<String, Alarm> alarms = alarmIndex(region);
+        Set<String> referenced = new HashSet<>();
+        for (Alarm alarm : new HashSet<>(alarms.values())) {
+            if (alarm instanceof CompositeAlarm composite) {
+                CompositeAlarmRule.parse(composite.getAlarmRule()).references().stream().map(alarms::get)
+                        .filter(Objects::nonNull).forEach(child -> referenced.add(child.getAlarmName()));
             }
         }
-        Set<String> deletedNames = new HashSet<>();
-        for (String name : alarmNames) {
-            Alarm existing = alarmStore.get(region + "::" + name).orElse(null);
-            if (existing != null) {
-                deletedNames.add(name);
-                ObjectNode data = MAPPER.createObjectNode().put("version", "1.0").put("type", "Delete");
-                data.set("deletedAlarm", snapshot(existing));
-                recordHistory(existing, region, "ConfigurationUpdate", "Alarm \"" + name + "\" deleted", data);
-            }
-            alarmStore.delete(region + "::" + name);
+        List<String> blocked = existing.stream().map(Alarm::getAlarmName).filter(referenced::contains).toList();
+        if (!blocked.isEmpty()) {
+            throw new AwsException("ValidationError", "Cannot delete " + String.join(",", blocked)
+                    + " as there are composite alarm(s) depending on " + (blocked.size() == 1 ? "it." : "them."), 400);
         }
-        evaluateComposites(region, deletedNames, null);
+        for (Alarm alarm : existing) {
+            ObjectNode data = MAPPER.createObjectNode().put("version", "1.0").put("type", "Delete");
+            data.set("deletedAlarm", snapshot(alarm));
+            recordHistory(alarm, region, "ConfigurationUpdate", "Alarm \"" + alarm.getAlarmName() + "\" deleted", data);
+            alarmStore.delete(region + "::" + alarm.getAlarmName());
+        }
         LOG.infov("Deleted alarms: {0} in {1}", alarmNames, region);
     }
 
@@ -660,7 +772,7 @@ public class CloudWatchMetricsService {
 
             String oldState = alarm.getStateValue();
             changeState(alarm, region, stateValue, stateReason, stateReasonData);
-            evaluateComposites(region, Set.of(alarmName), null);
+            evaluateComposites(region, Set.of(alarmName));
             LOG.infov("SetAlarmState: {0} -> {1}", alarmName, stateValue);
             if (alarmSnsNotifier != null && alarm instanceof MetricAlarm metricAlarm) {
                 notifications = alarmSnsNotifier.prepareTransition(metricAlarm, oldState);
