@@ -158,20 +158,29 @@ class Ec2VolumeKmsKeyIdIntegrationTest {
 
     @Test
     void anInstanceRootVolumeThatIsNotEncryptedHasNoKey() {
-        String instanceId = ec2("RunInstances", "ImageId", "ami-0abcdef1234567890",
-                "InstanceType", "t3.micro", "MinCount", "1", "MaxCount", "1")
-                .when().post("/").then().statusCode(200)
-                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
-        String rootVolumeId = ec2("DescribeInstances", "InstanceId.1", instanceId)
-                .when().post("/").then().statusCode(200)
-                .extract().path("DescribeInstancesResponse.reservationSet.item.instancesSet.item"
-                        + ".blockDeviceMapping.item.ebs.volumeId");
+        String instanceId = launch();
+        try {
+            assertNoKmsKeyId(attachedVolume(instanceId, "/dev/xvda", "false"));
+        } finally {
+            call("TerminateInstances", "InstanceId.1", instanceId);
+        }
+    }
 
-        assertNoKmsKeyId(ec2("DescribeVolumes", "VolumeId.1", rootVolumeId)
-                .when().post("/").then().statusCode(200)
-                .body("DescribeVolumesResponse.volumeSet.item.encrypted", equalTo("false"))
-                .extract().asString());
-        call("TerminateInstances", "InstanceId.1", instanceId);
+    /**
+     * AWS refuses a launch mapping that names a key without Encrypted=true; Floci accepts it, and
+     * with encryption by default off the volume stays unencrypted and keeps no key.
+     */
+    @Test
+    void aLaunchMappingKeyWithoutEncryptedLeavesTheVolumeUnencrypted() {
+        String instanceId = launch(
+                "BlockDeviceMapping.1.DeviceName", "/dev/sdf",
+                "BlockDeviceMapping.1.Ebs.VolumeSize", "1",
+                "BlockDeviceMapping.1.Ebs.KmsKeyId", KEY_ARN);
+        try {
+            assertNoKmsKeyId(attachedVolume(instanceId, "/dev/sdf", "false"));
+        } finally {
+            call("TerminateInstances", "InstanceId.1", instanceId);
+        }
     }
 
     /**
@@ -202,7 +211,10 @@ class Ec2VolumeKmsKeyIdIntegrationTest {
         }
     }
 
-    /** A launch template's mapping key reaches the volume a launch from the template creates. */
+    /**
+     * A launch template's mapping key reaches the volume a launch from the template creates, and a
+     * request entry for the same device that names another key wins over it.
+     */
     @Test
     void aLaunchTemplateMappingKeyReachesTheVolume() {
         String templateId = ec2("CreateLaunchTemplate", "LaunchTemplateName", "kms-key-" + System.nanoTime(),
@@ -212,11 +224,21 @@ class Ec2VolumeKmsKeyIdIntegrationTest {
                 "LaunchTemplateData.BlockDeviceMapping.1.Ebs.KmsKeyId", KEY_ARN)
                 .when().post("/").then().statusCode(200)
                 .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
-        String instanceId = launch("LaunchTemplate.LaunchTemplateId", templateId);
         try {
-            assertEquals(List.of(KEY_ARN), XmlParser.extractAll(attachedVolume(instanceId, "/dev/sdf"), "kmsKeyId"));
+            String fromTemplate = launch("LaunchTemplate.LaunchTemplateId", templateId);
+            String overridden = launch("LaunchTemplate.LaunchTemplateId", templateId,
+                    "BlockDeviceMapping.1.DeviceName", "/dev/sdf",
+                    "BlockDeviceMapping.1.Ebs.KmsKeyId", DEFAULT_KEY_ARN);
+            try {
+                assertEquals(List.of(KEY_ARN),
+                        XmlParser.extractAll(attachedVolume(fromTemplate, "/dev/sdf"), "kmsKeyId"));
+                assertEquals(List.of(DEFAULT_KEY_ARN),
+                        XmlParser.extractAll(attachedVolume(overridden, "/dev/sdf"), "kmsKeyId"));
+            } finally {
+                call("TerminateInstances", "InstanceId.1", fromTemplate, "InstanceId.2", overridden);
+            }
         } finally {
-            call("TerminateInstances", "InstanceId.1", instanceId);
+            call("DeleteLaunchTemplate", "LaunchTemplateId", templateId);
         }
     }
 
@@ -257,15 +279,20 @@ class Ec2VolumeKmsKeyIdIntegrationTest {
                 .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
     }
 
-    /** DescribeVolumes for the one volume attached to the instance at the device. */
+    /** DescribeVolumes for the one encrypted volume attached to the instance at the device. */
     private static String attachedVolume(String instanceId, String device) {
+        return attachedVolume(instanceId, device, "true");
+    }
+
+    /** DescribeVolumes for the one volume attached to the instance at the device. */
+    private static String attachedVolume(String instanceId, String device, String encrypted) {
         String xml = ec2("DescribeVolumes",
                 "Filter.1.Name", "attachment.instance-id", "Filter.1.Value.1", instanceId,
                 "Filter.2.Name", "attachment.device", "Filter.2.Value.1", device)
                 .when().post("/").then().statusCode(200)
                 .extract().asString();
         assertEquals(1, XmlParser.extractAll(xml, "size").size(), xml);
-        assertEquals(List.of("true"), XmlParser.extractAll(xml, "encrypted"), xml);
+        assertEquals(List.of(encrypted), XmlParser.extractAll(xml, "encrypted"), xml);
         return xml;
     }
 
