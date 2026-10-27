@@ -117,10 +117,10 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
         RouteDecision decision = decide(host, originalPath, requestContext.getHeaderString("Authorization"));
         if (this.requestContext != null) {
-            decision.owner().ifPresent(owner -> {
-                this.requestContext.setAccountId(owner.accountId());
-                this.requestContext.setRegion(owner.region());
-            });
+            if (decision.owner() != null) {
+                this.requestContext.setAccountId(decision.owner().accountId());
+                this.requestContext.setRegion(decision.owner().region());
+            }
         }
 
         switch (decision.kind()) {
@@ -168,9 +168,9 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
     RouteDecision decide(String host, String originalPath, String authorization) {
         String apiId = extractApiId(host, baseHostname);
         if (apiId == null) {
-            return RouteDecision.none(Optional.empty());
+            return RouteDecision.none(null);
         }
-        Optional<ApiGatewayV2Service.ApiOwner> owner = apiGatewayLookup.findApiOwner(apiId);
+        ApiGatewayV2Service.ApiOwner owner = apiGatewayLookup.findApiOwner(apiId).orElse(null);
         // Host matching alone cannot tell whether this request was already rewritten: the Host
         // header still names the execute-api subdomain afterwards. Rewriting twice would produce
         // /execute-api/{apiId}/execute-api/{apiId}/... and a 404, so bail out if another
@@ -178,7 +178,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         if (originalPath != null && originalPath.startsWith("/execute-api/")) {
             return RouteDecision.none(owner);
         }
-        if (owner.isEmpty()) {
+        if (owner == null) {
             // Region: the host label when it is a real AWS region (…execute-api.{region}.…), else
             // the SigV4 credential scope. The cross-region apiId scan (resolveApiRegion) is the
             // final fallback so an API created outside the default region still resolves —
@@ -190,12 +190,11 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
             return decideInRegion(apiId, apiGatewayLookup.resolveApiRegion(preferredRegion, apiId),
                     originalPath, owner);
         }
-        ApiGatewayV2Service.ApiOwner apiOwner = owner.get();
-        return underAccountOf(apiOwner, () -> decideInRegion(apiId, apiOwner.region(), originalPath, owner));
+        return underAccountOf(owner, () -> decideInRegion(apiId, owner.region(), originalPath, owner));
     }
 
     private RouteDecision decideInRegion(String apiId, String region, String originalPath,
-                                         Optional<ApiGatewayV2Service.ApiOwner> owner) {
+                                         ApiGatewayV2Service.ApiOwner owner) {
         try {
             String protocolType = apiGatewayLookup.protocolType(region, apiId);
             // HTTP APIs route all their invoke traffic through this filter. WEBSOCKET APIs route
@@ -212,7 +211,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         } catch (AwsException e) {
             // The v2 owner lookup is account-independent. When it found no owner, let the
             // REST execute controller resolve the API after account context is established.
-            if (owner.isEmpty()) {
+            if (owner == null) {
                 return RouteDecision.restApi(apiId);
             }
             LOG.debugv(e, "Execute API host did not resolve to a routable API: apiId={0}, region={1}",
@@ -292,24 +291,24 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
     /**
      * The outcome of the routing decision. {@code owner} is the HTTP or WebSocket API owner found for
-     * the host, whatever the outcome, so that {@link #filter} can switch to its account.
+     * the host, whatever the outcome, so that {@link #filter} can switch to its account, or null.
      */
-    record RouteDecision(RouteKind kind, String apiId, Optional<ApiGatewayV2Service.ApiOwner> owner,
+    record RouteDecision(RouteKind kind, String apiId, ApiGatewayV2Service.ApiOwner owner,
                          String region, String stage, String remainingPath) {
 
-        static RouteDecision none(Optional<ApiGatewayV2Service.ApiOwner> owner) {
+        static RouteDecision none(ApiGatewayV2Service.ApiOwner owner) {
             return new RouteDecision(RouteKind.NONE, null, owner, null, null, null);
         }
 
-        static RouteDecision disabled(Optional<ApiGatewayV2Service.ApiOwner> owner) {
+        static RouteDecision disabled(ApiGatewayV2Service.ApiOwner owner) {
             return new RouteDecision(RouteKind.DISABLED, null, owner, null, null, null);
         }
 
         static RouteDecision restApi(String apiId) {
-            return new RouteDecision(RouteKind.REST_API, apiId, Optional.empty(), null, null, null);
+            return new RouteDecision(RouteKind.REST_API, apiId, null, null, null, null);
         }
 
-        static RouteDecision httpApi(String apiId, String region, Optional<ApiGatewayV2Service.ApiOwner> owner,
+        static RouteDecision httpApi(String apiId, String region, ApiGatewayV2Service.ApiOwner owner,
                                      String stage, String remainingPath) {
             return new RouteDecision(RouteKind.HTTP_API, apiId, owner, region, stage, remainingPath);
         }
