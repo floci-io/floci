@@ -212,7 +212,9 @@ public class SchedulerController {
                                   @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
         List<Schedule> schedules = schedulerService.listSchedules(groupName, namePrefix, state, region);
-        PaginatedResult<Schedule> page = Pagination.paginate(schedules, Schedule::getName,
+        // A schedule name is only unique inside its group, so the ARN is the cursor: keying on
+        // the name alone makes a page boundary swallow a same-named schedule from another group.
+        PaginatedResult<Schedule> page = Pagination.paginate(schedules, Schedule::getArn,
                 Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken,
                 100, 100, "ValidationException");
         ObjectNode response = objectMapper.createObjectNode();
