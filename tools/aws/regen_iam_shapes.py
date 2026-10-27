@@ -12,17 +12,14 @@ Run from anywhere in the repo:
 """
 from __future__ import annotations
 
-import argparse
-import json
 import sys
 from pathlib import Path
 
-from regen_partitions import resolve_botocore_data, strip_source
-from request_shapes import REPO_ROOT, build_constraints, load_model
+import request_shapes
+from request_shapes import REPO_ROOT
 
 OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-shapes.json"
 MODEL = Path("iam/2010-05-08")
-GENERATOR = "tools/aws/regen_iam_shapes.py"
 
 # One wave per group, each chosen so that no operation in it checks a declared constraint by hand,
 # which is what keeps the vendored shapes adding the refusals AWS answers rather than rewording an
@@ -71,10 +68,10 @@ PAGING_ONLY = (
 )
 
 
-def paging_only(model: dict) -> dict:
-    """`model` with each `PAGING_ONLY` request reduced to its paging members."""
+def paging_only(model: dict, operations: tuple[str, ...] = PAGING_ONLY) -> dict:
+    """`model` with each of `operations` reduced to its paging members, `PAGING_ONLY` by default."""
     shapes = dict(model["shapes"])
-    for operation in PAGING_ONLY:
+    for operation in operations:
         name = model["operations"][operation]["input"]["shape"]
         request = shapes[name]
         shapes[name] = {"type": request["type"],
@@ -82,32 +79,13 @@ def paging_only(model: dict) -> dict:
     return {**model, "shapes": shapes}
 
 
-def build(model: dict, provenance: str) -> dict:
-    return build_constraints(paging_only(model), OPERATIONS + PAGING_ONLY, provenance, GENERATOR)
-
-
-def render(doc: dict) -> str:
-    return json.dumps(doc, indent=2) + "\n"
+# What the vendored file carries: the operations read whole, then the paged ones read in part.
+VENDORED = OPERATIONS + PAGING_ONLY
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--check", action="store_true", help="exit 1 when the vendored file differs from a fresh generation")
-    parser.add_argument("--botocore-data", type=Path, help="botocore data directory")
-    parser.add_argument("--output", type=Path, default=OUTPUT, help=argparse.SUPPRESS)
-    args = parser.parse_args(argv)
-    data, provenance = resolve_botocore_data(args.botocore_data)
-    fresh = render(build(load_model(data, MODEL), provenance))
-    if args.check:
-        current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""
-        if strip_source(current) != strip_source(fresh):
-            print(f"{args.output} is stale (generated from {provenance}).", file=sys.stderr)
-            return 1
-        return 0
-    args.output.write_text(fresh, encoding="utf-8")
-    shown = args.output.relative_to(REPO_ROOT) if args.output.is_relative_to(REPO_ROOT) else args.output
-    print(f"wrote {shown} from {provenance}")
-    return 0
+    return request_shapes.main(argv, script=__file__, model=MODEL, output=OUTPUT,
+                               description=__doc__, operations=VENDORED, prepare=paging_only)
 
 
 if __name__ == "__main__":

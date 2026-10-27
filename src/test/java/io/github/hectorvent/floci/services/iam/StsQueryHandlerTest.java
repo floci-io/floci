@@ -153,6 +153,50 @@ class StsQueryHandlerTest {
         }
     }
 
+    /**
+     * A duration the constraint check accepted is the duration the caller gets. The check reads a
+     * Query number with the whitespace around it off, so a padded value passes its range, and the
+     * read behind it takes it off as well: parsing the raw value would throw and fall back to the
+     * default, so a request asking for an hour would have been handed the twelve hours
+     * {@code GetSessionToken} defaults to, or the five minutes a web identity token defaults to.
+     */
+    @Test
+    void aPaddedDurationIsTheOneAskedForRatherThanTheDefault() {
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        Clock clock = Clock.fixed(now, ZoneOffset.UTC);
+        IamService iamService = mock(IamService.class);
+        StsQueryHandler sessions =
+                newHandler(iamService, new RegionResolver(REGION, "000000000000"), clock);
+        setCaller(sessions, "AKIAlongterm", "-");
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("DurationSeconds", " 3600 ");
+
+        Response session = sessions.handle("GetSessionToken", params);
+
+        assertEquals(200, session.getStatus(), (String) session.getEntity());
+        assertEquals("2026-01-01T01:00:00Z", extract(EXPIRATION, (String) session.getEntity()));
+
+        when(iamService.findEnabledOutboundWebIdentityFederation())
+                .thenReturn(Optional.of(enabledFederation()));
+        WebIdentityTokenIssuer tokenIssuer = mock(WebIdentityTokenIssuer.class);
+        when(tokenIssuer.mint(any(), anyString(), anyString(), anyList(), any(), any(), any()))
+                .thenReturn("header.claims.signature");
+        StsQueryHandler tokens = newHandler(iamService, new RegionResolver(REGION, "000000000000"),
+                clock, mock(DelegationRequestService.class), tokenIssuer);
+        setCaller(tokens, "AKIAlongterm", "-");
+
+        MultivaluedMap<String, String> tokenParams = new MultivaluedHashMap<>();
+        tokenParams.putSingle("Audience.member.1", "app");
+        tokenParams.putSingle("SigningAlgorithm", "RS256");
+        tokenParams.putSingle("DurationSeconds", " 1800 ");
+
+        Response token = tokens.handle("GetWebIdentityToken", tokenParams);
+
+        assertEquals(200, token.getStatus(), (String) token.getEntity());
+        assertEquals("2026-01-01T00:30:00Z", extract(EXPIRATION, (String) token.getEntity()));
+    }
+
     /** The account's federation state with the feature on, which the operation reads the issuer from. */
     private static OutboundWebIdentityFederation enabledFederation() {
         OutboundWebIdentityFederation federation = new OutboundWebIdentityFederation();

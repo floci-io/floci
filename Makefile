@@ -29,6 +29,8 @@
 # generated from the certificate bundles AWS publishes by tools/aws/regen_rds_ca_certificates.py.
 # src/main/resources/aws/iam-request-shapes.json, the IAM request constraints of the operations
 # read from the model, is generated from botocore's IAM model by tools/aws/regen_iam_shapes.py.
+# src/main/resources/aws/sts-request-shapes.json, the same for STS, is generated from botocore's
+# STS model by tools/aws/regen_sts_shapes.py.
 # src/main/resources/aws/emr-serverless-shapes.json, the shapes the Step Functions emr-serverless
 # integrations recase against, is generated from botocore's EMR Serverless model by
 # tools/aws/regen_emr_serverless_shapes.py.
@@ -240,6 +242,7 @@ aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-p
 	$(PYTHON) tools/aws/regen_resource_groups_shapes.py
 	$(PYTHON) tools/aws/regen_ecr_shapes.py
 	$(PYTHON) tools/aws/regen_iam_shapes.py
+	$(PYTHON) tools/aws/regen_sts_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
 	$(PYTHON) tools/aws/regen_sesv2_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_shapes.py
@@ -278,6 +281,12 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 	@$(PYTHON) tools/aws/regen_iam_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/iam-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_sts_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/sts-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
