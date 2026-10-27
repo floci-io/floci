@@ -13193,6 +13193,76 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return associateAddress(region, allocationId, instanceId, null);
     }
 
+    public Address associateAddress(String region, String allocationId, String instanceId,
+                                    String networkInterfaceId, String privateIpAddress) {
+        if (!isSet(networkInterfaceId)) {
+            if (!isSet(instanceId)) {
+                throw new AwsException("MissingParameter",
+                        "Specify either InstanceId or NetworkInterfaceId.", 400);
+            }
+            return associateAddress(region, allocationId, instanceId, privateIpAddress);
+        }
+        if (isSet(instanceId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Specify either InstanceId or NetworkInterfaceId, but not both.", 400);
+        }
+        synchronized (privateIpAllocationLock) {
+            NetworkInterface networkInterface = networkInterfaces.get(key(region, networkInterfaceId)).orElse(null);
+            if (networkInterface == null) {
+                Instance owner = instances.scan(k -> k.startsWith(region + "::")).stream()
+                        .filter(instance -> networkInterfaceId.equals(primaryInterfaceId(instance)))
+                        .findFirst().orElse(null);
+                if (owner != null) {
+                    return associateAddress(region, allocationId, owner.getInstanceId(), privateIpAddress);
+                }
+                throw new AwsException("InvalidNetworkInterfaceID.NotFound",
+                        "The network interface ID '" + networkInterfaceId + "' does not exist.", 400);
+            }
+            networkInterface = releaseIfHostIsGone(region, networkInterface);
+            NetworkInterfaceAttachment attachment = networkInterface.getAttachment();
+            if (attachment != null) {
+                if (attachment.getDeviceIndex() != 0) {
+                    throw new AwsException("Unsupported",
+                            "Elastic IP association to a non-primary attached interface is not supported.", 400);
+                }
+                return associateAddress(region, allocationId, attachment.getInstanceId(), privateIpAddress);
+            }
+            if (!"available".equals(networkInterface.getStatus())) {
+                throw new AwsException("Unsupported",
+                        "Elastic IP association to a service-managed interface is not supported.", 400);
+            }
+            String selectedPrivateIp = isSet(privateIpAddress)
+                    ? privateIpAddress : networkInterface.getPrivateIpAddress();
+            if (networkInterface.getPrivateIpAddresses().stream()
+                    .noneMatch(ip -> selectedPrivateIp.equals(ip.getPrivateIpAddress()))) {
+                throw new AwsException("InvalidParameterValue",
+                        "The private IP address is not assigned to the selected network interface.", 400);
+            }
+            Address address = getRequiredAddress(region, allocationId);
+            if (isHeldByNatGateway(region, allocationId)) {
+                throw new AwsException("Resource.AlreadyAssociated",
+                        "The Elastic IP address is already associated with a NAT gateway.", 400);
+            }
+            if (address.getAssociationId() != null) {
+                disassociateAddress(region, address.getAssociationId());
+            }
+            for (Address previous : addresses.scan(k -> k.startsWith(region + "::"))) {
+                if (previous.getAssociationId() != null
+                        && networkInterfaceId.equals(previous.getNetworkInterfaceId())
+                        && selectedPrivateIp.equals(previous.getPrivateIpAddress())) {
+                    disassociateAddress(region, previous.getAssociationId());
+                }
+            }
+            address.setInstanceId(null);
+            address.setNetworkInterfaceId(networkInterfaceId);
+            address.setPrivateIpAddress(selectedPrivateIp);
+            address.setAssociationId("eipassoc-" + randomHex(17));
+            updateStoredAddressAssociation(address);
+            addresses.put(key(region, allocationId), address);
+            return address;
+        }
+    }
+
     /**
      * Associates the Elastic IP with one private address of the instance.
      *

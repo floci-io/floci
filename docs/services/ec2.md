@@ -914,6 +914,14 @@ any other `PrivateIpAddress` fails with `InvalidParameterValue` and changes no a
 exception is container mode without AWS-faithful private addresses: the instance reports its Docker
 bridge address there, so any value means its primary address.
 
+`AssociateAddress` accepts `NetworkInterfaceId` for a detached interface or an instance's
+primary interface. A detached interface records the association on its selected private
+address; omitting `PrivateIpAddress` selects the primary address. Supplying both
+`InstanceId` and `NetworkInterfaceId`, a missing interface, or a private address the
+interface does not own fails before changing an existing association. Association to a
+nonprimary attached interface or a service-managed interface is not implemented and
+returns `Unsupported`.
+
 Deleting an interface, including deletion on instance termination, disassociates its
 Elastic IP without releasing the allocation. A retained interface keeps its association
 after termination; release still follows that interface's VPC rules.
