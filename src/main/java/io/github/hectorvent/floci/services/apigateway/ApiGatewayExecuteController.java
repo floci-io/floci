@@ -92,6 +92,8 @@ import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import java.util.stream.Collectors;
 
+// apigatewayv2.model.Integration (HTTP API) clashes with the imported REST Integration, so it is written in full.
+
 /**
  * Executes API Gateway stage requests, routing them through the configured
  * integration (AWS_PROXY, AWS, HTTP_PROXY, HTTP or MOCK).
@@ -3862,7 +3864,6 @@ public class ApiGatewayExecuteController {
         // buildProxyEvent already does for REST (V1).
         String preservedPath = preserveTrailingSlash(path, uriInfo.getRequestUri().getRawPath());
 
-
         ObjectNode event = objectMapper.createObjectNode();
         event.put("version", "2.0");
         event.put("routeKey", routeKey != null ? routeKey : "$default");
@@ -4014,7 +4015,6 @@ public class ApiGatewayExecuteController {
             return false;
         }
     }
-
 
     // ──────────────────────────── Gateway responses ────────────────────────────
 
