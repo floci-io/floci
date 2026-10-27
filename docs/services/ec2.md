@@ -931,10 +931,9 @@ request's, field by field: a request entry for a `DeviceName` the template maps,
 only one side maps apply as given. A request entry that makes the device something else, an EBS
 volume (`Ebs`), an instance store volume (`VirtualName`) or nothing (`NoDevice`), replaces the
 template's choice for it, an `Ebs` block still merging member by member into the template's. An
-Auto Scaling group launching from a template gets its mappings the same way; one launching from a
-launch configuration does not pass the configuration's mappings yet. CloudFormation does not pass
-them yet: an `AWS::EC2::Instance` launches without the `BlockDeviceMappings` it or its launch
-template declares, and an `AWS::EC2::LaunchTemplate` or
+Auto Scaling group launching from a template or a launch configuration gets its mappings the same
+way. CloudFormation does not pass them yet: an `AWS::EC2::Instance` launches without the
+`BlockDeviceMappings` it or its launch template declares, and an `AWS::EC2::LaunchTemplate` or
 `AWS::AutoScaling::LaunchConfiguration` stores none, so instances launched from what a stack
 creates get the AMI's devices alone. A mapping naming a `VolumeType` outside the service model's
 enum fails with `InvalidParameterValue`, as `ModifyVolume` does; one with `NoDevice` set creates no

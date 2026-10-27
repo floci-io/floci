@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefresh;
 import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefreshLaunch;
 import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefreshReplacement;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
+import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfigurationBlockDeviceMapping;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.autoscaling.model.ScalingActivity;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -893,7 +894,7 @@ public class AutoScalingReconciler {
                     // subnet's MapPublicIpOnLaunch, and only null means
                     // "fall back to the subnet default".
                     lc.getAssociatePublicIpAddress(),
-                    null, lc.getMetadataOptions(), null);
+                    launchConfigurationBlockDevices(lc), lc.getMetadataOptions(), null);
         }
 
         LaunchTemplate launchTemplate = resolveLaunchTemplate(asg);
@@ -964,6 +965,38 @@ public class AutoScalingReconciler {
         }
 
         return null;
+    }
+
+    /**
+     * A launch configuration's block device mappings in the shape RunInstances takes. Auto Scaling
+     * marks a suppressed device with a Boolean {@code NoDevice}, EC2 with an empty string.
+     */
+    private static List<LaunchTemplateData.BlockDeviceMapping> launchConfigurationBlockDevices(
+            LaunchConfiguration configuration) {
+        List<LaunchTemplateData.BlockDeviceMapping> mappings = new ArrayList<>();
+        if (configuration.getBlockDeviceMappings() == null) {
+            return mappings;
+        }
+        for (LaunchConfigurationBlockDeviceMapping source : configuration.getBlockDeviceMappings()) {
+            LaunchTemplateData.BlockDeviceMapping mapping = new LaunchTemplateData.BlockDeviceMapping();
+            mapping.setDeviceName(source.getDeviceName());
+            mapping.setVirtualName(source.getVirtualName());
+            mapping.setNoDevice(Boolean.TRUE.equals(source.getNoDevice()) ? "" : null);
+            LaunchConfigurationBlockDeviceMapping.Ebs sourceEbs = source.getEbs();
+            if (sourceEbs != null) {
+                LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+                ebs.setSnapshotId(sourceEbs.getSnapshotId());
+                ebs.setVolumeSize(sourceEbs.getVolumeSize());
+                ebs.setVolumeType(sourceEbs.getVolumeType());
+                ebs.setDeleteOnTermination(sourceEbs.getDeleteOnTermination());
+                ebs.setIops(sourceEbs.getIops());
+                ebs.setThroughput(sourceEbs.getThroughput());
+                ebs.setEncrypted(sourceEbs.getEncrypted());
+                mapping.setEbs(ebs);
+            }
+            mappings.add(mapping);
+        }
+        return mappings;
     }
 
     private static String encodeLegacyUserData(String userData) {
