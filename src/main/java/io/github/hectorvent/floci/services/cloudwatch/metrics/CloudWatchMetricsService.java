@@ -542,8 +542,8 @@ public class CloudWatchMetricsService {
     /**
      * Evaluates {@code newAlarm}, a composite alarm just created or updated, and the composite alarms
      * above it and above {@code changedAlarmNames}, each after its composite children and only when
-     * one of its children changed. A composite alarm on a cycle is not evaluated. A change of state
-     * carries the reason and the triggering children CloudWatch reports.
+     * one of its children changed. A composite alarm on a cycle is not evaluated; those above it
+     * still are. A change of state carries the reason and the triggering children CloudWatch reports.
      */
     private void evaluateComposites(String region, Set<String> changedAlarmNames, String newAlarm, boolean created) {
         if (changedAlarmNames.isEmpty() && newAlarm == null) {
@@ -579,6 +579,11 @@ public class CloudWatchMetricsService {
         } while (discovered);
         Set<String> cycles = pending.keySet().stream()
                 .filter(name -> isCyclic(name, alarms)).collect(Collectors.toSet());
+        if (!cycles.isEmpty()) {
+            // Not evaluated, and no longer pending, so the composite alarms above them still are.
+            LOG.debugv("Composite alarms on a cycle are not evaluated: {0}", cycles);
+            pending.keySet().removeAll(cycles);
+        }
         Function<String, String> states = reference -> {
             Alarm child = alarms.get(reference);
             return child == null ? null : child.getStateValue();
@@ -592,7 +597,7 @@ public class CloudWatchMetricsService {
                 Map.Entry<String, CompositeAlarmRule.Rule> next = iterator.next();
                 boolean blocked = next.getValue().references().stream().map(alarms::get)
                         .anyMatch(child -> child != null && pending.containsKey(child.getAlarmName()));
-                if (blocked || cycles.contains(next.getKey())) {
+                if (blocked) {
                     continue;
                 }
                 if (!next.getKey().equals(newAlarm)
@@ -622,8 +627,8 @@ public class CloudWatchMetricsService {
                             since = orderOf(alarm, stateOrder);
                         }
                     }
-                    // No reason means the changed child no longer resolves, as one stored under another ARN
-                    // would not: nothing explains a change, so the alarm keeps its state.
+                    // Only a changed child stored under another ARN, which no API call writes, fails to
+                    // resolve: nothing then explains a change, so the alarm keeps its state.
                     if (reason != null) {
                         String data = triggeringAlarms(rule.agreeing(states, triggered), alarms, stateOrder, since);
                         changeState(alarm, region, state, reason, data);
@@ -637,9 +642,6 @@ public class CloudWatchMetricsService {
                 progress = true;
             }
         } while (progress && !pending.isEmpty());
-        if (!pending.isEmpty()) {
-            LOG.debugv("Composite alarm evaluation stopped at cyclic dependencies: {0}", pending.keySet());
-        }
     }
 
     /** The child {@code rule} names that changed state most recently in this evaluation, or null if none resolves. */

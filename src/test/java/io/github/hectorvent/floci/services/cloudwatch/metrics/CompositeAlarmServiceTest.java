@@ -558,8 +558,10 @@ class CompositeAlarmServiceTest {
 
     /**
      * A composite alarm set with SetAlarmState "returns to its actual state only once any of its
-     * children alarms change state" (SetAlarmState API reference): a child's configuration update or
-     * a SetAlarmState to the state it already has does not change its state.
+     * children alarms change state"
+     * (https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_SetAlarmState.html):
+     * a metric alarm child's update or a SetAlarmState to the state it already has does not change
+     * its state.
      */
     @Test
     void aManualStateHoldsThroughAChildsUpdateAndSameStateSet() {
@@ -579,6 +581,41 @@ class CompositeAlarmServiceTest {
         set("m", "ALARM");
         assertEquals("ALARM", state("c"));
         assertTransitionedBecause("c", "m", "m ALARM");
+    }
+
+    /** The cycle between c and d is not evaluated, but p above it follows its other child. */
+    @Test
+    void aCompositeAlarmAboveACycleIsStillEvaluated() {
+        metric("m");
+        put("c", "ALARM(m)");
+        put("d", "ALARM(c)");
+        put("c", "ALARM(d) OR ALARM(m)");
+        put("p", "ALARM(c) OR ALARM(m)");
+        set("m", "ALARM");
+        assertEquals("ALARM", state("p"));
+        assertTransitionedBecause("p", "m", "m ALARM");
+    }
+
+    /** Rules saved before missing children were refused can name an alarm that is created later. */
+    @Test
+    void aCompositeAlarmStoredOverAMissingAlarmIsEvaluatedWhenThatAlarmIsCreated() {
+        InMemoryStorage<String, Alarm> alarms = new InMemoryStorage<>();
+        CloudWatchMetricsService stored = new CloudWatchMetricsService(new InMemoryStorage<>(), alarms,
+                new RegionResolver(REGION, "123456789012"));
+        CompositeAlarm watcher = new CompositeAlarm();
+        watcher.setAlarmName("watcher");
+        watcher.setAlarmArn(arn("watcher"));
+        watcher.setAlarmRule("INSUFFICIENT_DATA(late)");
+        watcher.setRegion(REGION);
+        watcher.setStateValue("OK");
+        alarms.put(REGION + "::watcher", watcher);
+        MetricAlarm late = new MetricAlarm();
+        late.setAlarmName("late");
+        stored.putMetricAlarm(late, REGION);
+        CompositeAlarm evaluated = stored.describeCompositeAlarms(List.of("watcher"), null, REGION).getFirst();
+        assertEquals("ALARM", evaluated.getStateValue());
+        assertTrue(evaluated.getStateReason().startsWith(arn("late") + " transitioned to INSUFFICIENT_DATA at "),
+                evaluated.getStateReason());
     }
 
     @Test
