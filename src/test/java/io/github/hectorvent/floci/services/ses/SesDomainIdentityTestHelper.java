@@ -9,14 +9,15 @@ import static io.restassured.RestAssured.given;
  * Creates a domain identity that is verified for sending. A domain identity stays Pending until
  * its DKIM CNAME records exist in a Route 53 hosted zone, so this publishes them in a zone of its
  * own. A test that checks the Pending state first creates the identity itself and then calls
- * {@link #publishDkimRecords}.
+ * {@link #publishDkimRecords}. Both return the hosted zone id, for a test that adds records of
+ * its own.
  */
 final class SesDomainIdentityTestHelper {
 
     private SesDomainIdentityTestHelper() {
     }
 
-    static void createVerified(String domain, String sesAuthorization) {
+    static String createVerified(String domain, String sesAuthorization) {
         List<String> tokens = given()
             .contentType("application/json")
             .header("Authorization", sesAuthorization)
@@ -28,10 +29,10 @@ final class SesDomainIdentityTestHelper {
             .extract()
             .jsonPath()
             .getList("DkimAttributes.Tokens", String.class);
-        publishDkimRecords(domain, tokens);
+        return publishDkimRecords(domain, tokens);
     }
 
-    static void publishDkimRecords(String domain, List<String> tokens) {
+    static String publishDkimRecords(String domain, List<String> tokens) {
         String location = given()
             .contentType("application/xml")
             .body("""
@@ -64,6 +65,7 @@ final class SesDomainIdentityTestHelper {
                       </Change>
                     """.formatted(token, domain, token));
         }
+        String zoneId = location.substring(location.lastIndexOf('/') + 1);
         given()
             .contentType("application/xml")
             .body("""
@@ -76,8 +78,9 @@ final class SesDomainIdentityTestHelper {
                 </ChangeResourceRecordSetsRequest>
                 """.formatted(changes))
         .when()
-            .post("/2013-04-01/hostedzone/" + location.substring(location.lastIndexOf('/') + 1) + "/rrset")
+            .post("/2013-04-01/hostedzone/" + zoneId + "/rrset")
         .then()
             .statusCode(200);
+        return zoneId;
     }
 }

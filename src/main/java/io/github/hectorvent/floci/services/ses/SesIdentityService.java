@@ -258,7 +258,7 @@ public class SesIdentityService implements SesTaggable {
     }
 
     /** Only a domain that is not yet verified can still change status, through its DKIM records. */
-    private Identity withCurrentStatus(Identity identity, String region) {
+    Identity withCurrentStatus(Identity identity, String region) {
         if ("Domain".equals(identity.getIdentityType()) && !"Success".equals(identity.getVerificationStatus())) {
             Identity refreshed = refreshIdentityState(identity, region);
             return refreshed == null ? identity : refreshed;
@@ -774,30 +774,53 @@ public class SesIdentityService implements SesTaggable {
     private boolean hasExpectedDkimRecord(String domain, String token) {
         String expectedName = normalizeDnsName(token + "._domainkey." + domain);
         String expectedValue = normalizeDnsName(token + "." + DKIM_SIGNING_HOSTED_ZONE);
-        for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
-            for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
-                    Integer.MAX_VALUE)) {
-                if (!"CNAME".equalsIgnoreCase(recordSet.getType())) {
-                    continue;
-                }
-                if (!expectedName.equals(normalizeDnsName(recordSet.getName()))) {
-                    continue;
-                }
-                List<ResourceRecord> records = recordSet.getRecords();
-                if (records == null) {
-                    continue;
-                }
-                for (ResourceRecord record : records) {
-                    if (record != null && expectedValue.equals(normalizeDnsName(record.getValue()))) {
-                        return true;
-                    }
+        for (ResourceRecordSet recordSet : recordSets("CNAME")) {
+            if (!expectedName.equals(normalizeDnsName(recordSet.getName()))) {
+                continue;
+            }
+            List<ResourceRecord> records = recordSet.getRecords();
+            if (records == null) {
+                continue;
+            }
+            for (ResourceRecord record : records) {
+                if (record != null && expectedValue.equals(normalizeDnsName(record.getValue()))) {
+                    return true;
                 }
             }
         }
         return false;
     }
 
-    private String normalizeDnsName(String value) {
+    /**
+     * The names of the TXT record sets in every Route53 hosted zone, normalized as by
+     * {@link #normalizeDnsName}: the stand-in for the public DNS lookups SES makes. Empty while DNS
+     * lookup is disabled.
+     */
+    Set<String> txtRecordNames() {
+        if (route53Service == null) {
+            return Set.of();
+        }
+        Set<String> names = new HashSet<>();
+        for (ResourceRecordSet recordSet : recordSets("TXT")) {
+            names.add(normalizeDnsName(recordSet.getName()));
+        }
+        return names;
+    }
+
+    private List<ResourceRecordSet> recordSets(String type) {
+        List<ResourceRecordSet> matching = new ArrayList<>();
+        for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
+            for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
+                    Integer.MAX_VALUE)) {
+                if (type.equalsIgnoreCase(recordSet.getType())) {
+                    matching.add(recordSet);
+                }
+            }
+        }
+        return matching;
+    }
+
+    static String normalizeDnsName(String value) {
         if (value == null) {
             return "";
         }
@@ -818,7 +841,7 @@ public class SesIdentityService implements SesTaggable {
 
     private String dkimLookupCacheKey(String region, Identity identity) {
         List<String> normalizedTokens = identity.getDkimTokens().stream()
-                .map(this::normalizeDnsName)
+                .map(SesIdentityService::normalizeDnsName)
                 .sorted()
                 .toList();
         return region + "::" + normalizeDnsName(identity.getIdentity()) + "::" + String.join(",", normalizedTokens);

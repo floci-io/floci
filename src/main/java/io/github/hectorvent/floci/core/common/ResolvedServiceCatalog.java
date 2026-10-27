@@ -88,6 +88,7 @@ import io.github.hectorvent.floci.services.ses.SesIdentityController;
 import io.github.hectorvent.floci.services.ses.SesImportJobController;
 import io.github.hectorvent.floci.services.ses.SesInsightsController;
 import io.github.hectorvent.floci.services.ses.SesMetricsController;
+import io.github.hectorvent.floci.services.ses.SesRecommendationController;
 import io.github.hectorvent.floci.services.ses.SesReputationEntityController;
 import io.github.hectorvent.floci.services.ses.SesSendController;
 import io.github.hectorvent.floci.services.ses.SesSuppressionController;
@@ -351,7 +352,8 @@ public class ResolvedServiceCatalog {
                                 SesDedicatedIpController.class, SesExportJobController.class,
                                 SesIdentityController.class,
                                 SesInsightsController.class, SesMetricsController.class,
-                                SesReputationEntityController.class, SesSendController.class,
+                                SesRecommendationController.class, SesReputationEntityController.class,
+                                SesSendController.class,
                                 SesSuppressionController.class, SesTagController.class,
                                 SesTemplateController.class, SesImportJobController.class,
                                 SesTenantController.class)),
