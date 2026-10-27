@@ -139,6 +139,36 @@ class ApiGatewayV2CloudMapIntegrationTest {
     }
 
     @Test
+    void namedStageStaysInThePathTheInstanceReceives() throws IOException {
+        Stub stub = startStub("staged");
+        String serviceId = createService(null);
+        register(serviceId, "i-1", stub, "");
+        String apiId = createApi(serviceArn(serviceId), "VPC_LINK", createVpcLink());
+
+        given().urlEncodingEnabled(false).when().get("/execute-api/" + apiId + "/prod/a%3Fb")
+                .then().statusCode(200);
+        given().urlEncodingEnabled(false).when().get("/execute-api/" + apiId + "/prod/x/")
+                .then().statusCode(200);
+        given().urlEncodingEnabled(false).when().get("/execute-api/" + apiId + "/prod/a%20b?k=v")
+                .then().statusCode(200);
+
+        assertThat(stub.rawRequestTargets, contains("/prod/a%3Fb", "/prod/x/", "/prod/a%20b"));
+        assertThat(stub.received.get(2).query(), equalTo("k=v"));
+    }
+
+    @Test
+    void defaultStageIsNotInThePathTheInstanceReceives() throws IOException {
+        Stub stub = startStub("unstaged");
+        String serviceId = createService(null);
+        register(serviceId, "i-1", stub, "");
+        String apiId = createApi(serviceArn(serviceId), "VPC_LINK", createVpcLink());
+
+        given().when().get("/execute-api/" + apiId + "/$default/orders").then().statusCode(200);
+
+        assertThat(stub.rawRequestTargets, contains("/orders"));
+    }
+
+    @Test
     void serviceWithoutInstancesAnswers503() {
         String serviceId = createService(null);
         String apiId = createApi(serviceArn(serviceId), "VPC_LINK", createVpcLink());

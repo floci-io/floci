@@ -17,7 +17,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CloudMapInstanceResolverTest {
@@ -29,12 +33,14 @@ class CloudMapInstanceResolverTest {
     private final CloudMapService cloudMap = mock(CloudMapService.class);
     private final CloudMapInstanceResolver resolver = new CloudMapInstanceResolver(cloudMap);
 
+    private Service service;
+
     private void givenService(String healthCheckCustomConfig, Instance... instances) {
-        Service service = new Service();
+        service = new Service();
         service.setId(SERVICE_ID);
         service.setHealthCheckCustomConfig(healthCheckCustomConfig);
         when(cloudMap.getService(SERVICE_ID)).thenReturn(service);
-        when(cloudMap.listInstances(SERVICE_ID)).thenReturn(List.of(instances));
+        when(cloudMap.filterInstances(eq(SERVICE_ID), anyString(), anyMap())).thenReturn(List.of(instances));
     }
 
     private static Instance instance(String id, String health, Map<String, String> attributes) {
@@ -62,31 +68,44 @@ class CloudMapInstanceResolverTest {
     }
 
     @Test
-    void healthCheckedServiceNeverPicksAnUnhealthyInstance() {
-        givenService(CUSTOM_HEALTH_CHECK,
-                instance("up-1", "HEALTHY", address("10.0.0.1", "8080")),
-                instance("down", "UNHEALTHY", address("10.0.0.2", "8080")),
-                instance("up-2", "HEALTHY", address("10.0.0.3", "8080")));
+    void serviceWithAHealthCheckAsksForHealthyInstancesOnly() {
+        givenService(CUSTOM_HEALTH_CHECK, instance("up", "HEALTHY", address("10.0.0.1", "8080")));
 
-        Set<Endpoint> picked = new HashSet<>();
-        for (int i = 0; i < 200; i++) {
-            picked.add(resolver.pickInstance(SERVICE_ARN).orElseThrow());
-        }
+        assertEquals(new Endpoint("10.0.0.1", 8080), resolver.pickInstance(SERVICE_ARN).orElseThrow());
 
-        assertEquals(Set.of(new Endpoint("10.0.0.1", 8080), new Endpoint("10.0.0.3", 8080)), picked);
+        verify(cloudMap).filterInstances(SERVICE_ID, "HEALTHY", Map.of());
     }
 
     @Test
-    void healthCheckedServiceWithOnlyUnhealthyInstancesHasNoCandidate() {
-        givenService(CUSTOM_HEALTH_CHECK, instance("down", "UNHEALTHY", address("10.0.0.2", "8080")));
+    void serviceWithAHealthCheckConfigAsksForHealthyInstancesOnly() {
+        givenService(null, instance("up", "HEALTHY", address("10.0.0.1", "8080")));
+        service.setHealthCheckConfig("{\"Type\":\"HTTP\"}");
+
+        resolver.pickInstance(SERVICE_ARN);
+
+        verify(cloudMap).filterInstances(SERVICE_ID, "HEALTHY", Map.of());
+    }
+
+    @Test
+    void serviceWithoutHealthCheckAsksForEveryInstance() {
+        givenService(null, instance("a", "UNHEALTHY", address("10.0.0.1", "8080")));
+
+        assertEquals(new Endpoint("10.0.0.1", 8080), resolver.pickInstance(SERVICE_ARN).orElseThrow());
+
+        verify(cloudMap).filterInstances(SERVICE_ID, "ALL", Map.of());
+    }
+
+    @Test
+    void noInstanceLeftByTheServiceHasNoCandidate() {
+        givenService(CUSTOM_HEALTH_CHECK);
 
         assertEquals(Optional.empty(), resolver.pickInstance(SERVICE_ARN));
     }
 
     @Test
-    void serviceWithoutHealthCheckCountsEveryInstance() {
+    void picksAmongEveryInstanceTheServiceReturns() {
         givenService(null,
-                instance("a", "UNHEALTHY", address("10.0.0.1", "8080")),
+                instance("a", "HEALTHY", address("10.0.0.1", "8080")),
                 instance("b", "HEALTHY", address("10.0.0.2", "8080")));
 
         Set<Endpoint> picked = new HashSet<>();
@@ -126,18 +145,12 @@ class CloudMapInstanceResolverTest {
     }
 
     @Test
-    void arnQueryStringFiltersInstancesByAttribute() {
-        givenService(null,
-                instance("prod", "HEALTHY", Map.of("AWS_INSTANCE_IPV4", "10.0.0.1",
-                        "AWS_INSTANCE_PORT", "8080", "stage", "prod", "deployment", "green")),
-                instance("dev", "HEALTHY", Map.of("AWS_INSTANCE_IPV4", "10.0.0.2",
-                        "AWS_INSTANCE_PORT", "8080", "stage", "dev", "deployment", "green")));
+    void arnQueryStringIsPassedToTheServiceAsAttributeFilters() {
+        givenService(null, instance("prod", "HEALTHY", address("10.0.0.1", "8080")));
 
-        for (int i = 0; i < 50; i++) {
-            assertEquals(new Endpoint("10.0.0.1", 8080),
-                    resolver.pickInstance(SERVICE_ARN + "?stage=prod&deployment=green").orElseThrow());
-        }
-        assertEquals(Optional.empty(), resolver.pickInstance(SERVICE_ARN + "?stage=qa"));
+        resolver.pickInstance(SERVICE_ARN + "?stage=prod&deployment=green");
+
+        verify(cloudMap).filterInstances(SERVICE_ID, "ALL", Map.of("stage", "prod", "deployment", "green"));
     }
 
     @Test

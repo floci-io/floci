@@ -804,6 +804,10 @@ answers `502` with `Invalid VPC link identifier specified: <id>`, a link that is
 answers `502`, and a missing `connectionId` answers `500`, the same as a REST (v1) VPC link
 integration.
 
+API Gateway includes the stage in the path it sends to the backend, so a request to the `prod`
+stage arrives as `/prod/<route-path>`. The `$default` stage has no stage segment, so its requests
+arrive as `/<route-path>`.
+
 The `integrationUri` names the backend:
 
 - An ALB or NLB listener ARN forwards through that listener.

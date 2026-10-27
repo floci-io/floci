@@ -393,6 +393,17 @@ class ApiGatewayV2AlbIntegrationTest {
     }
 
     @Test
+    @Order(15)
+    void albTargetReceivesTheNamedStageInThePathButNotTheDefaultStage() {
+        given().urlEncodingEnabled(false).when().get("/execute-api/" + apiId + "/prod/a%3Fb")
+                .then().statusCode(200).body("rawPath", equalTo("/prod/a%3Fb"));
+        given().urlEncodingEnabled(false).when().get("/execute-api/" + apiId + "/prod/x/")
+                .then().statusCode(200).body("rawPath", equalTo("/prod/x/"));
+        given().urlEncodingEnabled(false).when().get("/execute-api/" + apiId + "/$default/a%3Fb")
+                .then().statusCode(200).body("rawPath", equalTo("/a%3Fb"));
+    }
+
+    @Test
     @Order(90)
     void cleanup() {
         if (integrationId != null) {

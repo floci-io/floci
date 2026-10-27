@@ -108,7 +108,8 @@ public class ApiGatewayExecuteController {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayExecuteController.class);
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
-    private static final int EXECUTE_API_PREFIX_SEGMENTS = 3;
+    private static final String DEFAULT_STAGE = "$default";
+    private static final int EXECUTE_API_PREFIX_SEGMENTS = 2;
     private static final Set<String> V2_TEXT_CONTENT_TYPES = Set.of(
             MediaType.TEXT_PLAIN,
             MediaType.TEXT_HTML,
@@ -2932,7 +2933,7 @@ public class ApiGatewayExecuteController {
                             .entity(jsonMessage("Bad Gateway: cannot resolve ALB listener: " + integrationUri))
                             .type(MediaType.APPLICATION_JSON).build();
                 }
-                String resolvedUrl = "http://127.0.0.1:" + listenerEndpoint.port() + proxyTargetPath(path, uriInfo);
+                String resolvedUrl = "http://127.0.0.1:" + listenerEndpoint.port() + proxyTargetPath(path, uriInfo, stageName);
                 effective = withResolvedUriAndHost(integration, resolvedUrl, listenerEndpoint.host());
                 LOG.debugv("ALB integration: listener {0} → {1}", integrationUri, resolvedUrl);
             } else if (isCloudMapIntegration(integration)) {
@@ -2954,7 +2955,7 @@ public class ApiGatewayExecuteController {
                     LOG.debugv("Cloud Map service {0} has no healthy instance to route to", integrationUri);
                     return httpApiError(503, "Service Unavailable");
                 }
-                String resolvedUrl = "http://" + instance.address() + ":" + instance.port() + proxyTargetPath(path, uriInfo);
+                String resolvedUrl = "http://" + instance.address() + ":" + instance.port() + proxyTargetPath(path, uriInfo, stageName);
                 effective = withResolvedUri(integration, resolvedUrl);
                 LOG.debugv("Cloud Map integration: {0} → {1}:{2}", integrationUri, instance.address(), instance.port());
             }
@@ -4333,25 +4334,31 @@ public class ApiGatewayExecuteController {
 
     // ──────────────────────────── Path matching ────────────────────────────
 
-    /** The request path after the {@code /execute-api/{apiId}/{stage}} prefix, as the caller encoded it. */
-    static String rawTargetPath(String normalizedPath, String rawRequestPath) {
+    /**
+     * The request path a private integration sends to its backend, as the caller encoded it. API Gateway keeps
+     * the stage segment in it, except for {@code $default}, which has none.
+     */
+    static String rawTargetPath(String normalizedPath, String rawRequestPath, String stageName) {
+        boolean defaultStage = DEFAULT_STAGE.equals(stageName);
         if (rawRequestPath != null) {
             int start = 0;
-            for (int segment = 0; segment < EXECUTE_API_PREFIX_SEGMENTS && start >= 0; segment++) {
+            int segments = EXECUTE_API_PREFIX_SEGMENTS + (defaultStage ? 1 : 0);
+            for (int segment = 0; segment < segments && start >= 0; segment++) {
                 start = rawRequestPath.indexOf('/', start + 1);
             }
             if (start >= 0) {
                 return rawRequestPath.substring(start);
             }
-            if (rawRequestPath.startsWith("/execute-api/")) {
+            if (defaultStage && rawRequestPath.startsWith("/execute-api/")) {
                 return "/";
             }
         }
-        return preserveTrailingSlash(normalizedPath, rawRequestPath);
+        String path = preserveTrailingSlash(normalizedPath, rawRequestPath);
+        return defaultStage ? path : "/" + stageName + path;
     }
 
-    private static String proxyTargetPath(String normalizedPath, UriInfo uriInfo) {
-        return rawTargetPath(normalizedPath, uriInfo.getRequestUri().getRawPath());
+    private static String proxyTargetPath(String normalizedPath, UriInfo uriInfo, String stageName) {
+        return rawTargetPath(normalizedPath, uriInfo.getRequestUri().getRawPath(), stageName);
     }
 
     /**

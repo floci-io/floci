@@ -7,20 +7,29 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class RawTargetPathTest {
 
     @Test
-    void encodedCharactersAndTrailingSlashSurviveAfterTheGatewayPrefix() {
-        assertEquals("/a%3Fb", ApiGatewayExecuteController.rawTargetPath("/a?b", "/execute-api/api1/$default/a%3Fb"));
-        assertEquals("/x/", ApiGatewayExecuteController.rawTargetPath("/x", "/execute-api/api1/prod/x/"));
-        assertEquals("/a%20b/c", ApiGatewayExecuteController.rawTargetPath("/a b/c", "/execute-api/api1/prod/a%20b/c"));
+    void namedStageStaysInTheTargetPathAsTheCallerEncodedIt() {
+        assertEquals("/prod/a%3Fb", ApiGatewayExecuteController.rawTargetPath("/a?b", "/execute-api/api1/prod/a%3Fb", "prod"));
+        assertEquals("/prod/x/", ApiGatewayExecuteController.rawTargetPath("/x", "/execute-api/api1/prod/x/", "prod"));
+        assertEquals("/test/a%20b/c", ApiGatewayExecuteController.rawTargetPath("/a b/c", "/execute-api/api1/test/a%20b/c", "test"));
     }
 
     @Test
-    void emptyRemainderIsTheRootPath() {
-        assertEquals("/", ApiGatewayExecuteController.rawTargetPath("/", "/execute-api/api1/prod"));
-        assertEquals("/", ApiGatewayExecuteController.rawTargetPath("/", "/execute-api/api1/prod/"));
+    void defaultStageIsNotPartOfTheTargetPath() {
+        assertEquals("/a%3Fb", ApiGatewayExecuteController.rawTargetPath("/a?b", "/execute-api/api1/$default/a%3Fb", "$default"));
+        assertEquals("/x/", ApiGatewayExecuteController.rawTargetPath("/x", "/execute-api/api1/$default/x/", "$default"));
+    }
+
+    @Test
+    void emptyRemainderIsTheStageRootOrTheRootPath() {
+        assertEquals("/prod", ApiGatewayExecuteController.rawTargetPath("/", "/execute-api/api1/prod", "prod"));
+        assertEquals("/prod/", ApiGatewayExecuteController.rawTargetPath("/", "/execute-api/api1/prod/", "prod"));
+        assertEquals("/", ApiGatewayExecuteController.rawTargetPath("/", "/execute-api/api1/$default", "$default"));
+        assertEquals("/", ApiGatewayExecuteController.rawTargetPath("/", "/execute-api/api1/$default/", "$default"));
     }
 
     @Test
     void missingRawPathFallsBackToTheNormalizedPath() {
-        assertEquals("/x", ApiGatewayExecuteController.rawTargetPath("/x", null));
+        assertEquals("/x", ApiGatewayExecuteController.rawTargetPath("/x", null, "$default"));
+        assertEquals("/prod/x", ApiGatewayExecuteController.rawTargetPath("/x", null, "prod"));
     }
 }

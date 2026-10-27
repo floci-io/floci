@@ -32,6 +32,7 @@ public class CloudMapInstanceResolver {
     private static final String ATTRIBUTE_IPV4 = "AWS_INSTANCE_IPV4";
     private static final String ATTRIBUTE_PORT = "AWS_INSTANCE_PORT";
     private static final String HEALTHY = "HEALTHY";
+    private static final String ALL = "ALL";
     private static final Pattern IPV4 = Pattern.compile("^(?:(?:25[0-5]|2[0-4]\\d|[01]?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|[01]?\\d?\\d)$");
     private static final int MAX_PORT = 65_535;
 
@@ -54,30 +55,19 @@ public class CloudMapInstanceResolver {
             throw new IllegalArgumentException("Not a Cloud Map service ARN: " + serviceArn);
         }
         Service service = cloudMapService.getService(arn.group(1));
-        Map<String, String> filters = parseQuery(arn.group(2));
         // DiscoverInstances HealthStatus: a service without a health check reports none, so all instances count
         boolean healthChecked = isPresent(service.getHealthCheckConfig())
                 || isPresent(service.getHealthCheckCustomConfig());
+        String healthFilter = healthChecked ? HEALTHY : ALL;
 
         List<Endpoint> candidates = new ArrayList<>();
-        for (Instance instance : cloudMapService.listInstances(service.getId())) {
-            if (healthChecked && !HEALTHY.equals(instance.getHealthStatus())) {
-                continue;
-            }
-            Map<String, String> attributes = instance.getAttributes() != null ? instance.getAttributes() : Map.of();
-            if (!matches(attributes, filters)) {
-                continue;
-            }
-            toEndpoint(attributes).ifPresent(candidates::add);
+        for (Instance instance : cloudMapService.filterInstances(service.getId(), healthFilter, parseQuery(arn.group(2)))) {
+            toEndpoint(instance.getAttributes() != null ? instance.getAttributes() : Map.of()).ifPresent(candidates::add);
         }
         if (candidates.isEmpty()) {
             return Optional.empty();
         }
         return Optional.of(candidates.get(ThreadLocalRandom.current().nextInt(candidates.size())));
-    }
-
-    private static boolean matches(Map<String, String> attributes, Map<String, String> filters) {
-        return filters.entrySet().stream().allMatch(e -> e.getValue().equals(attributes.get(e.getKey())));
     }
 
     private static Optional<Endpoint> toEndpoint(Map<String, String> attributes) {
