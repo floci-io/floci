@@ -1,5 +1,6 @@
 package com.floci.test;
 
+import org.assertj.core.api.ThrowableAssert;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -257,7 +258,7 @@ class DynamoDbAccessPathValidationTest {
                         "alternate", condition(ComparisonOperator.EQ, "a1")))));
     }
 
-    private static void assertValidationException(org.assertj.core.api.ThrowableAssert.ThrowingCallable call) {
+    private static void assertValidationException(ThrowableAssert.ThrowingCallable call) {
         assertThatThrownBy(call)
                 .isInstanceOf(DynamoDbException.class)
                 .satisfies(error -> assertThat(((DynamoDbException) error)

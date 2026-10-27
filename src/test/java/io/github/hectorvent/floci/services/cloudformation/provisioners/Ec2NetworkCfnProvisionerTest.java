@@ -1200,14 +1200,31 @@ class Ec2NetworkCfnProvisionerTest {
         describesPrefixList(prefixList(1, 2, OFFICE));
         StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
 
-        provisioner.provision(r, prefixListProps(2, "192.0.2.19/24", "office"), ctx(PREFIX_LIST_ID));
+        provisioner.provision(r, prefixListProps(2, "192.0.2.0/24", "office"), ctx(PREFIX_LIST_ID));
 
         assertEquals(PREFIX_LIST_ID, r.getPhysicalId());
         assertEquals("1", r.getAttributes().get("Version"));
         assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR),
-                "a CIDR written with host bits is the same block, not a change");
+                "an unchanged canonical entry needs no update");
         verify(ec2, never()).modifyManagedPrefixList(any(), any(), any(), any(), any(), any(), any());
         verify(ec2, never()).createManagedPrefixList(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void invalidUpdateEntriesAreRejectedBeforeDiffingOrTags() {
+        describesPrefixList(prefixList(1, 2, OFFICE));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+        doThrow(new AwsException("InvalidParameterValue", "invalid CIDR", 400))
+                .when(ec2).validatePrefixListEntry(any(), eq("IPv4"));
+
+        AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                withTags(prefixListProps(2, "192.0.2.19/24", "office"), "team", "changed"), ctx(PREFIX_LIST_ID)));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+        verify(ec2, never()).modifyManagedPrefixList(any(), any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).createTags(any(), any(), any());
+        verify(ec2, never()).deleteTags(any(), any(), any());
     }
 
     @Test

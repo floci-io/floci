@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -128,8 +129,8 @@ class ApiGatewayV2StageSettingsTest {
                 .when().post("/v2/apis/" + apiId + "/stages")
                 .then().statusCode(201)
                 .body("defaultRouteSettings.throttlingRateLimit", equalTo(50.0f))
-                .body("defaultRouteSettings.throttlingBurstLimit", org.hamcrest.Matchers.nullValue())
-                .body("defaultRouteSettings.dataTraceEnabled", org.hamcrest.Matchers.nullValue());
+                .body("defaultRouteSettings.throttlingBurstLimit", Matchers.nullValue())
+                .body("defaultRouteSettings.dataTraceEnabled", Matchers.nullValue());
     }
 
     @Test

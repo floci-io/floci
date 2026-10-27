@@ -528,6 +528,13 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         return stateMachineStore.scan(k -> k.startsWith(regionArnPrefix(region)));
     }
 
+    public PaginatedResult<StateMachine> listStateMachines(String region, Integer maxResults, String nextToken) {
+        int pageSize = StepFunctionsPaging.pageSize(maxResults, nextToken);
+        return Pagination.paginate(listStateMachines(region), StateMachine::getStateMachineArn, pageSize, nextToken,
+                "states:state-machines:" + region + ":" + regionResolver.getAccountId(),
+                token -> new AwsException("InvalidToken", "Invalid nextToken.", 400));
+    }
+
     // ── State machine versions ──────────────────────────────────────────────
 
     public StateMachineVersion publishStateMachineVersion(String stateMachineArn) {

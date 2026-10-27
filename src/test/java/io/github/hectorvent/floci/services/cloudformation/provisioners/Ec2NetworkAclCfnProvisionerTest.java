@@ -193,6 +193,26 @@ class Ec2NetworkAclCfnProvisionerTest {
                 "0.0.0.0/0", null, null, null, null, null, true);
     }
 
+    @Test
+    void aclEntryOmitsPortRangeAndRuleNumberThatResolveToNoValue() {
+        StackResource r = resource("AWS::EC2::NetworkAclEntry", "Entry");
+        ObjectNode props = mapper.createObjectNode()
+                .put("NetworkAclId", "acl-abc")
+                .put("Protocol", "6")
+                .put("RuleAction", "allow")
+                .put("CidrBlock", "0.0.0.0/0");
+        props.set("RuleNumber", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        ObjectNode portRange = mapper.createObjectNode();
+        portRange.set("From", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        portRange.set("To", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        props.set("PortRange", portRange);
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 100, "6", "allow", false,
+                "0.0.0.0/0", null, null, null, null, null, true);
+    }
+
     /**
      * Id is the type's primaryIdentifier and its only schema readOnlyProperty. It went unset for a
      * long time because the sibling NetworkAcl arm sets one too, and the coverage scan read the

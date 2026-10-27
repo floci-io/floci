@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.bcmdataexports.model.DestinationConfi
 import io.github.hectorvent.floci.services.bcmdataexports.model.Export;
 import io.github.hectorvent.floci.services.bcmdataexports.model.ExportExecution;
 import io.github.hectorvent.floci.services.bcmdataexports.model.RefreshCadence;
+import io.github.hectorvent.floci.services.cur.CurEmissionScheduler;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -36,12 +37,12 @@ public class BcmDataExportsJsonHandler {
 
     private final BcmDataExportsService service;
     private final ObjectMapper objectMapper;
-    private final io.github.hectorvent.floci.services.cur.CurEmissionScheduler scheduler;
+    private final CurEmissionScheduler scheduler;
 
     @Inject
     public BcmDataExportsJsonHandler(BcmDataExportsService service,
                                      ObjectMapper objectMapper,
-                                     io.github.hectorvent.floci.services.cur.CurEmissionScheduler scheduler) {
+                                     CurEmissionScheduler scheduler) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.scheduler = scheduler;

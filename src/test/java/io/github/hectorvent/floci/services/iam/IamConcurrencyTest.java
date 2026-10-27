@@ -10,6 +10,7 @@ import org.junit.jupiter.api.TestFactory;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -56,7 +57,7 @@ class IamConcurrencyTest {
         List<Scenario> scenarios = List.of(
                 new Scenario("role.tags", iam -> {
                     iam.createRole("r", "/", "{}", null, 3600, null);
-                    return i -> iam.tagRole("r", java.util.Map.of("k" + i, "v" + i));
+                    return i -> iam.tagRole("r", Map.of("k" + i, "v" + i));
                 }, iam -> iam.getRole("r").getTags().size()),
 
                 new Scenario("role.inlinePolicies", iam -> {
@@ -72,7 +73,7 @@ class IamConcurrencyTest {
 
                 new Scenario("user.tags", iam -> {
                     iam.createUser("u", "/");
-                    return i -> iam.tagUser("u", java.util.Map.of("k" + i, "v" + i));
+                    return i -> iam.tagUser("u", Map.of("k" + i, "v" + i));
                 }, iam -> iam.getUser("u").getTags().size()),
 
                 new Scenario("user.inlinePolicies", iam -> {
@@ -111,7 +112,7 @@ class IamConcurrencyTest {
 
                 new Scenario("policy.tags", iam -> {
                     IamPolicy p = iam.createPolicy("pol", "/", null, "{}", null);
-                    return i -> iam.tagPolicy(p.getArn(), java.util.Map.of("k" + i, "v" + i));
+                    return i -> iam.tagPolicy(p.getArn(), Map.of("k" + i, "v" + i));
                 }, iam -> iam.getPolicy(onlyPolicyArn(iam)).getTags().size())
         );
 
@@ -227,7 +228,7 @@ class IamConcurrencyTest {
                         try {
                             start.await();
                             iam.addRoleToInstanceProfile("prof", "role" + idx);
-                        } catch (io.github.hectorvent.floci.core.common.AwsException expected) {
+                        } catch (AwsException expected) {
                             // LimitExceeded once one role is in
                         } catch (Throwable t) {
                             unexpected.add(t);
@@ -272,9 +273,9 @@ class IamConcurrencyTest {
                         try {
                             start.await(10, TimeUnit.SECONDS);
                             iam.createOpenIDConnectProvider("https://oidc.example.com/id/RACE",
-                                    List.of(clientId), List.of("thumb"), java.util.Map.of());
+                                    List.of(clientId), List.of("thumb"), Map.of());
                             winners.add(clientId);
-                        } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+                        } catch (AwsException e) {
                             if (!"EntityAlreadyExists".equals(e.getErrorCode())) {
                                 unexpected.add(e.getErrorCode());
                             }
@@ -323,7 +324,7 @@ class IamConcurrencyTest {
                             start.await(10, TimeUnit.SECONDS);
                             iam.createAccountAlias(alias);
                             winners.add(alias);
-                        } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+                        } catch (AwsException e) {
                             if (!"EntityAlreadyExists".equals(e.getErrorCode())) {
                                 unexpected.add(e.getErrorCode());
                             }
@@ -375,7 +376,7 @@ class IamConcurrencyTest {
                             start.await(10, TimeUnit.SECONDS);
                             iam.changePassword("racer", "Passw0rd$start", candidate);
                             winners.add(candidate);
-                        } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+                        } catch (AwsException e) {
                             if (!"InvalidParameterValue".equals(e.getErrorCode())) {
                                 unexpected.add(e.getErrorCode());
                             }

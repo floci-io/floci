@@ -168,7 +168,7 @@ public class RabbitMqManager {
                 "http://" + mgmt.host() + ":" + mgmt.port(),
                 List.of("amqp://" + amqp.host() + ":" + amqp.port()),
                 amqp.host());
-        broker.setBrokerInstances(new java.util.ArrayList<>(List.of(instance)));
+        broker.setBrokerInstances(new ArrayList<>(List.of(instance)));
         LOG.infov("RabbitMQ container {0} started for broker {1}: amqp={2} (host ports amqp={3}, console={4})",
                 info.containerId(), broker.getBrokerName(), instance.getEndpoints().get(0),
                 String.valueOf(ports.amqp()), String.valueOf(ports.console()));

@@ -54,6 +54,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
@@ -604,7 +605,7 @@ public class GlueService {
         }
         try {
             return Instant.parse(value.trim());
-        } catch (java.time.format.DateTimeParseException e) {
+        } catch (DateTimeParseException e) {
             throw new AwsException("InvalidInputException", "Invalid time value: " + value, 400);
         }
     }

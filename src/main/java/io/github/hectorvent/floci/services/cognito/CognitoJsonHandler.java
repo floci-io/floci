@@ -191,7 +191,7 @@ public class CognitoJsonHandler {
 
     private Response handleAddCustomAttributes(JsonNode request) {
         String userPoolId = request.path("UserPoolId").asText();
-        List<Map<String, Object>> customAttributes = new java.util.ArrayList<>();
+        List<Map<String, Object>> customAttributes = new ArrayList<>();
         JsonNode attrsNode = request.path("CustomAttributes");
         if (attrsNode.isArray()) {
             for (JsonNode attrNode : attrsNode) {
@@ -1186,9 +1186,9 @@ public class CognitoJsonHandler {
         node.put("DeletionProtection", p.getDeletionProtection() != null ? p.getDeletionProtection() : "INACTIVE");
         node.set("LambdaConfig", objectMapper.valueToTree(p.getLambdaConfig() != null ? p.getLambdaConfig() : new HashMap<>()));
         node.set("SchemaAttributes", objectMapper.valueToTree(CognitoStandardAttributes.merge(p.getSchemaAttributes())));
-        node.set("AutoVerifiedAttributes", objectMapper.valueToTree(p.getAutoVerifiedAttributes() != null ? p.getAutoVerifiedAttributes() : new java.util.ArrayList<>()));
-        node.set("AliasAttributes", objectMapper.valueToTree(p.getAliasAttributes() != null ? p.getAliasAttributes() : new java.util.ArrayList<>()));
-        node.set("UsernameAttributes", objectMapper.valueToTree(p.getUsernameAttributes() != null ? p.getUsernameAttributes() : new java.util.ArrayList<>()));
+        node.set("AutoVerifiedAttributes", objectMapper.valueToTree(p.getAutoVerifiedAttributes() != null ? p.getAutoVerifiedAttributes() : new ArrayList<>()));
+        node.set("AliasAttributes", objectMapper.valueToTree(p.getAliasAttributes() != null ? p.getAliasAttributes() : new ArrayList<>()));
+        node.set("UsernameAttributes", objectMapper.valueToTree(p.getUsernameAttributes() != null ? p.getUsernameAttributes() : new ArrayList<>()));
 
         if (p.getSmsVerificationMessage() != null) node.put("SmsVerificationMessage", p.getSmsVerificationMessage());
         if (p.getEmailVerificationMessage() != null) node.put("EmailVerificationMessage", p.getEmailVerificationMessage());
@@ -1400,7 +1400,7 @@ public class CognitoJsonHandler {
             return List.of();
         }
 
-        List<ResourceServerScope> scopes = new java.util.ArrayList<>();
+        List<ResourceServerScope> scopes = new ArrayList<>();
         scopesNode.forEach(item -> {
             ResourceServerScope scope = new ResourceServerScope();
             scope.setScopeName(item.path("ScopeName").asText());
@@ -1415,7 +1415,7 @@ public class CognitoJsonHandler {
             return List.of();
         }
 
-        List<String> values = new java.util.ArrayList<>();
+        List<String> values = new ArrayList<>();
         node.forEach(item -> values.add(item.asText()));
         return values;
     }

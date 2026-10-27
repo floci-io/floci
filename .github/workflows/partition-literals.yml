@@ -100,6 +100,9 @@ jobs:
       - name: Run generator tests
         run: make aws-data-test
 
+      - name: Check DynamoDB condition request members
+        run: make dynamodb-condition-keys-check
+
       - name: Check partitions.json against a fresh generation
         run: make aws-data-check
 

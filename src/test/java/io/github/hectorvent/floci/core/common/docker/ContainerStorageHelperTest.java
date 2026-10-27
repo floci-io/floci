@@ -351,7 +351,7 @@ class ContainerStorageHelperTest {
     }
 
     private static EmulatorConfig config(
-            String namespace, java.util.List<EmulatorConfig.DockerConfig.LabelEntry> extraLabels) {
+            String namespace, List<EmulatorConfig.DockerConfig.LabelEntry> extraLabels) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
         EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);

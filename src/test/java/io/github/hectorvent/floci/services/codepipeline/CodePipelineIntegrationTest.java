@@ -9,6 +9,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -1191,7 +1192,7 @@ class CodePipelineIntegrationTest {
         putObject("codepipeline-source-override", "source.zip", "default artifact");
         String oldVersion = given()
                 .contentType("application/octet-stream")
-                .body("selected old version".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                .body("selected old version".getBytes(StandardCharsets.UTF_8))
         .when()
                 .put("/codepipeline-source-override/alternate.zip")
         .then()
@@ -2803,7 +2804,7 @@ class CodePipelineIntegrationTest {
     private static String putObject(String bucket, String key, String body, String revisionSummary) {
         RequestSpecification request = given()
                 .contentType("application/octet-stream")
-                .body(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                .body(body.getBytes(StandardCharsets.UTF_8));
         if (revisionSummary != null) {
             request.header("x-amz-meta-codepipeline-artifact-revision-summary", revisionSummary);
         }

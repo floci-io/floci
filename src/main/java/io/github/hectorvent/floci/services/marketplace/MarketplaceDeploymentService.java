@@ -16,6 +16,7 @@ import jakarta.inject.Inject;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -174,7 +175,7 @@ public class MarketplaceDeploymentService implements Resettable {
         saveRecord(record);
     }
 
-    public synchronized void untagResource(String resourceArn, java.util.List<String> tagKeys, String region) {
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys, String region) {
         validateRegion(region);
         ObjectNode record = requireByArn(resourceArn);
         if (tagKeys == null || tagKeys.isEmpty()) {

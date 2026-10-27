@@ -1,12 +1,18 @@
 package io.github.hectorvent.floci.services.verifiedpermissions;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.Response;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -118,7 +124,7 @@ class VerifiedPermissionsIntegrationTest {
                 .then().statusCode(200).extract().path("policyStoreId");
     }
 
-    private static io.restassured.response.Response givenAws(String action, String body) {
+    private static Response givenAws(String action, String body) {
         return given().contentType(CONTENT_TYPE).header("Authorization", AUTH)
                 .header("X-Amz-Target", "VerifiedPermissions." + action).body(body)
                 .when().post("/");
@@ -208,7 +214,7 @@ class VerifiedPermissionsIntegrationTest {
                 .body("determiningPolicies.size()", equalTo(1));
 
         String blocked = entities.replace("\"blocked\":false", "\"blocked\":true");
-        java.util.LinkedHashMap<String,Object> blockedAuth = new java.util.LinkedHashMap<>(auth);
+        LinkedHashMap<String,Object> blockedAuth = new LinkedHashMap<>(auth);
         blockedAuth.put("entities", Map.of("cedarJson", blocked));
         givenAws("IsAuthorized", objectJson(blockedAuth)).then().statusCode(200)
                 .body("decision", equalTo("DENY"))
@@ -226,18 +232,18 @@ class VerifiedPermissionsIntegrationTest {
         Map<String,Object> action = Map.of("actionType", "Demo::Action", "actionId", "write");
         Map<String,Object> entity = Map.of(
                 "identifier", principal,
-                "parents", java.util.List.of(Map.of("entityType", "Demo::Group", "entityId", "admins")),
+                "parents", List.of(Map.of("entityType", "Demo::Group", "entityId", "admins")),
                 "attributes", Map.of("department", Map.of("string", "platform")));
         Map<String,Object> auth = Map.of("policyStoreId", store, "principal", principal, "action", action, "resource", resource,
-                "entities", Map.of("entityList", java.util.List.of(entity)));
+                "entities", Map.of("entityList", List.of(entity)));
         givenAws("IsAuthorized", objectJson(auth)).then().statusCode(200).body("decision", equalTo("ALLOW"));
 
         Map<String,Object> item1 = Map.of("principal", principal, "action", action, "resource", resource);
         Map<String,Object> item2 = Map.of("principal", principal,
                 "action", Map.of("actionType", "Demo::Action", "actionId", "read"),
                 "resource", Map.of("entityType", "Demo::Document", "entityId", "doc2"));
-        givenAws("BatchIsAuthorized", objectJson(Map.of("policyStoreId", store, "requests", java.util.List.of(item1, item2),
-                        "entities", Map.of("entityList", java.util.List.of(entity)))))
+        givenAws("BatchIsAuthorized", objectJson(Map.of("policyStoreId", store, "requests", List.of(item1, item2),
+                        "entities", Map.of("entityList", List.of(entity)))))
                 .then().statusCode(200).body("results.size()", equalTo(2))
                 .body("results[0].decision", equalTo("ALLOW"))
                 .body("results[1].decision", equalTo("DENY"));
@@ -249,7 +255,7 @@ class VerifiedPermissionsIntegrationTest {
         String body = objectJson(Map.of("clientToken", token, "validationSettings", Map.of("mode", "OFF")));
         String first = givenAws("CreatePolicyStore", body).then().statusCode(200).extract().path("policyStoreId");
         String second = givenAws("CreatePolicyStore", body).then().statusCode(200).extract().path("policyStoreId");
-        org.junit.jupiter.api.Assertions.assertEquals(first, second);
+        Assertions.assertEquals(first, second);
         givenAws("CreatePolicyStore", objectJson(Map.of("clientToken", token,
                         "validationSettings", Map.of("mode", "STRICT"))))
                 .then().statusCode(400).body("__type", containsString("ConflictException"));
@@ -264,7 +270,7 @@ class VerifiedPermissionsIntegrationTest {
                 "principalEntityType", "Demo::User",
                 "configuration", Map.of("cognitoUserPoolConfiguration", Map.of(
                         "userPoolArn", cognitoArn,
-                        "clientIds", java.util.List.of("client-1"),
+                        "clientIds", List.of("client-1"),
                         "groupConfiguration", Map.of("groupEntityType", "Demo::Group")))));
         String cognitoId = givenAws("CreateIdentitySource", cognitoCreate).then().statusCode(200)
                 .extract().path("identitySourceId");
@@ -281,11 +287,11 @@ class VerifiedPermissionsIntegrationTest {
                         "issuer", "https://id.example.com",
                         "entityIdPrefix", "ext",
                         "tokenSelection", Map.of("identityTokenOnly", Map.of(
-                                "clientIds", java.util.List.of("web-client"), "principalIdClaim", "sub"))))));
+                                "clientIds", List.of("web-client"), "principalIdClaim", "sub"))))));
         String oidcId = givenAws("CreateIdentitySource", oidcCreate).then().statusCode(200)
                 .extract().path("identitySourceId");
         givenAws("ListIdentitySources", objectJson(Map.of("policyStoreId", store,
-                        "filters", java.util.List.of(Map.of("principalEntityType", "Demo::ExternalUser")))))
+                        "filters", List.of(Map.of("principalEntityType", "Demo::ExternalUser")))))
                 .then().statusCode(200).body("identitySources.size()", equalTo(1))
                 .body("identitySources[0].identitySourceId", equalTo(oidcId));
 
@@ -297,7 +303,7 @@ class VerifiedPermissionsIntegrationTest {
                         "issuer", "https://id2.example.com",
                         "entityIdPrefix", "partner",
                         "tokenSelection", Map.of("accessTokenOnly", Map.of(
-                                "audiences", java.util.List.of("api://demo"), "principalIdClaim", "sub"))))));
+                                "audiences", List.of("api://demo"), "principalIdClaim", "sub"))))));
         givenAws("UpdateIdentitySource", update).then().statusCode(200);
         givenAws("GetIdentitySource", objectJson(Map.of("policyStoreId", store, "identitySourceId", oidcId)))
                 .then().statusCode(200).body("principalEntityType", equalTo("Demo::Partner"))
@@ -354,7 +360,7 @@ class VerifiedPermissionsIntegrationTest {
     @Test
     void identitySourceDocumentedCollectionLimits_areEnforced() {
         String store = createStore("OFF", "DISABLED");
-        java.util.List<String> emptyAudiences = java.util.List.of();
+        List<String> emptyAudiences = List.of();
         givenAws("CreateIdentitySource", objectJson(Map.of(
                         "policyStoreId", store,
                         "principalEntityType", "Demo::User",
@@ -367,8 +373,8 @@ class VerifiedPermissionsIntegrationTest {
 
     private static String objectJson(Object value) {
         try {
-            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(value);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            return new ObjectMapper().writeValueAsString(value);
+        } catch (JsonProcessingException e) {
             throw new IllegalStateException(e);
         }
     }

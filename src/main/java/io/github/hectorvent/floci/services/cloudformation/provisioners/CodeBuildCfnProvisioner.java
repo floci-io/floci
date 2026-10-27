@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildJsonHandler;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.util.Set;
@@ -75,7 +76,7 @@ public class CodeBuildCfnProvisioner implements CfnResourceProvisioner {
 
     private JsonNode handle(String action, ObjectNode request, String region, String account) {
         try {
-            jakarta.ws.rs.core.Response response =
+            Response response =
                     codeBuildJsonHandler.handle(action, request, region, account);
             try {
                 // The handler returns Response.ok(Map.of(...)) for every JSON action, never a

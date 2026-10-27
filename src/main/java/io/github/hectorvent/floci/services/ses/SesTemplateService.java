@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -262,7 +263,7 @@ public class SesTemplateService implements SesTaggable {
         JsonNode node;
         try {
             node = mapper.readTree(raw);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        } catch (JsonProcessingException e) {
             throw new AwsException("InvalidRenderingParameter",
                     "Template rendering data is invalid: " + e.getOriginalMessage(), 400);
         }

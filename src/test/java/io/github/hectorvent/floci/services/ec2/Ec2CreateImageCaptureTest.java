@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -105,7 +106,7 @@ class Ec2CreateImageCaptureTest {
 
         assertNull(managerWith(dockerClient).commitInstance(instance(null), "floci-ami/ami-1:latest"));
 
-        verify(dockerClient, never()).commitCmd(org.mockito.ArgumentMatchers.anyString());
+        verify(dockerClient, never()).commitCmd(ArgumentMatchers.anyString());
     }
 
     @Test
@@ -168,7 +169,7 @@ class Ec2CreateImageCaptureTest {
 
         assertTrue(managerWith(dockerClient).removeCommittedImage(null));
 
-        verify(dockerClient, never()).removeImageCmd(org.mockito.ArgumentMatchers.anyString());
+        verify(dockerClient, never()).removeImageCmd(ArgumentMatchers.anyString());
     }
 
     @Test

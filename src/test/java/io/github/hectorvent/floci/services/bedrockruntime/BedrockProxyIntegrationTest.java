@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.testing.BedrockProxyBackendProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -780,9 +781,9 @@ class BedrockProxyIntegrationTest {
             .post("/model/" + MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(424)
-            .body("message", org.hamcrest.Matchers.allOf(
-                    org.hamcrest.Matchers.containsString("…"),
-                    org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("x".repeat(1000)))));
+            .body("message", Matchers.allOf(
+                    Matchers.containsString("…"),
+                    Matchers.not(Matchers.containsString("x".repeat(1000)))));
     }
 
     @Test
@@ -1214,7 +1215,7 @@ class BedrockProxyIntegrationTest {
 
         assertThat(body, containsString("messageStart"));
         assertThat(body, containsString("modelStreamErrorException"));
-        assertThat(body, org.hamcrest.Matchers.not(containsString("messageStop")));
+        assertThat(body, Matchers.not(containsString("messageStop")));
     }
 
     @Test
@@ -1246,8 +1247,8 @@ class BedrockProxyIntegrationTest {
         assertThat(body, containsString("messageStop"));
         assertThat(body, containsString("end_turn"));
         assertThat(body, containsString("metadata"));
-        assertThat(body, org.hamcrest.Matchers.not(containsString("modelStreamErrorException")));
-        assertThat(body, org.hamcrest.Matchers.not(containsString("contentBlockDelta")));
+        assertThat(body, Matchers.not(containsString("modelStreamErrorException")));
+        assertThat(body, Matchers.not(containsString("contentBlockDelta")));
     }
 
     @Test
@@ -1277,7 +1278,7 @@ class BedrockProxyIntegrationTest {
         assertThat(body, containsString("messageStart"));
         assertThat(body, containsString("Hello"));
         assertThat(body, containsString("modelStreamErrorException"));
-        assertThat(body, org.hamcrest.Matchers.not(containsString("messageStop")));
+        assertThat(body, Matchers.not(containsString("messageStop")));
     }
 
     @Test
@@ -1310,9 +1311,9 @@ class BedrockProxyIntegrationTest {
 
         assertThat(body, containsString("messageStop"));
         assertThat(body, containsString("end_turn"));
-        assertThat(body, org.hamcrest.Matchers.not(containsString("call_1")));
-        assertThat(body, org.hamcrest.Matchers.not(containsString("toolUse")));
-        assertThat(body, org.hamcrest.Matchers.not(containsString("modelStreamErrorException")));
+        assertThat(body, Matchers.not(containsString("call_1")));
+        assertThat(body, Matchers.not(containsString("toolUse")));
+        assertThat(body, Matchers.not(containsString("modelStreamErrorException")));
     }
 
     @Test

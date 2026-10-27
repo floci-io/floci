@@ -40,6 +40,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.TableBackup;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -409,7 +410,7 @@ public class DynamoDbService {
 
     private void persistItems(String storageKey) {
         if (itemStore == null) return;
-        var items = currentItems(storageKey, false);
+        ConcurrentSkipListMap<String, JsonNode> items = currentItems(storageKey, false);
         if (items != null) {
             itemStore.put(storageKey, new HashMap<>(items));
         } else {
@@ -819,7 +820,7 @@ public class DynamoDbService {
         settleVectorIndexes(storageKey, table);
 
         // Update dynamic counts
-        var items = itemsByTable.get(scopedItemsKey(storageKey));
+        ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items != null) {
             table.setItemCount(items.size());
         }
@@ -985,7 +986,7 @@ public class DynamoDbService {
     public void deleteTable(String tableName, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
-        var table = tableStore.get(storageKey)
+        TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
         requireNotCreating(table);
         settleVectorIndexes(storageKey, table);
@@ -1127,7 +1128,7 @@ public class DynamoDbService {
         validateIndexKeyTypes(table, normalizedItem, false);
 
         return withItemLock(storageKey, itemKey, () -> {
-            var tableItems = itemsFor(storageKey, stagedItems, true);
+            ConcurrentSkipListMap<String, JsonNode> tableItems = itemsFor(storageKey, stagedItems, true);
 
             JsonNode existing = tableItems.get(itemKey);
 
@@ -1177,7 +1178,7 @@ public class DynamoDbService {
         TableDefinition table = requireActiveTable(storageKey);
 
         String itemKey = buildItemKey(table, key, true);
-        var items = currentItems(storageKey, false);
+        ConcurrentSkipListMap<String, JsonNode> items = currentItems(storageKey, false);
         if (items == null) {
             LOG.tracev("Got item from {0}: key={1} item=<not found>", canonicalTableName, itemKey);
             return null;
@@ -1246,7 +1247,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
-            var items = itemsFor(storageKey, stagedItems, false);
+            ConcurrentSkipListMap<String, JsonNode> items = itemsFor(storageKey, stagedItems, false);
             if (existingItemCheck != null) {
                 existingItemCheck.accept(items == null ? null : items.get(itemKey));
             }
@@ -1381,7 +1382,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
-            var items = itemsFor(storageKey, stagedItems, true);
+            ConcurrentSkipListMap<String, JsonNode> items = itemsFor(storageKey, stagedItems, true);
 
             // Get existing item or create new one from key
             JsonNode existing = items.get(itemKey);
@@ -1400,7 +1401,7 @@ public class DynamoDbService {
                 item = key.deepCopy();
             }
 
-            var touchedPaths = new ArrayList<String>();
+            ArrayList<String> touchedPaths = new ArrayList<String>();
             // Apply UpdateExpression (modern format: "SET #n = :val, age = :age REMOVE attr")
             if (updateExpression != null) {
                 applyUpdateExpression(item, updateExpression, expressionAttrNames, expressionAttrValues, touchedPaths);
@@ -1409,7 +1410,7 @@ public class DynamoDbService {
             else if (attributeUpdates != null && attributeUpdates.isObject()) {
                 Iterator<Map.Entry<String, JsonNode>> fields = attributeUpdates.fields();
                 while (fields.hasNext()) {
-                    var entry = fields.next();
+                    Map.Entry<String, JsonNode> entry = fields.next();
                     String attrName = entry.getKey();
                     touchedPaths.add(attrName);
                     JsonNode update = entry.getValue();
@@ -1451,7 +1452,7 @@ public class DynamoDbService {
                                     BigDecimal delta = new BigDecimal(value.get("N").asText());
                                     BigDecimal current = curAttr != null && curAttr.has("N")
                                             ? new BigDecimal(curAttr.get("N").asText()) : BigDecimal.ZERO;
-                                    var sum = current.add(delta);
+                                    BigDecimal sum = current.add(delta);
                                     DynamoDbNumberUtils.checkArithmeticResult(sum);
                                     ObjectNode numNode = objectMapper.createObjectNode();
                                     numNode.put("N", sum.stripTrailingZeros().toPlainString());
@@ -1564,7 +1565,7 @@ public class DynamoDbService {
         String skName = accessPath.sortKeyName();
         List<String> sortKeyNames = accessPath.sortKeyNames();
 
-        var items = itemsByTable.get(scopedItemsKey(storageKey));
+        ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) return new QueryResult(List.of(), 0, 0, null, List.of());
 
         List<JsonNode> results = new ArrayList<>();
@@ -1724,7 +1725,7 @@ public class DynamoDbService {
 
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
 
-        var items = itemsByTable.get(scopedItemsKey(storageKey));
+        ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) return new ScanResult(List.of(), 0, 0, null, List.of());
 
         // ConcurrentSkipListMap keeps items sorted by base item key — no sort needed.
@@ -1743,7 +1744,7 @@ public class DynamoDbService {
             lekSkName = accessPath.sortKeyName();
         }
 
-        var source = exclusiveStartKey != null
+        Collection<JsonNode> source = exclusiveStartKey != null
                 ? items.tailMap(buildItemKeyFromNode(exclusiveStartKey, pkName, skName), false).values()
                 : items.values();
 
@@ -1838,7 +1839,7 @@ public class DynamoDbService {
     private boolean matchesScanFilter(JsonNode item, JsonNode scanFilter) {
         Iterator<Map.Entry<String, JsonNode>> fields = scanFilter.fields();
         while (fields.hasNext()) {
-            var entry = fields.next();
+            Map.Entry<String, JsonNode> entry = fields.next();
             String attrName = entry.getKey();
             JsonNode condition = entry.getValue();
             JsonNode attrValue = item.get(attrName);
@@ -2317,7 +2318,7 @@ public class DynamoDbService {
         TableDefinition table = requireActiveTable(storageKey);
 
         String itemKey = buildItemKey(table, key);
-        var tableItems = itemsFor(storageKey, stagedItems, false);
+        ConcurrentSkipListMap<String, JsonNode> tableItems = itemsFor(storageKey, stagedItems, false);
         JsonNode existing = tableItems != null ? tableItems.get(itemKey) : null;
 
         try {
@@ -2397,7 +2398,7 @@ public class DynamoDbService {
                 throw new AwsException("ValidationException", "Key is required for Update", 400);
             }
             String itemKey = buildItemKey(table, key, true);
-            var items = itemsFor(storageKey, stagedItems, false);
+            ConcurrentSkipListMap<String, JsonNode> items = itemsFor(storageKey, stagedItems, false);
             JsonNode existing = items != null ? items.get(itemKey) : null;
             ObjectNode item = existing != null ? existing.deepCopy() : key.deepCopy();
 
@@ -3119,7 +3120,7 @@ public class DynamoDbService {
             if (!table.isTtlEnabled() || table.getTtlAttributeName() == null) {
                 continue;
             }
-            var items = itemsByTable.get(rawKey);
+            ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(rawKey);
             if (items == null) {
                 continue;
             }
@@ -3676,7 +3677,7 @@ public class DynamoDbService {
             try {
                 BigDecimal existingNum = new BigDecimal(existingNumStr);
                 BigDecimal addNum = new BigDecimal(addNumStr);
-                var sum = existingNum.add(addNum);
+                BigDecimal sum = existingNum.add(addNum);
                 DynamoDbNumberUtils.checkArithmeticResult(sum);
                 result.put("N", sum.toPlainString());
                 return result;
@@ -3694,7 +3695,7 @@ public class DynamoDbService {
             Set<String> combined = new LinkedHashSet<>();
             existingValue.get("SS").forEach(n -> combined.add(n.asText()));
             addValue.get("SS").forEach(n -> combined.add(n.asText()));
-            var arrayNode = result.putArray("SS");
+            ArrayNode arrayNode = result.putArray("SS");
             combined.forEach(arrayNode::add);
             return result;
         }
@@ -3707,7 +3708,7 @@ public class DynamoDbService {
             Set<String> combined = new LinkedHashSet<>();
             existingValue.get("NS").forEach(n -> combined.add(n.asText()));
             addValue.get("NS").forEach(n -> combined.add(n.asText()));
-            var arrayNode = result.putArray("NS");
+            ArrayNode arrayNode = result.putArray("NS");
             combined.forEach(arrayNode::add);
             return result;
         }
@@ -3720,7 +3721,7 @@ public class DynamoDbService {
             Set<String> combined = new LinkedHashSet<>();
             existingValue.get("BS").forEach(n -> combined.add(n.asText()));
             addValue.get("BS").forEach(n -> combined.add(n.asText()));
-            var arrayNode = result.putArray("BS");
+            ArrayNode arrayNode = result.putArray("BS");
             combined.forEach(arrayNode::add);
             return result;
         }
@@ -3841,7 +3842,7 @@ public class DynamoDbService {
                 if (!toRemove.contains(n.asText())) remaining.add(n.asText());
             });
             if (remaining.isEmpty()) return null;
-            var arrayNode = result.putArray("SS");
+            ArrayNode arrayNode = result.putArray("SS");
             remaining.forEach(arrayNode::add);
             return result;
         }
@@ -3854,7 +3855,7 @@ public class DynamoDbService {
                 if (!toRemove.contains(n.asText())) remaining.add(n.asText());
             });
             if (remaining.isEmpty()) return null;
-            var arrayNode = result.putArray("NS");
+            ArrayNode arrayNode = result.putArray("NS");
             remaining.forEach(arrayNode::add);
             return result;
         }
@@ -3867,7 +3868,7 @@ public class DynamoDbService {
                 if (!toRemove.contains(n.asText())) remaining.add(n.asText());
             });
             if (remaining.isEmpty()) return null;
-            var arrayNode = result.putArray("BS");
+            ArrayNode arrayNode = result.putArray("BS");
             remaining.forEach(arrayNode::add);
             return result;
         }
@@ -5098,8 +5099,8 @@ public class DynamoDbService {
 
         // The worker gets its own copy so the object serialized into this response never
         // changes underneath the handler, and the request account so its writes land there.
-        var accountId = regionResolver.getAccountId();
-        var worker = objectMapper.convertValue(desc, ExportDescription.class);
+        String accountId = regionResolver.getAccountId();
+        ExportDescription worker = objectMapper.convertValue(desc, ExportDescription.class);
         exportExecutor.execute(() -> RequestScopes.runAs(accountId, () -> runExport(worker, snapshot, exportArn)));
 
         return desc;
@@ -5313,12 +5314,12 @@ public class DynamoDbService {
         if (exportStore == null) {
             return new ListExportsResult(List.of(), null);
         }
-        var all = exportStore.scan(k -> true).stream()
+        List<ExportDescription> all = exportStore.scan(k -> true).stream()
                 .filter(d -> inRequestRegion(d.getExportArn()))
                 .filter(d -> tableArn == null || tableArn.equals(d.getTableArn()))
                 .toList();
         requirePageSize(maxResults, "maxResults");
-        var page = pageByArn(all, ExportDescription::getExportArn, maxResults, nextToken);
+        Page<ExportDescription> page = pageByArn(all, ExportDescription::getExportArn, maxResults, nextToken);
         return new ListExportsResult(page.items().stream().map(ExportSummary::new).toList(), page.nextToken());
     }
 
@@ -5344,19 +5345,19 @@ public class DynamoDbService {
     }
 
     private static <T> Page<T> pageByArn(List<T> all, Function<T, String> arnOf, Integer pageSize, String nextToken) {
-        var limit = pageSize != null ? pageSize : MAX_JOB_PAGE_SIZE;
-        var sorted = all.stream().sorted(Comparator.comparing(arnOf).reversed()).toList();
-        var startIdx = 0;
+        int limit = pageSize != null ? pageSize : MAX_JOB_PAGE_SIZE;
+        List<T> sorted = all.stream().sorted(Comparator.comparing(arnOf).reversed()).toList();
+        int startIdx = 0;
         if (nextToken != null) {
-            for (var i = 0; i < sorted.size(); i++) {
+            for (int i = 0; i < sorted.size(); i++) {
                 if (nextToken.equals(arnOf.apply(sorted.get(i)))) {
                     startIdx = i + 1;
                     break;
                 }
             }
         }
-        var end = Math.min(startIdx + limit, sorted.size());
-        var newNextToken = end < sorted.size() ? arnOf.apply(sorted.get(end - 1)) : null;
+        int end = Math.min(startIdx + limit, sorted.size());
+        String newNextToken = end < sorted.size() ? arnOf.apply(sorted.get(end - 1)) : null;
         return new Page<>(sorted.subList(startIdx, end), newNextToken);
     }
 
@@ -5593,7 +5594,7 @@ public class DynamoDbService {
         if (request.path("S3BucketSource").path("S3Bucket").asText("").isBlank()) {
             throw new AwsException("ValidationException", "S3BucketSource.S3Bucket is required", 400);
         }
-        var inputFormat = request.path("InputFormat").asText("");
+        String inputFormat = request.path("InputFormat").asText("");
         switch (inputFormat) {
             case "DYNAMODB_JSON" -> { }
             case "" -> throw new AwsException("ValidationException", "InputFormat is required", 400);
@@ -5603,7 +5604,7 @@ public class DynamoDbService {
                     "Value '" + inputFormat
                     + "' at 'inputFormat' failed to satisfy constraint: Member must satisfy enum value set: [ION, CSV, DYNAMODB_JSON]");
         }
-        var compression = request.path("InputCompressionType").asText("NONE");
+        String compression = request.path("InputCompressionType").asText("NONE");
         switch (compression) {
             case "NONE", "GZIP" -> { }
             case "ZSTD" -> throw new AwsException("ValidationException",
@@ -5614,7 +5615,7 @@ public class DynamoDbService {
         }
         DynamoDbTableNames.requireShortName(request.path("TableCreationParameters").path("TableName").asText(null));
         validateBillingMode(request.path("TableCreationParameters"), "tableCreationParameters.");
-        var clientToken = request.path("ClientToken").asText(null);
+        String clientToken = request.path("ClientToken").asText(null);
         if (clientToken != null && clientToken.isBlank()) {
             throw SmithyValidationErrors.validationException(
                     SmithyValidationErrors.lengthTooShort("clientToken", clientToken, 1));
@@ -5622,7 +5623,7 @@ public class DynamoDbService {
         if (clientToken == null || importStore == null) {
             return null;
         }
-        var existing = importStore.scan(k -> true).stream()
+        ImportTableDescription existing = importStore.scan(k -> true).stream()
                 .filter(d -> inRequestRegion(d.getImportArn()))
                 .filter(d -> clientToken.equals(d.getClientToken()))
                 .findFirst()
@@ -5636,7 +5637,7 @@ public class DynamoDbService {
     }
 
     private static boolean sameImportParameters(ImportTableDescription existing, JsonNode request) {
-        var options = request.hasNonNull("InputFormatOptions") ? request.get("InputFormatOptions") : null;
+        JsonNode options = request.hasNonNull("InputFormatOptions") ? request.get("InputFormatOptions") : null;
         return Objects.equals(existing.getS3BucketSource(), request.get("S3BucketSource"))
                 && Objects.equals(existing.getInputFormat(), request.path("InputFormat").asText())
                 && Objects.equals(existing.getInputFormatOptions(), options)
@@ -5645,12 +5646,12 @@ public class DynamoDbService {
     }
 
     public ImportTableDescription startImport(JsonNode request, TableDefinition table, String region) {
-        var tableName = table.getTableName();
-        var accountId = regionResolver.getAccountId();
-        var importArn = AwsArnUtils.Arn.of("dynamodb", region, accountId,
+        String tableName = table.getTableName();
+        String accountId = regionResolver.getAccountId();
+        String importArn = AwsArnUtils.Arn.of("dynamodb", region, accountId,
                 "table/" + tableName + "/import/" + newJobId()).toString();
 
-        var desc = new ImportTableDescription();
+        ImportTableDescription desc = new ImportTableDescription();
         desc.setImportArn(importArn);
         desc.setImportStatus("IN_PROGRESS");
         desc.setTableArn(table.getTableArn());
@@ -5672,27 +5673,27 @@ public class DynamoDbService {
 
         // The worker gets its own copy so the object serialized into this response never
         // changes underneath the handler, and the request account so its writes land there.
-        var worker = objectMapper.convertValue(desc, ImportTableDescription.class);
+        ImportTableDescription worker = objectMapper.convertValue(desc, ImportTableDescription.class);
         Thread.ofVirtual().start(() -> RequestScopes.runAs(accountId, () -> runImport(worker, tableName, region)));
         return desc;
     }
 
     void runImport(ImportTableDescription desc, String tableName, String region) {
-        var source = desc.getS3BucketSource();
-        var bucket = source.path("S3Bucket").asText();
-        var prefix = source.path("S3KeyPrefix").asText("");
-        var bucketOwner = source.path("S3BucketOwner").asText(null);
+        JsonNode source = desc.getS3BucketSource();
+        String bucket = source.path("S3Bucket").asText();
+        String prefix = source.path("S3KeyPrefix").asText("");
+        String bucketOwner = source.path("S3BucketOwner").asText(null);
         try {
             // AWS reads another account's bucket only when its policy grants it. floci has no bucket policies.
             if (bucketOwner != null && !bucketOwner.equals(regionResolver.getAccountId())) {
                 throw new AwsException("AccessDenied",
                         "Access Denied (Service: Amazon S3; Status Code: 403; Error Code: AccessDenied)", 403);
             }
-            var objects = s3Service.listObjects(bucket, prefix, null, Integer.MAX_VALUE);
+            List<S3Object> objects = s3Service.listObjects(bucket, prefix, null, Integer.MAX_VALUE);
             if (objects.isEmpty()) {
                 failImport(desc, "S3NoSuchKey", "No objects found under s3://" + bucket + "/" + prefix);
             } else {
-                for (var object : objects) {
+                for (S3Object object : objects) {
                     try {
                         importObject(desc, tableName, region, bucket, object.getKey());
                     } catch (IOException | RuntimeException e) {
@@ -5727,10 +5728,10 @@ public class DynamoDbService {
 
     private void importObject(ImportTableDescription desc, String tableName, String region,
                               String bucket, String key) throws IOException {
-        var size = s3Service.getObjectMetadata(bucket, key, null).getSize();
+        long size = s3Service.getObjectMetadata(bucket, key, null).getSize();
         desc.setProcessedSizeBytes(desc.getProcessedSizeBytes() + size);
-        try (var raw = s3Service.openObjectStream(bucket, key, null);
-             var reader = new BufferedReader(new InputStreamReader(decompress(desc, raw), StandardCharsets.UTF_8))) {
+        try (InputStream raw = s3Service.openObjectStream(bucket, key, null);
+             BufferedReader reader = new BufferedReader(new InputStreamReader(decompress(desc, raw), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isBlank()) {
@@ -5738,7 +5739,7 @@ public class DynamoDbService {
                 }
                 desc.setProcessedItemCount(desc.getProcessedItemCount() + 1);
                 try {
-                    var item = objectMapper.readTree(line).path("Item");
+                    JsonNode item = objectMapper.readTree(line).path("Item");
                     if (!item.isObject()) {
                         throw new IOException("line has no Item object");
                     }
@@ -5771,7 +5772,7 @@ public class DynamoDbService {
     }
 
     private void activateTable(String tableName, String region) {
-        var storageKey = regionKey(region, tableName);
+        String storageKey = regionKey(region, tableName);
         tableStore.get(storageKey).ifPresent(table -> {
             if ("CREATING".equals(table.getTableStatus())) {
                 table.setTableStatus("ACTIVE");
@@ -5785,10 +5786,10 @@ public class DynamoDbService {
      * worker survives the process. An import also leaves its table stuck in CREATING.
      */
     private void recoverInterruptedJobs() {
-        var now = Instant.now().getEpochSecond();
+        long now = Instant.now().getEpochSecond();
         if (exportStore instanceof AccountAwareStorageBackend<ExportDescription> exports) {
-            for (var entry : exports.scanAllAccountEntries(k -> true)) {
-                var desc = entry.value();
+            for (AccountAwareStorageBackend.AccountEntry<ExportDescription> entry : exports.scanAllAccountEntries(k -> true)) {
+                ExportDescription desc = entry.value();
                 if (!"IN_PROGRESS".equals(desc.getExportStatus())) {
                     continue;
                 }
@@ -5800,8 +5801,8 @@ public class DynamoDbService {
             }
         }
         if (importStore instanceof AccountAwareStorageBackend<ImportTableDescription> imports) {
-            for (var entry : imports.scanAllAccountEntries(k -> true)) {
-                var desc = entry.value();
+            for (AccountAwareStorageBackend.AccountEntry<ImportTableDescription> entry : imports.scanAllAccountEntries(k -> true)) {
+                ImportTableDescription desc = entry.value();
                 if (!"IN_PROGRESS".equals(desc.getImportStatus())) {
                     continue;
                 }
@@ -5811,8 +5812,8 @@ public class DynamoDbService {
             }
         }
         if (tableStore instanceof AccountAwareStorageBackend<TableDefinition> tables) {
-            for (var entry : tables.scanAllAccountEntries(k -> true)) {
-                var table = entry.value();
+            for (AccountAwareStorageBackend.AccountEntry<TableDefinition> entry : tables.scanAllAccountEntries(k -> true)) {
+                TableDefinition table = entry.value();
                 if ("CREATING".equals(table.getTableStatus())) {
                     table.setTableStatus("ACTIVE");
                     tables.putForAccount(entry.accountId(), entry.key(), table);
@@ -5835,12 +5836,12 @@ public class DynamoDbService {
         if (importStore == null) {
             return new ListImportsResult(List.of(), null);
         }
-        var all = importStore.scan(k -> true).stream()
+        List<ImportTableDescription> all = importStore.scan(k -> true).stream()
                 .filter(d -> inRequestRegion(d.getImportArn()))
                 .filter(d -> tableArn == null || tableArn.equals(d.getTableArn()))
                 .toList();
         requirePageSize(pageSize, "pageSize");
-        var page = pageByArn(all, ImportTableDescription::getImportArn, pageSize, nextToken);
+        Page<ImportTableDescription> page = pageByArn(all, ImportTableDescription::getImportArn, pageSize, nextToken);
         return new ListImportsResult(page.items().stream().map(ImportSummary::new).toList(), page.nextToken());
     }
 

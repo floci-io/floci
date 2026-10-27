@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -134,7 +135,7 @@ class FocusRowProjectorTest {
 
     @Test
     void tagsAreSerializedAsJsonObject() throws Exception {
-        Map<String, String> tags = new java.util.LinkedHashMap<>();
+        Map<String, String> tags = new LinkedHashMap<>();
         tags.put("Owner", "team-a");
         tags.put("CostCenter", "1234");
 

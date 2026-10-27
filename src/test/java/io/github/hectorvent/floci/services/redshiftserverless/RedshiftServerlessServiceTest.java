@@ -18,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -98,7 +99,7 @@ class RedshiftServerlessServiceTest {
         when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
                 any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
                 .thenReturn(new RedshiftServerlessRuntime.Backend("127.0.0.1", 55432));
-        EmulatorConfig config = mock(EmulatorConfig.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        EmulatorConfig config = mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
         when(config.storage().persistentPath()).thenReturn(dumpDir.toString());
         service = new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
     }

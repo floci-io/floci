@@ -3,12 +3,14 @@ package io.github.hectorvent.floci.services.redshift;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.model.EventSubscription;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
@@ -32,6 +34,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 class RedshiftQueryHandlerTest {
+
+    @Test
+    void eventSubscriptionResponsesUseTheRedshiftNamespace() {
+        EventSubscription subscription = new EventSubscription();
+        subscription.setCustSubscriptionId("watcher");
+        subscription.setSubscriptionCreationTime(Instant.parse("2026-10-26T12:00:00Z"));
+        when(service.createEventSubscription(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(subscription);
+        Response response = handler.handle("CreateEventSubscription", new MultivaluedHashMap<>());
+        assertTrue(response.getEntity().toString().contains(
+                "<CreateEventSubscriptionResponse xmlns=\"" + AwsNamespaces.REDSHIFT + "\">"));
+    }
 
     @Test
     void nonFiniteEventTimestampsReturnAnAwsValidationError() {

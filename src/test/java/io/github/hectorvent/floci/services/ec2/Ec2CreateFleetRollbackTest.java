@@ -39,18 +39,20 @@ class Ec2CreateFleetRollbackTest {
         template.setInstanceType("t3.micro");
         when(service.resolveLaunchTemplateData(REGION, "lt-test", null, "1")).thenReturn(template);
 
+        Reservation first = reservation("i-first");
+        Reservation second = reservation("i-second");
         when(service.runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), nullable(String.class),
                 anyList(), nullable(String.class), nullable(String.class), anyList(), nullable(String.class),
                 nullable(String.class), nullable(Boolean.class), nullable(String.class), anyInt(),
                 nullable(String.class), nullable(LaunchTemplateData.MetadataOptions.class),
                 nullable(String.class), nullable(String.class), eq(false), nullable(String.class),
                 nullable(String.class), anyList(), eq(false), nullable(String.class), nullable(LaunchTemplateData.CapacityReservationSpecification.class)))
-                .thenReturn(reservation("i-first"))
-                .thenReturn(reservation("i-second"))
+                .thenReturn(first)
+                .thenReturn(second)
                 .thenThrow(new AwsException("InvalidSubnetID.NotFound", "launch failed", 400));
-        when(service.terminateInstances(REGION, List.of("i-first")))
+        when(service.rollBackLaunch(REGION, first))
                 .thenThrow(new AwsException("InternalError", "cleanup failed", 500));
-        when(service.terminateInstances(REGION, List.of("i-second"))).thenReturn(List.of());
+        when(service.rollBackLaunch(REGION, second)).thenReturn(List.of());
 
         Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
                 mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
@@ -62,8 +64,8 @@ class Ec2CreateFleetRollbackTest {
         String responseBody = response.getEntity().toString();
         assertTrue(responseBody.contains("<Code>InvalidSubnetID.NotFound</Code>"));
         assertTrue(responseBody.contains("CreateFleet rollback incomplete for instance(s): i-first"));
-        verify(service).terminateInstances(REGION, List.of("i-first"));
-        verify(service).terminateInstances(REGION, List.of("i-second"));
+        verify(service).rollBackLaunch(REGION, first);
+        verify(service).rollBackLaunch(REGION, second);
     }
 
     private static Reservation reservation(String instanceId) {

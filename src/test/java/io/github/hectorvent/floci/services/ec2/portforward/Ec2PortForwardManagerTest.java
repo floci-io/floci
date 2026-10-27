@@ -286,7 +286,7 @@ class Ec2PortForwardManagerTest {
     private static SecurityGroup sg(IpPermission... perms) {
         SecurityGroup sg = new SecurityGroup();
         sg.setGroupId("sg-test");
-        sg.setIpPermissions(new java.util.ArrayList<>(List.of(perms)));
+        sg.setIpPermissions(new ArrayList<>(List.of(perms)));
         return sg;
     }
 

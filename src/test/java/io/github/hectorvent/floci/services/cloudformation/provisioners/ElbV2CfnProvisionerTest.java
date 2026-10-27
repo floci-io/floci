@@ -21,6 +21,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.mockito.Mockito;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -236,7 +237,7 @@ class ElbV2CfnProvisionerTest {
         updated.getAttributes().put("LoadBalancerName", generated);
         provisioner.provision(updated, onTwoSubnets(mapper.createObjectNode()), ctx(LB_ARN));
 
-        verify(elb, org.mockito.Mockito.times(2)).createLoadBalancer(eq(REGION), eq(generated), isNull(), isNull(),
+        verify(elb, Mockito.times(2)).createLoadBalancer(eq(REGION), eq(generated), isNull(), isNull(),
                 isNull(), eq(TWO_SUBNETS), anyList(), any());
     }
 
@@ -424,7 +425,7 @@ class ElbV2CfnProvisionerTest {
         provisioner.provision(retained, onTwoSubnets(mapper.createObjectNode().put("Name", "web-v2")), ctx(LB_ARN));
         assertNull(provisioner.updateCleanupPhysicalId(retained));
         assertEquals(new UpdateCleanupResult(true, true, LB_ARN, 0, null), provisioner.completeUpdate(retained));
-        verify(elb, org.mockito.Mockito.times(1)).deleteLoadBalancer(REGION, LB_ARN);
+        verify(elb, Mockito.times(1)).deleteLoadBalancer(REGION, LB_ARN);
     }
 
     @Test
@@ -445,7 +446,7 @@ class ElbV2CfnProvisionerTest {
         UpdateCleanupResult third = provisioner.completeUpdate(r);
         assertEquals(3, third.attempts());
         assertEquals(3, provisioner.completeUpdate(r).attempts(), "no fourth attempt");
-        verify(elb, org.mockito.Mockito.times(3)).deleteListener(REGION, LISTENER_ARN);
+        verify(elb, Mockito.times(3)).deleteListener(REGION, LISTENER_ARN);
     }
 
     @Test
@@ -835,7 +836,7 @@ class ElbV2CfnProvisionerTest {
         // The replacement the failed update created stays owed a delete; the restored prior does not.
         assertTrue(provisioner.hasReplacementUpdate(r));
         assertEquals(renamed.getLoadBalancerArn(), provisioner.updateCleanupPhysicalId(r));
-        org.mockito.Mockito.reset(elb);
+        Mockito.reset(elb);
         // A retried rollback (ContinueUpdateRollback) re-attempts the delete that failed; succeeding,
         // it owes nothing more and never touches the restored prior.
         assertTrue(provisioner.rollbackUpdate(r));
@@ -875,7 +876,7 @@ class ElbV2CfnProvisionerTest {
         when(elb.createLoadBalancer(eq(REGION), eq("web-v3"), isNull(), isNull(), isNull(), eq(TWO_SUBNETS), anyList(), any()))
                 .thenReturn(third);
         provisioner.provision(r, onTwoSubnets(mapper.createObjectNode().put("Name", "web-v3")), ctx(LB_ARN));
-        org.mockito.Mockito.reset(elb);
+        Mockito.reset(elb);
         UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
         assertTrue(cleanup.complete(), cleanup.toString());
         verify(elb).deleteLoadBalancer(REGION, orphanArn);
@@ -913,8 +914,8 @@ class ElbV2CfnProvisionerTest {
         UpdateCleanupResult third3 = provisioner.completeUpdate(r);
         assertEquals(3, third3.attempts());
         assertEquals("listeners attached", third3.failureReason());
-        verify(elb, org.mockito.Mockito.times(1)).deleteLoadBalancer(REGION, LB_ARN);
-        verify(elb, org.mockito.Mockito.times(4)).deleteLoadBalancer(REGION, orphanArn);
+        verify(elb, Mockito.times(1)).deleteLoadBalancer(REGION, LB_ARN);
+        verify(elb, Mockito.times(4)).deleteLoadBalancer(REGION, orphanArn);
     }
 
     @Test
@@ -949,13 +950,13 @@ class ElbV2CfnProvisionerTest {
         assertEquals(first.previousPhysicalId(), provisioner.updateCleanupPhysicalId(r),
                 "progress and failure events name the same entity");
 
-        org.mockito.Mockito.doNothing().when(elb).deleteLoadBalancer(REGION, LB_ARN);
+        Mockito.doNothing().when(elb).deleteLoadBalancer(REGION, LB_ARN);
         UpdateCleanupResult second = provisioner.completeUpdate(r);
         assertEquals(3, second.attempts(), "only the exhausted orphan remains");
         assertEquals(orphanArn, second.previousPhysicalId());
         provisioner.clearUpdate(r);
         assertFalse(provisioner.hasReplacementUpdate(r));
-        verify(elb, org.mockito.Mockito.times(4)).deleteLoadBalancer(REGION, orphanArn);
+        verify(elb, Mockito.times(4)).deleteLoadBalancer(REGION, orphanArn);
     }
 
     @Test

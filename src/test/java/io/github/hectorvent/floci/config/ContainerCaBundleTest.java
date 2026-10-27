@@ -20,6 +20,7 @@ import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -101,7 +102,7 @@ class ContainerCaBundleTest {
         byte[] first = Files.readAllBytes(ContainerCaBundle.write(tlsDir, ca.certificatePath()));
         byte[] second = Files.readAllBytes(ContainerCaBundle.write(tlsDir, ca.certificatePath()));
 
-        assertTrue(java.util.Arrays.equals(first, second));
+        assertTrue(Arrays.equals(first, second));
         try (Stream<Path> files = Files.list(tlsDir)) {
             assertTrue(files.noneMatch(file -> file.getFileName().toString().endsWith(".tmp")), "no temp file left behind");
         }

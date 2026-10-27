@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.controlcatalog.model.ControlDefinitio
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -129,7 +130,7 @@ public class ControlCatalogService implements Resettable {
                 .filter(definition -> identifierFilter == null || definition.aliases().contains(identifierFilter))
                 .filter(definition -> providerFilter == null || "AWS".equals(providerFilter))
                 .distinct()
-                .sorted(java.util.Comparator.comparing(ControlDefinition::globalIdentifier))
+                .sorted(Comparator.comparing(ControlDefinition::globalIdentifier))
                 .toList();
         if (offset > definitions.size()) {
             throw validation("nextToken is invalid.");

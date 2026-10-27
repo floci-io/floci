@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.swf;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -139,7 +140,7 @@ class SwfLambdaIntegrationTest {
 
         history.then()
                 .statusCode(200)
-                .body("events.eventType", org.hamcrest.Matchers.hasItems(
+                .body("events.eventType", Matchers.hasItems(
                         "LambdaFunctionScheduled", "LambdaFunctionStarted", "LambdaFunctionCompleted"))
                 .body("events.find { it.eventType == 'LambdaFunctionScheduled' }"
                         + ".lambdaFunctionScheduledEventAttributes.id", equalTo("lam-1"))
@@ -201,7 +202,7 @@ class SwfLambdaIntegrationTest {
                 """.formatted(domain))
                 .then()
                 .statusCode(200)
-                .body("events.eventType", org.hamcrest.Matchers.hasItems(
+                .body("events.eventType", Matchers.hasItems(
                         "LambdaFunctionScheduled", "LambdaFunctionStarted", "LambdaFunctionFailed"))
                 .body("events.find { it.eventType == 'LambdaFunctionFailed' }"
                         + ".lambdaFunctionFailedEventAttributes.reason",
@@ -231,10 +232,10 @@ class SwfLambdaIntegrationTest {
                 """.formatted(domain))
                 .then()
                 .statusCode(200)
-                .body("events.eventType", org.hamcrest.Matchers.hasItem("StartLambdaFunctionFailed"))
+                .body("events.eventType", Matchers.hasItem("StartLambdaFunctionFailed"))
                 // This is the one Lambda path that never reaches Started.
                 .body("events.eventType",
-                        org.hamcrest.Matchers.not(org.hamcrest.Matchers.hasItem("LambdaFunctionStarted")))
+                        Matchers.not(Matchers.hasItem("LambdaFunctionStarted")))
                 .body("events.find { it.eventType == 'StartLambdaFunctionFailed' }"
                         + ".startLambdaFunctionFailedEventAttributes.cause", equalTo("ASSUME_ROLE_FAILED"))
                 .body("events.find { it.eventType == 'StartLambdaFunctionFailed' }"

@@ -17,6 +17,7 @@ import jakarta.inject.Inject;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -157,7 +158,7 @@ public class BcmPricingCalculatorService {
     public List<WorkloadEstimateUsage> listUsage(String estimateId) {
         get(estimateId);
         return usages.scan(k -> k.startsWith(estimateId + "/")).stream()
-                .sorted(java.util.Comparator.comparing(WorkloadEstimateUsage::getKey)).toList();
+                .sorted(Comparator.comparing(WorkloadEstimateUsage::getKey)).toList();
     }
 
     private void recompute(WorkloadEstimate estimate) {

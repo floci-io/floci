@@ -263,7 +263,7 @@ class IamTest {
     void tagUser() {
         iam.tagUser(TagUserRequest.builder()
                 .userName(USER_NAME)
-                .tags(software.amazon.awssdk.services.iam.model.Tag.builder().key("env").value("sdk-test").build())
+                .tags(Tag.builder().key("env").value("sdk-test").build())
                 .build());
     }
 

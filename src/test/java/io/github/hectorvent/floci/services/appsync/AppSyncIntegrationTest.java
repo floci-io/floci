@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.appsync;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
@@ -7,6 +9,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -14,6 +17,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -33,7 +38,7 @@ class AppSyncIntegrationTest {
     private static String apiId;
     private static String keyId;
 
-    @jakarta.inject.Inject
+    @Inject
     StorageBackend<String, SchemaCreationStatus> schemaStatusStore;
 
     @BeforeAll
@@ -49,7 +54,7 @@ class AppSyncIntegrationTest {
      * returns PROCESSING. Use {@link #getTerminalStatus(String)} if only
      * the status string is needed.
      */
-    private static java.util.Map<String, Object> awaitSchemaTerminal(String apiId) {
+    private static Map<String, Object> awaitSchemaTerminal(String apiId) {
         return await().atMost(Duration.ofSeconds(10))
                 .pollInterval(Duration.ofMillis(25))
                 .until(() -> given()
@@ -78,7 +83,7 @@ class AppSyncIntegrationTest {
      * error surfaces in the polled FAILED status.
      */
     @SuppressWarnings("unchecked")
-    private static java.util.Map<String, Object> postSchemaAndAwaitFailed(String apiId, String body) {
+    private static Map<String, Object> postSchemaAndAwaitFailed(String apiId, String body) {
         given()
             .header("Authorization", AUTH)
             .contentType("application/json")
@@ -89,14 +94,14 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .body("status", equalTo("PROCESSING"));
 
-        java.util.Map<String, Object> full = awaitSchemaTerminal(apiId);
+        Map<String, Object> full = awaitSchemaTerminal(apiId);
         assertThat(full.get("status"), equalTo("FAILED"));
         String detailsJson = (String) full.get("details");
         assertThat(detailsJson, notNullValue());
         try {
-            return new com.fasterxml.jackson.databind.ObjectMapper()
-                    .readValue(detailsJson, java.util.Map.class);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            return new ObjectMapper()
+                    .readValue(detailsJson, Map.class);
+        } catch (JsonProcessingException e) {
             throw new RuntimeException(e);
         }
     }
@@ -2687,7 +2692,7 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(200)
             .body("status", equalTo("PROCESSING"));
-        java.util.Map<String, Object> body = awaitSchemaTerminal(apiId);
+        Map<String, Object> body = awaitSchemaTerminal(apiId);
         assertThat(body.get("status"), equalTo("FAILED"));
         String details = (String) body.get("details");
         assertThat(details, notNullValue());
@@ -2910,14 +2915,14 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .extract().path("graphqlApi.apiId");
 
-        java.util.Map<String, Object> ext = postSchemaAndAwaitFailed(tempApiId, """
+        Map<String, Object> ext = postSchemaAndAwaitFailed(tempApiId, """
                 {
                   "definition": "type Query { hello: String } directive @unknownDirective on FIELD_DEFINITION"
                 }
                 """);
         assertThat(ext.get("reason"), equalTo("CODE_ERROR"));
-        java.util.List<java.util.Map<String, Object>> codeErrors =
-                (java.util.List<java.util.Map<String, Object>>) ((java.util.Map<?, ?>) ext.get("detail")).get("codeErrors");
+        List<Map<String, Object>> codeErrors =
+                (List<Map<String, Object>>) ((Map<?, ?>) ext.get("detail")).get("codeErrors");
         assertThat(codeErrors.get(0).get("errorType"), equalTo("VALIDATION_ERROR"));
         assertThat((String) codeErrors.get(0).get("value"), containsString("Unknown directive"));
 
@@ -2927,18 +2932,18 @@ class AppSyncIntegrationTest {
     @Test
     @Order(700)
     void startSchemaCreation_syntaxError_returnsExtendedBadRequest() {
-        java.util.Map<String, Object> ext = postSchemaAndAwaitFailed(apiId, """
+        Map<String, Object> ext = postSchemaAndAwaitFailed(apiId, """
                 {
                   "definition": "type Query { invalid syntax!!! }"
                 }
                 """);
         assertThat(ext.get("reason"), equalTo("CODE_ERROR"));
-        java.util.List<java.util.Map<String, Object>> codeErrors =
-                (java.util.List<java.util.Map<String, Object>>) ((java.util.Map<?, ?>) ext.get("detail")).get("codeErrors");
+        List<Map<String, Object>> codeErrors =
+                (List<Map<String, Object>>) ((Map<?, ?>) ext.get("detail")).get("codeErrors");
         assertThat(codeErrors.size(), greaterThanOrEqualTo(1));
         assertThat(codeErrors.get(0).get("errorType"), equalTo("PARSER_ERROR"));
         assertThat(codeErrors.get(0).get("value"), notNullValue());
-        java.util.Map<String, Object> location = (java.util.Map<String, Object>) codeErrors.get(0).get("location");
+        Map<String, Object> location = (Map<String, Object>) codeErrors.get(0).get("location");
         assertThat(location, notNullValue());
         assertThat(location.get("line"), notNullValue());
         assertThat(location.get("column"), notNullValue());
@@ -2960,17 +2965,17 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .extract().path("graphqlApi.apiId");
 
-        java.util.Map<String, Object> ext = postSchemaAndAwaitFailed(tempApiId, """
+        Map<String, Object> ext = postSchemaAndAwaitFailed(tempApiId, """
                 {
                   "definition": "type Query { hello: NonExistentType }"
                 }
                 """);
         assertThat(ext.get("reason"), equalTo("CODE_ERROR"));
-        java.util.List<java.util.Map<String, Object>> codeErrors =
-                (java.util.List<java.util.Map<String, Object>>) ((java.util.Map<?, ?>) ext.get("detail")).get("codeErrors");
+        List<Map<String, Object>> codeErrors =
+                (List<Map<String, Object>>) ((Map<?, ?>) ext.get("detail")).get("codeErrors");
         assertThat(codeErrors.get(0).get("errorType"), equalTo("VALIDATION_ERROR"));
         assertThat((String) codeErrors.get(0).get("value"), containsString("NonExistentType"));
-        java.util.Map<String, Object> location = (java.util.Map<String, Object>) codeErrors.get(0).get("location");
+        Map<String, Object> location = (Map<String, Object>) codeErrors.get(0).get("location");
         assertThat(location.get("line"), notNullValue());
         assertThat(location.get("column"), notNullValue());
         assertThat(location.get("span"), equalTo(-1));
@@ -2993,17 +2998,17 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .extract().path("graphqlApi.apiId");
 
-        java.util.Map<String, Object> ext = postSchemaAndAwaitFailed(tempApiId, """
+        Map<String, Object> ext = postSchemaAndAwaitFailed(tempApiId, """
                 {
                   "definition": "type Query { hello: String @unknownDirective }"
                 }
                 """);
         assertThat(ext.get("reason"), equalTo("CODE_ERROR"));
-        java.util.List<java.util.Map<String, Object>> codeErrors =
-                (java.util.List<java.util.Map<String, Object>>) ((java.util.Map<?, ?>) ext.get("detail")).get("codeErrors");
+        List<Map<String, Object>> codeErrors =
+                (List<Map<String, Object>>) ((Map<?, ?>) ext.get("detail")).get("codeErrors");
         assertThat(codeErrors.get(0).get("errorType"), equalTo("VALIDATION_ERROR"));
         assertThat((String) codeErrors.get(0).get("value"), containsString("Unknown directive: @unknownDirective"));
-        java.util.Map<String, Object> location = (java.util.Map<String, Object>) codeErrors.get(0).get("location");
+        Map<String, Object> location = (Map<String, Object>) codeErrors.get(0).get("location");
         assertThat(location.get("span"), equalTo(-1));
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);

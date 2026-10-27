@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
@@ -101,7 +102,7 @@ class CloudTrailCfnProvisionerTest {
                         .set("Equals", mapper.createArrayNode().add("Data"))))));
         StackResource resource = resource();
 
-        assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+        assertThrows(AwsException.class,
                 () -> provisioner.provision(resource, props, context()));
         assertEquals(created.trailArn(), resource.getPhysicalId(),
                 "physicalId must be recorded right after createTrail succeeds, "

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -36,13 +37,16 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 /**
  * Query-protocol handler for SES actions.
@@ -332,7 +336,7 @@ public class SesQueryHandler {
                .elem("Bounces", "0")
                .elem("Complaints", "0")
                .elem("Rejects", "0")
-               .elem("Timestamp", java.time.Instant.now().toString())
+               .elem("Timestamp", Instant.now().toString())
                .end("member");
         }
         xml.end("SendDataPoints");
@@ -769,8 +773,9 @@ public class SesQueryHandler {
         String templateName = getParam(params, "Template");
         String templateArn = getParam(params, "TemplateArn");
         BulkDestinationIndexes destinations = bulkDestinationIndexes(params);
-        // The model validation answers ahead of every other check of the request, listing its
-        // violations in the model's member order (probe-confirmed).
+        // The model validation answers ahead of every other check of the request. It lists the
+        // top-level members before the nested ones ('template' ahead of 'defaultTags.1.member.name'),
+        // each group in the model's member order (probe-confirmed).
         List<String> violations = new ArrayList<>();
         if (templateName == null && templateArn == null) {
             violations.add(SmithyValidationErrors.notNullWithoutValue("template"));
@@ -778,12 +783,15 @@ public class SesQueryHandler {
         if (!params.containsKey("Destinations") && !hasParamWithPrefix(params, "Destinations.")) {
             violations.add(SmithyValidationErrors.notNullWithoutValue("destinations"));
         }
+        addMessageTagViolations(params, "DefaultTags", "defaultTags", violations);
         // A skipped index, like an entry without a Destination, is a null destination
         // (probe-confirmed). An empty address list still sends its bare key.
         for (int i = 1; i <= Math.min(destinations.last(), MAX_VALIDATED_DESTINATION_INDEX); i++) {
             if (!destinations.withDestination().contains(i)) {
                 violations.add(SmithyValidationErrors.notNullWithoutValue("destinations." + i + ".member.destination"));
             }
+            addMessageTagViolations(params, "Destinations.member." + i + ".ReplacementTags",
+                    "destinations." + i + ".member.replacementTags", violations);
         }
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationError(violations);
@@ -811,22 +819,40 @@ public class SesQueryHandler {
         // AWS counts the destinations before it looks the template up (probe-confirmed). The list
         // runs to its highest index, so counting that index first also bounds the scan below.
         SesService.requireBulkDestinationCount(lastIndex);
+        // Probe-confirmed for an absent and an empty value; where it falls among the checks above
+        // is unprobed.
+        if (defaultDataRaw == null || defaultDataRaw.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "The default template data does not exist", 400);
+        }
+        JsonNode defaultTemplateData = templateDataObject(defaultDataRaw);
+        List<MessageTag> defaultEmailTags = readMessageTags(params, "DefaultTags");
         List<BulkEmailEntry> entries = new ArrayList<>();
         for (int i = 1; i <= lastIndex; i++) {
             String destPrefix = "Destinations.member." + i;
             List<String> to = extractMembers(params, destPrefix + ".Destination.ToAddresses");
             List<String> cc = extractMembers(params, destPrefix + ".Destination.CcAddresses");
             List<String> bcc = extractMembers(params, destPrefix + ".Destination.BccAddresses");
-            String replacementRaw = getParam(params, destPrefix + ".ReplacementTemplateData");
-            List<MessageTag> replacementTags = extractMessageTags(params, destPrefix + ".ReplacementTags");
+            JsonNode replacementData = templateDataObject(getParam(params, destPrefix + ".ReplacementTemplateData"));
+            List<MessageTag> replacementTags = readMessageTags(params, destPrefix + ".ReplacementTags");
+            // Each of these fails its own entry, with a 200 for the call; invalid default data or a
+            // blank default tag name fails every entry. A blank tag name wins over invalid data and
+            // an address syntax error over both (probe-confirmed).
+            String rejection = null;
+            if (hasBlankName(defaultEmailTags) || hasBlankName(replacementTags)) {
+                rejection = "The tag name must be specified.";
+            } else if (defaultTemplateData == null || replacementData == null) {
+                rejection = "The template data is invalid";
+            }
             entries.add(new BulkEmailEntry(to, cc, bcc,
-                    parseTemplateData(replacementRaw), replacementTags, List.of()));
+                    replacementData == null ? objectMapper.createObjectNode() : replacementData,
+                    replacementTags, List.of(), rejection));
         }
-        JsonNode defaultTemplateData = parseTemplateData(defaultDataRaw);
+        if (defaultTemplateData == null) {
+            defaultTemplateData = objectMapper.createObjectNode();
+        }
 
         String configurationSetName = getParam(params, "ConfigurationSetName");
         String returnPath = getParam(params, "ReturnPath");
-        List<MessageTag> defaultEmailTags = extractMessageTags(params, "DefaultTags");
         List<BulkEmailEntryResult> results = sesService.sendBulkEmail(SendBulkEmailRequest.builder()
                 .source(source)
                 .sourceArn(getParam(params, "SourceArn"))
@@ -836,6 +862,7 @@ public class SesQueryHandler {
                 .configurationSetName(configurationSetName)
                 .defaultEmailTags(defaultEmailTags)
                 .region(region)
+                .recipientLimitPerEntry(true)
                 .defaultContent(new EmailContent.Template(resolvedName, defaultTemplateData, List.of()))
                 .entries(entries)
                 .build());
@@ -1175,7 +1202,7 @@ public class SesQueryHandler {
      */
     private List<String> parseReorderRuleNames(MultivaluedMap<String, String> params) {
         String prefix = "RuleNames.member.";
-        Map<Integer, String> byIndex = new java.util.TreeMap<>();
+        Map<Integer, String> byIndex = new TreeMap<>();
         for (String key : params.keySet()) {
             if (!key.startsWith(prefix)) {
                 continue;
@@ -1201,7 +1228,7 @@ public class SesQueryHandler {
             int index = member.getKey();
             int skip = index - Math.max(previous, 1);
             if (skip > MAX_RULE_NAMES_INDEX_SKIP) {
-                throw new AwsException("MalformedInput", String.format(java.util.Locale.ROOT,
+                throw new AwsException("MalformedInput", String.format(Locale.ROOT,
                         "Excessively sparse input would skip %,d list elements", skip), 400);
             }
             while (names.size() < index - 1) {
@@ -1295,7 +1322,7 @@ public class SesQueryHandler {
 
     private List<String> receiptActionIndexTokens(MultivaluedMap<String, String> params) {
         String prefix = "Rule.Actions.member.";
-        Map<Integer, String> byValue = new java.util.HashMap<>();
+        Map<Integer, String> byValue = new HashMap<>();
         for (String key : params.keySet()) {
             if (!key.startsWith(prefix)) {
                 continue;
@@ -1456,26 +1483,26 @@ public class SesQueryHandler {
      * Floci stores the V2 canonical form internally, so the V1 handler translates
      * in both directions.
      */
-    private static final java.util.Map<String, String> V1_EVENT_TYPE_TO_INTERNAL =
-            java.util.Map.ofEntries(
-                    java.util.Map.entry("send", "SEND"),
-                    java.util.Map.entry("reject", "REJECT"),
-                    java.util.Map.entry("bounce", "BOUNCE"),
-                    java.util.Map.entry("complaint", "COMPLAINT"),
-                    java.util.Map.entry("delivery", "DELIVERY"),
-                    java.util.Map.entry("open", "OPEN"),
-                    java.util.Map.entry("click", "CLICK"),
-                    java.util.Map.entry("renderingFailure", "RENDERING_FAILURE"),
-                    java.util.Map.entry("deliveryDelay", "DELIVERY_DELAY"),
-                    java.util.Map.entry("subscription", "SUBSCRIPTION"));
+    private static final Map<String, String> V1_EVENT_TYPE_TO_INTERNAL =
+            Map.ofEntries(
+                    Map.entry("send", "SEND"),
+                    Map.entry("reject", "REJECT"),
+                    Map.entry("bounce", "BOUNCE"),
+                    Map.entry("complaint", "COMPLAINT"),
+                    Map.entry("delivery", "DELIVERY"),
+                    Map.entry("open", "OPEN"),
+                    Map.entry("click", "CLICK"),
+                    Map.entry("renderingFailure", "RENDERING_FAILURE"),
+                    Map.entry("deliveryDelay", "DELIVERY_DELAY"),
+                    Map.entry("subscription", "SUBSCRIPTION"));
 
-    private static final java.util.Map<String, String> INTERNAL_EVENT_TYPE_TO_V1;
+    private static final Map<String, String> INTERNAL_EVENT_TYPE_TO_V1;
     static {
-        java.util.Map<String, String> reverse = new java.util.HashMap<>();
+        Map<String, String> reverse = new HashMap<>();
         for (Map.Entry<String, String> e : V1_EVENT_TYPE_TO_INTERNAL.entrySet()) {
             reverse.put(e.getValue(), e.getKey());
         }
-        INTERNAL_EVENT_TYPE_TO_V1 = java.util.Map.copyOf(reverse);
+        INTERNAL_EVENT_TYPE_TO_V1 = Map.copyOf(reverse);
     }
 
     /**
@@ -1566,7 +1593,7 @@ public class SesQueryHandler {
         JsonNode node;
         try {
             node = objectMapper.readTree(raw);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        } catch (JsonProcessingException e) {
             throw new AwsException("InvalidTemplate",
                     "Invalid TemplateData JSON: " + e.getMessage(), 400);
         }
@@ -1577,7 +1604,51 @@ public class SesQueryHandler {
         return node;
     }
 
+    // null for data that is not a JSON object, which a bulk send answers per entry.
+    private JsonNode templateDataObject(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return objectMapper.createObjectNode();
+        }
+        try {
+            JsonNode node = objectMapper.readTree(raw);
+            return node.isObject() ? node : null;
+        } catch (JsonProcessingException expected) {
+            // Malformed JSON is the same per-entry failure as a non-object value.
+            return null;
+        }
+    }
+
     // --- Helpers ---
+
+    // A skipped index is a tag with neither member, so it lists both (probe-confirmed).
+    private static void addMessageTagViolations(MultivaluedMap<String, String> params, String prefix,
+                                                String path, List<String> violations) {
+        int last = Math.min(lastMemberIndex(params, prefix + ".member."), MAX_VALIDATED_TAG_INDEX);
+        for (int i = 1; i <= last; i++) {
+            if (params.getFirst(prefix + ".member." + i + ".Name") == null) {
+                violations.add(SmithyValidationErrors.notNullWithoutValue(path + "." + i + ".member.name"));
+            }
+            if (params.getFirst(prefix + ".member." + i + ".Value") == null) {
+                violations.add(SmithyValidationErrors.notNullWithoutValue(path + "." + i + ".member.value"));
+            }
+        }
+    }
+
+    private static int lastMemberIndex(MultivaluedMap<String, String> params, String prefix) {
+        int last = 0;
+        for (String key : params.keySet()) {
+            if (key.startsWith(prefix)) {
+                int dot = key.indexOf('.', prefix.length());
+                last = Math.max(last, memberIndex(
+                        dot < 0 ? key.substring(prefix.length()) : key.substring(prefix.length(), dot)));
+            }
+        }
+        return last;
+    }
+
+    private static boolean hasBlankName(List<MessageTag> tags) {
+        return tags.stream().anyMatch(tag -> tag.name() == null || tag.name().isBlank());
+    }
 
     private static boolean hasParamWithPrefix(MultivaluedMap<String, String> params, String prefix) {
         return params.keySet().stream().anyMatch(key -> key.startsWith(prefix));
@@ -1586,6 +1657,9 @@ public class SesQueryHandler {
     // Bounds the violation list a hostile index could inflate; an index above it still fails the
     // destination count. Where AWS stops listing null destinations has not been probed.
     private static final int MAX_VALIDATED_DESTINATION_INDEX = 1000;
+
+    // Bounds the violation list in the same way; a tag past it is read only up to the first gap.
+    private static final int MAX_VALIDATED_TAG_INDEX = 1000;
 
     /** The highest {@code Destinations.member.N}, and the Ns that carry a {@code Destination}. */
     private record BulkDestinationIndexes(int last, Set<Integer> withDestination) {}
@@ -1635,18 +1709,24 @@ public class SesQueryHandler {
      * no members are present.
      */
     private List<MessageTag> extractMessageTags(MultivaluedMap<String, String> params, String prefix) {
+        List<MessageTag> tags = readMessageTags(params, prefix);
+        if (hasBlankName(tags)) {
+            throw new AwsException("InvalidParameterValue",
+                    "The tag name must be specified.", 400);
+        }
+        return tags;
+    }
+
+    private List<MessageTag> readMessageTags(MultivaluedMap<String, String> params, String prefix) {
         List<MessageTag> tags = new ArrayList<>();
         for (int i = 1; ; i++) {
             String name = getParam(params, prefix + ".member." + i + ".Name");
             String value = getParam(params, prefix + ".member." + i + ".Value");
-            if (name == null && value == null) break;
-            if (name == null || name.isBlank()) {
-                throw new AwsException("InvalidParameterValue",
-                        "The tag name must be specified.", 400);
+            if (name == null && value == null) {
+                return tags;
             }
             tags.add(new MessageTag(name, value));
         }
-        return tags;
     }
 
     private String getParam(MultivaluedMap<String, String> params, String name) {

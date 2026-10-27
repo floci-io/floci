@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.fis;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -545,19 +546,19 @@ class FisIntegrationTest {
         }
     }
 
-    private static io.restassured.specification.RequestSpecification awsRequest() {
+    private static RequestSpecification awsRequest() {
         return awsRequest(ACCOUNT_ID, REGION);
     }
 
-    private static io.restassured.specification.RequestSpecification awsRequest(String accountId, String region) {
+    private static RequestSpecification awsRequest(String accountId, String region) {
         return given().header("Authorization", authorization(accountId, region));
     }
 
-    private static io.restassured.specification.RequestSpecification ec2Request() {
+    private static RequestSpecification ec2Request() {
         return given().header("Authorization", authorization(ACCOUNT_ID, REGION, "ec2"));
     }
 
-    private static io.restassured.specification.RequestSpecification jsonRequest(String body) {
+    private static RequestSpecification jsonRequest(String body) {
         return awsRequest().contentType("application/json").body(body);
     }
 

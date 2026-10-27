@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.lambda.launcher.ProvidedRuntimeBootstrap;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -89,7 +90,7 @@ public class LambdaPodSpecFactory {
         }
         // The provided.* base images exec /var/runtime/bootstrap with no /var/task
         // fallback, and their /var/runtime ships empty, so masking it with an emptyDir
-        // that the init container copies bootstrap into is safe and required.
+        // that holds the bootstrap delegate is safe and required.
         boolean needsRuntimeDir = providedRuntime && hasCode;
         if (needsRuntimeDir) {
             volumes.add(emptyDirVolume(nodes, "runtime"));
@@ -195,12 +196,16 @@ public class LambdaPodSpecFactory {
         }
         script.append("rm -f /tmp/code.zip /tmp/layer*.zip\n");
         if (providedRuntime) {
-            // The provided.* entrypoint execs /var/runtime/bootstrap, mirroring the
-            // docker path's tar-copy into RUNTIME_DIR. busybox unzip drops unix mode
-            // bits, so the exec bit must be restored explicitly.
-            script.append("if [ -f ").append(TASK_DIR).append("/bootstrap ]; then cp ")
-                    .append(TASK_DIR).append("/bootstrap ").append(RUNTIME_DIR)
-                    .append("/bootstrap && chmod +x ").append(RUNTIME_DIR).append("/bootstrap; fi\n");
+            // busybox unzip drops Unix mode bits. Restore each supplied bootstrap
+            // in place so the shared delegate preserves its companion-file path.
+            for (String directory : List.of(TASK_DIR, OPT_DIR)) {
+                script.append("if [ -f ").append(directory).append("/bootstrap ]; then chmod +x ")
+                        .append(directory).append("/bootstrap; fi\n");
+            }
+            script.append("cat > ").append(RUNTIME_DIR).append("/bootstrap <<'FLOCI_BOOTSTRAP'\n")
+                    .append(ProvidedRuntimeBootstrap.SCRIPT)
+                    .append("FLOCI_BOOTSTRAP\n")
+                    .append("chmod +x ").append(RUNTIME_DIR).append("/bootstrap\n");
         }
         return script.toString();
     }

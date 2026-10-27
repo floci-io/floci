@@ -38,8 +38,10 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * AWS Lambda API REST endpoints.
@@ -98,9 +100,10 @@ public class LambdaController {
                                 @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
         LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
+        String effectiveQualifier = LambdaArnUtils.resolveWithQualifier(functionName, qualifier).qualifier();
 
         ObjectNode root = objectMapper.createObjectNode();
-        root.set("Configuration", objectMapper.valueToTree(buildFunctionConfiguration(fn)));
+        root.set("Configuration", objectMapper.valueToTree(buildReadConfiguration(fn, effectiveQualifier)));
         ObjectNode code = root.putObject("Code");
         if ("Image".equals(fn.getPackageType()) && fn.getImageUri() != null) {
             code.put("RepositoryType", "ECR");
@@ -131,7 +134,6 @@ public class LambdaController {
         }
 
         Integer reservedConcurrency = fn.getReservedConcurrentExecutions();
-        String effectiveQualifier = LambdaArnUtils.resolveWithQualifier(functionName, qualifier).qualifier();
         if (effectiveQualifier == null && reservedConcurrency != null) {
             root.putObject("Concurrency").put("ReservedConcurrentExecutions", reservedConcurrency);
         }
@@ -169,7 +171,8 @@ public class LambdaController {
                                               @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
         LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
-        return Response.ok(buildFunctionConfiguration(fn)).build();
+        String effectiveQualifier = LambdaArnUtils.resolveWithQualifier(functionName, qualifier).qualifier();
+        return Response.ok(buildReadConfiguration(fn, effectiveQualifier)).build();
     }
 
     // ──────────────────────────── UpdateFunctionConfiguration ────────────────────────────
@@ -704,7 +707,7 @@ public class LambdaController {
         if (!(weights instanceof Map)) return null;
         Map<String, Object> raw = (Map<String, Object>) weights;
         if (raw.isEmpty()) return null;
-        java.util.Map<String, Double> result = new java.util.HashMap<>();
+        Map<String, Double> result = new HashMap<>();
         raw.forEach((k, v) -> result.put(k, ((Number) v).doubleValue()));
         return result;
     }
@@ -719,6 +722,15 @@ public class LambdaController {
                 && !"$LATEST".equals(configuration.get("Version"))) {
             configuration.put("FunctionArn", arn.substring(0, arn.lastIndexOf(':')));
         }
+    }
+
+    private Map<String, Object> buildReadConfiguration(LambdaFunction fn, String qualifier) {
+        Map<String, Object> configuration = buildFunctionConfiguration(fn);
+        if (qualifier != null && !"$LATEST".equals(qualifier) && !qualifier.equals(fn.getVersion())) {
+            unqualifyArn(configuration);
+            configuration.put("FunctionArn", configuration.get("FunctionArn") + ":" + qualifier);
+        }
+        return configuration;
     }
 
     private Map<String, Object> buildFunctionConfiguration(LambdaFunction fn) {
@@ -915,6 +927,6 @@ public class LambdaController {
         if (config == null || !(config.get(key) instanceof List<?> values)) {
             return List.of();
         }
-        return values.stream().filter(java.util.Objects::nonNull).map(Object::toString).toList();
+        return values.stream().filter(Objects::nonNull).map(Object::toString).toList();
     }
 }

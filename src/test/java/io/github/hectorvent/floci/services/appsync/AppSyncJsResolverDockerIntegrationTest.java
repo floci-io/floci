@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -366,7 +367,7 @@ class AppSyncJsResolverDockerIntegrationTest {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private io.restassured.response.ValidatableResponse query(String graphql) {
+    private ValidatableResponse query(String graphql) {
         return given()
             .header("x-api-key", apiKey)
             .contentType("application/json")

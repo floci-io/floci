@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.json.JsonPath;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -111,7 +112,7 @@ class CodeArtifactNuGetDockerIntegrationTest {
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/v3/package/" + LOWER_ID + "/index.json")
                 .then().statusCode(200)
-                .body("versions", org.hamcrest.Matchers.hasItem(VERSION));
+                .body("versions", Matchers.hasItem(VERSION));
 
         byte[] fetchedNupkg = given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/v3/package/" + LOWER_ID + "/" + VERSION + "/"

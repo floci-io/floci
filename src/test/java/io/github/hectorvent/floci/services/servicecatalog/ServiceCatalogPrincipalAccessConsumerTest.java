@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.servicecatalog;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -115,7 +116,7 @@ class ServiceCatalogPrincipalAccessConsumerTest {
         call("ListPrincipalsForPortfolio", "{\"PortfolioId\":\"" + portfolioId + "\"}")
         .then()
             .statusCode(200)
-            .body("Principals.PrincipalARN", org.hamcrest.Matchers.not(hasItem(arn)));
+            .body("Principals.PrincipalARN", Matchers.not(hasItem(arn)));
     }
 
     // ---------- ListPortfolioAccess ----------
@@ -166,7 +167,7 @@ class ServiceCatalogPrincipalAccessConsumerTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidParametersException"))
-            .body("message", org.hamcrest.Matchers.startsWith("OrganizationNodeType must be one of"));
+            .body("message", Matchers.startsWith("OrganizationNodeType must be one of"));
     }
 
     @Test

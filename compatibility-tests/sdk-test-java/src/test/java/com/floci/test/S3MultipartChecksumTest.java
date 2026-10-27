@@ -35,6 +35,7 @@ import java.io.ByteArrayOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
@@ -298,7 +299,7 @@ class S3MultipartChecksumTest {
         int offset = 0;
         for (int i = 0; i < reported.size(); i++) {
             int size = reported.get(i).size().intValue();
-            parts[i] = java.util.Arrays.copyOfRange(whole, offset, offset + size);
+            parts[i] = Arrays.copyOfRange(whole, offset, offset + size);
             offset += size;
         }
         assertThat(offset).isEqualTo(whole.length);

@@ -16,6 +16,7 @@ import software.amazon.awssdk.services.eventbridge.model.DescribeEventBusRequest
 import software.amazon.awssdk.services.eventbridge.model.DescribeEventBusResponse;
 import software.amazon.awssdk.services.eventbridge.model.ListTagsForResourceRequest;
 import software.amazon.awssdk.services.eventbridge.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.eventbridge.model.Tag;
 
 import java.util.List;
 import java.util.Map;
@@ -118,8 +119,8 @@ class CloudFormationEventBusTest {
                         .build())
                 .tags().stream()
                 .collect(Collectors.toMap(
-                        software.amazon.awssdk.services.eventbridge.model.Tag::key,
-                        software.amazon.awssdk.services.eventbridge.model.Tag::value));
+                        Tag::key,
+                        Tag::value));
     }
 
     private static String template(String description, String keepValue, String secondTagKey) {

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -44,7 +45,7 @@ class Ec2NatGatewayAddressIntegrationTest {
     @Test
     void aPublicGatewayReportsItsElasticIpPrivateIpAndInterface() {
         String subnetId = subnetId();
-        io.restassured.response.Response allocation = given()
+        Response allocation = given()
             .formParam("Action", "AllocateAddress")
             .formParam("Domain", "vpc")
             .header("Authorization", AUTH_HEADER)
@@ -114,7 +115,7 @@ class Ec2NatGatewayAddressIntegrationTest {
         .then().statusCode(200)
             .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
 
-        io.restassured.response.Response described = given()
+        Response described = given()
             .formParam("Action", "DescribeNatGateways")
             .formParam("NatGatewayId.1", natGatewayId)
             .header("Authorization", AUTH_HEADER)
@@ -244,7 +245,7 @@ class Ec2NatGatewayAddressIntegrationTest {
             .extract().path("AllocateAddressResponse.allocationId");
     }
 
-    private io.restassured.response.Response createNat(String allocationId) {
+    private Response createNat(String allocationId) {
         return given()
             .formParam("Action", "CreateNatGateway")
             .formParam("SubnetId", subnetId())

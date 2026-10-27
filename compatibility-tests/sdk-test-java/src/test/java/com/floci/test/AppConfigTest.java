@@ -13,6 +13,7 @@ import software.amazon.awssdk.services.appconfigdata.model.StartConfigurationSes
 
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -300,7 +301,7 @@ class AppConfigTest {
         try {
             appConfig.tagResource(TagResourceRequest.builder()
                     .resourceArn(arn)
-                    .tags(java.util.Map.of("env", "prod", "owner", "Alice"))
+                    .tags(Map.of("env", "prod", "owner", "Alice"))
                     .build());
 
             ListTagsForResourceResponse listed = appConfig.listTagsForResource(
@@ -346,7 +347,7 @@ class AppConfigTest {
 
         appConfig.tagResource(TagResourceRequest.builder()
                 .resourceArn(arn)
-                .tags(java.util.Map.of("env", "prod"))
+                .tags(Map.of("env", "prod"))
                 .build());
 
         ListTagsForResourceResponse listed = appConfig.listTagsForResource(
@@ -672,6 +673,75 @@ class AppConfigTest {
         } finally {
             try {
                 appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(monitoredAppId).build());
+            } catch (Exception ignored) {
+                // Best-effort cleanup: the application name is unique, so a leftover cannot affect other tests.
+            }
+        }
+    }
+
+    @Test
+    @Order(58)
+    @DisplayName("Deployments report the strategy settings they started with, also once the strategy is deleted")
+    void deploymentsKeepTheirStrategySettings() {
+        String historyAppId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name(TestFixtures.uniqueName("history-app")).build()).id();
+        try {
+            String historyEnvId = appConfig.createEnvironment(CreateEnvironmentRequest.builder()
+                    .applicationId(historyAppId).name("history").build()).id();
+            String profileId = appConfig.createConfigurationProfile(CreateConfigurationProfileRequest.builder()
+                    .applicationId(historyAppId).name("history-settings").locationUri("hosted").build()).id();
+            appConfig.createHostedConfigurationVersion(CreateHostedConfigurationVersionRequest.builder()
+                    .applicationId(historyAppId)
+                    .configurationProfileId(profileId)
+                    .content(SdkBytes.fromString("{\"key\": \"value\"}", StandardCharsets.UTF_8))
+                    .contentType("application/json")
+                    .build());
+            String strategyId = appConfig.createDeploymentStrategy(CreateDeploymentStrategyRequest.builder()
+                    .name(TestFixtures.uniqueName("gradual"))
+                    .deploymentDurationInMinutes(15)
+                    .finalBakeTimeInMinutes(5)
+                    .growthFactor(25.0f)
+                    .growthType(GrowthType.LINEAR)
+                    .replicateTo(ReplicateTo.NONE)
+                    .build()).id();
+            StartDeploymentResponse started = appConfig.startDeployment(StartDeploymentRequest.builder()
+                    .applicationId(historyAppId)
+                    .environmentId(historyEnvId)
+                    .configurationProfileId(profileId)
+                    .configurationVersion("1")
+                    .deploymentStrategyId(strategyId)
+                    .build());
+
+            appConfig.deleteDeploymentStrategy(DeleteDeploymentStrategyRequest.builder()
+                    .deploymentStrategyId(strategyId).build());
+
+            ListDeploymentsResponse listed = appConfig.listDeployments(ListDeploymentsRequest.builder()
+                    .applicationId(historyAppId).environmentId(historyEnvId).build());
+            assertThat(listed.items()).hasSize(1);
+            DeploymentSummary summary = listed.items().get(0);
+            assertThat(summary.deploymentNumber()).isEqualTo(started.deploymentNumber());
+            assertThat(summary.configurationName()).isEqualTo("history-settings");
+            assertThat(summary.deploymentDurationInMinutes()).isEqualTo(15);
+            assertThat(summary.finalBakeTimeInMinutes()).isEqualTo(5);
+            assertThat(summary.growthFactor()).isEqualTo(25.0f);
+            assertThat(summary.growthType()).isEqualTo(GrowthType.LINEAR);
+
+            GetDeploymentResponse deployment = appConfig.getDeployment(GetDeploymentRequest.builder()
+                    .applicationId(historyAppId)
+                    .environmentId(historyEnvId)
+                    .deploymentNumber(started.deploymentNumber())
+                    .build());
+            assertThat(deployment.deploymentDurationInMinutes()).isEqualTo(15);
+            assertThat(deployment.finalBakeTimeInMinutes()).isEqualTo(5);
+            assertThat(deployment.growthFactor()).isEqualTo(25.0f);
+            assertThat(deployment.growthType()).isEqualTo(GrowthType.LINEAR);
+            assertThat(started.deploymentDurationInMinutes()).isEqualTo(15);
+            assertThat(started.finalBakeTimeInMinutes()).isEqualTo(5);
+            assertThat(started.growthFactor()).isEqualTo(25.0f);
+            assertThat(started.growthType()).isEqualTo(GrowthType.LINEAR);
+        } finally {
+            try {
+                appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(historyAppId).build());
             } catch (Exception ignored) {
                 // Best-effort cleanup: the application name is unique, so a leftover cannot affect other tests.
             }

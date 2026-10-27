@@ -14,6 +14,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
@@ -269,7 +271,7 @@ class ExecuteApiSigV4AuthorizerTest {
      */
     private static Map<String, String> signedWithSessionToken(String accessKeyId, String sessionToken)
             throws Exception {
-        Map<String, String> signed = new java.util.LinkedHashMap<>(ExecuteApiRequestSigner.signedHeaders(
+        Map<String, String> signed = new LinkedHashMap<>(ExecuteApiRequestSigner.signedHeaders(
                 "GET", PATH, Map.of(), HOST, null, accessKeyId, "session-secret", REGION, Instant.now()));
         signed.put("X-Amz-Security-Token", sessionToken);
         return signed;
@@ -333,7 +335,7 @@ class ExecuteApiSigV4AuthorizerTest {
         // x-amz-content-sha256 header alongside a replaced body must not restore the match:
         // the header is not in SignedHeaders, and a literal hash is never taken on trust.
         byte[] signedBody = "{\"amount\":1}".getBytes();
-        Map<String, String> signed = new java.util.LinkedHashMap<>(ExecuteApiRequestSigner.signedHeaders(
+        Map<String, String> signed = new LinkedHashMap<>(ExecuteApiRequestSigner.signedHeaders(
                 "POST", PATH, Map.of(), HOST, signedBody, "test", "test", REGION, Instant.now()));
         signed.put("x-amz-content-sha256", Digests.sha256Hex(signedBody));
 
@@ -401,8 +403,8 @@ class ExecuteApiSigV4AuthorizerTest {
             for (String pair : rawQuery.split("&")) {
                 int equals = pair.indexOf('=');
                 queryParameters.add(equals >= 0 ? pair.substring(0, equals) : pair,
-                        equals >= 0 ? java.net.URLDecoder.decode(pair.substring(equals + 1),
-                                java.nio.charset.StandardCharsets.UTF_8) : "");
+                        equals >= 0 ? URLDecoder.decode(pair.substring(equals + 1),
+                                StandardCharsets.UTF_8) : "");
             }
         }
         when(uriInfo.getQueryParameters()).thenReturn(queryParameters);

@@ -194,6 +194,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private static final String DOCUMENTATION_PREFIX = "203.0.113.";
     private static final Set<String> VALID_VOLUME_TYPES =
             Set.of("standard", "io1", "io2", "gp2", "sc1", "st1", "gp3");
+    /** The volume types whose IOPS are provisioned, and so the only ones a launch keeps Iops for. */
+    private static final Set<String> PROVISIONED_IOPS_VOLUME_TYPES = Set.of("gp3", "io1", "io2");
     /** The accounts behind the two non-self owner aliases DescribeImages accepts. */
     private static final String AMAZON_OWNER_ID = "137112412989";
     private static final String AWS_MARKETPLACE_OWNER_ID = "679593333241";
@@ -2076,7 +2078,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    private void validatePrefixListEntry(PrefixListEntry entry, String addressFamily) {
+    /** Validates an entry before a consumer computes or applies a prefix-list update. */
+    public void validatePrefixListEntry(PrefixListEntry entry, String addressFamily) {
         if (entry.getCidr() == null || entry.getCidr().isBlank()) {
             throw new AwsException("MissingParameter", "Every prefix list entry must specify a Cidr.", 400);
         }
@@ -3825,8 +3828,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      *                released; with no subnet or zone named, the launch lands in the host's zone.
      * @param tenancy Placement.Tenancy; defaults to {@code host} when a host is named.
      * @param blockDeviceMappings the launch's BlockDeviceMappings (request merged over launch
-     *                            template), or null. An entry naming the AMI's root device
-     *                            overrides the root volume type, as on AWS.
+     *                            template), or null. They apply over the AMI's own mappings, and
+     *                            each EBS device left creates a volume; see {@link #planLaunchVolumes}.
      */
     public Reservation runInstances(String region, String imageId, String instanceType,
                                     int minCount, int maxCount, String keyName,
@@ -4062,13 +4065,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
         String architecture = architectureFor(region, imageId, effectiveInstanceType);
-        // An entry with NoDevice set removes its device whatever else it names, as on AWS.
-        List<LaunchTemplateData.BlockDeviceMapping> mappedDevices = blockDeviceMappings == null ? List.of()
-                : blockDeviceMappings.stream().filter(m -> m.getNoDevice() == null).toList();
-        mappedDevices.stream()
+        List<LaunchTemplateData.BlockDeviceMapping> launchMappings =
+                blockDeviceMappings == null ? List.of() : blockDeviceMappings;
+        // An entry with NoDevice set names no device to create, so its type is not checked.
+        launchMappings.stream()
+                .filter(m -> m.getNoDevice() == null)
                 .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null)
                 .forEach(m -> requireValidVolumeType(m.getEbs().getVolumeType()));
-        String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId), mappedDevices);
         List<Instance> launched = new ArrayList<>();
         // Resolving the AMI, building the instances that depend on it and publishing them is one
         // step. A DeregisterImage releases the captured layer only when no live instance resolves
@@ -4087,6 +4090,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         ResolvedAmiImage dockerImage = null;
         synchronized (imageRegistryLock) {
             requireNotDeregistered(region, imageId);
+            // Planned under the lock DeregisterImage deletes snapshots under, so a snapshot a
+            // mapping names is still there when its volume is stored.
+            Image image = findImageForCapture(region, imageId);
+            String rootDeviceName = image != null && image.getRootDeviceName() != null
+                    ? image.getRootDeviceName() : new Instance().getRootDeviceName();
+            List<LaunchVolume> launchVolumes = planLaunchVolumes(region, image, rootDeviceName, launchMappings);
             if (!config.services().ec2().mock()) {
                 // A CreateImage AMI is not in the catalog, so resolve through its source. The
                 // ancestor supplies the guest runtime (systemd vs minimal, cloud-init), which a
@@ -4213,27 +4222,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             }
                         }
 
-                        // Root EBS volume
-                        String rootVolId = "vol-" + randomHex(17);
-                        inst.setRootVolumeId(rootVolId);
-                        Volume rootVol = new Volume();
-                        rootVol.setVolumeId(rootVolId);
-                        rootVol.setAvailabilityZone(az);
-                        rootVol.setVolumeType(rootVolumeType);
-                        rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
-                        rootVol.setState("in-use");
-                        rootVol.setRegion(region);
-                        rootVol.setEncrypted(ebsEncryptionByDefault(region));
-                        rootVol.setCreateTime(Instant.now());
-                        VolumeAttachment att = new VolumeAttachment();
-                        att.setVolumeId(rootVolId);
-                        att.setInstanceId(instanceId);
-                        att.setDevice(inst.getRootDeviceName());
-                        att.setState("attached");
-                        att.setDeleteOnTermination(true);
-                        att.setAttachTime(Instant.now());
-                        rootVol.getAttachments().add(att);
-                        volumes.put(key(region, rootVolId), rootVol);
+                        inst.setRootDeviceName(rootDeviceName);
+                        for (LaunchVolume planned : launchVolumes) {
+                            Volume volume = newVolume(region, az, planned.volumeType(), planned.size(),
+                                    planned.encrypted(), planned.iops(), planned.throughput(), planned.snapshotId());
+                            volume.setState("in-use");
+                            VolumeAttachment attachment = new VolumeAttachment();
+                            attachment.setVolumeId(volume.getVolumeId());
+                            attachment.setInstanceId(instanceId);
+                            attachment.setDevice(planned.deviceName());
+                            attachment.setState("attached");
+                            attachment.setDeleteOnTermination(planned.deleteOnTermination());
+                            attachment.setAttachTime(inst.getLaunchTime());
+                            volume.getAttachments().add(attachment);
+                            volumes.put(key(region, volume.getVolumeId()), volume);
+                            reservation.getLaunchVolumeIds().add(volume.getVolumeId());
+                            if (rootDeviceName.equals(planned.deviceName())) {
+                                inst.setRootVolumeId(volume.getVolumeId());
+                            }
+                        }
 
                         instances.put(key(region, instanceId), inst);
                         launched.add(inst);
@@ -4247,7 +4254,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             acquireCapacity(region, launched);
         } catch (RuntimeException failure) {
             try {
-                terminateInstances(region, launched.stream().map(Instance::getInstanceId).toList());
+                rollBackLaunch(region, reservation);
             } catch (RuntimeException cleanupFailure) {
                 failure.addSuppressed(cleanupFailure);
                 LOG.errorv(cleanupFailure, "Failed to clean up rejected capacity launch in {0}", region);
@@ -5063,21 +5070,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 // DescribeAddresses re-point holds, so one already under way cannot write it back.
                 synchronized (privateIpAllocationLock) {
                     writePublicAddress(inst, () -> clearPublicAddress(inst));
-                }
-            }
-            // Delete root volume if deleteOnTermination (matches real AWS behavior)
-            if (inst.getRootVolumeId() != null) {
-                Volume rootVol = volumes.get(key(region, inst.getRootVolumeId())).orElse(null);
-                if (rootVol != null) {
-                    boolean attachedElsewhere = rootVol.getAttachments().stream()
-                            .anyMatch(a -> !inst.getInstanceId().equals(a.getInstanceId()));
-                    if (!attachedElsewhere) {
-                        if (volumeBlockDeviceManager != null) {
-                            volumeBlockDeviceManager.deleteVolume(inst.getRootVolumeId());
-                        }
-                        volumes.delete(key(region, inst.getRootVolumeId()));
-                        removeTags(region, inst.getRootVolumeId());
-                    }
                 }
             }
             detachAttachedVolumesOnTermination(region, inst);
@@ -8683,31 +8675,188 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return mapping;
     }
 
+    /** One EBS volume a launch creates, settled before anything of the launch is stored. */
+    private record LaunchVolume(String deviceName, String snapshotId, int size, String volumeType,
+                                int iops, Integer throughput, boolean encrypted, boolean deleteOnTermination) {}
+
     /**
-     * The root volume takes the type a request mapping for the AMI's root device names, else the
-     * type the AMI's root mapping declares, as on AWS.
+     * The EBS volumes a launch creates, one per device: the AMI's block device mappings with the
+     * launch's own over them. A launch's entries "overwrite or merge with the block device mapping
+     * of the AMI" field by field, so an entry resizing a device the AMI maps keeps its snapshot,
+     * and the AMI itself is not changed. {@code NoDevice} keeps a device the AMI maps from being
+     * created, and an entry naming an instance store volume ({@code VirtualName}) takes its device
+     * over, but neither applies to the root device, which every launch has: such an entry for the
+     * root leaves the AMI's root as it maps it. An entry without an {@code Ebs} block creates
+     * nothing.
+     *
+     * <p>A volume takes its snapshot's size unless its entry names one, which may not be smaller.
+     * The root takes the AMI root's type, else {@code gp3}, and DeleteOnTermination defaults to
+     * true for every device the launch creates. IOPS are kept only for the types that take them
+     * (gp3, io1, io2) and throughput only for gp3, so an entry that changes a template device's
+     * type does not carry the old type's settings onto the new one.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-block-device-mapping.html">Add block device mappings to Amazon EC2 instance</a>
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/preserving-volumes-on-termination.html">Preserve data when an instance is terminated</a>
      */
-    private static String rootVolumeTypeFor(Image image,
-                                            List<LaunchTemplateData.BlockDeviceMapping> requestMappings) {
-        String rootDeviceName = image != null && image.getRootDeviceName() != null
-                ? image.getRootDeviceName() : new Instance().getRootDeviceName();
-        if (requestMappings != null) {
-            for (LaunchTemplateData.BlockDeviceMapping m : requestMappings) {
-                if (m.getEbs() != null && m.getEbs().getVolumeType() != null
-                        && Objects.equals(m.getDeviceName(), rootDeviceName)) {
-                    return m.getEbs().getVolumeType();
+    private List<LaunchVolume> planLaunchVolumes(String region, Image image, String rootDeviceName,
+                                                 List<LaunchTemplateData.BlockDeviceMapping> launchMappings) {
+        requireValidLaunchDevices(launchMappings);
+        List<LaunchTemplateData.BlockDeviceMapping> amiMappings = new ArrayList<>();
+        if (image != null && image.getBlockDeviceMappings() != null) {
+            for (BlockDeviceMapping declared : image.getBlockDeviceMappings()) {
+                LaunchTemplateData.BlockDeviceMapping mapping = launchMapping(declared);
+                if (isSameDevice(mapping.getDeviceName(), rootDeviceName)) {
+                    // An AMI may map its root as "xvda" while its RootDeviceName says "/dev/xvda".
+                    mapping.setDeviceName(rootDeviceName);
                 }
+                amiMappings.add(mapping);
             }
         }
-        if (image == null || image.getBlockDeviceMappings() == null) {
-            return DEFAULT_ROOT_VOLUME_TYPE;
+        if (amiMappings.stream().noneMatch(m -> rootDeviceName.equals(m.getDeviceName()))) {
+            // A catalog AMI need not map its root device; it then gets the default root volume.
+            // Its size is left unset until the launch's entries are merged, so a root entry
+            // naming only a snapshot takes the snapshot's size.
+            LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+            LaunchTemplateData.BlockDeviceMapping root = new LaunchTemplateData.BlockDeviceMapping();
+            root.setDeviceName(rootDeviceName);
+            root.setEbs(ebs);
+            amiMappings.addFirst(root);
         }
-        return image.getBlockDeviceMappings().stream()
-                .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null
-                        && Objects.equals(m.getDeviceName(), image.getRootDeviceName()))
-                .map(m -> m.getEbs().getVolumeType())
-                .findFirst()
-                .orElse(DEFAULT_ROOT_VOLUME_TYPE);
+        // An entry naming a device the AMI maps, "xvdf" for its "/dev/xvdf" included, is merged
+        // into it. NoDevice removes its device and a VirtualName makes it an instance store
+        // volume, so neither leaves an EBS volume there, whatever else the entry names; the root
+        // can be neither, so such an entry for it leaves the AMI's own root in place.
+        List<LaunchTemplateData.BlockDeviceMapping> overrides = new ArrayList<>();
+        for (LaunchTemplateData.BlockDeviceMapping mapping : spelledAs(amiMappings, launchMappings)) {
+            if (rootDeviceName.equals(mapping.getDeviceName())
+                    && (mapping.getNoDevice() != null || mapping.namesInstanceStore())) {
+                continue;
+            }
+            overrides.add(mapping);
+        }
+        List<LaunchVolume> planned = new ArrayList<>();
+        for (LaunchTemplateData.BlockDeviceMapping mapping
+                : LaunchTemplateData.BlockDeviceMapping.merge(amiMappings, overrides)) {
+            boolean root = rootDeviceName.equals(mapping.getDeviceName());
+            LaunchTemplateData.Ebs ebs = mapping.getEbs();
+            if (!root && (mapping.getNoDevice() != null || mapping.namesInstanceStore() || ebs == null)) {
+                continue;
+            }
+            if (ebs == null) {
+                ebs = new LaunchTemplateData.Ebs();
+            }
+            String snapshotId = ebs.getSnapshotId() == null || ebs.getSnapshotId().isBlank()
+                    ? null : ebs.getSnapshotId();
+            Snapshot snapshot = snapshotId == null ? null : snapshots.get(key(region, snapshotId))
+                    .orElseThrow(() -> new AwsException("InvalidSnapshot.NotFound",
+                            "The snapshot '" + snapshotId + "' does not exist.", 400));
+            Integer snapshotSize = snapshot == null ? null : snapshot.getVolumeSize();
+            // With neither a size nor a sized snapshot, the root gets the default root size and
+            // any other device 0, which leaves the size to CreateVolume's default.
+            int size = ebs.getVolumeSize() != null ? ebs.getVolumeSize()
+                    : snapshotSize != null ? snapshotSize : root ? DEFAULT_ROOT_VOLUME_SIZE_GIB : 0;
+            if (snapshotSize != null && size < snapshotSize) {
+                throw new AwsException("InvalidBlockDeviceMapping", "Volume of size " + size
+                        + "GB is smaller than snapshot '" + snapshotId + "', expect size>= " + snapshotSize + "GB", 400);
+            }
+            String volumeType = ebs.getVolumeType() != null ? ebs.getVolumeType()
+                    : root ? DEFAULT_ROOT_VOLUME_TYPE : null;
+            boolean takesIops = volumeType != null && PROVISIONED_IOPS_VOLUME_TYPES.contains(volumeType);
+            int iops = takesIops && ebs.getIops() != null ? ebs.getIops() : 0;
+            Integer throughput = "gp3".equals(volumeType) ? ebs.getThroughput() : null;
+            planned.add(new LaunchVolume(mapping.getDeviceName(), snapshotId, size, volumeType, iops, throughput,
+                    Boolean.TRUE.equals(ebs.getEncrypted()) || snapshot != null && snapshot.isEncrypted(),
+                    !Boolean.FALSE.equals(ebs.getDeleteOnTermination())));
+        }
+        return planned;
+    }
+
+    /**
+     * Refuses the launch block device mappings AWS refuses before anything else: an entry without
+     * a device name, a device name AttachVolume would refuse, and a device named twice, "xvdh" and
+     * "/dev/xvdh" being one device as they are to AttachVolume.
+     */
+    static void requireValidLaunchDevices(List<LaunchTemplateData.BlockDeviceMapping> mappings) {
+        if (mappings == null) {
+            return;
+        }
+        Set<String> named = new HashSet<>();
+        for (LaunchTemplateData.BlockDeviceMapping mapping : mappings) {
+            String device = mapping.getDeviceName();
+            if (device == null || device.isBlank()) {
+                throw new AwsException("InvalidBlockDeviceMapping", "Missing device name", 400);
+            }
+            if (!DEVICE_NAME_PATTERN.matcher(device).matches() || device.contains("..")) {
+                throw new AwsException("InvalidBlockDeviceMapping", "Invalid device name " + device, 400);
+            }
+            if (!named.add(normalizedDevice(device))) {
+                throw new AwsException("InvalidBlockDeviceMapping",
+                        device + " is being assigned to multiple times.", 400);
+            }
+        }
+    }
+
+    /**
+     * Launch entries with each device the base maps spelled as the base spells it, "xvdf" becoming
+     * a base's "/dev/xvdf", so that merging them over the base folds each entry into the device it
+     * names. A renamed entry is a copy; the entries given are never changed.
+     */
+    static List<LaunchTemplateData.BlockDeviceMapping> spelledAs(List<LaunchTemplateData.BlockDeviceMapping> base,
+                                                                 List<LaunchTemplateData.BlockDeviceMapping> entries) {
+        Map<String, String> spellings = new HashMap<>();
+        for (LaunchTemplateData.BlockDeviceMapping mapping : base) {
+            if (mapping.getDeviceName() != null) {
+                spellings.putIfAbsent(normalizedDevice(mapping.getDeviceName()), mapping.getDeviceName());
+            }
+        }
+        List<LaunchTemplateData.BlockDeviceMapping> spelled = new ArrayList<>(entries.size());
+        for (LaunchTemplateData.BlockDeviceMapping mapping : entries) {
+            String device = mapping.getDeviceName() == null ? null
+                    : spellings.get(normalizedDevice(mapping.getDeviceName()));
+            spelled.add(device == null || device.equals(mapping.getDeviceName()) ? mapping : renamed(mapping, device));
+        }
+        return spelled;
+    }
+
+    /** A copy of a launch entry under another spelling of its device name; the original is untouched. */
+    private static LaunchTemplateData.BlockDeviceMapping renamed(LaunchTemplateData.BlockDeviceMapping mapping,
+                                                                 String deviceName) {
+        LaunchTemplateData.BlockDeviceMapping copy = new LaunchTemplateData.BlockDeviceMapping();
+        copy.setDeviceName(deviceName);
+        copy.setVirtualName(mapping.getVirtualName());
+        copy.setNoDevice(mapping.getNoDevice());
+        copy.setEbs(mapping.getEbs());
+        return copy;
+    }
+
+    /**
+     * An AMI's block device mapping in the launch-time shape the launch's own entries merge over.
+     * RegisterImage keeps an entry naming no Ebs member, such as an instance store or a NoDevice
+     * entry, with an empty Ebs block; that entry describes no EBS volume, so it gets none here.
+     */
+    private static LaunchTemplateData.BlockDeviceMapping launchMapping(BlockDeviceMapping declared) {
+        LaunchTemplateData.BlockDeviceMapping mapping = new LaunchTemplateData.BlockDeviceMapping();
+        mapping.setDeviceName(declared.getDeviceName());
+        EbsBlockDevice declaredEbs = declared.getEbs();
+        if (describesVolume(declaredEbs)) {
+            LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+            ebs.setSnapshotId(declaredEbs.getSnapshotId());
+            ebs.setVolumeSize(declaredEbs.getVolumeSize());
+            ebs.setVolumeType(declaredEbs.getVolumeType());
+            ebs.setDeleteOnTermination(declaredEbs.getDeleteOnTermination());
+            ebs.setEncrypted(declaredEbs.getEncrypted());
+            mapping.setEbs(ebs);
+        }
+        return mapping;
+    }
+
+    /**
+     * Whether an AMI entry's Ebs block describes a volume. RegisterImage keeps an empty one for an
+     * entry naming no Ebs member, such as an instance store or a NoDevice entry.
+     */
+    private static boolean describesVolume(EbsBlockDevice ebs) {
+        return ebs != null && (ebs.getSnapshotId() != null || ebs.getVolumeSize() != null
+                || ebs.getVolumeType() != null || ebs.getDeleteOnTermination() != null || ebs.getEncrypted() != null);
     }
 
     /** The image a CreateImage source was launched from, whether catalog-backed or registered. */
@@ -13231,10 +13380,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                int size, boolean encrypted, int iops, Integer throughput,
                                String snapshotId, List<Tag> volumeTags) {
         ensureDefaultResources(region);
-        String volumeId = "vol-" + randomHex(17);
+        Volume vol = newVolume(region, availabilityZone, volumeType, size, encrypted, iops, throughput, snapshotId);
+        String volumeId = vol.getVolumeId();
+        if (volumeTags != null) {
+            vol.setTags(new ArrayList<>(volumeTags));
+            // Tags on create are tags like any other: DescribeTags lists them in this region.
+            putTags(region, vol.getVolumeId(), new ArrayList<>(volumeTags));
+        }
+        volumes.put(key(region, volumeId), vol);
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.createVolume(volumeId, vol.getSize());
+        }
+        return vol;
+    }
+
+    /**
+     * A new, unattached volume record, not yet stored, with the defaults CreateVolume and a
+     * launch's block device mappings share.
+     */
+    private Volume newVolume(String region, String availabilityZone, String volumeType, int size,
+                             boolean encrypted, int iops, Integer throughput, String snapshotId) {
         String effectiveType = volumeType != null ? volumeType : "gp2";
         Volume vol = new Volume();
-        vol.setVolumeId(volumeId);
+        vol.setVolumeId("vol-" + randomHex(17));
         vol.setAvailabilityZone(availabilityZone != null ? availabilityZone : region + "a");
         vol.setVolumeType(effectiveType);
         vol.setSize(size > 0 ? size : 8);
@@ -13252,15 +13420,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         vol.setCreateTime(Instant.now());
         vol.setState("available");
         vol.setRegion(region);
-        if (volumeTags != null) {
-            vol.setTags(new ArrayList<>(volumeTags));
-            // Tags on create are tags like any other: DescribeTags lists them in this region.
-            putTags(region, vol.getVolumeId(), new ArrayList<>(volumeTags));
-        }
-        volumes.put(key(region, volumeId), vol);
-        if (volumeBlockDeviceManager != null) {
-            volumeBlockDeviceManager.createVolume(volumeId, vol.getSize());
-        }
         return vol;
     }
 
@@ -13273,7 +13432,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                  List<Map.Entry<String, List<String>>> filters) {
         if (volumeIds != null && !volumeIds.isEmpty()) {
             for (String id : volumeIds) {
-                if (volumes.get(key(region, id)).orElse(null) == null) {
+                if (volumes.get(key(region, id)).flatMap(v -> settleEndedHolders(region, v)).isEmpty()) {
                     throw new AwsException("InvalidVolume.NotFound",
                             "The volume '" + id + "' does not exist.", 400);
                 }
@@ -13282,6 +13441,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return volumes.scan(k -> true).stream()
                 .filter(v -> v.getRegion().equals(region))
                 .filter(v -> volumeIds == null || volumeIds.isEmpty() || volumeIds.contains(v.getVolumeId()))
+                .map(v -> settleEndedHolders(region, v))
+                .flatMap(Optional::stream)
                 .filter(v -> matchesFilters(v, filters, region))
                 .collect(Collectors.toList());
     }
@@ -13292,8 +13453,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         withVolumeLock(volumeId, () -> {
             ensureDefaultResources(region);
-            Volume volume = volumes.get(key(region, volumeId)).orElseThrow(() ->
-                    new AwsException("InvalidVolume.NotFound",
+            Volume volume = volumes.get(key(region, volumeId)).flatMap(v -> settleEndedHolders(region, v))
+                    .orElseThrow(() -> new AwsException("InvalidVolume.NotFound",
                             "The volume '" + volumeId + "' does not exist.", 400));
             if ("in-use".equals(volume.getState()) || !volume.getAttachments().isEmpty()) {
                 throw new AwsException("VolumeInUse",
@@ -13356,9 +13517,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (d1 == null || d2 == null) {
             return false;
         }
-        String n1 = d1.startsWith("/") ? d1 : "/dev/" + d1;
-        String n2 = d2.startsWith("/") ? d2 : "/dev/" + d2;
-        return n1.equals(n2);
+        return normalizedDevice(d1).equals(normalizedDevice(d2));
+    }
+
+    /** A device name with the "/dev/" a bare name such as "xvdf" leaves implicit. */
+    private static String normalizedDevice(String device) {
+        return device.startsWith("/") ? device : "/dev/" + device;
     }
 
     private boolean isRootVolume(String region, Volume volume) {
@@ -13534,6 +13698,45 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .collect(Collectors.toList());
     }
 
+    /**
+     * The EBS volumes attached to each of the instances, as their block device mappings report
+     * them: the volumes a launch created and any attached since, root device first, then by device
+     * name. The volume store is read once for all of them, so a response listing many instances
+     * does not scan it once per instance. A terminated instance has none, whichever way it ended.
+     */
+    public Map<String, List<VolumeAttachment>> instanceVolumeAttachments(Collection<Instance> instances) {
+        Map<String, List<VolumeAttachment>> byInstance = new HashMap<>();
+        Map<String, Instance> live = new HashMap<>();
+        Set<String> regions = new HashSet<>();
+        for (Instance instance : instances) {
+            byInstance.put(instance.getInstanceId(), new ArrayList<>());
+            if (instance.getRegion() != null
+                    && (instance.getState() == null || !"terminated".equals(instance.getState().getName()))) {
+                live.put(instance.getInstanceId(), instance);
+                regions.add(instance.getRegion());
+            }
+        }
+        for (String region : regions) {
+            for (Volume volume : volumes.scan(k -> k.startsWith(region + "::"))) {
+                if (!region.equals(volume.getRegion())) {
+                    continue;
+                }
+                // A copy: termination, a settle, AttachVolume and DetachVolume change the list
+                // under the volume's lock, which a read does not take.
+                for (VolumeAttachment attachment : new ArrayList<>(volume.getAttachments())) {
+                    Instance instance = live.get(attachment.getInstanceId());
+                    if (instance != null && region.equals(instance.getRegion())) {
+                        byInstance.get(instance.getInstanceId()).add(attachment);
+                    }
+                }
+            }
+        }
+        live.values().forEach(instance -> byInstance.get(instance.getInstanceId()).sort(
+                Comparator.comparing((VolumeAttachment a) -> !isSameDevice(a.getDevice(), instance.getRootDeviceName()))
+                        .thenComparing(VolumeAttachment::getDevice, Comparator.nullsLast(Comparator.naturalOrder()))));
+        return byInstance;
+    }
+
     public VolumeAttachment attachVolume(String region, String volumeId, String instanceId, String device) {
         ensureDefaultResources(region);
         if (volumeId == null || volumeId.isEmpty()) {
@@ -13650,9 +13853,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private Volume getRequiredVolume(String region, String volumeId) {
-        return volumes.get(key(region, volumeId)).orElseThrow(() ->
-                new AwsException("InvalidVolume.NotFound", "The volume '" + volumeId + "' does not exist.", 400)
-        );
+        return volumes.get(key(region, volumeId)).flatMap(volume -> settleEndedHolders(region, volume))
+                .orElseThrow(() -> new AwsException("InvalidVolume.NotFound",
+                        "The volume '" + volumeId + "' does not exist.", 400));
     }
 
     // ─── Network Interfaces ──────────────────────────────────────────────────────────
@@ -14190,37 +14393,113 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /**
+     * Undoes a launch refused after its instances were stored: terminates them and deletes every
+     * volume the launch created, those it would keep on termination included, so nothing of the
+     * refused launch is left. The volumes are the ones the launch recorded as it created them, so
+     * one whose attachment already ended, as a failed container's are settled by whichever call
+     * reads them first, is still found. Only a volume termination left unattached is deleted: an
+     * instance whose termination fails keeps its volumes as they were, and a volume attached to
+     * another instance since stays.
+     */
+    public List<Map<String, String>> rollBackLaunch(String region, Reservation launch) {
+        try {
+            return terminateInstances(region, launch.getInstances().stream().map(Instance::getInstanceId).toList());
+        } finally {
+            for (String volumeId : launch.getLaunchVolumeIds()) {
+                String k = key(region, volumeId);
+                withVolumeLock(volumeId, () -> volumes.get(k)
+                        .filter(current -> current.getAttachments().isEmpty())
+                        .ifPresent(current -> deleteVolumeRecord(region, k, current)));
+            }
+        }
+    }
+
+    /**
+     * Each volume attached to a terminating instance, the root included, goes as its attachment's
+     * DeleteOnTermination says: deleted when it is set, unless another instance still has the
+     * volume attached, and otherwise detached, left available or, still held by another
+     * instance, in-use.
+     */
     private void detachAttachedVolumesOnTermination(String region, Instance inst) {
         for (String k : volumes.keys()) {
             Volume vol = volumes.get(k).orElse(null);
-            if (vol == null || !region.equals(vol.getRegion()) || vol.getAttachments().isEmpty()) {
+            if (vol == null || !region.equals(vol.getRegion())
+                    || vol.getAttachments().stream().noneMatch(a -> inst.getInstanceId().equals(a.getInstanceId()))) {
                 continue;
             }
-            boolean modified = false;
-            for (VolumeAttachment att : new ArrayList<>(vol.getAttachments())) {
-                if (inst.getInstanceId().equals(att.getInstanceId())) {
-                    if (volumeBlockDeviceManager != null) {
-                        volumeBlockDeviceManager.detachVolume(vol, inst, att.getDevice());
-                    }
-                    if (att.isDeleteOnTermination()) {
-                        if (volumeBlockDeviceManager != null) {
-                            volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
-                        }
-                        volumes.delete(k);
-                        removeTags(region, vol.getVolumeId());
-                        modified = false;
-                        break;
-                    } else {
-                        vol.getAttachments().remove(att);
-                        modified = true;
-                    }
+            withVolumeLock(vol.getVolumeId(), () -> endAttachments(region, k, inst));
+        }
+    }
+
+    /**
+     * Ends one volume's attachments to an instance that has terminated. Called under the volume's
+     * lock, and on the volume as the store holds it now.
+     */
+    private void endAttachments(String region, String storeKey, Instance inst) {
+        Volume vol = volumes.get(storeKey).orElse(null);
+        if (vol == null) {
+            return;
+        }
+        boolean modified = false;
+        for (VolumeAttachment att : new ArrayList<>(vol.getAttachments())) {
+            if (inst.getInstanceId().equals(att.getInstanceId())) {
+                // The root has no block device to remove: it is the container's own file system.
+                boolean root = vol.getVolumeId().equals(inst.getRootVolumeId())
+                        || isSameDevice(att.getDevice(), inst.getRootDeviceName());
+                if (volumeBlockDeviceManager != null && !root) {
+                    volumeBlockDeviceManager.detachVolume(vol, inst, att.getDevice());
                 }
-            }
-            if (modified) {
-                vol.setState(vol.getAttachments().isEmpty() ? "available" : "in-use");
-                volumes.put(k, vol);
+                boolean attachedElsewhere = vol.getAttachments().stream()
+                        .anyMatch(other -> !inst.getInstanceId().equals(other.getInstanceId()));
+                if (att.isDeleteOnTermination() && !attachedElsewhere) {
+                    deleteVolumeRecord(region, storeKey, vol);
+                    return;
+                }
+                vol.getAttachments().remove(att);
+                modified = true;
             }
         }
+        if (modified) {
+            vol.setState(vol.getAttachments().isEmpty() ? "available" : "in-use");
+            volumes.put(storeKey, vol);
+        }
+    }
+
+    /** Deletes a volume, its block device and its tags. Called under the volume's lock. */
+    private void deleteVolumeRecord(String region, String storeKey, Volume vol) {
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
+        }
+        volumes.delete(storeKey);
+        removeTags(region, vol.getVolumeId());
+    }
+
+    /**
+     * A volume as it stands once the attachments it still holds to a terminated instance are
+     * ended. TerminateInstances ends them itself, but a container-backed launch that fails or is
+     * cancelled ends "terminated" inside the container manager, which has no access to this
+     * store, and would leave the volumes its launch created in-use on an instance that is gone.
+     * Settling on read covers every such path at once, as {@link #releaseIfHostIsGone} does for
+     * interfaces, and applies what termination would have: DeleteOnTermination deletes.
+     *
+     * @return the volume, or empty when it was deleted
+     */
+    private Optional<Volume> settleEndedHolders(String region, Volume volume) {
+        List<Instance> ended = new ArrayList<>();
+        for (VolumeAttachment attachment : new ArrayList<>(volume.getAttachments())) {
+            Instance holder = attachment.getInstanceId() == null ? null
+                    : instances.get(key(region, attachment.getInstanceId())).orElse(null);
+            if (holder != null && holder.getState() != null && "terminated".equals(holder.getState().getName())) {
+                ended.add(holder);
+            }
+        }
+        if (ended.isEmpty()) {
+            return Optional.of(volume);
+        }
+        String storeKey = key(region, volume.getVolumeId());
+        withVolumeLock(volume.getVolumeId(), () -> ended.forEach(holder -> endAttachments(region, storeKey, holder)));
+        return volumes.get(storeKey);
     }
 
     private NetworkInterface requireStandaloneNetworkInterface(String region, String networkInterfaceId) {

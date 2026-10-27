@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.servicequotas;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -48,7 +49,7 @@ class RequestServiceQuotaIncreaseConsumerTest {
         given().post("/_floci/state/reset").then().statusCode(200);
     }
 
-    private static io.restassured.response.Response request(String body) {
+    private static Response request(String body) {
         return given()
                 .contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", TARGET)

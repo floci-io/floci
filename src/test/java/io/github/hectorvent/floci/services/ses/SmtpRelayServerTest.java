@@ -11,6 +11,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -26,6 +27,8 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -78,7 +81,7 @@ class SmtpRelayServerTest {
     }
 
     private static EmulatorConfig config(String user, String pass, String starttls) {
-        EmulatorConfig config = mock(EmulatorConfig.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        EmulatorConfig config = mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
         when(config.services().ses().smtpUser()).thenReturn(Optional.ofNullable(user));
         when(config.services().ses().smtpPass()).thenReturn(Optional.ofNullable(pass));
         when(config.services().ses().smtpStarttls()).thenReturn(starttls);
@@ -230,8 +233,8 @@ class SmtpRelayServerTest {
 
         private final ServerSocket serverSocket;
         private final Thread acceptThread;
-        private volatile java.util.concurrent.CountDownLatch delivered =
-                new java.util.concurrent.CountDownLatch(1);
+        private volatile CountDownLatch delivered =
+                new CountDownLatch(1);
         private volatile String mailFrom;
         private volatile String authCommand;
         private volatile String data;
@@ -253,7 +256,7 @@ class SmtpRelayServerTest {
         }
 
         void reset() {
-            delivered = new java.util.concurrent.CountDownLatch(1);
+            delivered = new CountDownLatch(1);
             mailFrom = null;
             authCommand = null;
             data = null;
@@ -261,7 +264,7 @@ class SmtpRelayServerTest {
         }
 
         boolean awaitDelivery() throws InterruptedException {
-            return delivered.await(20, java.util.concurrent.TimeUnit.SECONDS);
+            return delivered.await(20, TimeUnit.SECONDS);
         }
 
         String mailFrom() {

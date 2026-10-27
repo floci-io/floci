@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -249,14 +250,14 @@ class SesEventPublishingV2IntegrationTest {
         String raw = "From: " + SENDER + "\r\n"
                 + "To: bounce@simulator.amazonses.com\r\n"
                 + "Subject: mime-only\r\n\r\nbody";
-        String rawB64 = java.util.Base64.getEncoder().encodeToString(
-                raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String rawB64 = Base64.getEncoder().encodeToString(
+                raw.getBytes(StandardCharsets.UTF_8));
         given()
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", SES_AUTH)
                 .body("Action=SendRawEmail"
-                        + "&Source=" + java.net.URLEncoder.encode(SENDER, java.nio.charset.StandardCharsets.UTF_8)
-                        + "&RawMessage.Data=" + java.net.URLEncoder.encode(rawB64, java.nio.charset.StandardCharsets.UTF_8)
+                        + "&Source=" + URLEncoder.encode(SENDER, StandardCharsets.UTF_8)
+                        + "&RawMessage.Data=" + URLEncoder.encode(rawB64, StandardCharsets.UTF_8)
                         + "&ConfigurationSetName=" + CS
                         + "&Version=2010-12-01")
         .when()
@@ -423,10 +424,10 @@ class SesEventPublishingV2IntegrationTest {
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", SES_AUTH)
                 .body("Action=SendEmail"
-                        + "&Source=" + java.net.URLEncoder.encode(SENDER, java.nio.charset.StandardCharsets.UTF_8)
+                        + "&Source=" + URLEncoder.encode(SENDER, StandardCharsets.UTF_8)
                         + "&Destination.ToAddresses.member.1="
-                        + java.net.URLEncoder.encode("success@simulator.amazonses.com",
-                                java.nio.charset.StandardCharsets.UTF_8)
+                        + URLEncoder.encode("success@simulator.amazonses.com",
+                                StandardCharsets.UTF_8)
                         + "&Message.Subject.Data=v1tagged"
                         + "&Message.Body.Text.Data=hi"
                         + "&Tags.member.1.Name=campaign&Tags.member.1.Value=v1launch"
@@ -2041,14 +2042,14 @@ class SesEventPublishingV2IntegrationTest {
                 + "X-SES-CONFIGURATION-SET: " + CS + "\r\n"
                 + "X-SES-MESSAGE-TAGS: campaign=headercampaign, env=headerenv\r\n"
                 + "\r\nbody";
-        String rawB64 = java.util.Base64.getEncoder().encodeToString(
-                raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String rawB64 = Base64.getEncoder().encodeToString(
+                raw.getBytes(StandardCharsets.UTF_8));
         given()
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", SES_AUTH)
                 .body("Action=SendRawEmail"
-                        + "&Source=" + java.net.URLEncoder.encode(SENDER, java.nio.charset.StandardCharsets.UTF_8)
-                        + "&RawMessage.Data=" + java.net.URLEncoder.encode(rawB64, java.nio.charset.StandardCharsets.UTF_8)
+                        + "&Source=" + URLEncoder.encode(SENDER, StandardCharsets.UTF_8)
+                        + "&RawMessage.Data=" + URLEncoder.encode(rawB64, StandardCharsets.UTF_8)
                         + "&Version=2010-12-01")
         .when()
                 .post("/")
@@ -2074,14 +2075,14 @@ class SesEventPublishingV2IntegrationTest {
                 + "Subject: header-vs-request\r\n"
                 + "X-SES-MESSAGE-TAGS: campaign=fromheader, only=inheader\r\n"
                 + "\r\nbody";
-        String rawB64 = java.util.Base64.getEncoder().encodeToString(
-                raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String rawB64 = Base64.getEncoder().encodeToString(
+                raw.getBytes(StandardCharsets.UTF_8));
         given()
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", SES_AUTH)
                 .body("Action=SendRawEmail"
-                        + "&Source=" + java.net.URLEncoder.encode(SENDER, java.nio.charset.StandardCharsets.UTF_8)
-                        + "&RawMessage.Data=" + java.net.URLEncoder.encode(rawB64, java.nio.charset.StandardCharsets.UTF_8)
+                        + "&Source=" + URLEncoder.encode(SENDER, StandardCharsets.UTF_8)
+                        + "&RawMessage.Data=" + URLEncoder.encode(rawB64, StandardCharsets.UTF_8)
                         + "&Tags.member.1.Name=campaign&Tags.member.1.Value=fromrequest"
                         + "&ConfigurationSetName=" + CS
                         + "&Version=2010-12-01")

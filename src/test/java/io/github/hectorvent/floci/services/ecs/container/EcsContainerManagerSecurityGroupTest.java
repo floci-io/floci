@@ -21,6 +21,8 @@ import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
@@ -221,12 +223,12 @@ class EcsContainerManagerSecurityGroupTest {
         ContainerDefinition router = new ContainerDefinition();
         router.setName("log_router");
         router.setImage("amazon/aws-for-fluent-bit:stable");
-        router.setFirelensConfiguration(new io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration(
+        router.setFirelensConfiguration(new FirelensConfiguration(
                 "fluentbit", Map.of()));
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
         app.setImage("app:latest");
-        app.setLogConfiguration(new io.github.hectorvent.floci.services.ecs.model.LogConfiguration(
+        app.setLogConfiguration(new LogConfiguration(
                 "awsfirelens", Map.of("Name", "cloudwatch"), null));
 
         TaskDefinition taskDef = new TaskDefinition();

@@ -419,6 +419,9 @@ IAM_PASSED_NETWORK_CONNECTORS_PATHS := src/main/resources/aws/iam-passed-network
 	tools/aws/test_regen_iam_passed_network_connectors.py
 IAM_TAG_ON_CREATE_PATHS := src/main/resources/aws/iam-tag-on-create.json tools/aws/regen_iam_tag_on_create.py \
 	$(IAM_PASSED_ROLES_GENERATOR) tools/aws/test_regen_iam_tag_on_create.py
+DYNAMODB_CONDITION_KEYS_PATHS := src/main/resources/aws/dynamodb-condition-keys.json \
+	tools/aws/regen_dynamodb_condition_keys.py tools/aws/test_regen_dynamodb_condition_keys.py \
+	tools/aws/regen_partitions.py tools/aws/regen_query_services.py
 IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
 	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_request_resources.py
@@ -427,7 +430,7 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
-	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; \
+	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; \
 	covers() { \
 		[ -z "$(strip $(CHANGED))" ] && return 0; \
 		for path in $(CHANGED); do case " $$1 " in *" $$path "*) return 0;; esac; done; \
@@ -455,8 +458,11 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	if covers "$(IAM_REQUEST_RESOURCES_PATHS)" "the table of the resources requests name"; then \
 		$(MAKE) --no-print-directory iam-request-resources-verify || requested=$$?; \
 	fi; \
+	if covers "$(DYNAMODB_CONDITION_KEYS_PATHS)" "the DynamoDB condition key table"; then \
+		$(MAKE) --no-print-directory dynamodb-condition-keys-verify || dynamodb=$$?; \
+	fi; \
 	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || [ $$passed -ne 0 ] \
-			|| [ $$connectors -ne 0 ] || [ $$tagged -ne 0 ] || [ $$requested -ne 0 ]; then \
+			|| [ $$connectors -ne 0 ] || [ $$tagged -ne 0 ] || [ $$requested -ne 0 ] || [ $$dynamodb -ne 0 ]; then \
 		echo ""; \
 		echo "error: vendored IAM data does not match upstream:"; \
 		if [ $$namespaces -ne 0 ]; then \
@@ -480,6 +486,7 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 		if [ $$requested -ne 0 ]; then \
 			echo "       the table of the resources requests name, see its message above"; \
 		fi; \
+		if [ $$dynamodb -ne 0 ]; then echo "       the DynamoDB condition key table"; fi; \
 		exit 1; \
 	fi
 
@@ -649,3 +656,11 @@ cfn-property-types-verify: ## CI gate (online): the vendored CloudFormation prop
 
 cfn-property-types-test: ## Run the CloudFormation property type generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_cfn_property_types.py -q
+
+.PHONY: dynamodb-condition-keys-sync dynamodb-condition-keys-check dynamodb-condition-keys-verify
+dynamodb-condition-keys-sync: ## Regenerate DynamoDB IAM condition keys from AWS and botocore
+	$(PYTHON) tools/aws/regen_dynamodb_condition_keys.py
+dynamodb-condition-keys-check: ## Check DynamoDB condition request members against pinned botocore
+	$(PYTHON) tools/aws/regen_dynamodb_condition_keys.py --check
+dynamodb-condition-keys-verify: ## Check DynamoDB condition action keys against AWS
+	$(PYTHON) tools/aws/regen_dynamodb_condition_keys.py --verify

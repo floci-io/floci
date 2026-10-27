@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -98,7 +99,7 @@ class S3EventBridgeNotificationValidationIntegrationTest {
         return bucket;
     }
 
-    private static io.restassured.response.ValidatableResponse putNotification(String bucket, String body) {
+    private static ValidatableResponse putNotification(String bucket, String body) {
         return given()
                 .contentType("application/xml")
                 .body(body)
@@ -107,7 +108,7 @@ class S3EventBridgeNotificationValidationIntegrationTest {
                 .then();
     }
 
-    private static io.restassured.response.ValidatableResponse getNotification(String bucket) {
+    private static ValidatableResponse getNotification(String bucket) {
         return given()
                 .when()
                 .get("/" + bucket + "?notification")

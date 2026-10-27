@@ -926,16 +926,65 @@ Within `NetworkInterfaces`, `ConnectionTrackingSpecification` is stored and read
 three of its timeout members.
 
 At launch, `RunInstances` and `CreateFleet` apply the template's `BlockDeviceMappings` under the
-request's, field by field: a request entry for a `DeviceName` the template maps changes only the
-members it sets, and the rest keep the template's values; devices only one side maps apply as
-given. An Auto Scaling group launching from a template gets the template's mappings the same
-way. The root volume's type comes from the mapping for the AMI's root device, else from the
-AMI's own root mapping, else `gp3`, and `CreateImage` records that type on the new AMI's root
-mapping. A mapping with `NoDevice` set removes its device whatever else it names, so it sets no
-type and its `VolumeType` is not checked. A mapping naming a `VolumeType` outside the service model's enum fails with
-`InvalidParameterValue`, as `ModifyVolume` does. Template versions are not checked when they are
-stored, so a template naming an unknown `VolumeType` is accepted by `CreateLaunchTemplate` and
-fails at launch.
+request's, field by field: a request entry for a `DeviceName` the template maps, spelled `xvdf` or
+`/dev/xvdf`, changes only the members it sets, and the rest keep the template's values; devices
+only one side maps apply as given. A request entry that makes the device something else, an EBS
+volume (`Ebs`), an instance store volume (`VirtualName`) or nothing (`NoDevice`), replaces the
+template's choice for it, an `Ebs` block still merging member by member into the template's. An
+Auto Scaling group launching from a template gets its mappings the same way; one launching from a
+launch configuration does not pass the configuration's mappings yet. CloudFormation does not pass
+them yet: an `AWS::EC2::Instance` launches without the `BlockDeviceMappings` it or its launch
+template declares, and an `AWS::EC2::LaunchTemplate` or
+`AWS::AutoScaling::LaunchConfiguration` stores none, so instances launched from what a stack
+creates get the AMI's devices alone. A mapping naming a `VolumeType` outside the service model's
+enum fails with `InvalidParameterValue`, as `ModifyVolume` does; one with `NoDevice` set creates no
+device, so its `VolumeType` is not checked. Template versions are not checked when they are stored,
+so a template naming an unknown `VolumeType` is accepted by `CreateLaunchTemplate` and fails at
+launch.
+
+The launch's mappings then apply over the AMI's own block device mapping the same way, and the
+launch creates one EBS volume for each device left, attached at that device:
+
+- The instance's root device is the AMI's `RootDeviceName`, which the AMI's entry for it may spell
+  `xvda` or `/dev/xvda`. An AMI that maps no root device gets an 8 GiB root volume. A launch entry
+  for a device the AMI maps applies to it whether it is spelled `xvdf` or `/dev/xvdf`. `NoDevice`
+  keeps any other device the AMI maps from being created, and an entry naming a `VirtualName`, an
+  instance store volume, takes the device over, so neither leaves an EBS volume there. The root
+  is always created: an entry setting either on it leaves the AMI's root as the AMI maps it. An
+  AMI entry with no `Ebs` member, such as an instance store volume, creates nothing.
+- The catalog's images are rooted at `/dev/xvda`, including some AWS publishes with a
+  `/dev/sda1` root, such as Ubuntu and Windows, so on them an entry for `/dev/sda1` adds a data
+  volume rather than resizing the root.
+- A volume from a snapshot takes the snapshot's size unless its entry names a larger one. A smaller
+  size fails with `InvalidBlockDeviceMapping` ("Volume of size 8GB is smaller than snapshot
+  'snap-...', expect size>= 16GB"), and a snapshot that does not exist fails with
+  `InvalidSnapshot.NotFound`. An entry naming neither a size nor a snapshot gets 8 GiB. Snapshots
+  hold no data in Floci, so a volume made from one starts empty.
+- The root takes the AMI root's `VolumeType`, else `gp3`; other devices default to `gp2`, as
+  `CreateVolume` does. `Iops` applies only to `gp3`, `io1` and `io2` volumes and `Throughput` only
+  to `gp3`, so a request entry that changes a template device's type does not carry the old type's
+  settings over. A volume is encrypted when its entry or its snapshot says so, or when encryption
+  by default is on.
+- `DeleteOnTermination` defaults to `true` for every device a launch creates. When the instance
+  terminates, the volumes whose
+  attachment says `true` are deleted, the root included, unless another instance still has them
+  attached; the rest are detached. That holds as well for an instance that ends `terminated`
+  because its container never started: its volumes are settled the next time an EBS volume call
+  reads them, `DescribeVolumes` or a call naming one of them. A root kept this way holds no data
+  when the instance had a container, whose own file system was the root.
+- An entry without a `DeviceName` fails with `InvalidBlockDeviceMapping` ("Missing device name"),
+  as do a device name `AttachVolume` would refuse ("Invalid device name ...") and a device the
+  request or the template names twice ("/dev/sdh is being assigned to multiple times."), whether or
+  not a launch template is used. `CreateFleet` checks the device names before answering `DryRun`.
+- Nothing of a refused launch is kept: no instance, volume or network interface. A launch undone
+  after its instances exist, an instant `CreateFleet` whose later launch fails or a `RunInstances`
+  whose capacity reservation another launch took in the meantime, deletes every volume it created,
+  those with `DeleteOnTermination` false included. Auto Scaling and CloudFormation undo instances
+  they launched by terminating them, so there the volumes termination keeps stay.
+
+`DescribeInstances` lists every EBS volume attached to the instance in `BlockDeviceMappings`, root
+device first: those its launch created and any attached since, each with its own
+`DeleteOnTermination`; a terminated instance lists none.
 
 Both blocks are validated by `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` before
 anything is stored. An `InstanceRequirements` block must carry `VCpuCount` and `MemoryMiB`, each

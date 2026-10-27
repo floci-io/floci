@@ -3761,19 +3761,69 @@ public class S3Service implements Resettable, ResourceProvider {
     // --- Bucket Tagging ---
 
     public void putBucketTagging(String bucketName, Map<String, String> tags) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
-        bucket.setTags(tags != null ? tags : new java.util.HashMap<>());
-        bucketStore.put(bucketName, bucket);
-        LOG.debugv("Put tags on bucket: {0}", bucketName);
+        putBucketTaggingForAccount(null, bucketName, tags);
     }
 
     public Map<String, String> getBucketTagging(String bucketName) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+        return getBucketTaggingForAccount(null, bucketName);
+    }
+
+    /**
+     * The tags of the bucket a control-plane tagging ARN names: the bucket of that name in
+     * {@code accountId}'s partition, the calling account's when the ARN carries none, as the
+     * global form does not. A bucket another account owns is read exactly where it lives and
+     * never fallen back to the caller's same-named one: the ARN names another account's bucket
+     * or no bucket at all, and either way the answer is {@code NoSuchBucket}.
+     */
+    public Map<String, String> getBucketTaggingForAccount(String accountId, String bucketName) {
+        Bucket bucket = bucketForAccount(accountId, bucketName);
         return bucket.getTags() != null ? bucket.getTags() : Map.of();
+    }
+
+    /** Replaces the tags of the bucket a control-plane tagging ARN names, in the partition it names. */
+    public void putBucketTaggingForAccount(String accountId, String bucketName, Map<String, String> tags) {
+        Bucket bucket = bucketForAccount(accountId, bucketName);
+        bucket.setTags(tags != null ? tags : new HashMap<>());
+        writeBucketForAccount(namedAccount(accountId), bucketName, bucket);
+        LOG.debugv("Put tags on bucket {0} of account {1}", bucketName, namedAccount(accountId));
+    }
+
+    /**
+     * The bucket of that name in the account a tagging ARN names, resolved the same way for the
+     * tag read, the tag write and the policy lookup. The calling account's own partition is read
+     * through {@link StorageBackend#get}, which also migrates pre-multi-account data; another
+     * account's is read exactly, and a store with no partitions at all has the one bucket the
+     * name can mean.
+     */
+    private Bucket bucketForAccount(String accountId, String bucketName) {
+        String account = namedAccount(accountId);
+        AccountAwareStorageBackend<Bucket> aware = accountAwareBucketStore();
+        Optional<Bucket> bucket = account.equals(ownerId()) || aware == null
+                ? bucketStore.get(bucketName)
+                : aware.getForAccount(account, bucketName);
+        return bucket.orElseThrow(() -> new AwsException("NoSuchBucket",
+                "The specified bucket does not exist.", 404));
+    }
+
+    /** Writes a bucket back to the partition {@link #bucketForAccount} read it from. */
+    private void writeBucketForAccount(String account, String bucketName, Bucket bucket) {
+        AccountAwareStorageBackend<Bucket> aware = accountAwareBucketStore();
+        if (!account.equals(ownerId()) && aware != null) {
+            aware.putForAccount(account, bucketName, bucket);
+        } else {
+            bucketStore.put(bucketName, bucket);
+        }
+    }
+
+    /** The account an ARN names: its own account field, the calling account's when it carries none. */
+    private String namedAccount(String accountId) {
+        return accountId != null && !accountId.isBlank() ? accountId : ownerId();
+    }
+
+    @SuppressWarnings("unchecked")
+    private AccountAwareStorageBackend<Bucket> accountAwareBucketStore() {
+        return bucketStore instanceof AccountAwareStorageBackend<?> aware
+                ? (AccountAwareStorageBackend<Bucket>) aware : null;
     }
 
     public void putBucketWebsite(String bucketName, WebsiteConfiguration config) {
@@ -5435,6 +5485,23 @@ public class S3Service implements Resettable, ResourceProvider {
     public Optional<BucketPolicyInfo> findBucketPolicyInfo(String bucketName) {
         return resolveBucketEntry(bucketName)
                 .map(entry -> new BucketPolicyInfo(entry.value().getPolicy(), entry.account()));
+    }
+
+    /**
+     * The policy of the bucket a control-plane tagging ARN names, in the account the ARN names:
+     * the same bucket {@link #getBucketTaggingForAccount} reads the tags of, so a bucket policy
+     * denying the control actions reaches the bucket the handler acts on. The calling account
+     * keeps {@link #findBucketPolicyInfo}'s resolution, which spans partitions under the global
+     * bucket namespace.
+     */
+    public Optional<BucketPolicyInfo> findBucketPolicyInfoForAccount(String accountId, String bucketName) {
+        String account = namedAccount(accountId);
+        AccountAwareStorageBackend<Bucket> aware = accountAwareBucketStore();
+        if (account.equals(ownerId()) || aware == null) {
+            return findBucketPolicyInfo(bucketName);
+        }
+        return aware.getForAccount(account, bucketName)
+                .map(bucket -> new BucketPolicyInfo(bucket.getPolicy(), account));
     }
 
     public Optional<String> findBucketPolicy(String bucketName) {

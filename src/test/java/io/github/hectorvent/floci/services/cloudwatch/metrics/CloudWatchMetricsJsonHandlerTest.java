@@ -41,10 +41,11 @@ class CloudWatchMetricsJsonHandlerTest {
     private static final Instant EPOCH_OLD = EPOCH_NOW.minusSeconds(86400);
 
     private CloudWatchMetricsJsonHandler handler;
+    private CloudWatchMetricsService service;
 
     @BeforeEach
     void setUp() {
-        CloudWatchMetricsService service = new CloudWatchMetricsService(
+        service = new CloudWatchMetricsService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver(REGION, "000000000000")
@@ -345,6 +346,33 @@ class CloudWatchMetricsJsonHandlerTest {
         assertEquals(2, alarm.get("DatapointsToAlarm").asInt());
         assertEquals("breaching", alarm.get("TreatMissingData").asText());
         assertEquals("Count", alarm.get("Unit").asText());
+    }
+
+    @Test
+    void describeAlarms_reportsStateTransitionedTimestampForBothAlarmKinds() {
+        handler.handle("PutMetricAlarm", alarmRequest("TransitionedMetric"), REGION);
+        ObjectNode composite = MAPPER.createObjectNode();
+        composite.put("AlarmName", "TransitionedComposite");
+        composite.put("AlarmRule", "ALARM(TransitionedMetric)");
+        handler.handle("PutCompositeAlarm", composite, REGION);
+        ObjectNode describe = MAPPER.createObjectNode();
+        describe.putArray("AlarmTypes").add("MetricAlarm").add("CompositeAlarm");
+
+        ObjectNode response = (ObjectNode) handler.handle("DescribeAlarms", describe, REGION).getEntity();
+
+        for (String kind : List.of("MetricAlarms", "CompositeAlarms")) {
+            JsonNode alarm = response.get(kind).get(0);
+            assertTrue(alarm.has("StateTransitionedTimestamp"), kind + ": " + alarm);
+            assertEquals(alarm.get("StateUpdatedTimestamp").asLong(), alarm.get("StateTransitionedTimestamp").asLong());
+        }
+
+        service.describeAlarms(List.of("TransitionedMetric"), null, REGION).getFirst().setStateTransitionedTimestamp(100);
+        service.describeCompositeAlarms(List.of("TransitionedComposite"), null, REGION).getFirst()
+                .setStateTransitionedTimestamp(100);
+        response = (ObjectNode) handler.handle("DescribeAlarms", describe, REGION).getEntity();
+        for (String kind : List.of("MetricAlarms", "CompositeAlarms")) {
+            assertEquals(100, response.get(kind).get(0).get("StateTransitionedTimestamp").asLong(), kind);
+        }
     }
 
     // AWS sends every alarm collection even when it is empty. The CLI's text output writes a

@@ -238,7 +238,7 @@ public class SesSendController {
             validateTrackingOverrides(request);
             JsonNode bulkEntries = request.path("BulkEmailEntries");
             if (bulkEntries.isMissingNode() || bulkEntries.isNull()) {
-                throw constraintViolation(null, "bulkEmailEntries", "Member must not be null");
+                throw SmithyValidationErrors.badRequest(SmithyValidationErrors.notNullWithoutValue("bulkEmailEntries"));
             }
             String fromEmailAddress = request.path("FromEmailAddress").asText(null);
             if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
@@ -494,11 +494,13 @@ public class SesSendController {
             String memberPrefix = location + "." + index + ".member.";
             String fileName = attachmentString(node, "FileName", memberPrefix + "fileName", 0, 255);
             if (fileName == null) {
-                throw constraintViolation(null, memberPrefix + "fileName", "Member must not be null");
+                throw SmithyValidationErrors.badRequest(
+                        SmithyValidationErrors.notNullWithoutValue(memberPrefix + "fileName"));
             }
             JsonNode rawNode = node.get("RawContent");
             if (rawNode == null || rawNode.isNull()) {
-                throw constraintViolation(null, memberPrefix + "rawContent", "Member must not be null");
+                throw SmithyValidationErrors.badRequest(
+                        SmithyValidationErrors.notNullWithoutValue(memberPrefix + "rawContent"));
             }
             byte[] rawContent;
             try {
@@ -568,13 +570,13 @@ public class SesSendController {
     }
 
     private static AwsException constraintViolation(String value, String path, String constraint) {
-        String subject = value == null ? "Value" : "Value '" + value + "'";
         return SmithyValidationErrors.badRequest(
-                subject + " at '" + path + "' failed to satisfy constraint: " + constraint);
+                "Value '" + value + "' at '" + path + "' failed to satisfy constraint: " + constraint);
     }
 
     private static AwsException missingHeaderMember(String location, int index, String member) {
-        return constraintViolation(null, location + "." + index + ".member." + member, "Member must not be null");
+        return SmithyValidationErrors.badRequest(
+                SmithyValidationErrors.notNullWithoutValue(location + "." + index + ".member." + member));
     }
 
     /**

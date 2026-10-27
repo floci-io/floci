@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -119,7 +120,7 @@ class TlsConfigSourceCertificatePathTest {
 
         assertNotNull(certPath);
         assertTrue(Path.of(certPath).isAbsolute(), "the emitted path must be absolute: " + certPath);
-        assertTrue(java.nio.file.Files.exists(Path.of(certPath)),
+        assertTrue(Files.exists(Path.of(certPath)),
                 "the emitted path must resolve to the generated certificate: " + certPath);
     }
 }

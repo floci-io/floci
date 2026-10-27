@@ -6,6 +6,7 @@ import com.github.dockerjava.api.command.PullImageCmd;
 import com.github.dockerjava.api.command.PullImageResultCallback;
 import com.github.dockerjava.api.exception.DockerClientException;
 import com.github.dockerjava.api.exception.InternalServerErrorException;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.AuthConfig;
 import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.PullResponseItem;
@@ -314,7 +315,7 @@ public class ImageCacheService {
     private InspectImageResponse inspectLocalImage(String imageUri) {
         try {
             return dockerClient.inspectImageCmd(imageUri).exec();
-        } catch (com.github.dockerjava.api.exception.NotFoundException e) {
+        } catch (NotFoundException e) {
             return null;
         }
     }

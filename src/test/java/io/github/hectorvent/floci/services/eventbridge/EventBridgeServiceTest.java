@@ -32,6 +32,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -1340,7 +1341,7 @@ class EventBridgeServiceTest {
         target.setArn("arn:aws:sqs:us-west-2:000000000000:replay-queue");
         service.putTargets("my-rule", null, List.of(target), "us-west-2");
 
-        java.util.Map<String, Object> entry = new java.util.HashMap<>();
+        Map<String, Object> entry = new HashMap<>();
         entry.put("Source", "my.app");
         entry.put("DetailType", "Test");
         entry.put("Detail", "{}");

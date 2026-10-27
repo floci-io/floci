@@ -30,6 +30,7 @@ public abstract class Alarm {
     private String stateReason = "Unchecked";
     private String stateReasonData;
     private long stateUpdatedTimestamp;
+    private long stateTransitionedTimestamp;
     private Map<String, String> tags = new HashMap<>();
     private String region;
 
@@ -77,6 +78,15 @@ public abstract class Alarm {
 
     public long getStateUpdatedTimestamp() { return stateUpdatedTimestamp; }
     public void setStateUpdatedTimestamp(long stateUpdatedTimestamp) { this.stateUpdatedTimestamp = stateUpdatedTimestamp; }
+
+    /** When StateValue last changed; 0 for an alarm stored before this was recorded. */
+    public long getStateTransitionedTimestamp() { return stateTransitionedTimestamp; }
+    public void setStateTransitionedTimestamp(long timestamp) { this.stateTransitionedTimestamp = timestamp; }
+
+    /** The StateTransitionedTimestamp to report: an alarm stored without one reports its last state update. */
+    public long lastTransitionTimestamp() {
+        return stateTransitionedTimestamp > 0 ? stateTransitionedTimestamp : stateUpdatedTimestamp;
+    }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

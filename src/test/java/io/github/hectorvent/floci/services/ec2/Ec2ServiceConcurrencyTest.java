@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -25,6 +26,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntConsumer;
+import java.util.function.IntFunction;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -257,10 +260,10 @@ class Ec2ServiceConcurrencyTest {
     }
 
     /** Runs N concurrent invocations of the same op; the op absorbs its own expected failures. */
-    private static void runRaceAllowing(java.util.function.IntConsumer op) throws Exception {
+    private static void runRaceAllowing(IntConsumer op) throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(THREADS);
         CountDownLatch start = new CountDownLatch(1);
-        List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+        List<Future<?>> futures = new ArrayList<>();
         for (int i = 0; i < N; i++) {
             int idx = i;
             futures.add(pool.submit(() -> {
@@ -278,10 +281,10 @@ class Ec2ServiceConcurrencyTest {
     }
 
     /** Runs N indexed mutations across THREADS with a common start gate; returns their results. */
-    private static Set<String> runRace(java.util.function.IntFunction<String> op) throws Exception {
+    private static Set<String> runRace(IntFunction<String> op) throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(THREADS);
         CountDownLatch start = new CountDownLatch(1);
-        List<java.util.concurrent.Future<String>> futures = new java.util.ArrayList<>();
+        List<Future<String>> futures = new ArrayList<>();
         for (int i = 0; i < N; i++) {
             int idx = i;
             futures.add(pool.submit(() -> {
@@ -290,7 +293,7 @@ class Ec2ServiceConcurrencyTest {
             }));
         }
         start.countDown();
-        Set<String> results = new java.util.HashSet<>();
+        Set<String> results = new HashSet<>();
         for (Future<String> f : futures) {
             results.add(f.get(30, TimeUnit.SECONDS));
         }

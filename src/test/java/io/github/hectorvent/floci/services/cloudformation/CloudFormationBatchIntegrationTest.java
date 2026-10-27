@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -402,7 +403,7 @@ class CloudFormationBatchIntegrationTest {
             .body(containsString("<StackStatus>" + status + "</StackStatus>"));
     }
 
-    private static io.restassured.specification.RequestSpecification givenBatchJson(String body) {
+    private static RequestSpecification givenBatchJson(String body) {
         return given()
                 .header("Authorization", BATCH_AUTH)
                 .contentType("application/json")

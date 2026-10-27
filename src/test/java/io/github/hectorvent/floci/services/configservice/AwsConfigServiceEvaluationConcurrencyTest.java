@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRuleSource;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -39,7 +40,7 @@ class AwsConfigServiceEvaluationConcurrencyTest {
             String resourceId = "bucket-" + attempt;
             CountDownLatch start = new CountDownLatch(1);
             AtomicReference<Throwable> unexpected = new AtomicReference<>();
-            List<Thread> writers = new java.util.ArrayList<>();
+            List<Thread> writers = new ArrayList<>();
 
             // Every writer races on the SAME resource key; only the last one in should win, and
             // by OrderingTimestamp rather than by write order. Half submit an older evaluation,

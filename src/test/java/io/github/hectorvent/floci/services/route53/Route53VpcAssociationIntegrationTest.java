@@ -4,8 +4,15 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
+import io.restassured.response.Response;
 import jakarta.inject.Inject;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -348,20 +355,20 @@ class Route53VpcAssociationIntegrationTest {
         // ID-based continuation point. Tie-breaking by ID as well makes the total order fixed
         // regardless of iteration order, so this asserts the walk is a stable ID-ascending walk.
         String shared = "vpc-tiebreak-shared";
-        java.util.List<String> zoneIds = new java.util.ArrayList<>();
+        List<String> zoneIds = new ArrayList<>();
         for (int i = 0; i < 4; i++) {
             zoneIds.add(createPrivateZone("tiebreak.internal.", "vpc-tiebreak-" + i, shared));
         }
-        java.util.List<String> expectedOrder = new java.util.ArrayList<>(zoneIds);
-        java.util.Collections.sort(expectedOrder);
+        List<String> expectedOrder = new ArrayList<>(zoneIds);
+        Collections.sort(expectedOrder);
 
-        java.util.List<String> walked = new java.util.ArrayList<>();
+        List<String> walked = new ArrayList<>();
         String token = null;
         for (int page = 0; page < zoneIds.size(); page++) {
             String url = "/2013-04-01/hostedzonesbyvpc?vpcid=" + shared + "&vpcregion=us-east-1&maxitems=1"
                     + (token != null ? "&nexttoken=" + token : "");
-            io.restassured.response.Response resp = given().get(url).then().statusCode(200).extract().response();
-            io.restassured.path.xml.XmlPath xml = resp.xmlPath();
+            Response resp = given().get(url).then().statusCode(200).extract().response();
+            XmlPath xml = resp.xmlPath();
             walked.add(xml.getString("ListHostedZonesByVPCResponse.HostedZoneSummaries.HostedZoneSummary.HostedZoneId"));
             String next = xml.getString("ListHostedZonesByVPCResponse.NextToken");
             token = (next == null || next.isEmpty()) ? null : next;
@@ -455,7 +462,7 @@ class Route53VpcAssociationIntegrationTest {
                 .body(vpcRequest("DeleteVPCAssociationAuthorizationRequest", spokeVpc, ""))
                 .post("/2013-04-01/hostedzone/" + zoneId + "/deauthorizevpcassociation")
                 .then().statusCode(200)
-                .body(org.hamcrest.Matchers.emptyOrNullString());
+                .body(Matchers.emptyOrNullString());
 
         given().header("Authorization", route53Auth(VPC_ACCOUNT))
                 .get("/2013-04-01/hostedzonesbyvpc?vpcid=" + spokeVpc + "&vpcregion=us-east-1")

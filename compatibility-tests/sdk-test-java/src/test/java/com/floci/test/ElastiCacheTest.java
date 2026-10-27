@@ -11,6 +11,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.AuthenticationMode;
 import software.amazon.awssdk.services.elasticache.model.CreateReplicationGroupRequest;
+import software.amazon.awssdk.services.elasticache.model.CreateReplicationGroupResponse;
 import software.amazon.awssdk.services.elasticache.model.CreateUserGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.CreateUserGroupResponse;
 import software.amazon.awssdk.services.elasticache.model.CreateUserRequest;
@@ -18,6 +19,7 @@ import software.amazon.awssdk.services.elasticache.model.CreateUserResponse;
 import software.amazon.awssdk.services.elasticache.model.DeleteReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteUserGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DeleteUserRequest;
+import software.amazon.awssdk.services.elasticache.model.DeleteUserResponse;
 import software.amazon.awssdk.services.elasticache.model.DescribeCacheClustersRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeCacheClustersResponse;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsRequest;
@@ -25,6 +27,7 @@ import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGrou
 import software.amazon.awssdk.services.elasticache.model.DescribeUserGroupsRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeUserGroupsResponse;
 import software.amazon.awssdk.services.elasticache.model.DescribeUsersRequest;
+import software.amazon.awssdk.services.elasticache.model.DescribeUsersResponse;
 import software.amazon.awssdk.services.elasticache.model.ElastiCacheException;
 import software.amazon.awssdk.services.elasticache.model.Endpoint;
 import software.amazon.awssdk.services.elasticache.model.InputAuthenticationType;
@@ -98,7 +101,7 @@ class ElastiCacheTest {
     @Test
     @Order(1)
     void createReplicationGroup() {
-        var response = elasticache.createReplicationGroup(CreateReplicationGroupRequest.builder()
+        CreateReplicationGroupResponse response = elasticache.createReplicationGroup(CreateReplicationGroupRequest.builder()
                 .replicationGroupId(groupId)
                 .replicationGroupDescription("compat test group")
                 .engine("redis")
@@ -122,7 +125,7 @@ class ElastiCacheTest {
     void describeReplicationGroup() {
         requireGroup();
 
-        var response = elasticache.describeReplicationGroups(DescribeReplicationGroupsRequest.builder()
+        DescribeReplicationGroupsResponse response = elasticache.describeReplicationGroups(DescribeReplicationGroupsRequest.builder()
                 .replicationGroupId(groupId)
                 .build());
 
@@ -165,7 +168,7 @@ class ElastiCacheTest {
     @Test
     @Order(5)
     void createUser() {
-        var response = elasticache.createUser(CreateUserRequest.builder()
+        CreateUserResponse response = elasticache.createUser(CreateUserRequest.builder()
                 .userId(userId)
                 .userName(userName)
                 .engine("redis")
@@ -189,7 +192,7 @@ class ElastiCacheTest {
     void describeUsersContainsCreatedUser() {
         requireUser();
 
-        var response = elasticache.describeUsers(DescribeUsersRequest.builder().build());
+        DescribeUsersResponse response = elasticache.describeUsers(DescribeUsersRequest.builder().build());
 
         assertThat(response.users())
                 .anyMatch(user -> user.userId().equals(userId) && user.userName().equals(userName)
@@ -229,7 +232,7 @@ class ElastiCacheTest {
         // Known deviation: an id that names no user group but names a user associates that
         // user directly, which Floci accepted before it modelled user groups. Real AWS only
         // accepts user group ids here; userGroupMembersAuthenticateThroughTheProxy covers that.
-        var response = elasticache.modifyReplicationGroup(ModifyReplicationGroupRequest.builder()
+        ModifyReplicationGroupResponse response = elasticache.modifyReplicationGroup(ModifyReplicationGroupRequest.builder()
                 .replicationGroupId(groupId)
                 .userGroupIdsToAdd(userId)
                 .build());
@@ -251,7 +254,7 @@ class ElastiCacheTest {
     void modifyUserRotatesPassword() throws Exception {
         requireUser();
 
-        var response = elasticache.modifyUser(ModifyUserRequest.builder()
+        ModifyUserResponse response = elasticache.modifyUser(ModifyUserRequest.builder()
                 .userId(userId)
                 .engine("redis")
                 .authenticationMode(AuthenticationMode.builder()
@@ -294,7 +297,7 @@ class ElastiCacheTest {
     @Order(11)
     void valkeyUserRoundTripEchoesEngine() {
         String valkeyUserId = TestFixtures.uniqueName("ec-valkey-user");
-        var created = elasticache.createUser(CreateUserRequest.builder()
+        CreateUserResponse created = elasticache.createUser(CreateUserRequest.builder()
                 .userId(valkeyUserId)
                 .userName(TestFixtures.uniqueName("ec-valkey-name"))
                 .engine("valkey")
@@ -305,7 +308,7 @@ class ElastiCacheTest {
                 .build());
         assertThat(created.engine()).isEqualTo("valkey");
 
-        var deleted = elasticache.deleteUser(DeleteUserRequest.builder()
+        DeleteUserResponse deleted = elasticache.deleteUser(DeleteUserRequest.builder()
                 .userId(valkeyUserId)
                 .build());
         assertThat(deleted.engine()).isEqualTo("valkey");
@@ -454,7 +457,7 @@ class ElastiCacheTest {
                 .isInstanceOf(ElastiCacheException.class)
                 .hasMessageContaining("not found");
 
-        var response = elasticache.createReplicationGroup(CreateReplicationGroupRequest.builder()
+        CreateReplicationGroupResponse response = elasticache.createReplicationGroup(CreateReplicationGroupRequest.builder()
                 .replicationGroupId(reusedGroupId)
                 .replicationGroupDescription("compat test group reuse")
                 .engine("redis")

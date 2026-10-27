@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.servicecatalog;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -77,7 +78,7 @@ class ServiceCatalogConstraintConsumerTest {
             .body("ConstraintDetail.Type", equalTo("LAUNCH"))
             .body("ConstraintDetail.PortfolioId", equalTo(portfolioId))
             .body("ConstraintDetail.ProductId", equalTo(productId))
-            .body("ConstraintDetail.ConstraintId", org.hamcrest.Matchers.notNullValue());
+            .body("ConstraintDetail.ConstraintId", Matchers.notNullValue());
     }
 
     // ---------- DescribeConstraint ----------

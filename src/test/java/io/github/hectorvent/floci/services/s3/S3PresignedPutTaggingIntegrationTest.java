@@ -45,7 +45,7 @@ class S3PresignedPutTaggingIntegrationTest {
         .then()
             .statusCode(200);
 
-        int port = io.restassured.RestAssured.port;
+        int port = RestAssured.port;
         String fullBaseUrl = "http://localhost:" + port;
         String presignedUrl = presignGenerator.generatePresignedUrl(
                 fullBaseUrl, BUCKET, "tagged-via-presign.txt", "PUT", 3600);

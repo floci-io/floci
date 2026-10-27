@@ -863,8 +863,13 @@ public class Ec2QueryHandler {
             if (marketType == null && launchTemplateData.getInstanceMarketOptions() != null) {
                 marketType = launchTemplateData.getInstanceMarketOptions().getMarketType();
             }
+            // Checked on each side before the merge, which would fold a device named twice into one;
+            // a request entry spelling a template device differently ("xvdf") then merges into it.
+            Ec2Service.requireValidLaunchDevices(launchTemplateData.getBlockDeviceMappings());
+            Ec2Service.requireValidLaunchDevices(blockDeviceMappings);
             blockDeviceMappings = LaunchTemplateData.BlockDeviceMapping.merge(
-                    launchTemplateData.getBlockDeviceMappings(), blockDeviceMappings);
+                    launchTemplateData.getBlockDeviceMappings(),
+                    Ec2Service.spelledAs(launchTemplateData.getBlockDeviceMappings(), blockDeviceMappings));
             if (!suppliedInterfaces) {
                 // With neither request interfaces nor, after the checks above, a request SubnetId
                 // or PrivateIpAddress, the template's primary interface places the launch.
@@ -953,8 +958,9 @@ public class Ec2QueryHandler {
                 .start("groupSet").end("groupSet")
                 .start("instancesSet");
         Map<String, String> capacityAssociations = service.capacityReservationAssociations(region);
+        Map<String, List<VolumeAttachment>> volumeAttachments = service.instanceVolumeAttachments(res.getInstances());
         for (Instance inst : res.getInstances()) {
-            xml.start("item").raw(instanceXml(inst, capacityAssociations)).end("item");
+            xml.start("item").raw(instanceXml(inst, capacityAssociations, volumeAttachments)).end("item");
         }
         xml.end("instancesSet")
                 .end("RunInstancesResponse");
@@ -1053,11 +1059,12 @@ public class Ec2QueryHandler {
             }
             // The template stored them unchecked; the launch would refuse them, so the dry run does.
             Ec2Service.validateMetadataOptions(launch.metadataOptions());
+            Ec2Service.requireValidLaunchDevices(launch.blockDeviceMappings());
         }
         checkDryRun(p);
 
         List<FleetLaunchResult> results = new ArrayList<>(targetCapacity);
-        List<String> launchedInstanceIds = new ArrayList<>(targetCapacity);
+        List<Reservation> launched = new ArrayList<>(targetCapacity);
         try {
             for (int i = 0; i < targetCapacity; i++) {
                 FleetLaunch launch = launches.get(i % launches.size());
@@ -1081,18 +1088,19 @@ public class Ec2QueryHandler {
                         null, null, launch.blockDeviceMappings(), "spot".equals(capacityType), null,
                         launch.capacityReservationSpecification());
                 Instance instance = reservation.getInstances().get(0);
-                launchedInstanceIds.add(instance.getInstanceId());
+                launched.add(reservation);
                 results.add(new FleetLaunchResult(instance, launch));
             }
         } catch (RuntimeException e) {
-            if (!launchedInstanceIds.isEmpty()) {
+            if (!launched.isEmpty()) {
                 LOG.warnv("CreateFleet failed after launching instances {0}; rolling them back: {1}",
-                        launchedInstanceIds, e.getMessage());
+                        launched.stream().map(r -> r.getInstances().get(0).getInstanceId()).toList(), e.getMessage());
                 List<String> rollbackFailureInstanceIds = new ArrayList<>();
                 List<RuntimeException> rollbackFailures = new ArrayList<>();
-                for (String instanceId : launchedInstanceIds) {
+                for (Reservation reservation : launched) {
+                    String instanceId = reservation.getInstances().get(0).getInstanceId();
                     try {
-                        service.terminateInstances(region, List.of(instanceId));
+                        service.rollBackLaunch(region, reservation);
                     } catch (RuntimeException cleanupFailure) {
                         rollbackFailureInstanceIds.add(instanceId);
                         rollbackFailures.add(cleanupFailure);
@@ -1415,6 +1423,8 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("reservationSet");
         Map<String, String> capacityAssociations = service.capacityReservationAssociations(region);
+        Map<String, List<VolumeAttachment>> volumeAttachments = service.instanceVolumeAttachments(
+                reservations.stream().flatMap(res -> res.getInstances().stream()).toList());
         for (Reservation res : reservations) {
             xml.start("item")
                     .elem("reservationId", res.getReservationId())
@@ -1422,7 +1432,7 @@ public class Ec2QueryHandler {
                     .start("groupSet").end("groupSet")
                     .start("instancesSet");
             for (Instance inst : res.getInstances()) {
-                xml.start("item").raw(instanceXml(inst, capacityAssociations)).end("item");
+                xml.start("item").raw(instanceXml(inst, capacityAssociations, volumeAttachments)).end("item");
             }
             xml.end("instancesSet").end("item");
         }
@@ -5134,7 +5144,8 @@ public class Ec2QueryHandler {
 
     // ─── XML fragment builders ────────────────────────────────────────────────
 
-    private String instanceXml(Instance inst, Map<String, String> capacityAssociations) {
+    private String instanceXml(Instance inst, Map<String, String> capacityAssociations,
+                               Map<String, List<VolumeAttachment>> volumeAttachments) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("instanceId", inst.getInstanceId())
                 .elem("imageId", inst.getImageId())
@@ -5264,19 +5275,7 @@ public class Ec2QueryHandler {
         if (capacityReservationId != null) {
             xml.elem("capacityReservationId", capacityReservationId);
         }
-        if (inst.getRootVolumeId() != null) {
-            xml.start("blockDeviceMapping")
-                    .start("item")
-                    .elem("deviceName", inst.getRootDeviceName())
-                    .start("ebs")
-                    .elem("volumeId", inst.getRootVolumeId())
-                    .elem("status", "attached")
-                    .elem("deleteOnTermination", "true")
-                    .elem("attachTime", inst.getLaunchTime() != null ? ISO_FMT.format(inst.getLaunchTime()) : "")
-                    .end("ebs")
-                    .end("item")
-                    .end("blockDeviceMapping");
-        }
+        instanceBlockDeviceMappingXml(xml, volumeAttachments.getOrDefault(inst.getInstanceId(), List.of()));
         if (inst.getIamInstanceProfileArn() != null) {
             xml.start("iamInstanceProfile")
                     .elem("arn", inst.getIamInstanceProfileArn())
@@ -5285,6 +5284,24 @@ public class Ec2QueryHandler {
         }
         xml.raw(tagSetXml(inst.getTags()));
         return xml.build();
+    }
+
+    /** An instance's {@code blockDeviceMapping}: the EBS volumes attached to it, root device first. */
+    private void instanceBlockDeviceMappingXml(XmlBuilder xml, List<VolumeAttachment> attachments) {
+        xml.start("blockDeviceMapping");
+        for (VolumeAttachment attachment : attachments) {
+            xml.start("item")
+                    .elem("deviceName", attachment.getDevice())
+                    .start("ebs")
+                    .elem("volumeId", attachment.getVolumeId())
+                    .elem("status", attachment.getState())
+                    .elem("deleteOnTermination", String.valueOf(attachment.isDeleteOnTermination()));
+            if (attachment.getAttachTime() != null) {
+                xml.elem("attachTime", ISO_FMT.format(attachment.getAttachTime()));
+            }
+            xml.end("ebs").end("item");
+        }
+        xml.end("blockDeviceMapping");
     }
 
     private String resolveIamInstanceProfileArn(MultivaluedMap<String, String> p) {

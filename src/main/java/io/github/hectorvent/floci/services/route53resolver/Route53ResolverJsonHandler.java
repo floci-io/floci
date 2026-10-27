@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -90,7 +91,7 @@ public class Route53ResolverJsonHandler {
                                 "Unknown operation: Route53Resolver." + action))
                         .build();
             };
-        } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+        } catch (AwsException e) {
             return Response.status(e.getHttpStatus())
                     .entity(new AwsErrorResponse(e.jsonType(), e.getMessage())).build();
         }

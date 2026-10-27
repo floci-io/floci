@@ -128,7 +128,8 @@ public class CloudTrailService {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
         String key = regionKey(trail.homeRegion(), trail.name());
         withTrailLock(key, () -> store.delete(key));
-        pendingRecordsByTrail.keySet().removeIf(k -> k.trailName().equals(trail.name()));
+        pendingRecordsByTrail.keySet().removeIf(k -> k.trailName().equals(trail.name())
+                && k.region().equals(trail.homeRegion()) && k.accountId().equals(regionResolver.getAccountId()));
     }
 
     public Trail updateTrail(String region, String trailNameOrArn,
@@ -428,7 +429,7 @@ public class CloudTrailService {
         List<TrailKey> result = new ArrayList<>();
         for (Map.Entry<PendingTrailKey, PendingRecordBuffer> e : pendingRecordsByTrail.entrySet()) {
             for (String eventRegion : e.getValue().eventRegions()) {
-                result.add(new TrailKey(e.getKey().region(), e.getKey().trailName(), eventRegion));
+                result.add(new TrailKey(e.getKey().region(), e.getKey().trailName(), eventRegion, e.getKey().accountId()));
             }
         }
         return result;
@@ -482,10 +483,15 @@ public class CloudTrailService {
      * {@code region} is the trail's home region (used for trail store lookups).
      * {@code eventRegion} is the region where the event occurred (used for the S3 delivery path).
      * For single-region trails these are the same; for multi-region trails they differ.
+     * {@code accountId} preserves the owning account for background delivery.
      */
-    public record TrailKey(String region, String trailName, String eventRegion) {}
+    public record TrailKey(String region, String trailName, String eventRegion, String accountId) {
+        public TrailKey(String region, String trailName, String eventRegion) {
+            this(region, trailName, eventRegion, null);
+        }
+    }
 
-    private record PendingTrailKey(String region, String trailName) {}
+    private record PendingTrailKey(String region, String trailName, String accountId) {}
 
     private record PendingRecord(ObjectNode record, long byteCount) {}
 
@@ -612,8 +618,9 @@ public class CloudTrailService {
         }
     }
 
-    private static PendingTrailKey pendingTrailKey(TrailKey key) {
-        return new PendingTrailKey(key.region(), key.trailName());
+    private PendingTrailKey pendingTrailKey(TrailKey key) {
+        return new PendingTrailKey(key.region(), key.trailName(),
+                key.accountId() != null ? key.accountId() : regionResolver.getAccountId());
     }
 
     // --- Helpers ---
@@ -629,6 +636,9 @@ public class CloudTrailService {
             }
             Trail trail = entry.trail();
             if (!sameRegion && !trail.isMultiRegionTrail()) {
+                continue;
+            }
+            if (!regionResolver.partitionForRegion(region).equals(regionResolver.partitionForRegion(trail.homeRegion()))) {
                 continue;
             }
             if (!entry.logging()) {

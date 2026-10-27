@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.route53resolver;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -248,7 +249,7 @@ class Route53ResolverIntegrationTest {
             .extract().path("ResolverEndpoint.Id");
 
         String first = listIpAddresses(endpointId);
-        List<String> ids = io.restassured.path.json.JsonPath.from(first).getList("IpAddresses.IpId");
+        List<String> ids = JsonPath.from(first).getList("IpAddresses.IpId");
         assertEquals(2, ids.size());
         assertEquals(2, new HashSet<>(ids).size(), "repeated entries share an IpId: " + ids);
         assertEquals(first, listIpAddresses(endpointId));

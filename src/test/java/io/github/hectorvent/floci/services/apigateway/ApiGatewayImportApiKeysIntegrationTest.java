@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
+import org.hamcrest.Matchers;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -57,9 +59,9 @@ class ApiGatewayImportApiKeysIntegrationTest {
                 .get("/apikeys/{importedId}?includeValue=true")
                 .then()
                 .statusCode(200)
-                .body("name", org.hamcrest.Matchers.equalTo("imported-key"))
-                .body("value", org.hamcrest.Matchers.equalTo("secret-value"))
-                .body("enabled", org.hamcrest.Matchers.equalTo(true));
+                .body("name", Matchers.equalTo("imported-key"))
+                .body("value", Matchers.equalTo("secret-value"))
+                .body("enabled", Matchers.equalTo(true));
     }
 
     /** AWS ImportApiKeys uses the TitleCase header {@code Name,Key,Description,Enabled,UsagePlanIds}. */
@@ -124,7 +126,7 @@ class ApiGatewayImportApiKeysIntegrationTest {
                 .statusCode(201)
                 .extract().path("ids[0]");
 
-        org.junit.jupiter.api.Assertions.assertNotEquals("distinct-id-secret-value", importedId);
+        Assertions.assertNotEquals("distinct-id-secret-value", importedId);
 
         given()
                 .pathParam("importedId", importedId)

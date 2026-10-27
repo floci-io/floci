@@ -53,12 +53,14 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -1149,9 +1151,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             }
             JsonNode resourcesPattern = pattern.get("resources");
             if (resourcesPattern != null && resourcesPattern.isArray()) {
-                var resources = ((ArrayNode) event.get("Resources")).elements();
+                Iterator<JsonNode> resources = ((ArrayNode) event.get("Resources")).elements();
                 while (resources.hasNext()) {
-                    var resource = resources.next().asText(null);
+                    String resource = resources.next().asText(null);
                     if (matchesArrayField(resourcesPattern, resource)) {
                         return true;
                     }
@@ -1179,9 +1181,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 return false;
             }
         }
-        var fields = pattern.fields();
+        Iterator<Map.Entry<String, JsonNode>> fields = pattern.fields();
         while (fields.hasNext()) {
-            var field = fields.next();
+            Map.Entry<String, JsonNode> field = fields.next();
             if ("$or".equals(field.getKey())) {
                 continue;
             }
@@ -2165,7 +2167,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
     }
 
-    private <V> java.util.Optional<V> accountGet(StorageBackend<String, V> store, String accountId, String key) {
+    private <V> Optional<V> accountGet(StorageBackend<String, V> store, String accountId, String key) {
         if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
             return aware.getForAccount(accountId, key);
         }
@@ -2173,7 +2175,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     private <V> List<V> accountScan(StorageBackend<String, V> store, String accountId,
-                                    java.util.function.Predicate<String> filter) {
+                                    Predicate<String> filter) {
         if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
             return aware.scanForAccount(accountId, filter);
         }

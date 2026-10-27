@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.servicecatalog;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -29,7 +31,7 @@ class ServiceCatalogOrgAccessConsumerTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    private static io.restassured.response.Response call(String action, String body) {
+    private static Response call(String action, String body) {
         return given()
                 .contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", "AWS242ServiceCatalogService." + action)
@@ -58,6 +60,6 @@ class ServiceCatalogOrgAccessConsumerTest {
         call("GetAWSOrganizationsAccessStatus", "{}")
         .then()
             .statusCode(200)
-            .body("AccessStatus", org.hamcrest.Matchers.equalTo("ENABLED"));
+            .body("AccessStatus", Matchers.equalTo("ENABLED"));
     }
 }

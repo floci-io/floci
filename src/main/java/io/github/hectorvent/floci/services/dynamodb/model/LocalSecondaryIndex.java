@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -24,7 +25,7 @@ public class LocalSecondaryIndex {
     private long itemCount;
 
     public LocalSecondaryIndex() {
-        this.nonKeyAttributes = new java.util.ArrayList<>();
+        this.nonKeyAttributes = new ArrayList<>();
     }
 
     public LocalSecondaryIndex(String indexName, List<KeySchemaElement> keySchema,
@@ -39,7 +40,7 @@ public class LocalSecondaryIndex {
         this.indexArn = indexArn;
         this.projectionType = projectionType != null ? projectionType : "ALL";
         this.nonKeyAttributes = "INCLUDE".equals(this.projectionType) && nonKeyAttributes != null
-                ? nonKeyAttributes : new java.util.ArrayList<>();
+                ? nonKeyAttributes : new ArrayList<>();
     }
 
     public String getIndexName() { return indexName; }

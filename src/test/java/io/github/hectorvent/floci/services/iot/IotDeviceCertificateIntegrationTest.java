@@ -1,16 +1,23 @@
 package io.github.hectorvent.floci.services.iot;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
+import jakarta.inject.Inject;
 import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import javax.security.auth.x500.X500Principal;
 
 import java.io.ByteArrayInputStream;
 import java.io.StringWriter;
@@ -18,9 +25,13 @@ import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.PrivateKey;
+import java.security.Security;
 import java.security.Signature;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.security.interfaces.RSAPublicKey;
+import java.security.spec.ECGenParameterSpec;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -40,13 +51,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class IotDeviceCertificateIntegrationTest {
 
-    @jakarta.inject.Inject
+    @Inject
     IotService iotService;
 
-    @org.junit.jupiter.api.BeforeAll
+    @BeforeAll
     static void bouncyCastle() {
-        if (java.security.Security.getProvider(org.bouncycastle.jce.provider.BouncyCastleProvider.PROVIDER_NAME) == null) {
-            java.security.Security.addProvider(new org.bouncycastle.jce.provider.BouncyCastleProvider());
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
         }
     }
 
@@ -71,10 +82,10 @@ class IotDeviceCertificateIntegrationTest {
         assertEquals(List.of("1.3.6.1.5.5.7.3.2"), cert.getExtendedKeyUsage(), "clientAuth");
         assertEquals(-1, cert.getBasicConstraints());
         assertEquals("RSA", cert.getPublicKey().getAlgorithm());
-        assertEquals(2048, ((java.security.interfaces.RSAPublicKey) cert.getPublicKey()).getModulus().bitLength());
+        assertEquals(2048, ((RSAPublicKey) cert.getPublicKey()).getModulus().bitLength());
         assertEquals(expectedNotAfter(ca), cert.getNotAfter().toInstant(),
                 "AWS IoT-issued certificates all expire at the end of 2049, never past the CA");
-        assertTrue(!cert.getNotBefore().toInstant().isAfter(java.time.Instant.now()), "valid from issue time");
+        assertTrue(!cert.getNotBefore().toInstant().isAfter(Instant.now()), "valid from issue time");
 
         String expectedId = Digests.sha256Hex(cert.getEncoded());
         assertEquals(expectedId, body.getString("certificateId"), "AWS certificateId is sha256(DER), lowercase hex");
@@ -140,7 +151,7 @@ class IotDeviceCertificateIntegrationTest {
 
         cert.verify(ca.getPublicKey());
         assertEquals(deviceKey.getPublic(), cert.getPublicKey(), "the CSR's key is the certificate's key");
-        assertEquals(new javax.security.auth.x500.X500Principal(new X500Name("CN=thing-0001,O=Example").getEncoded()),
+        assertEquals(new X500Principal(new X500Name("CN=thing-0001,O=Example").getEncoded()),
                 cert.getSubjectX500Principal(), "the CSR's subject is the certificate's subject");
         assertEquals(List.of("1.3.6.1.5.5.7.3.2"), cert.getExtendedKeyUsage(), "clientAuth");
         assertEquals(-1, cert.getBasicConstraints());
@@ -166,7 +177,7 @@ class IotDeviceCertificateIntegrationTest {
     @Test
     void createCertificateFromCsrAcceptsAnEcKey() throws Exception {
         KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
-        kpg.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+        kpg.initialize(new ECGenParameterSpec("secp256r1"));
         KeyPair deviceKey = kpg.generateKeyPair();
         PKCS10CertificationRequest csr = new JcaPKCS10CertificationRequestBuilder(
                 new X500Name("CN=ec-device"), deviceKey.getPublic())
@@ -282,7 +293,7 @@ class IotDeviceCertificateIntegrationTest {
             .extract().asString();
 
         // Read with Jackson: RestAssured's JsonPath narrows large epoch doubles to float precision.
-        com.fasterxml.jackson.databind.JsonNode described = new com.fasterxml.jackson.databind.ObjectMapper().readTree(body)
+        JsonNode described = new ObjectMapper().readTree(body)
                 .path("certificateDescription");
         X509Certificate ca = parse(given().when().get("/_floci/ca.pem").then().statusCode(200).extract().asString());
         assertEquals(expectedNotAfter(ca).getEpochSecond(), described.path("validity").path("notAfter").asLong(),
@@ -319,7 +330,7 @@ class IotDeviceCertificateIntegrationTest {
     /** Built with the BouncyCastle provider so curves the JDK dropped (secp256k1) can be requested. */
     private static String ecCsrPem(String curve, String subject) throws Exception {
         KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC", "BC");
-        kpg.initialize(new java.security.spec.ECGenParameterSpec(curve));
+        kpg.initialize(new ECGenParameterSpec(curve));
         KeyPair keyPair = kpg.generateKeyPair();
         PKCS10CertificationRequest csr = new JcaPKCS10CertificationRequestBuilder(
                 new X500Name(subject), keyPair.getPublic())
@@ -349,9 +360,9 @@ class IotDeviceCertificateIntegrationTest {
     }
 
     /** AWS's fixed 2049 expiry, capped at the CA's own: a CA created before this change lives ten years. */
-    private static java.time.Instant expectedNotAfter(X509Certificate ca) {
-        java.time.Instant aws = java.time.Instant.parse("2049-12-31T23:59:59Z");
-        java.time.Instant caNotAfter = ca.getNotAfter().toInstant();
+    private static Instant expectedNotAfter(X509Certificate ca) {
+        Instant aws = Instant.parse("2049-12-31T23:59:59Z");
+        Instant caNotAfter = ca.getNotAfter().toInstant();
         return caNotAfter.isBefore(aws) ? caNotAfter : aws;
     }
 

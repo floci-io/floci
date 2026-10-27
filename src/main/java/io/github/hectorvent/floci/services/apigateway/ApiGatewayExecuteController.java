@@ -72,6 +72,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -434,7 +435,7 @@ public class ApiGatewayExecuteController {
 
         ApiGatewayResource matched = null;
         MethodConfig method = null;
-        // Candidates are ordered exact, then parameterised, then greedy. AWS picks the most
+        // Candidates are ordered most specific first (see matchResources). AWS picks the most
         // specific resource that can serve the method, so one declaring methods but not this
         // one yields to a less specific sibling that declares it: /users/me carrying only PATCH
         // does not hide GET /users/{userId}, and /devices carrying only POST falls through to
@@ -579,7 +580,7 @@ public class ApiGatewayExecuteController {
                 // A function error or a payload that is not a proxy response is answered by the
                 // gateway itself, so a configured INTEGRATION_FAILURE / DEFAULT_5XX shapes it.
                 return gatewayResponseOr(response, scope, GatewayResponseType.INTEGRATION_FAILURE,
-                        "Internal server error");
+                        "Internal server error", null);
             }
             return response;
         } catch (AwsException e) {
@@ -3969,7 +3970,35 @@ public class ApiGatewayExecuteController {
 
     private Response gatewayResponse(GatewayResponseScope scope, GatewayResponseType type, int status,
                                      String message, String validationError) {
-        return gatewayResponseBuilder(scope, type, status, message, validationError).build();
+        Response fallback = Response.status(status).entity(jsonMessage(message)).type(MediaType.APPLICATION_JSON)
+                .build();
+        return gatewayResponseOr(fallback, scope, type, message, validationError);
+    }
+
+    /**
+     * The types whose gateway response sends only its own {@code x-amzn-ErrorType} when it maps one
+     * (that exact key); the others send the mapped value ahead of theirs (measured on a REST API,
+     * eu-west-1, 2026-10-26).
+     */
+    private static final Set<GatewayResponseType> MAPPED_ERROR_TYPE_REPLACES = EnumSet.of(
+            GatewayResponseType.BAD_REQUEST_PARAMETERS, GatewayResponseType.BAD_REQUEST_BODY,
+            GatewayResponseType.UNSUPPORTED_MEDIA_TYPE, GatewayResponseType.API_CONFIGURATION_ERROR,
+            GatewayResponseType.INTEGRATION_FAILURE);
+
+    /**
+     * The {@code x-amzn-ErrorType} AWS sends with a gateway response of {@code type}, customised or
+     * not (measured on a REST API, eu-west-1, 2026-10-26). Null for the types these sites never emit.
+     */
+    private static String gatewayErrorType(GatewayResponseType type) {
+        return switch (type) {
+            case INVALID_API_KEY -> "ForbiddenException";
+            case UNAUTHORIZED -> "UnauthorizedException";
+            case ACCESS_DENIED -> "AccessDeniedException";
+            case AUTHORIZER_FAILURE, AUTHORIZER_CONFIGURATION_ERROR -> "AuthorizerConfigurationException";
+            case BAD_REQUEST_PARAMETERS, BAD_REQUEST_BODY, UNSUPPORTED_MEDIA_TYPE -> "BadRequestException";
+            case API_CONFIGURATION_ERROR, INTEGRATION_FAILURE -> "InternalServerErrorException";
+            default -> null;
+        };
     }
 
     private Response.ResponseBuilder gatewayResponseBuilder(GatewayResponseScope scope, GatewayResponseType type,
@@ -3983,18 +4012,20 @@ public class ApiGatewayExecuteController {
     }
 
     /**
-     * For the sites whose uncustomised answer is not the {@code {"message"}} body (a bare status,
-     * or the Lambda payload passed through): the answer stays as it was unless the API customised
-     * a gateway response for it.
+     * The {@code fallback} answer stays as it was (a {@code {"message"}} body, a bare status, or the
+     * Lambda payload passed through) unless the API customised a gateway response for it.
      */
     private Response gatewayResponseOr(Response fallback, GatewayResponseScope scope, GatewayResponseType type,
-                                       String message) {
+                                       String message, String validationError) {
         GatewayResponse configured = apiGatewayService.resolveGatewayResponse(scope.region(), scope.apiId(),
                 type, fallback.getStatus());
-        if (configured == null) {
-            return fallback;
+        Response.ResponseBuilder builder = configured == null ? Response.fromResponse(fallback)
+                : renderGatewayResponse(scope, configured, type, fallback.getStatus(), message, validationError);
+        if (configured != null && MAPPED_ERROR_TYPE_REPLACES.contains(type)
+                && configured.getResponseParameters().containsKey(GATEWAY_RESPONSE_HEADER_PREFIX + "x-amzn-ErrorType")) {
+            return builder.build();
         }
-        return renderGatewayResponse(scope, configured, type, fallback.getStatus(), message, null).build();
+        return builder.header("x-amzn-ErrorType", gatewayErrorType(type)).build();
     }
 
     private Response.ResponseBuilder renderGatewayResponse(GatewayResponseScope scope, GatewayResponse configured,
@@ -4257,55 +4288,28 @@ public class ApiGatewayExecuteController {
     }
 
     /**
-     * Finds all matching resources for {@code requestPath}, sorted by specificity.
-     * Priority: exact match > template path match (e.g. /items/{id}) > proxy+ wildcard.
+     * Finds all matching resources for {@code requestPath}, most specific first.
+     *
+     * <p>Ranked as measured on AWS, with exact, parameterised and greedy resources in one list:
+     * more literal segments first, then more segments before any greedy parameter, then the
+     * resource whose literal sits further left at the first position where the two differ. So
+     * {@code /s/b/{proxy+}} beats {@code /s/{x}/{y}} for {@code /s/b/c}, and
+     * {@code /a/{x}/c/{z+}} beats {@code /a/b/{proxy+}} for {@code /a/b/c/d}.
      */
     List<ApiGatewayResource> matchResources(List<ApiGatewayResource> resources, String requestPath) {
+        String[] rParts = requestPath.split("/", -1);
         List<ApiGatewayResource> matches = new ArrayList<>();
-        // 1. Exact match
         for (ApiGatewayResource r : resources) {
-            if (requestPath.equals(r.getPath())) {
+            if (r.getPath() != null && pathMatches(r.getPath(), rParts)) {
                 matches.add(r);
             }
         }
-        // 2. Template path match — /items/{id} matches /items/anything
-        for (ApiGatewayResource r : resources) {
-            if (r.getPath() != null && r.getPath().contains("{") && greedyParentPrefix(r.getPath()) == null) {
-                if (pathMatchesTemplate(r.getPath(), requestPath)) {
-                    matches.add(r);
-                }
-            }
-        }
-        // 3. Greedy wildcard: {proxy+}, or any other {name+}, matches longest parent prefix
-        // Requires at least one path segment after the parent prefix (except root /{proxy+})
-        List<ApiGatewayResource> proxyMatches = new ArrayList<>();
-        for (ApiGatewayResource r : resources) {
-            String parentPrefix = greedyParentPrefix(r.getPath());
-            if (parentPrefix == null) continue;
-            // Root /{proxy+} matches everything including /
-            if ("/".equals(parentPrefix)) {
-                proxyMatches.add(r);
-                continue;
-            }
-            // Non-root proxy+ requires at least one char after the prefix
-            if (requestPath.startsWith(parentPrefix)
-                    && requestPath.length() > parentPrefix.length()) {
-                proxyMatches.add(r);
-            }
-        }
-        // Sort proxy matches by parentPrefix length descending
-        proxyMatches.sort((r1, r2) -> {
-            String p1 = greedyParentPrefix(r1.getPath());
-            String p2 = greedyParentPrefix(r2.getPath());
-            return Integer.compare(p2.length(), p1.length());
-        });
-        matches.addAll(proxyMatches);
+        matches.sort(ApiGatewayExecuteController::compareSpecificity);
         return matches;
     }
 
     /**
-     * Finds the best-matching resource for {@code requestPath}.
-     * Priority: exact match > template path match (e.g. /items/{id}) > proxy+ wildcard.
+     * Finds the best-matching resource for {@code requestPath}, the first of {@link #matchResources}.
      */
     ApiGatewayResource matchResource(List<ApiGatewayResource> resources, String requestPath) {
         List<ApiGatewayResource> matches = matchResources(resources, requestPath);
@@ -4313,18 +4317,51 @@ public class ApiGatewayExecuteController {
     }
 
     /**
-     * Returns true if {@code requestPath} matches the template path (e.g. {@code /items/{id}}).
-     * Segments wrapped in {@code {}} match any single path segment.
+     * True when every segment before any greedy parameter matches: a literal matches itself, a
+     * {@code {param}} any one segment. A greedy resource then needs a non-empty remainder, except
+     * the root {@code /{proxy+}}, which also serves {@code /}; any other resource needs no more
+     * segments.
      */
-    private boolean pathMatchesTemplate(String templatePath, String requestPath) {
-        String[] tParts = templatePath.split("/", -1);
-        String[] rParts = requestPath.split("/", -1);
-        if (tParts.length != rParts.length) return false;
-        for (int i = 0; i < tParts.length; i++) {
-            if (tParts[i].startsWith("{") && tParts[i].endsWith("}")) continue; // wildcard segment
-            if (!tParts[i].equals(rParts[i])) return false;
+    private static boolean pathMatches(String resourcePath, String[] rParts) {
+        String[] fixed = fixedSegments(resourcePath);
+        boolean greedy = greedyParentPrefix(resourcePath) != null;
+        if (greedy ? rParts.length < fixed.length : rParts.length != fixed.length) {
+            return false;
         }
-        return true;
+        for (int i = 0; i < fixed.length; i++) {
+            if (!isPathParameter(fixed[i]) && !fixed[i].equals(rParts[i])) {
+                return false;
+            }
+        }
+        return !greedy || fixed.length == 1
+                || !String.join("/", Arrays.copyOfRange(rParts, fixed.length, rParts.length)).isEmpty();
+    }
+
+    private static int compareSpecificity(ApiGatewayResource a, ApiGatewayResource b) {
+        String[] fa = fixedSegments(a.getPath());
+        String[] fb = fixedSegments(b.getPath());
+        int order = Long.compare(literalCount(fb), literalCount(fa));
+        if (order == 0) {
+            order = Integer.compare(fb.length, fa.length);
+        }
+        for (int i = 0; order == 0 && i < fa.length; i++) {
+            order = Boolean.compare(isPathParameter(fa[i]), isPathParameter(fb[i]));
+        }
+        return order;
+    }
+
+    /** The segments of {@code resourcePath} before its greedy parameter, or all of them. */
+    private static String[] fixedSegments(String resourcePath) {
+        String[] parts = resourcePath.split("/", -1);
+        return greedyParentPrefix(resourcePath) == null ? parts : Arrays.copyOf(parts, parts.length - 1);
+    }
+
+    private static long literalCount(String[] segments) {
+        return Arrays.stream(segments).filter(s -> !isPathParameter(s)).count();
+    }
+
+    private static boolean isPathParameter(String segment) {
+        return segment.startsWith("{") && segment.endsWith("}");
     }
 
     /**
@@ -4389,13 +4426,16 @@ public class ApiGatewayExecuteController {
     /**
      * Extracts named path parameters from a matched template path.
      * Given template {@code /items/{id}} and request {@code /items/item-1}, returns {@code {id=item-1}}.
+     * A greedy template such as {@code /catalog/{kind}/{name+}} also yields the parameters before
+     * its greedy one from a longer request: {@code {kind=scopes}} for {@code /catalog/scopes/a/b}.
      */
     private Map<String, String> extractPathParams(String templatePath, String requestPath) {
         Map<String, String> params = new HashMap<>();
         if (templatePath == null || requestPath == null) return params;
         String[] tParts = templatePath.split("/", -1);
         String[] rParts = requestPath.split("/", -1);
-        if (tParts.length != rParts.length) return params;
+        boolean greedy = greedyParentPrefix(templatePath) != null;
+        if (greedy ? rParts.length < tParts.length : tParts.length != rParts.length) return params;
         for (int i = 0; i < tParts.length; i++) {
             String t = tParts[i];
             if (t.startsWith("{") && t.endsWith("}")) {

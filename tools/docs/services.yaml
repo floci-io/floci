@@ -322,7 +322,7 @@ services:
     # SubnetIds / VpcSecurityGroupIds / IamRoles / AddIamRoles / RemoveIamRoles / TagKeys / TagValues /
     # DbGroups / ScheduleDefinitions are labels of an inner member-name switch (memberKeyRegex), not
     # actions, same shape as the rds exclusions above.
-    exclude_actions: [SubnetIds, VpcSecurityGroupIds, IamRoles, AddIamRoles, RemoveIamRoles, TagKeys, TagValues, DbGroups, ScheduleDefinitions]
+    exclude_actions: [SubnetIds, VpcSecurityGroupIds, IamRoles, AddIamRoles, RemoveIamRoles, TagKeys, TagValues, DbGroups, ScheduleDefinitions, SourceIds, EventCategories]
   - service: redshiftdata
     doc: docs/services/redshift-data.md
     sources:

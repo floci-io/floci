@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ssooidc.model.DeviceAuthorization;
 import io.github.hectorvent.floci.services.ssooidc.model.RegisteredClient;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
@@ -70,8 +71,8 @@ class SsoPortalIntegrationTest {
                 .queryParam("account_id", "111111111111")
             .when().get("/assignment/roles")
             .then().statusCode(200)
-                .body("roleList[0].accountId", org.hamcrest.Matchers.equalTo("111111111111"))
-                .body("roleList[0].roleName", org.hamcrest.Matchers.equalTo("PortalDirect" + suffix));
+                .body("roleList[0].accountId", Matchers.equalTo("111111111111"))
+                .body("roleList[0].roleName", Matchers.equalTo("PortalDirect" + suffix));
 
         given()
                 .header("x-amz-sso_bearer_token", accessToken)
@@ -85,10 +86,10 @@ class SsoPortalIntegrationTest {
                 .queryParam("role_name", "PortalDirect" + suffix)
             .when().get("/federation/credentials")
             .then().statusCode(200)
-                .body("roleCredentials.accessKeyId", org.hamcrest.Matchers.startsWith("ASIA"))
-                .body("roleCredentials.secretAccessKey", org.hamcrest.Matchers.not(org.hamcrest.Matchers.emptyString()))
-                .body("roleCredentials.sessionToken", org.hamcrest.Matchers.not(org.hamcrest.Matchers.emptyString()))
-                .body("roleCredentials.expiration", org.hamcrest.Matchers.greaterThan(System.currentTimeMillis()));
+                .body("roleCredentials.accessKeyId", Matchers.startsWith("ASIA"))
+                .body("roleCredentials.secretAccessKey", Matchers.not(Matchers.emptyString()))
+                .body("roleCredentials.sessionToken", Matchers.not(Matchers.emptyString()))
+                .body("roleCredentials.expiration", Matchers.greaterThan(System.currentTimeMillis()));
 
         given()
                 .header("x-amz-sso_bearer_token", accessToken)
@@ -121,7 +122,7 @@ class SsoPortalIntegrationTest {
                 .header("x-amz-sso_bearer_token", accessToken)
             .when().post("/logout")
             .then().statusCode(200)
-                .body(org.hamcrest.Matchers.emptyOrNullString());
+                .body(Matchers.emptyOrNullString());
 
         given()
                 .header("x-amz-sso_bearer_token", accessToken)

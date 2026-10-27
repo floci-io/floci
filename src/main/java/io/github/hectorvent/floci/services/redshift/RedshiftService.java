@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.model.EventSubscription;
 import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.RedshiftEvent;
@@ -1895,6 +1896,17 @@ public class RedshiftService implements ManagedSecretRotator {
                         + "' from snapshot '" + snapshotIdentifier + "' failed at " + eventTime() + ".");
     }
 
+    /** Whether the named source exists; Floci does not model cluster security groups or scheduled actions. */
+    private boolean eventSourceExists(String sourceType, String sourceIdentifier) {
+        return switch (sourceType) {
+            case RedshiftEventCatalog.CLUSTER -> clusters.get(sourceIdentifier).isPresent();
+            case RedshiftEventCatalog.PARAMETER_GROUP -> DEFAULT_PARAMETER_GROUP_NAME.equals(sourceIdentifier)
+                    || parameterGroups.get(sourceIdentifier).isPresent();
+            case RedshiftEventCatalog.SNAPSHOT -> snapshots.get(sourceIdentifier).isPresent();
+            default -> false;
+        };
+    }
+
     public PaginatedResult<RedshiftEvent> describeEvents(String sourceIdentifier, String sourceType,
                                                          Instant startTime, Instant endTime, Integer duration,
                                                          Integer maxRecords, String marker) {
@@ -1904,6 +1916,30 @@ public class RedshiftService implements ManagedSecretRotator {
 
     public Map<String, List<EventInfo>> describeEventCategories(String sourceType) {
         return eventService().describeEventCategories(sourceType);
+    }
+
+    public EventSubscription createEventSubscription(String name, String snsTopicArn, String sourceType,
+                                                     List<String> sourceIds, List<String> categories,
+                                                     String severity, Boolean enabled, Map<String, String> tags) {
+        return eventService().createSubscription(name, snsTopicArn, sourceType, sourceIds, categories, severity,
+                enabled, tags, this::eventSourceExists);
+    }
+
+    public EventSubscription modifyEventSubscription(String name, String snsTopicArn, String sourceType,
+                                                     List<String> sourceIds, List<String> categories,
+                                                     String severity, Boolean enabled) {
+        return eventService().modifySubscription(name, snsTopicArn, sourceType, sourceIds, categories, severity,
+                enabled, this::eventSourceExists);
+    }
+
+    public void deleteEventSubscription(String name) {
+        eventService().deleteSubscription(name);
+    }
+
+    public PaginatedResult<EventSubscription> describeEventSubscriptions(String name, List<String> tagKeys,
+                                                                         List<String> tagValues, Integer maxRecords,
+                                                                         String marker) {
+        return eventService().describeSubscriptions(name, tagKeys, tagValues, maxRecords, marker);
     }
 
     // ── Cluster Subnet Group Operations ──────────────────────────────────────
@@ -2461,6 +2497,11 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public synchronized void createTags(String resourceName, Map<String, String> tags) {
+        String subscriptionName = eventSubscriptionTagName(resourceName);
+        if (subscriptionName != null) {
+            eventService().addSubscriptionTags(subscriptionName, tags);
+            return;
+        }
         TagHandle handle = resolveTagHandle(resourceName);
         Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         updated.putAll(tags);
@@ -2468,6 +2509,11 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public synchronized void deleteTags(String resourceName, Collection<String> tagKeys) {
+        String subscriptionName = eventSubscriptionTagName(resourceName);
+        if (subscriptionName != null) {
+            eventService().deleteSubscriptionTags(subscriptionName, tagKeys);
+            return;
+        }
         TagHandle handle = resolveTagHandle(resourceName);
         Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         tagKeys.forEach(updated::remove);
@@ -2515,6 +2561,13 @@ public class RedshiftService implements ManagedSecretRotator {
             for (SnapshotSchedule s : snapshotSchedules.scan(k -> true)) {
                 addTaggedResources(result, snapshotScheduleArn(s.getScheduleIdentifier()),
                         "snapshotschedule", s.getTags(), tagKeysFilter);
+            }
+        }
+        if (events != null && (resourceType == null || "eventsubscription".equalsIgnoreCase(resourceType))) {
+            for (EventSubscription subscription : events.describeSubscriptions(null, null, null, null, null).items()) {
+                addTaggedResources(result, regionResolver.buildArn("redshift", regionResolver.getRegion(),
+                                "eventsubscription:" + subscription.getCustSubscriptionId()),
+                        "eventsubscription", subscription.getTags(), tagKeysFilter);
             }
         }
         return result;
@@ -2572,7 +2625,7 @@ public class RedshiftService implements ManagedSecretRotator {
      * resolution, there is no bare-name fallback: Redshift tagging is new, so there is no
      * existing caller to stay backward compatible with.
      */
-    private TagHandle resolveTagHandle(String resourceName) {
+    private AwsArnUtils.Arn requireTagArn(String resourceName) {
         if (resourceName == null || resourceName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
         }
@@ -2598,6 +2651,17 @@ public class RedshiftService implements ManagedSecretRotator {
                 || !regionResolver.getRegion().equals(arn.region())) {
             throw new AwsException("ResourceNotFoundFault", "Resource " + resourceName + " not found", 404);
         }
+        return arn;
+    }
+
+    private String eventSubscriptionTagName(String resourceName) {
+        String resource = requireTagArn(resourceName).resource();
+        String prefix = "eventsubscription:";
+        return resource.startsWith(prefix) ? resource.substring(prefix.length()) : null;
+    }
+
+    private TagHandle resolveTagHandle(String resourceName) {
+        AwsArnUtils.Arn arn = requireTagArn(resourceName);
         String resource = arn.resource();
         int sep = resource.indexOf(':');
         if (sep < 0) {
@@ -2607,6 +2671,14 @@ public class RedshiftService implements ManagedSecretRotator {
         String id = resource.substring(sep + 1);
 
         return switch (type) {
+            case "eventsubscription" -> {
+                if (id.isBlank()) {
+                    throw new AwsException("InvalidParameterValue", "Invalid resource name: " + resourceName, 400);
+                }
+                EventSubscription subscription = eventService().describeSubscriptions(id, null, null, null, null)
+                        .items().getFirst();
+                yield new TagHandle(subscription.getTags(), updated -> eventService().replaceSubscriptionTags(id, updated));
+            }
             case "cluster" -> {
                 Cluster cluster = clusters.get(id)
                         .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + id + " not found", 404));

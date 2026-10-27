@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.budgets.BudgetsClient;
 import software.amazon.awssdk.services.budgets.model.*;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -33,7 +34,7 @@ class BudgetsTest {
                             .budgetName(budgetName)
                             .budgetType(BudgetType.COST)
                             .timeUnit(TimeUnit.MONTHLY)
-                            .budgetLimit(Spend.builder().amount(new java.math.BigDecimal("100.00")).unit("USD").build())
+                            .budgetLimit(Spend.builder().amount(new BigDecimal("100.00")).unit("USD").build())
                             .build())
                     .notificationsWithSubscribers(NotificationWithSubscribers.builder()
                             .notification(notification)
@@ -72,7 +73,7 @@ class BudgetsTest {
 
             client.updateBudget(b -> b.accountId(ACCOUNT_ID).newBudget(Budget.builder()
                     .budgetName(budgetName).budgetType(BudgetType.COST).timeUnit(TimeUnit.MONTHLY)
-                    .budgetLimit(Spend.builder().amount(new java.math.BigDecimal("150.00")).unit("USD").build()).build()));
+                    .budgetLimit(Spend.builder().amount(new BigDecimal("150.00")).unit("USD").build()).build()));
             assertThat(client.describeBudgetPerformanceHistory(b -> b.accountId(ACCOUNT_ID).budgetName(budgetName)).budgetPerformanceHistory())
                     .isNotNull();
 

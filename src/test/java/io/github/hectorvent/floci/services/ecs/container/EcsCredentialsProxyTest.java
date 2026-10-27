@@ -4,6 +4,8 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse.ContainerState;
+import com.github.dockerjava.api.command.InspectImageCmd;
+import com.github.dockerjava.api.command.InspectImageResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.model.Container;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -246,10 +248,10 @@ class EcsCredentialsProxyTest {
         when(config.services().ecs().taskRoleCredentials().proxyImage()).thenReturn("floci/network-helper:local");
         when(containerBuilder.resolveImage("floci/network-helper:local")).thenReturn("floci/network-helper:local");
         stubNoStaleContainerByName();
-        com.github.dockerjava.api.command.InspectImageCmd inspectImageCmd =
-                mock(com.github.dockerjava.api.command.InspectImageCmd.class);
+        InspectImageCmd inspectImageCmd =
+                mock(InspectImageCmd.class);
         when(dockerClient.inspectImageCmd(any())).thenReturn(inspectImageCmd);
-        when(inspectImageCmd.exec()).thenReturn(mock(com.github.dockerjava.api.command.InspectImageResponse.class));
+        when(inspectImageCmd.exec()).thenReturn(mock(InspectImageResponse.class));
         when(lifecycleManager.createAndStart(any())).thenReturn(
                 new ContainerLifecycleManager.ContainerInfo(containerId, Map.of()));
         InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class);

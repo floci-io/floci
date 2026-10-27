@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,7 +23,7 @@ class LambdaStructureSerializationIntegrationTest {
 
     @Test
     void createFunctionRejectsScalarStructureMembers() {
-        List<String> members = new java.util.ArrayList<>(FUNCTION_STRUCTURE_MEMBERS);
+        List<String> members = new ArrayList<>(FUNCTION_STRUCTURE_MEMBERS);
         members.add("Code");
 
         for (String member : members) {

@@ -38,6 +38,7 @@ import java.security.cert.X509Certificate;
 import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -1395,7 +1396,7 @@ class PostgresProtocolHandlerTest {
     @Test
     void iamSessionKeepsRelayingWhenTheReportedRoleIsUnchanged() throws Exception {
         byte[] wideRow = new byte[40_000];
-        java.util.Arrays.fill(wideRow, (byte) 'x');
+        Arrays.fill(wideRow, (byte) 'x');
 
         try (ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {

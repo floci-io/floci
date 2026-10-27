@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -41,7 +42,7 @@ class LambdaPublishVersionCodeSha256IntegrationTest {
                  "Code": {"ZipFile": "%s"}}
                 """.formatted(name, zipB64("v1")))
         .when().post("/2015-03-31/functions")
-        .then().statusCode(org.hamcrest.Matchers.anyOf(equalTo(200), equalTo(201)));
+        .then().statusCode(Matchers.anyOf(equalTo(200), equalTo(201)));
     }
 
     @Test

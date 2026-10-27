@@ -432,10 +432,14 @@ rejected with `ValidationError`.
 
 ### Metric alarm updates
 
-Updating a metric alarm preserves its current state, state reason, state timestamp and tags.
+Updating a metric alarm preserves its current state, state reason, state timestamps and tags.
 Tags supplied to `PutMetricAlarm` apply only when creating an alarm; use `TagResource` and
 `UntagResource` to change existing tags. `SetAlarmState` requires `StateReason` and rejects
 missing or unknown state values before changing the alarm.
+
+`StateTransitionedTimestamp` records when an alarm's `StateValue` last changed, while
+`StateUpdatedTimestamp` moves on every state update, including one that keeps the value.
+Alarms stored before Floci recorded it report their last state update.
 
 `SetAlarmState` enforces the modeled maximum lengths of 1023 characters for
 `StateReason` and 4000 characters for `StateReasonData` before changing alarm state.

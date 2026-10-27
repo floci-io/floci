@@ -16,6 +16,7 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -25,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiPredicate;
 
 /**
@@ -137,8 +139,8 @@ public class VpcNetworkManager {
     private final Object planLock = new Object();
 
     /** So a misconfigured fallback prefix is reported once, not once per VPC. */
-    private final java.util.concurrent.atomic.AtomicBoolean warnedPrefixClamp =
-            new java.util.concurrent.atomic.AtomicBoolean();
+    private final AtomicBoolean warnedPrefixClamp =
+            new AtomicBoolean();
 
     private final ScheduledExecutorService retries = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "ec2-vpc-network-teardown");
@@ -1005,7 +1007,7 @@ public class VpcNetworkManager {
      *                 so the network must be for that VPC in the same Region
      */
     private Set<Cidr4> dockerNetworkSubnets(String ownRegion, String ownVpcId) {
-        Set<Cidr4> taken = new java.util.LinkedHashSet<>();
+        Set<Cidr4> taken = new LinkedHashSet<>();
         try {
             for (Network network : dockerClient.listNetworksCmd().exec()) {
                 Map<String, String> labels = network.getLabels() == null ? Map.of() : network.getLabels();

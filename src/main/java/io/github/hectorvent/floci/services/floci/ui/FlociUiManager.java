@@ -27,7 +27,9 @@ import org.jboss.logging.Logger;
 import java.io.Closeable;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketException;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -876,7 +878,7 @@ public class FlociUiManager {
         for (Throwable t = e; t != null; t = t.getCause()) {
             // BindException and ConnectException both extend SocketException; the docker-java
             // Apache transport surfaces a refused/denied Unix-socket connect this way.
-            if (t instanceof java.net.SocketException || t instanceof java.net.UnknownHostException) {
+            if (t instanceof SocketException || t instanceof UnknownHostException) {
                 return true;
             }
         }

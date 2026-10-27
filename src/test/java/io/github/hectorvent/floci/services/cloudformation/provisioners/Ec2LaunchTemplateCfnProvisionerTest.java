@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 import org.mockito.InOrder;
 
 import java.io.ByteArrayOutputStream;
@@ -134,7 +135,7 @@ class Ec2LaunchTemplateCfnProvisionerTest {
         provisioner.provision(r, mapper.createObjectNode(), ctx());
 
         verify(ec2).createLaunchTemplate(eq("us-east-1"),
-                org.mockito.ArgumentMatchers.matches("my-stack-Lt-[0-9a-f]{12}"), any(), isNull());
+                ArgumentMatchers.matches("my-stack-Lt-[0-9a-f]{12}"), any(), isNull());
     }
 
     @Test

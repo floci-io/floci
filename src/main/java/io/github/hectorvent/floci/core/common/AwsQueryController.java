@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -72,7 +73,7 @@ public class AwsQueryController {
     private final DocDbService docDbService;
     private final RdsService rdsService;
     /** ARNs already reported as held by both services, so the warning is logged once each. */
-    private final java.util.Set<String> reportedArnCollisions = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Set<String> reportedArnCollisions = ConcurrentHashMap.newKeySet();
     private final SqsQueryHandler sqsQueryHandler;
     private final SnsQueryHandler snsQueryHandler;
     private final SesQueryHandler sesQueryHandler;

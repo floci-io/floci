@@ -32,6 +32,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
 
@@ -273,7 +274,7 @@ class RdsContainerManagerTest {
         manager.start("db1", "vol1", DatabaseEngine.SQLSERVER,
                 "mcr.microsoft.com/mssql/server:2022-latest", "sa", "Password123!", null);
 
-        org.mockito.ArgumentCaptor<ContainerSpec> spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).create(spec.capture());
         assertEquals("mcr.microsoft.com/mssql/server:2022-latest", spec.getValue().image());
         assertTrue(spec.getValue().env().contains("ACCEPT_EULA=Y"));
@@ -456,13 +457,13 @@ class RdsContainerManagerTest {
             TarArchiveEntry entry = tar.getNextEntry();
             assertEquals("floci-master-grants.sql", entry.getName());
             assertEquals(RdsContainerManager.mysqlMasterGrantSql("admin"),
-                    new String(tar.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+                    new String(tar.readAllBytes(), StandardCharsets.UTF_8));
         }
         // The script lands on the created container before it starts, so the entrypoint's
         // one-time init phase is the thing that runs it.
         InOrder order = Mockito.inOrder(dockerClient, lifecycleManager);
         order.verify(dockerClient).copyArchiveToContainerCmd("container-id");
-        order.verify(lifecycleManager).startCreated(org.mockito.ArgumentMatchers.eq("container-id"), any());
+        order.verify(lifecycleManager).startCreated(ArgumentMatchers.eq("container-id"), any());
     }
 
     @Test
@@ -650,7 +651,7 @@ class RdsContainerManagerTest {
         manager.stopAll();
 
         verify(lifecycleManager, times(2)).stopAndRemoveStrict(
-                any(), org.mockito.ArgumentMatchers.isNull());
+                any(), ArgumentMatchers.isNull());
     }
 
     @Test
@@ -816,7 +817,7 @@ class RdsContainerManagerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.create(any()))
                 .thenThrow(new IllegalStateException("no such image: mysql:8.0"));
-        DockerClient dockerClient = mock(DockerClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
 
@@ -844,10 +845,10 @@ class RdsContainerManagerTest {
                 DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()));
 
         // A Docker daemon appears.
-        org.mockito.Mockito.reset(lifecycleManager);
+        Mockito.reset(lifecycleManager);
         stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
                 "late-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
-        DockerClient dockerClient = mock(DockerClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
         RdsContainerHandle handle = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
@@ -883,10 +884,10 @@ class RdsContainerManagerTest {
         assertEquals("created-container", manager.getActiveHandle(runtimeId).getContainerId());
 
         // The daemon is back: the leftover is removed first, then the start goes through.
-        org.mockito.Mockito.reset(lifecycleManager);
+        Mockito.reset(lifecycleManager);
         stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
                 "late-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
-        DockerClient dockerClient = mock(DockerClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
         RdsContainerHandle handle = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
@@ -894,7 +895,7 @@ class RdsContainerManagerTest {
 
         assertEquals("late-container", handle.getContainerId());
         verify(lifecycleManager).stopAndRemoveStrict(
-                org.mockito.ArgumentMatchers.eq("created-container"), any());
+                ArgumentMatchers.eq("created-container"), any());
     }
 
     @Test
@@ -908,12 +909,12 @@ class RdsContainerManagerTest {
                         Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))),
                 new ContainerLifecycleManager.ContainerInfo("second-container",
                         Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
-        DockerClient dockerClient = mock(DockerClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
         doThrow(new IllegalStateException("Failed to remove container first-container"))
                 .doNothing()
                 .when(lifecycleManager).stopAndRemoveStrict(
-                        org.mockito.ArgumentMatchers.eq("first-container"), any());
+                        ArgumentMatchers.eq("first-container"), any());
         RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
         String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
 
@@ -928,7 +929,7 @@ class RdsContainerManagerTest {
         assertEquals("second-container", retried.getContainerId());
         assertEquals(retried, manager.getActiveHandle(runtimeId));
         verify(lifecycleManager, times(2)).stopAndRemoveStrict(
-                org.mockito.ArgumentMatchers.eq("first-container"), any());
+                ArgumentMatchers.eq("first-container"), any());
     }
 
     @Test
@@ -1016,7 +1017,7 @@ class RdsContainerManagerTest {
                 .thenThrow(new IllegalStateException("Docker unavailable"))
                 .thenReturn("container-b");
         when(lifecycleManager.startCreated(
-                org.mockito.ArgumentMatchers.eq("container-b"), any()))
+                ArgumentMatchers.eq("container-b"), any()))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo(
                         "container-b", Map.of(3306,
                         new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
@@ -1076,8 +1077,8 @@ class RdsContainerManagerTest {
 
         assertEquals("container-b", retried.getContainerId());
         verify(lifecycleManager).stopAndRemoveStrict(
-                org.mockito.ArgumentMatchers.eq("container-a"),
-                org.mockito.ArgumentMatchers.isNull());
+                ArgumentMatchers.eq("container-a"),
+                ArgumentMatchers.isNull());
     }
 
     @Test
@@ -1119,7 +1120,7 @@ class RdsContainerManagerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.create(any())).thenReturn("created-container");
         when(lifecycleManager.startCreated(
-                org.mockito.ArgumentMatchers.eq("created-container"), any()))
+                ArgumentMatchers.eq("created-container"), any()))
                 .thenThrow(new IllegalStateException("Docker start failed"));
         doThrow(new IllegalStateException("Docker cleanup failed"))
                 .doNothing()
@@ -1196,7 +1197,7 @@ class RdsContainerManagerTest {
             return "container-a";
         });
         when(lifecycleManager.startCreated(
-                org.mockito.ArgumentMatchers.eq("container-a"), any()))
+                ArgumentMatchers.eq("container-a"), any()))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo(
                         "container-a", Map.of(3306,
                         new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
@@ -1259,9 +1260,9 @@ class RdsContainerManagerTest {
         assertDoesNotThrow(manager::stopAll);
 
         verify(lifecycleManager).stopAndRemoveStrict(
-                org.mockito.ArgumentMatchers.eq("container-a"), any());
+                ArgumentMatchers.eq("container-a"), any());
         verify(lifecycleManager).stopAndRemoveStrict(
-                org.mockito.ArgumentMatchers.eq("container-b"), any());
+                ArgumentMatchers.eq("container-b"), any());
         assertEquals("container-a", manager.getActiveHandle(runtimeA).getContainerId());
         assertNull(manager.getActiveHandle(runtimeB));
     }
@@ -1386,7 +1387,7 @@ class RdsContainerManagerTest {
         assertEquals("floci-aws-rds-db1", spec.getValue().name(),
                 "the container is renamed to the current prefix");
         verify(lifecycleManager).ensureVolume("floci-rds-db1");
-        verify(lifecycleManager, org.mockito.Mockito.never()).ensureVolume("floci-aws-rds-db1");
+        verify(lifecycleManager, Mockito.never()).ensureVolume("floci-aws-rds-db1");
         // A pre-migration container under the old name holds the volume's engine lock, so it is
         // cleared too before the new one starts.
         verify(lifecycleManager).removeIfExistsStrict("floci-rds-db1");
@@ -1423,8 +1424,8 @@ class RdsContainerManagerTest {
         assertEquals("db1", handle.getRuntimeId());
         manager.stop(handle);
         verify(lifecycleManager).stopAndRemoveStrict(
-                org.mockito.ArgumentMatchers.eq("container-id"),
-                org.mockito.ArgumentMatchers.isNull());
+                ArgumentMatchers.eq("container-id"),
+                ArgumentMatchers.isNull());
     }
 
     @Test

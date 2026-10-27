@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.zip.ZipEntry;
@@ -264,7 +265,7 @@ class LambdaListLayersParametersIntegrationTest {
             .extract().path("NextMarker");
 
         String decoded = new String(Base64.getUrlDecoder().decode(marker),
-                java.nio.charset.StandardCharsets.UTF_8);
+                StandardCharsets.UTF_8);
         String spliced = LAYER_B + decoded.substring(decoded.lastIndexOf('.'));
         given()
             .queryParam("CompatibleRuntime", PAGE_RUNTIME)

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -185,7 +186,7 @@ class ApiGatewayApiKeyRevocationIntegrationTest {
                 .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/enabled\",\"value\":\"false\"}]}")
                 .when().patch("/apikeys/" + keyId)
                 .then().statusCode(200)
-                .body("enabled", org.hamcrest.Matchers.is(false));
+                .body("enabled", Matchers.is(false));
 
         IdentityApiKey identity = invokeAndReadIdentity(keyValue);
         assertNull(identity.apiKey(),
@@ -201,7 +202,7 @@ class ApiGatewayApiKeyRevocationIntegrationTest {
                 .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/enabled\",\"value\":\"true\"}]}")
                 .when().patch("/apikeys/" + keyId)
                 .then().statusCode(200)
-                .body("enabled", org.hamcrest.Matchers.is(true));
+                .body("enabled", Matchers.is(true));
 
         IdentityApiKey identity = invokeAndReadIdentity(keyValue);
         assertEquals(keyValue, identity.apiKey(),
@@ -215,7 +216,7 @@ class ApiGatewayApiKeyRevocationIntegrationTest {
         given()
                 .when().get("/usageplans/" + planId + "/keys")
                 .then().statusCode(200)
-                .body("item.find { it.id == '" + keyId + "' }", org.hamcrest.Matchers.notNullValue());
+                .body("item.find { it.id == '" + keyId + "' }", Matchers.notNullValue());
 
         given()
                 .when().delete("/apikeys/" + keyId)
@@ -224,7 +225,7 @@ class ApiGatewayApiKeyRevocationIntegrationTest {
         given()
                 .when().get("/usageplans/" + planId + "/keys")
                 .then().statusCode(200)
-                .body("item.find { it.id == '" + keyId + "' }", org.hamcrest.Matchers.nullValue());
+                .body("item.find { it.id == '" + keyId + "' }", Matchers.nullValue());
 
         given()
                 .when().get("/usageplans/" + planId + "/keys/" + keyId)

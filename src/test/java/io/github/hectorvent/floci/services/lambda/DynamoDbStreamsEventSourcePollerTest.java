@@ -28,6 +28,8 @@ import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.ObjectAnnotation;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.s3.model.S3ObjectUpdatedEvent;
+import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.event.Event;
@@ -105,9 +107,9 @@ class DynamoDbStreamsEventSourcePollerTest {
     private EsmStore esmStore;
     private EmulatorConfig config;
     private PipesFilterMatcher filterMatcher;
-    private io.github.hectorvent.floci.services.sqs.SqsService sqsService;
-    private io.github.hectorvent.floci.services.sns.SnsService snsService;
-    private io.github.hectorvent.floci.services.s3.S3Service s3Service;
+    private SqsService sqsService;
+    private SnsService snsService;
+    private S3Service s3Service;
     private final AtomicLong clock = new AtomicLong();
     private final AtomicLong sequence = new AtomicLong();
 
@@ -133,9 +135,9 @@ class DynamoDbStreamsEventSourcePollerTest {
         aliasStore = mock(LambdaAliasStore.class);
         esmStore = new EsmStore(new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT_ID));
         filterMatcher = new PipesFilterMatcher(OBJECT_MAPPER);
-        sqsService = mock(io.github.hectorvent.floci.services.sqs.SqsService.class);
-        snsService = mock(io.github.hectorvent.floci.services.sns.SnsService.class);
-        s3Service = mock(io.github.hectorvent.floci.services.s3.S3Service.class);
+        sqsService = mock(SqsService.class);
+        snsService = mock(SnsService.class);
+        s3Service = mock(S3Service.class);
 
         poller = pollerOver(reader, esmStore);
     }
@@ -946,8 +948,8 @@ class DynamoDbStreamsEventSourcePollerTest {
                 invocation -> requestContextInstance.get().getAccountId());
         s3Service = new S3Service(
                 storageFactory, config,
-                mock(io.github.hectorvent.floci.services.sqs.SqsService.class),
-                mock(io.github.hectorvent.floci.services.sns.SnsService.class),
+                mock(SqsService.class),
+                mock(SnsService.class),
                 mock(Instance.class), mock(EventBridgeService.class), mock(Event.class),
                 regionResolver, OBJECT_MAPPER, mock(IamService.class));
 

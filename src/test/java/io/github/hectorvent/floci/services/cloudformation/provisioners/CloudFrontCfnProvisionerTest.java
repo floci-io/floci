@@ -18,12 +18,14 @@ import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -102,7 +104,7 @@ class CloudFrontCfnProvisionerTest {
         return p;
     }
 
-    private static <T> T withIdentity(T model, java.util.function.Consumer<T> set) {
+    private static <T> T withIdentity(T model, Consumer<T> set) {
         set.accept(model);
         return model;
     }
@@ -461,7 +463,7 @@ class CloudFrontCfnProvisionerTest {
         when(cloudFront.getResponseHeadersPolicy(ID)).thenReturn(responseHeadersPolicy(ID, ETAG));
         AwsException inUse = new AwsException("ResponseHeadersPolicyInUse",
                 "The response headers policy is attached to one or more distributions.", 409);
-        org.mockito.Mockito.doThrow(inUse).when(cloudFront).deleteResponseHeadersPolicy(ID, ETAG);
+        Mockito.doThrow(inUse).when(cloudFront).deleteResponseHeadersPolicy(ID, ETAG);
 
         AwsException e = assertThrows(AwsException.class,
                 () -> provisioner.delete(RESPONSE_HEADERS_POLICY, ID, REGION));

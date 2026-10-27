@@ -2012,7 +2012,6 @@ public class CloudFormationService implements ResourceProvider {
                     JsonNode resDef = resources.get(logicalId);
                     String type = resDef.path("Type").asText();
                     String deletionPolicy = resDef.path("DeletionPolicy").asText(null);
-                    JsonNode props = resDef.path("Properties");
 
                     CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
                             accountId, region, stack.getStackName(),
@@ -2024,6 +2023,9 @@ public class CloudFormationService implements ResourceProvider {
                             parameterTypes,
                             (id, attribute, value) -> dispatcher.attributeValue(
                                     resources.path(id).path("Type").asText(), attribute, value));
+                    // AWS::NoValue removes the property, wherever the template puts it, so no
+                    // provisioner sees it: not a member, a list item or a whole property.
+                    JsonNode props = engine.omitNoValue(resDef.path("Properties"));
 
                     StackResource resource = stack.getResources().get(logicalId);
                     StackResource previousResource = resource;

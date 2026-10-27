@@ -223,10 +223,15 @@ PUT, PATCH and DELETE).
   them). Device-type, geolocation, TLS, JA3/JA4 and header-order headers are not generated.
 - The eight AWS managed origin request policies are available by their AWS IDs through
   `GetOriginRequestPolicy` and `ListOriginRequestPolicies` (`Type` is `managed` or `custom`), and
-  cannot be updated or deleted. AWS managed cache policies are not modeled: a behavior that
-  references one forwards nothing on its account, which matches `CachingDisabled`,
-  `CachingOptimized` and `CachingOptimizedForUncompressedObjects` but not `Amplify`,
-  `Elemental-MediaPackage` or the `UseOriginCacheControlHeaders` policies.
+  cannot be updated or deleted. The seven AWS managed cache policies with published settings
+  (`Managed-Amplify`, `Managed-CachingDisabled`, `Managed-CachingOptimized`,
+  `Managed-CachingOptimizedForUncompressedObjects`, `Managed-Elemental-MediaPackage`,
+  `Managed-UseOriginCacheControlHeaders` and `Managed-UseOriginCacheControlHeaders-QueryStrings`)
+  are available by their AWS IDs through `GetCachePolicy`, `GetCachePolicyConfig` and
+  `ListCachePolicies` (`Type` is `managed` or `custom`), and cannot be updated or deleted. A
+  behavior that references one forwards what its settings select. The four Amplify-only managed
+  cache policies (`Amplify-Default`, `Amplify-DefaultNoCookies`, `Amplify-ImageOptimization` and
+  `Amplify-StaticContent`) are not modeled: a behavior that references one forwards nothing.
 - In-process S3 origins do not apply forwarding settings: viewer query strings, cookies and headers
   do not change the S3 read, apart from the viewer's `Range` and `If-Range` on a GET or HEAD.
 - Origin responses are streamed to the viewer, from in-process S3 origins and custom origins alike,

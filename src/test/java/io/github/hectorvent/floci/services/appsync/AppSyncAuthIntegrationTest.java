@@ -21,6 +21,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -220,7 +221,7 @@ class AppSyncAuthIntegrationTest {
             .body("data.hello", nullValue())
             .body("errors[0].errorType", equalTo("Unauthorized"))
             .body("errors[0].message", equalTo("Not Authorized to access hello on type Query"))
-            .body("errors[0].path", equalTo(java.util.List.of("hello")));
+            .body("errors[0].path", equalTo(List.of("hello")));
     }
 
     @Test

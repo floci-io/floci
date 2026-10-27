@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -80,7 +81,7 @@ public class Identity {
         this.identity = identity;
         this.identityType = identityType;
         this.verificationStatus = "Success"; // auto-verify in emulator
-        this.verificationToken = java.util.UUID.randomUUID().toString();
+        this.verificationToken = UUID.randomUUID().toString();
         this.dkimEnabled = false;
         this.dkimVerificationStatus = "NotStarted";
         this.createdAt = Instant.now();

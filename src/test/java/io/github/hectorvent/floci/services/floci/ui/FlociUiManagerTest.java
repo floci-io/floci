@@ -27,6 +27,7 @@ import java.io.OutputStream;
 import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -572,7 +573,7 @@ class FlociUiManagerTest {
         when(ui.containerName()).thenReturn("floci-ui");
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.findByName("floci-ui"))
-                .thenThrow(new com.github.dockerjava.api.exception.DockerClientException(
+                .thenThrow(new DockerClientException(
                         "Cannot connect to the Docker daemon"));
 
         FlociUiManager manager = new FlociUiManager(
@@ -835,7 +836,7 @@ class FlociUiManagerTest {
         LinkedHashMap<String, String> env = new LinkedHashMap<>();
         env.put("PORT", "4500");
 
-        FlociUiManager.applyExtraEnv(env, Optional.of(java.util.Arrays.asList(
+        FlociUiManager.applyExtraEnv(env, Optional.of(Arrays.asList(
                 "NOT_A_PAIR", "=orphan", "  ", null, "GOOD=yes")));
 
         assertEquals(Map.of("PORT", "4500", "GOOD", "yes"), env);

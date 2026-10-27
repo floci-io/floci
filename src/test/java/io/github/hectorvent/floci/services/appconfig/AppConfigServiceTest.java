@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
 import io.github.hectorvent.floci.services.appconfig.model.Deployment;
+import io.github.hectorvent.floci.services.appconfig.model.DeploymentStrategy;
 import io.github.hectorvent.floci.services.appconfig.model.DeploymentSummary;
 import io.github.hectorvent.floci.services.appconfig.model.Environment;
 import io.github.hectorvent.floci.services.appconfig.model.Monitor;
@@ -68,12 +69,23 @@ class AppConfigServiceTest {
         when(deploymentStore.keys()).thenAnswer(invocation -> Set.copyOf(deployments.keySet()));
         doAnswer(invocation -> deployments.remove(invocation.getArgument(0, String.class)))
                 .when(deploymentStore).delete(anyString());
+        AccountAwareStorageBackend<DeploymentStrategy> strategyStore = mock(AccountAwareStorageBackend.class);
+        Map<String, DeploymentStrategy> strategies = new HashMap<>();
+        doAnswer(invocation -> {
+            strategies.put(invocation.getArgument(0, String.class), invocation.getArgument(1, DeploymentStrategy.class));
+            return null;
+        }).when(strategyStore).put(anyString(), any(DeploymentStrategy.class));
+        when(strategyStore.get(anyString()))
+                .thenAnswer(invocation -> Optional.ofNullable(strategies.get(invocation.getArgument(0, String.class))));
+        doAnswer(invocation -> strategies.remove(invocation.getArgument(0, String.class)))
+                .when(strategyStore).delete(anyString());
         when(activeConfigStore.keys()).thenReturn(Set.of());
         StorageFactory storageFactory = mock(StorageFactory.class);
         doAnswer(invocation -> switch (invocation.getArgument(1, String.class)) {
             case "appconfig-applications.json" -> applicationStore;
             case "appconfig-environments.json" -> environmentStore;
             case "appconfig-profiles.json" -> profileStore;
+            case "appconfig-strategies.json" -> strategyStore;
             case "appconfig-deployments.json" -> deploymentStore;
             case "appconfig-active-configs.json" -> activeConfigStore;
             default -> mock(AccountAwareStorageBackend.class);
@@ -142,6 +154,79 @@ class AppConfigServiceTest {
     @Test
     void listDeploymentsRejectsUnknownToken() {
         assertThrows(RuntimeException.class, () -> service.listDeployments("app", "env", 1, "unknown"));
+    }
+
+    @Test
+    void listDeploymentsStillReportsADeploymentWhoseStrategyWasDeleted() {
+        String strategyId = createGradualStrategy().getId();
+        startDeployment(strategyId);
+
+        service.deleteDeploymentStrategy(strategyId);
+        DeploymentSummary summary = onlyDeployment();
+
+        assertEquals(15, summary.getDeploymentDurationInMinutes());
+        assertEquals(5, summary.getFinalBakeTimeInMinutes());
+        assertEquals(25f, summary.getGrowthFactor());
+        assertEquals("LINEAR", summary.getGrowthType());
+    }
+
+    @Test
+    void listDeploymentsReportsTheStrategySettingsADeploymentStartedWith() {
+        DeploymentStrategy strategy = createGradualStrategy();
+        startDeployment(strategy.getId());
+
+        // What an in-place update of the strategy changes after the deployment has started.
+        strategy.setDeploymentDurationInMinutes(30);
+        strategy.setFinalBakeTimeInMinutes(10);
+        strategy.setGrowthFactor(50f);
+        strategy.setGrowthType("EXPONENTIAL");
+        DeploymentSummary summary = onlyDeployment();
+
+        assertEquals(15, summary.getDeploymentDurationInMinutes());
+        assertEquals(5, summary.getFinalBakeTimeInMinutes());
+        assertEquals(25f, summary.getGrowthFactor());
+        assertEquals("LINEAR", summary.getGrowthType());
+    }
+
+    @Test
+    void listDeploymentsReportsTheProfileNameADeploymentStartedWith() {
+        ConfigurationProfile profile = service.getConfigurationProfile("app", "profile");
+        profile.setName("service-settings");
+        startDeployment("AppConfig.AllAtOnce");
+
+        profile.setName("renamed-settings");
+
+        assertEquals("service-settings", onlyDeployment().getConfigurationName());
+    }
+
+    @Test
+    void listDeploymentsReadsTheLiveProfileAndStrategyForARecordThatDoesNotHoldThem() {
+        // Stored by an earlier build, which recorded neither the profile's name nor the strategy's settings.
+        deploymentStore.put("app::env::1", deployment("app", "env", 1));
+        service.getConfigurationProfile("app", "profile").setName("service-settings");
+
+        DeploymentSummary summary = onlyDeployment();
+
+        assertEquals("service-settings", summary.getConfigurationName());
+        assertEquals(0, summary.getDeploymentDurationInMinutes());
+        assertEquals(10, summary.getFinalBakeTimeInMinutes());
+        assertEquals(100f, summary.getGrowthFactor());
+        assertEquals("LINEAR", summary.getGrowthType());
+    }
+
+    @Test
+    void listDeploymentsLeavesOutTheStrategySettingsWhenNeitherTheRecordNorTheStrategyHoldsThem() {
+        Deployment stored = deployment("app", "env", 1);
+        stored.setDeploymentStrategyId("deleted");
+        deploymentStore.put("app::env::1", stored);
+
+        DeploymentSummary summary = onlyDeployment();
+
+        assertEquals(1, summary.getDeploymentNumber());
+        assertNull(summary.getDeploymentDurationInMinutes());
+        assertNull(summary.getFinalBakeTimeInMinutes());
+        assertNull(summary.getGrowthFactor());
+        assertNull(summary.getGrowthType());
     }
 
     @Test
@@ -296,6 +381,28 @@ class AppConfigServiceTest {
         } catch (AwsException e) {
             return false;
         }
+    }
+
+    private DeploymentStrategy createGradualStrategy() {
+        return service.createDeploymentStrategy(Map.of(
+                "Name", "gradual",
+                "DeploymentDurationInMinutes", 15,
+                "FinalBakeTimeInMinutes", 5,
+                "GrowthFactor", 25,
+                "GrowthType", "LINEAR"));
+    }
+
+    private void startDeployment(String strategyId) {
+        service.startDeployment("app", "env", Map.of(
+                "ConfigurationProfileId", "profile",
+                "ConfigurationVersion", "1",
+                "DeploymentStrategyId", strategyId));
+    }
+
+    private DeploymentSummary onlyDeployment() {
+        List<DeploymentSummary> items = service.listDeployments("app", "env", null, null).items();
+        assertEquals(1, items.size());
+        return items.get(0);
     }
 
     private static Deployment deployment(String applicationId, String environmentId, int number) {

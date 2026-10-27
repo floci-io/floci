@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.SsrfProtection;
 import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.io.ByteArrayInputStream;
 import java.net.InetAddress;
@@ -60,7 +61,7 @@ class VerifiedPermissionsOidcSignatureVerifierTest {
 
     @Test
     void unknownKidsTriggerAtMostOneRateLimitedRefresh() throws Exception {
-        RSAPublicKey key = org.mockito.Mockito.mock(RSAPublicKey.class);
+        RSAPublicKey key = Mockito.mock(RSAPublicKey.class);
         class CountingVerifier extends VerifiedPermissionsOidcSignatureVerifier {
             int fetches;
 
@@ -85,8 +86,8 @@ class VerifiedPermissionsOidcSignatureVerifierTest {
 
     @Test
     void unknownKidRefreshAllowsRoutineKeyRotation() throws Exception {
-        RSAPublicKey oldKey = org.mockito.Mockito.mock(RSAPublicKey.class);
-        RSAPublicKey newKey = org.mockito.Mockito.mock(RSAPublicKey.class);
+        RSAPublicKey oldKey = Mockito.mock(RSAPublicKey.class);
+        RSAPublicKey newKey = Mockito.mock(RSAPublicKey.class);
         class RotatingVerifier extends VerifiedPermissionsOidcSignatureVerifier {
             int fetches;
 
@@ -113,8 +114,8 @@ class VerifiedPermissionsOidcSignatureVerifierTest {
 
     @Test
     void failedUnknownKidRefreshDoesNotStartCooldown() throws Exception {
-        RSAPublicKey oldKey = org.mockito.Mockito.mock(RSAPublicKey.class);
-        RSAPublicKey newKey = org.mockito.Mockito.mock(RSAPublicKey.class);
+        RSAPublicKey oldKey = Mockito.mock(RSAPublicKey.class);
+        RSAPublicKey newKey = Mockito.mock(RSAPublicKey.class);
         class RecoveringVerifier extends VerifiedPermissionsOidcSignatureVerifier {
             int fetches;
 

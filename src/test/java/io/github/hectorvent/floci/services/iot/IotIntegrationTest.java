@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.iot;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.quarkus.test.junit.QuarkusTest;
+import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 import org.junit.jupiter.api.MethodOrderer;
@@ -11,6 +13,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.StringWriter;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.util.List;
 import java.util.Map;
 
@@ -574,7 +579,7 @@ class IotIntegrationTest {
         String csrArn = given()
             .contentType("application/json")
             .queryParam("setAsActive", false)
-            .body(java.util.Map.of("certificateSigningRequest", csrPem()))
+            .body(Map.of("certificateSigningRequest", csrPem()))
         .when()
             .post("/certificates")
         .then()
@@ -1082,13 +1087,13 @@ class IotIntegrationTest {
 
 
     private static String csrPem() throws Exception {
-        java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("RSA");
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
         kpg.initialize(2048);
-        java.security.KeyPair kp = kpg.generateKeyPair();
+        KeyPair kp = kpg.generateKeyPair();
         PKCS10CertificationRequest csr = new JcaPKCS10CertificationRequestBuilder(
-                new org.bouncycastle.asn1.x500.X500Name("CN=round-trip"), kp.getPublic())
-                .build(new org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate()));
-        java.io.StringWriter out = new java.io.StringWriter();
+                new X500Name("CN=round-trip"), kp.getPublic())
+                .build(new JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate()));
+        StringWriter out = new StringWriter();
         try (JcaPEMWriter w = new JcaPEMWriter(out)) {
             w.writeObject(csr);
         }

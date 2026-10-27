@@ -110,8 +110,8 @@ public class RedshiftTest {
         String address = cluster.endpoint().address();
         int port = cluster.endpoint().port();
         String jdbcUrl = "jdbc:postgresql://" + address + ":" + port + "/dev";
-        try (java.sql.Connection conn =
-                     java.sql.DriverManager.getConnection(jdbcUrl, "admin", "Password123")) {
+        try (Connection conn =
+                     DriverManager.getConnection(jdbcUrl, "admin", "Password123")) {
             assertTrue(conn.isValid(5));
         }
     }

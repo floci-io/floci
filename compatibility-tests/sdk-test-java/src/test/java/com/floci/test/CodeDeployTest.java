@@ -27,6 +27,7 @@ import software.amazon.awssdk.services.codedeploy.model.GetApplicationResponse;
 import software.amazon.awssdk.services.codedeploy.model.GetDeploymentConfigResponse;
 import software.amazon.awssdk.services.codedeploy.model.GetDeploymentGroupResponse;
 import software.amazon.awssdk.services.codedeploy.model.GetDeploymentResponse;
+import software.amazon.awssdk.services.codedeploy.model.InvalidDeploymentConfigNameException;
 import software.amazon.awssdk.services.codedeploy.model.ListApplicationsResponse;
 import software.amazon.awssdk.services.codedeploy.model.ListDeploymentConfigsResponse;
 import software.amazon.awssdk.services.codedeploy.model.ListDeploymentGroupsResponse;
@@ -263,7 +264,7 @@ class CodeDeployTest {
     void cannotDeleteBuiltInConfig() {
         assertThatThrownBy(() ->
                 codedeploy.deleteDeploymentConfig(r -> r.deploymentConfigName("CodeDeployDefault.AllAtOnce")))
-                .isInstanceOf(software.amazon.awssdk.services.codedeploy.model.InvalidDeploymentConfigNameException.class);
+                .isInstanceOf(InvalidDeploymentConfigNameException.class);
     }
 
     @Test

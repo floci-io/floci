@@ -474,7 +474,7 @@ class CognitoFeaturesTest {
     @Test
     @Order(60)
     void adminRespondToAuthChallengeNewPasswordRequired() {
-        String tempUser = "admin-challenge-user-" + java.util.UUID.randomUUID();
+        String tempUser = "admin-challenge-user-" + UUID.randomUUID();
         String tempPassword = "TempPass1!";
         String newPassword = "Permanent99!";
 
