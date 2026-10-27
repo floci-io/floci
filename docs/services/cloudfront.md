@@ -265,6 +265,14 @@ PUT, PATCH and DELETE).
   keeps a connection to the origin after the last packet of a response. An origin that does not
   answer in time is answered 504, "The origin didn't respond before the request expired", as on AWS.
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
+- A custom origin whose domain is an execute-api endpoint (`{apiId}.execute-api.{region}.amazonaws.com`) of an
+  HTTP or REST API that exists in this Floci is served by Floci itself, at the address the viewer reached,
+  through the same host routing as a direct call. The origin path names the stage, as on AWS. Neither DNS nor
+  the private address check applies. A forwarded viewer `Host` is a 502, so use an origin request policy
+  such as `Managed-AllViewerExceptHostHeader`. An execute-api domain of an API that does not exist in this
+  Floci is fetched like any other custom origin. A request that the host routing would not send to the API
+  (a WebSocket API, a disabled endpoint, a missing stage, or a region other than the API's) is answered 404
+  `{"message":"Not Found"}` and never reaches Floci's other endpoints.
 - A custom origin whose domain is a [Lambda Web Function](lambda-web-functions.md) endpoint of this Floci is
   served by Floci itself, at the address the viewer reached. The origin names the endpoint's
   `domainName` with or without its port, and its protocol and ports do not matter, so neither DNS nor

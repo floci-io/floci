@@ -200,6 +200,46 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         requestContext.setRequestUri(newUri);
     }
 
+    /**
+     * Whether a request for this execute-api host and raw path would be rewritten onto an API by
+     * {@link #filter}. False when the host names no API, the region label is not the API's region,
+     * the API is not invokable on this path (WebSocket, disabled endpoint, no stage), or the path is
+     * already an internal {@code /execute-api/} path.
+     */
+    public boolean routes(String host, String originalPath) {
+        String apiId = extractApiId(host, baseHostname);
+        if (apiId == null || (originalPath != null && originalPath.startsWith("/execute-api/"))) {
+            return false;
+        }
+        Optional<ApiGatewayV2Service.ApiOwner> owner;
+        String region;
+        String hostRegion = regionResolver.resolveRegionFromHost(host);
+        try {
+            owner = apiGatewayLookup.findApiOwner(apiId);
+            region = owner.isPresent() ? owner.get().region() : apiGatewayLookup.resolveApiRegion(hostRegion, apiId);
+        } catch (AwsException e) {
+            LOG.debugv(e, "Execute API host did not resolve to one API: apiId={0}", apiId);
+            return false;
+        }
+        if (owner.isPresent() && hostRegion != null && !hostRegion.equals(region)) {
+            return false;
+        }
+        try {
+            String protocolType = apiGatewayLookup.protocolType(region, apiId);
+            boolean routable = "HTTP".equals(protocolType)
+                    || ("WEBSOCKET".equals(protocolType) && isConnectionsManagementPath(originalPath));
+            if (!routable || apiGatewayLookup.executeApiEndpointDisabled(region, apiId)) {
+                return false;
+            }
+        } catch (AwsException e) {
+            return owner.isEmpty();
+        }
+        String path = originalPath == null ? "" : stripLeadingSlash(originalPath);
+        String firstSegment = firstSegment(path);
+        return (!firstSegment.isEmpty() && stageExists(region, apiId, firstSegment))
+                || stageExists(region, apiId, "$default");
+    }
+
     private void routeToRestApi(ContainerRequestContext requestContext, URI originalUri,
                                 String originalPath, String apiId) {
         String path = originalPath == null || originalPath.isEmpty() ? "/" : originalPath;

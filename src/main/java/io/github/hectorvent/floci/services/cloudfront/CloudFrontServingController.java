@@ -3,6 +3,9 @@ package io.github.hectorvent.floci.services.cloudfront;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestHost;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayExecuteApiHostFilter;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
+import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
@@ -111,6 +114,10 @@ public class CloudFrontServingController {
     private final CloudFrontService service;
     private final S3Service s3Service;
     private final LambdaWebService lambdaWebService;
+    private final ApiGatewayService apiGatewayService;
+    private final ApiGatewayV2Service apiGatewayV2Service;
+    private final ApiGatewayExecuteApiHostFilter executeApiHostFilter;
+    private final String flociHostname;
     private final LambdaWebIamAuth lambdaWebIamAuth;
     private final CurrentVertxRequest currentVertxRequest;
     private final HttpServer httpServer;
@@ -120,11 +127,17 @@ public class CloudFrontServingController {
     @Inject
     public CloudFrontServingController(CloudFrontService service, S3Service s3Service,
                                        LambdaWebService lambdaWebService, LambdaWebIamAuth lambdaWebIamAuth,
+                                       ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
+                                       ApiGatewayExecuteApiHostFilter executeApiHostFilter,
                                        EmulatorConfig emulatorConfig, CurrentVertxRequest currentVertxRequest,
                                        HttpServer httpServer) {
         this.service = service;
         this.s3Service = s3Service;
         this.lambdaWebService = lambdaWebService;
+        this.apiGatewayService = apiGatewayService;
+        this.apiGatewayV2Service = apiGatewayV2Service;
+        this.executeApiHostFilter = executeApiHostFilter;
+        this.flociHostname = emulatorConfig.hostname().orElse("localhost");
         this.lambdaWebIamAuth = lambdaWebIamAuth;
         this.currentVertxRequest = currentVertxRequest;
         this.httpServer = httpServer;
@@ -771,16 +784,25 @@ public class CloudFrontServingController {
                                                  String viewerScheme, String method, ViewerBody viewerBody) {
         boolean includeBody = !"HEAD".equals(method);
         try {
-            // Floci serves its own Web Function endpoints, whatever port and protocol the origin names.
+            // Floci serves its own Web Function and execute-api endpoints, whatever port and protocol the origin names.
             String webEndpoint = webFunctionEndpoint(origin);
-            if (webEndpoint != null && originRequest.headers().stream()
+            String executeApiHost = webEndpoint == null ? executeApiHost(origin) : null;
+            boolean inProcess = webEndpoint != null || executeApiHost != null;
+            if (inProcess && originRequest.headers().stream()
                     .anyMatch(header -> "Host".equalsIgnoreCase(header.name()))) {
                 // CloudFront checks the endpoint's certificate against the forwarded viewer Host, which it never names.
-                LOG.debugv("CloudFront forwards the viewer Host to Web Function origin {0}", origin.getId());
+                LOG.debugv("CloudFront forwards the viewer Host to in-process origin {0}", origin.getId());
                 return OriginResponse.error(502, "Bad Gateway.");
             }
-            URI target = webEndpoint != null
-                    ? flociListenerUri(forwardUri, originRequest.rawQuery())
+            // Dot segments would be resolved after the host filter's check and escape the API's stage.
+            String originPath = executeApiHost != null
+                    ? CloudFrontRequestRouter.normalizePath(rawPath(forwardUri)) : forwardUri;
+            if (executeApiHost != null && !executeApiHostFilter.routes(executeApiHost, originPath)) {
+                return new OriginResponse(404, MediaType.APPLICATION_JSON,
+                        "{\"message\":\"Not Found\"}".getBytes(StandardCharsets.UTF_8), 23, Map.of());
+            }
+            URI target = inProcess
+                    ? flociListenerUri(originPath, originRequest.rawQuery())
                     : buildCustomOriginUri(origin, viewerScheme, forwardUri, originRequest.rawQuery());
             HttpRequest.Builder rb = HttpRequest.newBuilder()
                     .uri(target);
@@ -798,6 +820,9 @@ public class CloudFrontServingController {
                     }
                 }
             }
+            if (executeApiHost != null) {
+                originHeaders.put("Host", executeApiHost);
+            }
             if (webEndpoint != null) {
                 originHeaders.put("Host", webEndpoint);
                 if (alwaysAmzAuth(origin)) {
@@ -808,7 +833,7 @@ public class CloudFrontServingController {
             // Both bodies are streamed, so neither has to fit in memory: the viewer's goes out with its
             // own Content-Length, or chunked as it came, and the origin's comes back as it arrives.
             ViewerBody requestBody = originRequestBody(method, viewerBody);
-            CloudFrontOriginHttpClient.OpenResponse resp = (webEndpoint != null ? flociClient : httpClient).open(
+            CloudFrontOriginHttpClient.OpenResponse resp = (inProcess ? flociClient : httpClient).open(
                     rb.build(), originRequest.headers(),
                     originHeaders, requestBody != null ? requestBody.stream() : null,
                     requestBody != null ? requestBody.length() : -1, originTimeouts(origin));
@@ -848,6 +873,36 @@ public class CloudFrontServingController {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    /**
+     * The origin's host when it is an execute-api endpoint of an HTTP or REST API that exists in this
+     * Floci, which the execute-api host filter then routes, and null otherwise.
+     */
+    private String executeApiHost(Origin origin) {
+        String host;
+        try {
+            host = normalizeOriginHost(origin.getDomainName());
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        String apiId = ApiGatewayExecuteApiHostFilter.extractApiId(host, flociHostname);
+        if (apiId == null) {
+            return null;
+        }
+        try {
+            boolean exists = apiGatewayV2Service.findApiOwner(apiId).isPresent()
+                    || apiGatewayService.findRestApiOwner(apiId).isPresent();
+            return exists ? host : null;
+        } catch (AwsException e) {
+            LOG.debugv("CloudFront execute-api origin id is ambiguous: {0}", apiId);
+            return null;
+        }
+    }
+
+    private static String rawPath(String forwardUri) {
+        int query = forwardUri.indexOf('?');
+        return query < 0 ? forwardUri : forwardUri.substring(0, query);
     }
 
     /**
