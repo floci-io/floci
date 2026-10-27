@@ -5,60 +5,83 @@ import io.github.hectorvent.floci.services.apigatewayv2.proxy.CloudMapInstanceRe
 import io.github.hectorvent.floci.services.cloudmap.CloudMapService;
 import io.github.hectorvent.floci.services.cloudmap.model.Instance;
 import io.github.hectorvent.floci.services.cloudmap.model.Service;
+import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyMap;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
+@QuarkusTest
 class CloudMapInstanceResolverTest {
 
-    private static final String SERVICE_ID = "srv-abc123";
-    private static final String SERVICE_ARN = "arn:aws:servicediscovery:us-east-1:000000000000:service/" + SERVICE_ID;
+    private static final String REGION = "us-east-1";
     private static final String CUSTOM_HEALTH_CHECK = "{\"FailureThreshold\":1}";
+    private static final String HEALTH_CHECK_CONFIG = "{\"Type\":\"HTTP\"}";
 
-    private final CloudMapService cloudMap = mock(CloudMapService.class);
-    private final CloudMapInstanceResolver resolver = new CloudMapInstanceResolver(cloudMap);
+    @Inject
+    CloudMapService cloudMap;
 
-    private Service service;
+    @Inject
+    CloudMapInstanceResolver resolver;
 
-    private void givenService(String healthCheckCustomConfig, Instance... instances) {
-        service = new Service();
-        service.setId(SERVICE_ID);
-        service.setHealthCheckCustomConfig(healthCheckCustomConfig);
-        when(cloudMap.getService(SERVICE_ID)).thenReturn(service);
-        when(cloudMap.filterInstances(eq(SERVICE_ID), anyString(), anyMap())).thenReturn(List.of(instances));
+    private String createService(String healthCheckConfig, String healthCheckCustomConfig) {
+        String name = "resolver-" + UUID.randomUUID();
+        Service service = cloudMap.createService(name, null, null, null, null, healthCheckConfig,
+                healthCheckCustomConfig, null, null, REGION);
+        return service.getId();
     }
 
-    private static Instance instance(String id, String health, Map<String, String> attributes) {
-        Instance instance = new Instance();
-        instance.setInstanceId(id);
-        instance.setHealthStatus(health);
-        instance.setAttributes(attributes);
-        return instance;
+    private static String arnOf(String serviceId) {
+        return "arn:aws:servicediscovery:" + REGION + ":000000000000:service/" + serviceId;
+    }
+
+    private void register(String serviceId, String instanceId, Map<String, String> attributes) {
+        cloudMap.registerInstance(serviceId, instanceId, null, attributes, REGION);
+    }
+
+    // Floci has no API that marks an instance UNHEALTHY, so the test flips the stored instance directly
+    private void markUnhealthy(String serviceId, String instanceId) {
+        Instance instance = cloudMap.getInstance(serviceId, instanceId);
+        instance.setHealthStatus("UNHEALTHY");
+        assertEquals("UNHEALTHY", cloudMap.getInstance(serviceId, instanceId).getHealthStatus());
     }
 
     private static Map<String, String> address(String ip, String port) {
         return Map.of("AWS_INSTANCE_IPV4", ip, "AWS_INSTANCE_PORT", port);
     }
 
+    private static Map<String, String> address(String ip, String port, String stage, String deployment) {
+        return Map.of("AWS_INSTANCE_IPV4", ip, "AWS_INSTANCE_PORT", port, "stage", stage, "deployment", deployment);
+    }
+
+    private void assertEveryPickIs(Endpoint expected, String serviceArn) {
+        for (int i = 0; i < 50; i++) {
+            assertEquals(expected, resolver.pickInstance(serviceArn).orElseThrow());
+        }
+    }
+
+    private void assertUnhealthyInstanceIsNeverPicked(String serviceId) {
+        register(serviceId, "up", address("10.0.0.1", "8080"));
+        register(serviceId, "down", address("10.0.0.2", "8080"));
+        markUnhealthy(serviceId, "down");
+
+        assertEveryPickIs(new Endpoint("10.0.0.1", 8080), arnOf(serviceId));
+    }
+
     @Test
     void recognizesCloudMapServiceArnsOnly() {
-        assertTrue(CloudMapInstanceResolver.isServiceArn(SERVICE_ARN));
-        assertTrue(CloudMapInstanceResolver.isServiceArn(SERVICE_ARN + "?stage=prod&deployment=green"));
+        String serviceArn = arnOf("srv-abc123");
+        assertTrue(CloudMapInstanceResolver.isServiceArn(serviceArn));
+        assertTrue(CloudMapInstanceResolver.isServiceArn(serviceArn + "?stage=prod&deployment=green"));
         assertFalse(CloudMapInstanceResolver.isServiceArn(
                 "arn:aws:servicediscovery:us-east-1:000000000000:namespace/ns-abc"));
         assertFalse(CloudMapInstanceResolver.isServiceArn(
@@ -68,49 +91,49 @@ class CloudMapInstanceResolverTest {
     }
 
     @Test
-    void serviceWithAHealthCheckAsksForHealthyInstancesOnly() {
-        givenService(CUSTOM_HEALTH_CHECK, instance("up", "HEALTHY", address("10.0.0.1", "8080")));
-
-        assertEquals(new Endpoint("10.0.0.1", 8080), resolver.pickInstance(SERVICE_ARN).orElseThrow());
-
-        verify(cloudMap).filterInstances(SERVICE_ID, "HEALTHY", Map.of());
+    void serviceWithACustomHealthCheckNeverPicksAnUnhealthyInstance() {
+        assertUnhealthyInstanceIsNeverPicked(createService(null, CUSTOM_HEALTH_CHECK));
     }
 
     @Test
-    void serviceWithAHealthCheckConfigAsksForHealthyInstancesOnly() {
-        givenService(null, instance("up", "HEALTHY", address("10.0.0.1", "8080")));
-        service.setHealthCheckConfig("{\"Type\":\"HTTP\"}");
-
-        resolver.pickInstance(SERVICE_ARN);
-
-        verify(cloudMap).filterInstances(SERVICE_ID, "HEALTHY", Map.of());
+    void serviceWithAHealthCheckConfigNeverPicksAnUnhealthyInstance() {
+        assertUnhealthyInstanceIsNeverPicked(createService(HEALTH_CHECK_CONFIG, null));
     }
 
     @Test
-    void serviceWithoutHealthCheckAsksForEveryInstance() {
-        givenService(null, instance("a", "UNHEALTHY", address("10.0.0.1", "8080")));
+    void healthCheckedServiceWithOnlyUnhealthyInstancesHasNoCandidate() {
+        String serviceId = createService(null, CUSTOM_HEALTH_CHECK);
+        register(serviceId, "down", address("10.0.0.2", "8080"));
+        markUnhealthy(serviceId, "down");
 
-        assertEquals(new Endpoint("10.0.0.1", 8080), resolver.pickInstance(SERVICE_ARN).orElseThrow());
-
-        verify(cloudMap).filterInstances(SERVICE_ID, "ALL", Map.of());
+        assertEquals(Optional.empty(), resolver.pickInstance(arnOf(serviceId)));
     }
 
     @Test
-    void noInstanceLeftByTheServiceHasNoCandidate() {
-        givenService(CUSTOM_HEALTH_CHECK);
+    void serviceWithoutHealthCheckPicksAnUnhealthyInstance() {
+        String serviceId = createService(null, null);
+        register(serviceId, "down", address("10.0.0.2", "8080"));
+        markUnhealthy(serviceId, "down");
 
-        assertEquals(Optional.empty(), resolver.pickInstance(SERVICE_ARN));
+        assertEveryPickIs(new Endpoint("10.0.0.2", 8080), arnOf(serviceId));
     }
 
     @Test
-    void picksAmongEveryInstanceTheServiceReturns() {
-        givenService(null,
-                instance("a", "HEALTHY", address("10.0.0.1", "8080")),
-                instance("b", "HEALTHY", address("10.0.0.2", "8080")));
+    void serviceWithNoInstanceHasNoCandidate() {
+        String serviceId = createService(null, CUSTOM_HEALTH_CHECK);
+
+        assertEquals(Optional.empty(), resolver.pickInstance(arnOf(serviceId)));
+    }
+
+    @Test
+    void picksAmongEveryRegisteredInstance() {
+        String serviceId = createService(null, null);
+        register(serviceId, "a", address("10.0.0.1", "8080"));
+        register(serviceId, "b", address("10.0.0.2", "8080"));
 
         Set<Endpoint> picked = new HashSet<>();
         for (int i = 0; i < 200; i++) {
-            picked.add(resolver.pickInstance(SERVICE_ARN).orElseThrow());
+            picked.add(resolver.pickInstance(arnOf(serviceId)).orElseThrow());
         }
 
         assertEquals(Set.of(new Endpoint("10.0.0.1", 8080), new Endpoint("10.0.0.2", 8080)), picked);
@@ -118,45 +141,52 @@ class CloudMapInstanceResolverTest {
 
     @Test
     void instanceWithoutAddressOrPortOrWithBadValuesIsNotACandidate() {
-        givenService(null,
-                instance("no-port", "HEALTHY", Map.of("AWS_INSTANCE_IPV4", "10.0.0.1")),
-                instance("no-ip", "HEALTHY", Map.of("AWS_INSTANCE_PORT", "8080")),
-                instance("not-an-ip", "HEALTHY", address("evil.example/@x", "8080")),
-                instance("port-text", "HEALTHY", address("10.0.0.2", "http")),
-                instance("port-range", "HEALTHY", address("10.0.0.3", "70000")),
-                instance("good", "HEALTHY", address("10.0.0.4", "9090")));
+        String serviceId = createService(null, null);
+        register(serviceId, "no-port", Map.of("AWS_INSTANCE_IPV4", "10.0.0.1"));
+        register(serviceId, "no-ip", Map.of("AWS_INSTANCE_PORT", "8080"));
+        register(serviceId, "not-an-ip", address("evil.example/@x", "8080"));
+        register(serviceId, "port-text", address("10.0.0.2", "http"));
+        register(serviceId, "port-range", address("10.0.0.3", "70000"));
+        register(serviceId, "port-zero", address("10.0.0.5", "0"));
+        register(serviceId, "good", address("10.0.0.4", "9090"));
 
-        for (int i = 0; i < 50; i++) {
-            assertEquals(new Endpoint("10.0.0.4", 9090), resolver.pickInstance(SERVICE_ARN).orElseThrow());
-        }
+        assertEveryPickIs(new Endpoint("10.0.0.4", 9090), arnOf(serviceId));
     }
 
     @Test
     void addressWithAnOctetAboveTheIpv4RangeIsNotACandidate() {
-        givenService(null,
-                instance("big-first", "HEALTHY", address("999.1.1.1", "8080")),
-                instance("big-last", "HEALTHY", address("10.0.0.256", "8080")),
-                instance("big-middle", "HEALTHY", address("10.300.0.1", "8080")),
-                instance("edge", "HEALTHY", address("255.255.255.255", "9090")));
+        String serviceId = createService(null, null);
+        register(serviceId, "big-first", address("999.1.1.1", "8080"));
+        register(serviceId, "big-last", address("10.0.0.256", "8080"));
+        register(serviceId, "big-middle", address("10.300.0.1", "8080"));
+        register(serviceId, "edge", address("255.255.255.255", "9090"));
 
-        for (int i = 0; i < 50; i++) {
-            assertEquals(new Endpoint("255.255.255.255", 9090), resolver.pickInstance(SERVICE_ARN).orElseThrow());
-        }
+        assertEveryPickIs(new Endpoint("255.255.255.255", 9090), arnOf(serviceId));
     }
 
     @Test
-    void arnQueryStringIsPassedToTheServiceAsAttributeFilters() {
-        givenService(null, instance("prod", "HEALTHY", address("10.0.0.1", "8080")));
+    void arnQueryStringKeepsOnlyInstancesWithMatchingAttributes() {
+        String serviceId = createService(null, null);
+        register(serviceId, "prod-green", address("10.0.0.1", "8080", "prod", "green"));
+        register(serviceId, "prod-blue", address("10.0.0.2", "8080", "prod", "blue"));
+        register(serviceId, "dev-green", address("10.0.0.3", "8080", "dev", "green"));
 
-        resolver.pickInstance(SERVICE_ARN + "?stage=prod&deployment=green");
+        assertEveryPickIs(new Endpoint("10.0.0.1", 8080), arnOf(serviceId) + "?stage=prod&deployment=green");
+    }
 
-        verify(cloudMap).filterInstances(SERVICE_ID, "ALL", Map.of("stage", "prod", "deployment", "green"));
+    @Test
+    void arnQueryStringMatchingNoInstanceHasNoCandidate() {
+        String serviceId = createService(null, null);
+        register(serviceId, "dev", address("10.0.0.3", "8080", "dev", "green"));
+
+        assertEquals(Optional.empty(), resolver.pickInstance(arnOf(serviceId) + "?stage=prod"));
     }
 
     @Test
     void missingCloudMapServicePropagatesNotFound() {
-        when(cloudMap.getService(SERVICE_ID)).thenThrow(new AwsException("ServiceNotFound", "gone", 404));
+        AwsException error = assertThrows(AwsException.class,
+                () -> resolver.pickInstance(arnOf("srv-doesnotexist")));
 
-        assertThrows(AwsException.class, () -> resolver.pickInstance(SERVICE_ARN));
+        assertEquals("ServiceNotFound", error.getErrorCode());
     }
 }
