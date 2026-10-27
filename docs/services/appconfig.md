@@ -48,6 +48,11 @@ that is not an IAM role ARN, returns `BadRequestException`.
 `StartDeployment` and `GetDeployment` return the deployed profile's name and location URI as
 `ConfigurationName` and `ConfigurationLocationUri`. Deployments stored by earlier Floci versions did not
 record them, so on those neither is set.
+They also return the deployment strategy's `DeploymentDurationInMinutes`, `FinalBakeTimeInMinutes`,
+`GrowthFactor` and `GrowthType` as the deployment started with them, and `ListDeployments` reports each
+deployment with the profile name and strategy settings it recorded, also once its strategy is deleted.
+A deployment stored by an earlier Floci version returns no strategy settings from `GetDeployment`, and
+`ListDeployments` reports the strategy's current settings while the strategy exists.
 A configuration profile created without `Type` reports no type, as AWS documents no default.
 
 ## Data Plane (AppConfigData) {#data-plane}

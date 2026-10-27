@@ -26,6 +26,20 @@ public class Deployment {
     private String configurationVersion;
     @JsonProperty("DeploymentStrategyId")
     private String deploymentStrategyId;
+    // The strategy's settings as the deployment started with them, so changing or deleting the strategy
+    // leaves them as they were. Omitted on deployments stored before they were recorded.
+    @JsonProperty("DeploymentDurationInMinutes")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Integer deploymentDurationInMinutes;
+    @JsonProperty("FinalBakeTimeInMinutes")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Integer finalBakeTimeInMinutes;
+    @JsonProperty("GrowthFactor")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Float growthFactor;
+    @JsonProperty("GrowthType")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String growthType;
     @JsonProperty("State")
     private String state; // BAKING, VALIDATING, DEPLOYING, COMPLETE, ROLLING_BACK, ROLLED_BACK
     @JsonProperty("Description")
@@ -56,6 +70,18 @@ public class Deployment {
 
     public String getDeploymentStrategyId() { return deploymentStrategyId; }
     public void setDeploymentStrategyId(String deploymentStrategyId) { this.deploymentStrategyId = deploymentStrategyId; }
+
+    public Integer getDeploymentDurationInMinutes() { return deploymentDurationInMinutes; }
+    public void setDeploymentDurationInMinutes(Integer deploymentDurationInMinutes) { this.deploymentDurationInMinutes = deploymentDurationInMinutes; }
+
+    public Integer getFinalBakeTimeInMinutes() { return finalBakeTimeInMinutes; }
+    public void setFinalBakeTimeInMinutes(Integer finalBakeTimeInMinutes) { this.finalBakeTimeInMinutes = finalBakeTimeInMinutes; }
+
+    public Float getGrowthFactor() { return growthFactor; }
+    public void setGrowthFactor(Float growthFactor) { this.growthFactor = growthFactor; }
+
+    public String getGrowthType() { return growthType; }
+    public void setGrowthType(String growthType) { this.growthType = growthType; }
 
     public String getState() { return state; }
     public void setState(String state) { this.state = state; }
