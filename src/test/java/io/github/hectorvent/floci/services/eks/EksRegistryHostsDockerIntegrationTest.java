@@ -418,7 +418,7 @@ class EksRegistryHostsDockerIntegrationTest {
         long deadline = System.currentTimeMillis() + 60000;
         while (System.currentTimeMillis() < deadline) {
             Cluster c = eksService.describeCluster(cluster.getName());
-            if (c.getStatus() == ClusterStatus.ACTIVE) {
+            if (c.getStatus() == ClusterStatus.ACTIVE && !c.isFinalizePending()) {
                 return;
             }
             Thread.sleep(1000);
