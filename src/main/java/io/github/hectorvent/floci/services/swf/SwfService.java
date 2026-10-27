@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -221,7 +222,7 @@ public class SwfService implements Resettable {
         }
         types.sort(Comparator.comparing(SwfWorkflowType::getName).thenComparing(SwfWorkflowType::getVersion));
         if (reverseOrder) {
-            java.util.Collections.reverse(types);
+            Collections.reverse(types);
         }
         return types;
     }
@@ -301,7 +302,7 @@ public class SwfService implements Resettable {
         }
         types.sort(Comparator.comparing(SwfActivityType::getName).thenComparing(SwfActivityType::getVersion));
         if (reverseOrder) {
-            java.util.Collections.reverse(types);
+            Collections.reverse(types);
         }
         return types;
     }
@@ -437,7 +438,7 @@ public class SwfService implements Resettable {
         SwfWorkflowExecution execution = requireExecution(region, domainName, workflowId, runId);
         List<SwfHistoryEvent> events = new ArrayList<>(execution.getEvents());
         if (reverseOrder) {
-            java.util.Collections.reverse(events);
+            Collections.reverse(events);
         }
         return events;
     }

@@ -50,6 +50,10 @@
 | `ListReplays` | - |
 <!-- floci:actions:end -->
 
+`ListRules` and `ListConnections` accept `NextToken` values of 1 to 2048
+characters. Empty or overlong tokens return `ValidationException`; unrecognized
+cursors within those bounds return `InvalidToken`.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -158,6 +162,13 @@ IAM policies.
 ## API Destination Targets
 
 A matching rule can send events directly to HTTP or HTTPS endpoints via API destinations. An API destination pairs an HTTP endpoint URL and HTTP method with an EventBridge Connection for authentication (API key, basic auth, or OAuth client credentials).
+
+`ListConnections` applies its name-prefix and state filters before returning
+name-ordered pages. `Limit` accepts 1 to 100; Floci uses 100 when it is omitted.
+Pass the returned `NextToken` with the same filters to continue. Tokens are scoped
+to the action, account, region, prefix and state; final pages omit the token.
+A cursor remains resumable after its connection is deleted. Token lengths must
+be 1 to 2048 characters, and unrecognized cursors return `InvalidToken`.
 
 ```bash
 # 1. Create a connection with API key auth

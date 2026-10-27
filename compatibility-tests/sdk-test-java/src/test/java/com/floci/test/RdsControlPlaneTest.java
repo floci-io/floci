@@ -1053,7 +1053,7 @@ class RdsControlPlaneTest {
                 .build();
     }
 
-    private static software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse createDbInstance(
+    private static CreateDbInstanceResponse createDbInstance(
             RdsClient client, String name, String password) {
         return client.createDBInstance(b -> b
                 .dbInstanceIdentifier(name)

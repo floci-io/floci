@@ -75,14 +75,27 @@ public final class SmithyValidationErrors {
     /** The violation for a number outside {@code min} to {@code max}, or {@code null} for one inside. */
     public static String outOfRange(String path, long value, long min, long max) {
         if (value < min) {
-            return "Value '" + value + "' at '" + path + "' failed to satisfy constraint: "
-                    + "Member must have value greater than or equal to " + min;
+            return valueTooSmall(path, Long.toString(value), min);
         }
         if (value > max) {
-            return "Value '" + value + "' at '" + path + "' failed to satisfy constraint: "
-                    + "Member must have value less than or equal to " + max;
+            return valueTooLarge(path, Long.toString(value), max);
         }
         return null;
+    }
+
+    /**
+     * The violation for a number below {@code min}, with the value already written: a number too
+     * large for a {@code long} is still a number, and the bound it breaks is one that fits in one.
+     */
+    public static String valueTooSmall(String path, String value, long min) {
+        return "Value '" + value + "' at '" + path + "' failed to satisfy constraint: "
+                + "Member must have value greater than or equal to " + min;
+    }
+
+    /** The violation for a number above {@code max}, with the value already written. */
+    public static String valueTooLarge(String path, String value, long max) {
+        return "Value '" + value + "' at '" + path + "' failed to satisfy constraint: "
+                + "Member must have value less than or equal to " + max;
     }
 
     /** The violation for a string outside its length bounds, or {@code null} for one inside. */
@@ -93,6 +106,24 @@ public final class SmithyValidationErrors {
         }
         if (length > max) {
             return "Value '" + value + "' at '" + path + "' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to " + max;
+        }
+        return null;
+    }
+
+    /**
+     * The violation for a list holding a member count outside its bounds, or {@code null} for one
+     * inside. The offending value is left out, which is the form this package already answers for a
+     * tag list and for an audience: quoting it would echo every member of the list back in the
+     * message.
+     */
+    public static String sizeOutOfRange(String path, int size, int min, int max) {
+        if (size < min) {
+            return "Value at '" + path + "' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to " + min;
+        }
+        if (size > max) {
+            return "Value at '" + path + "' failed to satisfy constraint: "
                     + "Member must have length less than or equal to " + max;
         }
         return null;

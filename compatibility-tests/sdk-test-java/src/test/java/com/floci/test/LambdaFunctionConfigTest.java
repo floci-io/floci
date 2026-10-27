@@ -4,10 +4,14 @@ import org.junit.jupiter.api.*;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.*;
+import software.amazon.awssdk.services.lambda.model.ImageConfig;
+import software.amazon.awssdk.services.lambda.model.PackageType;
 import software.amazon.awssdk.services.lambda.model.Runtime;
 
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -156,7 +160,7 @@ class LambdaFunctionConfigTest {
                     .runtime(Runtime.NODEJS20_X)
                     .role(ROLE)
                     .handler("index.handler")
-                    .architectures(java.util.List.of(Architecture.ARM64))
+                    .architectures(List.of(Architecture.ARM64))
                     .code(FunctionCode.builder()
                             .zipFile(SdkBytes.fromByteArray(LambdaUtils.minimalZip()))
                             .build())
@@ -201,7 +205,7 @@ class LambdaFunctionConfigTest {
                 UpdateFunctionConfigurationRequest.builder()
                         .functionName(FN)
                         .environment(Environment.builder()
-                                .variables(java.util.Map.of("KEY_A", "value-a", "KEY_B", "value-b"))
+                                .variables(Map.of("KEY_A", "value-a", "KEY_B", "value-b"))
                                 .build())
                         .build());
 
@@ -237,12 +241,12 @@ class LambdaFunctionConfigTest {
         try {
             CreateFunctionResponse createResp = lambda.createFunction(CreateFunctionRequest.builder()
                     .functionName(imageFn)
-                    .packageType(software.amazon.awssdk.services.lambda.model.PackageType.IMAGE)
+                    .packageType(PackageType.IMAGE)
                     .role(ROLE)
                     .code(FunctionCode.builder()
                             .imageUri("000000000000.dkr.ecr.us-east-1.amazonaws.com/fake-repo:latest")
                             .build())
-                    .imageConfig(software.amazon.awssdk.services.lambda.model.ImageConfig.builder()
+                    .imageConfig(ImageConfig.builder()
                             .workingDirectory("/app")
                             .build())
                     .build());
@@ -261,7 +265,7 @@ class LambdaFunctionConfigTest {
             UpdateFunctionConfigurationResponse updateResp = lambda.updateFunctionConfiguration(
                     UpdateFunctionConfigurationRequest.builder()
                             .functionName(imageFn)
-                            .imageConfig(software.amazon.awssdk.services.lambda.model.ImageConfig.builder()
+                            .imageConfig(ImageConfig.builder()
                                     .workingDirectory("/updated")
                                     .build())
                             .build());

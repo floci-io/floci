@@ -15,8 +15,11 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -293,7 +296,7 @@ class SamTransformProcessor {
         // Auth.Authorizers -> one AWS::ApiGatewayV2::Authorizer per entry, keyed by SAM authorizer
         // name so routes referencing Auth.DefaultAuthorizer (the only form handled here — per-route
         // Auth overrides are not expanded) can resolve the logical id to Ref.
-        Map<String, String> authorizerLogicalIdsByName = new java.util.LinkedHashMap<>();
+        Map<String, String> authorizerLogicalIdsByName = new LinkedHashMap<>();
         JsonNode auth = properties.path("Auth");
         JsonNode authorizers = auth.path("Authorizers");
         if (authorizers.isObject()) {
@@ -582,7 +585,7 @@ class SamTransformProcessor {
 
     private Map<String, String> expandImplicitRestApiAuthorizers(String apiId, JsonNode auth,
                                                                    ObjectNode resources) {
-        Map<String, String> logicalIds = new java.util.LinkedHashMap<>();
+        Map<String, String> logicalIds = new LinkedHashMap<>();
         JsonNode authorizers = auth.path("Authorizers");
         if (authorizers.isTextual()) {
             if (!"AWS_IAM".equals(authorizers.asText())) {
@@ -755,10 +758,10 @@ class SamTransformProcessor {
                     "SAM Api authorizer '" + defaultAuthorizer + "' is not defined in Auth.Authorizers.", 400);
         }
 
-        Map<String, String> pathToResource = new java.util.LinkedHashMap<>();
+        Map<String, String> pathToResource = new LinkedHashMap<>();
         List<String> methodIds = new ArrayList<>();
-        java.util.Set<String> permissionFns = new java.util.LinkedHashSet<>();
-        java.util.Set<String> seenRoutes = new java.util.LinkedHashSet<>();
+        Set<String> permissionFns = new LinkedHashSet<>();
+        Set<String> seenRoutes = new LinkedHashSet<>();
 
         for (ApiRoute r : routes) {
             String method = r.httpMethod().toUpperCase();

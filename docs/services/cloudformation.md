@@ -193,7 +193,7 @@ cross-resource references.
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook`, `ScalingPolicy` |
 | Application Auto Scaling | `ScalableTarget` (`ScheduledActions` are accepted and not run; Floci has no scheduled scaling), `ScalingPolicy` |
-| Route 53 | `HostedZone`, `RecordSet`, `HealthCheck` |
+| Route 53 | `HostedZone`, `RecordSet`, `RecordSetGroup` (written in one change batch, so a record set that cannot be written leaves the zone unchanged; every record set must be in the group's hosted zone), `HealthCheck` |
 | Cloud Map | `HttpNamespace`, `PrivateDnsNamespace`, `PublicDnsNamespace`, `Service` |
 | API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account`, `DomainName`, `BasePathMapping`, `GatewayResponse`, `ApiKey`, `UsagePlan`, `UsagePlanKey` |
 | API Gateway v2 | `Api`, `Authorizer`, `Route`, `Integration`, `Stage`, `Deployment`, `DomainName`, `ApiMapping`, `VpcLink` |
@@ -902,10 +902,17 @@ UPDATE_ROLLBACK_FAILED state and can not be updated.`). Two ways out remain:
   delete failed; a resource whose restore cannot be redone fails again, leaving the stack in
   `UPDATE_ROLLBACK_FAILED`, and can be passed in `ResourcesToSkip`. `ResourcesToSkip` names
   `UPDATE_FAILED` resources to report as `UPDATE_COMPLETE` with the reason `Resource skipped
-  during UpdateRollback`, without rolling them back; a skipped resource keeps the state the failed
-  update left it in. Once every other resource rolled back, the stack reaches
+  during UpdateRollback`, without rolling them back; a skipped resource keeps the state its failed
+  update and rollback left it in. Once every other resource rolled back, the stack reaches
   `UPDATE_ROLLBACK_COMPLETE` with the template, parameters and outputs from before the failed
   update, and takes updates again.
+
+An `AWS::Route53::RecordSetGroup` whose zone-change rollback cannot delete the records it wrote into
+the new zone first points back at its old records, so the group already matches the template the
+stack rolls back to. `ContinueUpdateRollback` retries that delete, and `DeleteStack` deletes those
+records while the group is still `UPDATE_FAILED`, giving up after three attempts as for any replaced
+resource. Nothing else deletes them, since nothing tells them apart from an identical record written
+there later: once the group is skipped, or a later update commits, they stay in their zone.
 
 `ForceRollback=true` skips every `UPDATE_FAILED` resource of the stack, each reported as a
 `ResourcesToSkip` skip is. When a forced rollback skipped a resource and completes, the stack's

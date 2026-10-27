@@ -165,6 +165,7 @@ AWS::RedshiftServerless::Workgroup	RedshiftServerlessCfnProvisioner
 AWS::Route53::HealthCheck	Route53CfnProvisioner
 AWS::Route53::HostedZone	Route53CfnProvisioner
 AWS::Route53::RecordSet	Route53CfnProvisioner
+AWS::Route53::RecordSetGroup	Route53CfnProvisioner
 AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
 AWS::S3Vectors::Index	S3VectorsCfnProvisioner

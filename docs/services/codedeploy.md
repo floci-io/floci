@@ -21,8 +21,17 @@ Floci implements the CodeDeploy API — stored-state management for applications
 | `GetApplication` | Returns application metadata |
 | `UpdateApplication` | Renames an application |
 | `DeleteApplication` | Removes application and all its deployment groups |
-| `ListApplications` | Returns all application names |
+| `ListApplications` | Lists application names with `nextToken` continuation |
 | `BatchGetApplications` | Returns info for multiple applications |
+
+`ListApplications` returns names in stable name order with opaque `nextToken`
+continuation. Floci uses 100 names per page as an emulator choice; the AWS API
+does not expose a page-size input or document a fixed page size. Continue with
+the returned token until it is absent. Empty and final pages omit `nextToken`.
+Tokens are bound to this action, the caller account, and the request region;
+malformed tokens return `InvalidNextTokenException` (HTTP 400). Omitted, null,
+and empty tokens start at the first page. This change preserves the service's
+existing application storage and region visibility.
 
 ### Deployment Groups
 

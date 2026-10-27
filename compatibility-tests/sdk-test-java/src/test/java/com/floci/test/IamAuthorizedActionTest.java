@@ -10,8 +10,8 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.AccessKey;
 import software.amazon.awssdk.services.sns.SnsClient;
+import software.amazon.awssdk.services.sns.model.AuthorizationErrorException;
 import software.amazon.awssdk.services.sns.model.PublishBatchResultEntry;
-import software.amazon.awssdk.services.sns.model.SnsException;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.SendMessageBatchResultEntry;
 import software.amazon.awssdk.services.sqs.model.SqsException;
@@ -125,13 +125,16 @@ class IamAuthorizedActionTest {
     }
 
     @Test
-    @DisplayName("a policy naming PublishBatch, which is no IAM action, grants nothing")
+    @DisplayName("a policy naming PublishBatch, which is no IAM action, grants nothing, refused as SNS's AuthorizationError")
     void aPolicyNamingPublishBatchGrantsNothing() {
         allow("sns:PublishBatch");
 
         assertThatThrownBy(() -> sns.publishBatch(r -> r.topicArn(topicArn)
                 .publishBatchRequestEntries(e -> e.id("one").message("hello"))))
-                .isInstanceOfSatisfying(SnsException.class, error -> assertThat(error.statusCode()).isEqualTo(403));
+                .isInstanceOfSatisfying(AuthorizationErrorException.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(403);
+                    assertThat(error.awsErrorDetails().errorCode()).isEqualTo("AuthorizationError");
+                });
     }
 
     private void allow(String action) {

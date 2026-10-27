@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.codebuild;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.codebuild.CodeBuildService.BuildPage;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService.ProjectPage;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildService.ReportGroupPage;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
@@ -279,14 +280,33 @@ public class CodeBuildJsonHandler {
     }
 
     private Response listBuilds(JsonNode req, String region, String account) {
-        return Response.ok(Map.of("ids", service.listBuilds(region, account,
-                req.path("sortOrder").asText(null)))).build();
+        BuildPage page = service.listBuildsPage(region, account,
+                req.path("sortOrder").asText(null), buildListToken(req));
+        return buildListResponse(page);
     }
 
     private Response listBuildsForProject(JsonNode req, String region, String account) {
         String projectName = req.path("projectName").asText(null);
-        return Response.ok(Map.of("ids", service.listBuildsForProject(region, account, projectName,
-                req.path("sortOrder").asText(null)))).build();
+        BuildPage page = service.listBuildsForProjectPage(region, account, projectName,
+                req.path("sortOrder").asText(null), buildListToken(req));
+        return buildListResponse(page);
+    }
+
+    private String buildListToken(JsonNode req) {
+        JsonNode token = req.get("nextToken");
+        if (token != null && !token.isTextual()) {
+            throw new AwsException("InvalidInputException", "Invalid nextToken", 400);
+        }
+        return token == null ? null : token.asText();
+    }
+
+    private Response buildListResponse(BuildPage page) {
+        Map<String, Object> result = new HashMap<>();
+        result.put("ids", page.ids());
+        if (page.nextToken() != null) {
+            result.put("nextToken", page.nextToken());
+        }
+        return Response.ok(result).build();
     }
 
     private Response stopBuild(JsonNode req, String region, String account) {

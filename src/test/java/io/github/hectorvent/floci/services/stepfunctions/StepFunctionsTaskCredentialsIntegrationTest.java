@@ -13,6 +13,7 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -154,7 +155,7 @@ class StepFunctionsTaskCredentialsIntegrationTest {
             assertEquals("States.Runtime", done.jsonPath().getString("error"));
         }
         request(TARGET, "ListExecutions", Map.of("stateMachineArn", child)).then()
-                .statusCode(200).body("executions.size()", org.hamcrest.Matchers.equalTo(0));
+                .statusCode(200).body("executions.size()", Matchers.equalTo(0));
     }
 
     @ParameterizedTest
@@ -177,7 +178,7 @@ class StepFunctionsTaskCredentialsIntegrationTest {
         assertEquals("Task Credentials must resolve to an object containing RoleArn",
                 done.jsonPath().getString("cause"));
         request(TARGET, "ListExecutions", Map.of("stateMachineArn", child)).then()
-                .statusCode(200).body("executions.size()", org.hamcrest.Matchers.equalTo(0));
+                .statusCode(200).body("executions.size()", Matchers.equalTo(0));
     }
 
     @ParameterizedTest
@@ -263,7 +264,7 @@ class StepFunctionsTaskCredentialsIntegrationTest {
         assertEquals("FAILED", done.jsonPath().getString("status"), done.asString());
         assertEquals("States.Timeout", done.jsonPath().getString("error"));
         Response children = request(TARGET, "ListExecutions", Map.of("stateMachineArn", child));
-        children.then().statusCode(200).body("executions.size()", org.hamcrest.Matchers.equalTo(1));
+        children.then().statusCode(200).body("executions.size()", Matchers.equalTo(1));
         String execution = children.jsonPath().getString("executions[0].executionArn");
         assertEquals("ABORTED", terminal(TARGET, execution).jsonPath().getString("status"));
     }

@@ -5,11 +5,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
@@ -38,7 +40,7 @@ class GlueJsonHandlerTest {
     @BeforeEach
     void setUp() {
         mapper = new ObjectMapper();
-        mapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
+        mapper.registerModule(new JavaTimeModule());
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
         StorageFactory storageFactory = new InMemoryStorageFactory();
         GlueSchemaRegistryService schemaRegistryService =
@@ -621,7 +623,7 @@ class GlueJsonHandlerTest {
         Map<String, Object> page = body(handler.handle("SearchTables", filtered, REGION));
         List<?> tables = (List<?>) page.get("TableList");
         assertEquals(1, tables.size());
-        assertEquals("beta", ((io.github.hectorvent.floci.services.glue.model.Table) tables.get(0)).getName());
+        assertEquals("beta", ((Table) tables.get(0)).getName());
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {

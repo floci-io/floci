@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -106,7 +107,7 @@ class RedshiftServerlessJsonHandlerTest {
                         Instant.ofEpochSecond(1_800_000_000L), List.of()));
         iamDbUserResolver = mock(RedshiftIamDbUserResolver.class);
         when(iamDbUserResolver.resolveDbUser("AUTH")).thenReturn("IAM:alice");
-        EmulatorConfig config = mock(EmulatorConfig.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        EmulatorConfig config = mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
         when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-snapshots.json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend)
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID));

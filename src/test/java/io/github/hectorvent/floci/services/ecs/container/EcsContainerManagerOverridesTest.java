@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
@@ -116,8 +117,8 @@ class EcsContainerManagerOverridesTest {
         ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
-        org.mockito.Mockito.verify(builder, org.mockito.Mockito.times(2)).withCmd(cmdCaptor.capture());
-        org.mockito.Mockito.verify(builder, org.mockito.Mockito.times(2)).withEnv(envCaptor.capture());
+        Mockito.verify(builder, Mockito.times(2)).withCmd(cmdCaptor.capture());
+        Mockito.verify(builder, Mockito.times(2)).withEnv(envCaptor.capture());
 
         List<List<String>> commands = cmdCaptor.getAllValues();
         List<List<String>> envs = envCaptor.getAllValues();

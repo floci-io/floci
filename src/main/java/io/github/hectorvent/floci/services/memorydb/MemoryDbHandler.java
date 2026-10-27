@@ -16,6 +16,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -181,7 +182,7 @@ public class MemoryDbHandler {
     }
 
     private Response handleUntagResource(JsonNode request) {
-        List<String> keys = new java.util.ArrayList<>();
+        List<String> keys = new ArrayList<>();
         request.path("TagKeys").forEach(k -> keys.add(k.asText()));
         Map<String, String> tags = service.untagResource(text(request, "ResourceArn"), keys);
         return Response.ok(tagListResponse(tags)).build();
@@ -282,7 +283,7 @@ public class MemoryDbHandler {
     }
 
     private List<String> parseStringList(JsonNode node) {
-        List<String> values = new java.util.ArrayList<>();
+        List<String> values = new ArrayList<>();
         if (node != null && node.isArray()) {
             node.forEach(n -> {
                 String value = n.asText(null);

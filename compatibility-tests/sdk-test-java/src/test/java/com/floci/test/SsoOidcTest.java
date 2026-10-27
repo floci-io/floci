@@ -10,10 +10,19 @@ import software.amazon.awssdk.services.ssooidc.model.CreateTokenWithIamResponse;
 import software.amazon.awssdk.services.ssooidc.model.RegisterClientResponse;
 import software.amazon.awssdk.services.ssooidc.model.StartDeviceAuthorizationResponse;
 
+import java.io.IOException;
 import java.net.URI;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -71,9 +80,9 @@ class SsoOidcTest {
                         advertisedUri.getRawPath() + "?" + advertisedUri.getRawQuery());
                 HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
                 HttpResponse<String> browserResponse = TestFixtures.emulatorHttpClient().send(
-                        request, java.net.http.HttpResponse.BodyHandlers.ofString());
+                        request, HttpResponse.BodyHandlers.ofString());
                 assertThat(browserResponse.statusCode()).isEqualTo(200);
-            } catch (java.io.IOException e) {
+            } catch (IOException e) {
                 throw new RuntimeException(e);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -120,7 +129,7 @@ class SsoOidcTest {
                     .build();
             Document actorPolicy = Document.mapBuilder()
                     .putString("Version", "2012-10-17")
-                    .putDocument("Statement", Document.fromList(java.util.List.of(statement)))
+                    .putDocument("Statement", Document.fromList(List.of(statement)))
                     .build();
             sso.putApplicationAuthenticationMethod(request -> request
                     .applicationArn(applicationArn)
@@ -140,25 +149,25 @@ class SsoOidcTest {
             String challenge = pkceChallenge(verifier);
             String authorizeUrl = TestFixtures.endpoint().toString()
                     + "/authorize?response_type=code&client_id="
-                    + java.net.URLEncoder.encode(applicationArn, java.nio.charset.StandardCharsets.UTF_8)
-                    + "&redirect_uri=" + java.net.URLEncoder.encode(redirectUri, java.nio.charset.StandardCharsets.UTF_8)
-                    + "&code_challenge=" + java.net.URLEncoder.encode(challenge, java.nio.charset.StandardCharsets.UTF_8)
+                    + URLEncoder.encode(applicationArn, StandardCharsets.UTF_8)
+                    + "&redirect_uri=" + URLEncoder.encode(redirectUri, StandardCharsets.UTF_8)
+                    + "&code_challenge=" + URLEncoder.encode(challenge, StandardCharsets.UTF_8)
                     + "&code_challenge_method=S256";
             String code;
             try {
                 HttpResponse<String> browserResponse = HttpClient.newBuilder()
-                        .followRedirects(java.net.http.HttpClient.Redirect.NEVER)
+                        .followRedirects(HttpClient.Redirect.NEVER)
                         .build()
-                        .send(java.net.http.HttpRequest.newBuilder(java.net.URI.create(authorizeUrl)).GET().build(),
-                                java.net.http.HttpResponse.BodyHandlers.ofString());
+                        .send(HttpRequest.newBuilder(URI.create(authorizeUrl)).GET().build(),
+                                HttpResponse.BodyHandlers.ofString());
                 assertThat(browserResponse.statusCode()).isEqualTo(303);
                 String[] params = URI.create(browserResponse.headers().firstValue("location").orElseThrow())
                         .getRawQuery().split("&");
-                code = java.util.Arrays.stream(params)
+                code = Arrays.stream(params)
                         .filter(value -> value.startsWith("code="))
-                        .map(value -> java.net.URLDecoder.decode(value.substring(5), java.nio.charset.StandardCharsets.UTF_8))
+                        .map(value -> URLDecoder.decode(value.substring(5), StandardCharsets.UTF_8))
                         .findFirst().orElseThrow();
-            } catch (java.io.IOException e) {
+            } catch (IOException e) {
                 throw new RuntimeException(e);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -184,10 +193,10 @@ class SsoOidcTest {
 
     private static String pkceChallenge(String verifier) {
         try {
-            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
-                    .digest(verifier.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
-            return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
-        } catch (java.security.NoSuchAlgorithmException e) {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(verifier.getBytes(StandardCharsets.US_ASCII));
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
+        } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
     }

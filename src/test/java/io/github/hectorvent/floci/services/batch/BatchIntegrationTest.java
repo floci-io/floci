@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.batch;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -807,7 +808,7 @@ class BatchIntegrationTest {
             .header("X-Amzn-Errortype", "ClientException");
     }
 
-    private static io.restassured.specification.RequestSpecification givenJson(String body) {
+    private static RequestSpecification givenJson(String body) {
         return given()
                 .header("Authorization", AUTH)
                 .contentType("application/json")

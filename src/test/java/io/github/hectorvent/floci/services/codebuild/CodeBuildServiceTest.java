@@ -9,10 +9,12 @@ import io.github.hectorvent.floci.services.codebuild.model.ProjectSource;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.Comparator;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -23,6 +25,21 @@ class CodeBuildServiceTest {
 
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";
+
+    @Test
+    void sharedPaginationResumesAfterDeletingTheDescendingAnchor() {
+        CodeBuildPagination.Page<Integer> first = CodeBuildPagination.page(
+                List.of(5, 4, 3, 2), Comparator.reverseOrder(), 2, null,
+                Integer::valueOf, String::valueOf);
+        assertEquals(List.of(5, 4), first.items());
+        assertEquals("4", first.nextToken());
+
+        CodeBuildPagination.Page<Integer> second = CodeBuildPagination.page(
+                List.of(5, 3, 2), Comparator.reverseOrder(), 2, first.nextToken(),
+                Integer::valueOf, String::valueOf);
+        assertEquals(List.of(3, 2), second.items());
+        assertNull(second.nextToken());
+    }
 
     @Test
     void retryBuildRetainsOriginalBuildspecOverride() {

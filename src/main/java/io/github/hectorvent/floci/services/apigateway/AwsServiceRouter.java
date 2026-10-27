@@ -23,6 +23,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.Arrays;
 import java.util.regex.Matcher;
 
 /**
@@ -120,7 +121,7 @@ public class AwsServiceRouter {
         // parts[5] is either "action/{ActionName}" or "path/{resourcePath}".
         // A path may itself contain ':' (rare), so re-join the remainder.
         String resourceSpec = parts.length > 6
-                ? String.join(":", java.util.Arrays.copyOfRange(parts, 5, parts.length))
+                ? String.join(":", Arrays.copyOfRange(parts, 5, parts.length))
                 : parts[5];
         if (resourceSpec.startsWith("action/")) {
             String action = resourceSpec.substring("action/".length());

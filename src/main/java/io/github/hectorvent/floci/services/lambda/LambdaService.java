@@ -11,8 +11,10 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -21,6 +23,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionService;
 import io.github.hectorvent.floci.services.lambda.durable.DurableWire;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableErrorObject;
@@ -48,6 +51,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -57,6 +61,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -99,6 +104,8 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_TOPIC_LENGTH = 249;
     private static final int MAX_TOPICS = 1;
     private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
+    private static final int LIST_FUNCTIONS_PAGE_SIZE = 50;
+    private static final int MAX_LIST_FUNCTIONS_ITEMS = 10_000;
     // UpdateFunctionCode S3Bucket (3-63 characters, [0-9A-Za-z\.\-_]*(?<!\.)) and S3Key (1-1024) shapes.
     private static final Pattern S3_BUCKET_PATTERN = Pattern.compile("[0-9A-Za-z\\.\\-_]*(?<!\\.)");
     // Create/UpdateAlias FunctionVersion (VersionWithLatestPublished: 1-1024, pattern below) and Description (max 256).
@@ -199,6 +206,7 @@ public class LambdaService implements ResourceProvider {
     private Map<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> policyMutationLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
+    private final SignedMarkers listFunctionMarkers = new SignedMarkers();
 
     /**
      * Package-private constructor for testing without CDI. Config defaults
@@ -337,8 +345,8 @@ public class LambdaService implements ResourceProvider {
                 if (!acceptable) {
                     throw new AwsException("AccessDeniedException",
                             "User is not authorized to perform: lambda:GetLayerVersion on resource: "
-                                    + arn + " because no resource-based policy allows the"
-                                    + " lambda:GetLayerVersion action", 403);
+                                    + arn + " " + PolicyType.RESOURCE_BASED_POLICY.noAllow("lambda:GetLayerVersion"),
+                            403);
                 }
                 LOG.warnv("Layer {0} belongs to another account; recorded on the function but its"
                         + " content will not be mounted at /opt", arn);
@@ -731,6 +739,17 @@ public class LambdaService implements ResourceProvider {
         return functionStore.list(region);
     }
 
+    public PaginatedResult<LambdaFunction> listFunctions(String region, String maxItems, String marker) {
+        List<String> errors = new ArrayList<>();
+        Integer requested = LambdaPagination.parseMaxItems(maxItems, MAX_LIST_FUNCTIONS_ITEMS, errors);
+        if (!errors.isEmpty()) {
+            throw SmithyValidationErrors.validationException(errors);
+        }
+        String scope = regionResolver.getAccountId() + "\n" + region + "\n";
+        return LambdaPagination.paginate(listFunctions(region), LambdaFunction::getFunctionName,
+                requested, LIST_FUNCTIONS_PAGE_SIZE, marker, listFunctionMarkers, scope);
+    }
+
     public LambdaFunction updateFunctionCode(String region, String functionName, Map<String, Object> request) {
         LambdaFunction fn = getFunction(region, functionName);
         // publishVersion copies roughly thirty fields off this same live object. Without the
@@ -887,7 +906,7 @@ public class LambdaService implements ResourceProvider {
 
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
         if (requestedVpcConfigUpdate != null) {
-            requestedVpcConfig = new java.util.HashMap<>(requestedVpcConfigUpdate);
+            requestedVpcConfig = new HashMap<>(requestedVpcConfigUpdate);
         }
         List<LambdaFileSystemConfig> requestedFileSystemConfigs = fn.getFileSystemConfigs();
         if (request.containsKey("FileSystemConfigs")) {
@@ -920,7 +939,7 @@ public class LambdaService implements ResourceProvider {
         }
         if (request.containsKey("Environment")) {
             if (environment != null && environment.containsKey("Variables")) {
-                fn.setEnvironment(environmentVariables != null ? environmentVariables : new java.util.HashMap<>());
+                fn.setEnvironment(environmentVariables != null ? environmentVariables : new HashMap<>());
             }
         }
 
@@ -2290,11 +2309,11 @@ public class LambdaService implements ResourceProvider {
     }
 
     /** The highest-numbered published version of a function, if any. */
-    private java.util.Optional<LambdaFunction> newestVersion(String region, String functionName) {
+    private Optional<LambdaFunction> newestVersion(String region, String functionName) {
         return functionStore.listVersions(region, functionName).stream()
                 .filter(v -> v.getVersion() != null && !"$LATEST".equals(v.getVersion()))
                 .filter(v -> v.getVersion().chars().allMatch(Character::isDigit))
-                .max(java.util.Comparator.comparingLong(v -> Long.parseLong(v.getVersion())));
+                .max(Comparator.comparingLong(v -> Long.parseLong(v.getVersion())));
     }
 
     /** Publishes an owned code snapshot; a failed copy must not reference mutable {@code $LATEST}. */
@@ -2418,7 +2437,7 @@ public class LambdaService implements ResourceProvider {
             snapshot.setEnvironment(fn.getEnvironment());
             snapshot.setVpcConfig(fn.getVpcConfig() == null
                     ? null
-                    : new java.util.HashMap<>(fn.getVpcConfig()));
+                    : new HashMap<>(fn.getVpcConfig()));
             snapshot.setVpcId(fn.getVpcId());
             snapshot.setSnapStartApplyOn(fn.getSnapStartApplyOn());
             snapshot.setLogFormat(fn.getLogFormat());
@@ -3005,7 +3024,7 @@ public class LambdaService implements ResourceProvider {
 
     public LambdaAlias createAlias(String region, String functionName, String aliasName,
                                    String functionVersion, String description,
-                                   java.util.Map<String, Double> routingConfig) {
+                                   Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
         validateAliasMembers(functionVersion, description);
         LambdaFunction fn = getFunction(region, functionName);
@@ -3047,7 +3066,7 @@ public class LambdaService implements ResourceProvider {
 
     public LambdaAlias updateAlias(String region, String functionName, String aliasName,
                                    String functionVersion, String description,
-                                   java.util.Map<String, Double> routingConfig) {
+                                   Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
         validateAliasMembers(functionVersion, description);
         LambdaFunction fn = getFunction(region, functionName);
@@ -3423,18 +3442,18 @@ public class LambdaService implements ResourceProvider {
 
     /** Stable, account-scoped S3 key for a published layer version's archive. */
     public static String layerObjectKey(String accountId, String layerName, long version) {
-        var account = accountId != null ? accountId : "000000000000";
+        String account = accountId != null ? accountId : "000000000000";
         return "layers/" + account + "/" + layerName + "/" + version;
     }
 
     /** Percent-encodes each path segment of a bucket path or object key for use in a URL. */
     public static String encodeObjectPath(String path) {
-        var encoded = new StringBuilder();
-        for (var segment : path.split("/", -1)) {
+        StringBuilder encoded = new StringBuilder();
+        for (String segment : path.split("/", -1)) {
             if (!encoded.isEmpty()) {
                 encoded.append('/');
             }
-            encoded.append(java.net.URLEncoder.encode(segment, java.nio.charset.StandardCharsets.UTF_8)
+            encoded.append(URLEncoder.encode(segment, StandardCharsets.UTF_8)
                     .replace("+", "%20"));
         }
         return encoded.toString();
@@ -3791,13 +3810,13 @@ public class LambdaService implements ResourceProvider {
             String resourceArn = policyResourceArn(fn, ref.qualifier());
             List<Map<String, Object>> statements = fn.getPolicies().stream()
                     .filter(statement -> scopedTo(statement, resourceArn))
-                    .<Map<String, Object>>map(java.util.LinkedHashMap::new)
+                    .<Map<String, Object>>map(LinkedHashMap::new)
                     .toList();
             if (statements.isEmpty()) {
                 throw new AwsException("ResourceNotFoundException",
                         "The resource you requested does not exist.", 404);
             }
-            Map<String, Object> policy = new java.util.LinkedHashMap<>();
+            Map<String, Object> policy = new LinkedHashMap<>();
             policy.put("Version", "2012-10-17");
             policy.put("Id", "default");
             policy.put("Statement", statements);

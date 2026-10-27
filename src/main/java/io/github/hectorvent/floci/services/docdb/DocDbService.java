@@ -33,6 +33,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 @ApplicationScoped
@@ -813,7 +814,7 @@ public class DocDbService {
 
     /** A resolved tag target: the record's key, its tags, and a sink that persists an update. */
     private record TagTarget(String lockKey, Map<String, String> tags,
-                             java.util.function.Consumer<Map<String, String>> save) {}
+                             Consumer<Map<String, String>> save) {}
 
     public Map<String, String> listTagsForResource(String resourceName) {
         return Map.copyOf(resolveTagTarget(resourceName).tags());
@@ -828,7 +829,7 @@ public class DocDbService {
         updateTags(resourceName, current -> tagKeys.forEach(current::remove));
     }
 
-    private void updateTags(String resourceName, java.util.function.Consumer<Map<String, String>> change) {
+    private void updateTags(String resourceName, Consumer<Map<String, String>> change) {
         // Resolve once to learn which record is meant, then do the read-modify-write under that
         // record's monitor and resolve again inside it: the record can be deleted in between, and
         // saving what the first read returned would put it back.

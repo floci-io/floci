@@ -68,6 +68,34 @@ class PaginationTest {
     }
 
     @Test
+    void signedPaging_resumesWithAnIssuedMarkerAndRejectsForeignOrChangedMarkers() {
+        SignedMarkers markers = new SignedMarkers();
+        PaginatedResult<String> first = signedPage(markers, 1, null, "account:region:");
+        assertThat(first.items(), contains("a"));
+        assertEquals("account:region:a", markers.cursorOf(first.nextToken()));
+
+        PaginatedResult<String> second = signedPage(markers, 2, first.nextToken(), "account:region:");
+        assertThat(second.items(), contains("b", "c"));
+        assertNull(second.nextToken());
+
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> signedPage(markers, 1, first.nextToken(), "other:region:")));
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> signedPage(new SignedMarkers(), 1, first.nextToken(), "account:region:")));
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> signedPage(markers, 1, first.nextToken() + "x", "account:region:")));
+    }
+
+    @Test
+    void signedPaging_rejectsAnEmptyOrMalformedMarker() {
+        SignedMarkers markers = new SignedMarkers();
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> signedPage(markers, 1, "", "")));
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> signedPage(markers, 1, "!!!", "")));
+    }
+
+    @Test
     void paging_aLimitNearIntMaxDoesNotReportAFurtherPage() {
         String afterFirst = page(1, null, "ns").nextToken();
 
@@ -194,6 +222,11 @@ class PaginationTest {
 
     private static PaginatedResult<String> page(int limit, String token, String namespace) {
         return Pagination.paginate(ITEMS, Function.identity(), limit, token, namespace, INVALID_TOKEN);
+    }
+
+    private static PaginatedResult<String> signedPage(SignedMarkers markers, int limit,
+                                                       String marker, String scope) {
+        return Pagination.paginate(ITEMS, Function.identity(), limit, marker, markers, scope, INVALID_TOKEN);
     }
 
     private static String decode(String token) {

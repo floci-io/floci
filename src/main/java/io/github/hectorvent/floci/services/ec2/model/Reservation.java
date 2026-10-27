@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -14,6 +15,9 @@ public class Reservation {
     private String ownerId;
     private List<GroupIdentifier> groups = new ArrayList<>();
     private List<Instance> instances = new ArrayList<>();
+    /** The volumes the launch created, kept for a caller that must undo it; never stored or returned. */
+    @JsonIgnore
+    private List<String> launchVolumeIds = new ArrayList<>();
 
     public Reservation() {}
 
@@ -28,4 +32,7 @@ public class Reservation {
 
     public List<Instance> getInstances() { return instances; }
     public void setInstances(List<Instance> instances) { this.instances = instances; }
+
+    @JsonIgnore
+    public List<String> getLaunchVolumeIds() { return launchVolumeIds; }
 }

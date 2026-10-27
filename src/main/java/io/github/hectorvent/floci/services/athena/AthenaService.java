@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.athena.model.CreateWorkGroupConfigurationRequest;
@@ -98,6 +99,7 @@ public class AthenaService {
     private final EmulatorConfig config;
     private final Vertx vertx;
     private final GlueViewDdlBuilder ddlBuilder;
+    private final RegionResolver regionResolver;
 
     @Inject
     public AthenaService(StorageFactory storageFactory,
@@ -106,7 +108,8 @@ public class AthenaService {
                          S3Service s3Service,
                          EmulatorConfig config,
                          Vertx vertx,
-                         GlueViewDdlBuilder ddlBuilder) {
+                         GlueViewDdlBuilder ddlBuilder,
+                         RegionResolver regionResolver) {
         this.queryStore = storageFactory.create("athena", "queries.json",
                 new TypeReference<>() {});
         this.workGroupStore = storageFactory.create("athena", "workgroups.json",
@@ -119,6 +122,7 @@ public class AthenaService {
         this.config = config;
         this.vertx = vertx;
         this.ddlBuilder = ddlBuilder;
+        this.regionResolver = regionResolver;
     }
 
     public String startQueryExecution(String query,
@@ -391,6 +395,21 @@ public class AthenaService {
                 .map(this::toCatalogSummary)
                 .toList());
         return summaries;
+    }
+
+    public PaginatedResult<Map<String, Object>> listDataCatalogsPage(String region, Integer maxResults, String nextToken) {
+        int limit = maxResults == null ? 50 : maxResults;
+        if (limit < 2 || limit > 50) {
+            throw new AwsException("InvalidRequestException", "MaxResults must be between 2 and 50.", 400);
+        }
+        if (nextToken != null && (nextToken.isEmpty() || nextToken.length() > 1024)) {
+            throw new AwsException("InvalidRequestException", "NextToken must contain 1 to 1024 characters.", 400);
+        }
+        return Pagination.paginate(listDataCatalogs(region), catalog -> {
+            String name = (String) catalog.get("CatalogName");
+            return DEFAULT_CATALOG.equals(name) ? "0" : "1" + name;
+        }, limit, nextToken, "ListDataCatalogs:" + regionResolver.getAccountId() + ":" + region,
+                token -> new AwsException("InvalidRequestException", "Invalid NextToken.", 400));
     }
 
     public Map<String, Object> getDataCatalog(String region, String name) {

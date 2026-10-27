@@ -57,7 +57,7 @@ public class EcsTaskRoleCredentialsServer {
         int port = config.services().ecs().taskRoleCredentials().port();
 
         Router router = Router.router(vertx);
-        router.get("/v2/credentials/:id").handler(this::handleCredentials);
+        router.get("/v2/credentials/:id").blockingHandler(this::handleCredentials);
 
         httpServer = vertx.createHttpServer();
         httpServer.requestHandler(router).listen(port, result -> {

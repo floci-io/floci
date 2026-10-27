@@ -261,6 +261,42 @@ class DynamoDbWriteCapacityTest {
     }
 
     @Test
+    void tableUnitsCountTheVectorAtFourBytesPerDimensionOnce() {
+        ObjectNode wide = item("""
+                {"pk": {"S": "a3"},
+                 "embedding": {"L": [{"N": "%1$s"}, {"N": "%1$s"}, {"N": "%1$s"}]}}
+                """.formatted("12345678901234567890123456789012345678"));
+        // 4 for the key, 9 for the vector's name and 12 for its dimensions leave 999 for the pad.
+        wide.set("pad", item("""
+                {"S": "%s"}
+                """.formatted("x".repeat(996))));
+        assertTrue(DynamoDbItemSize.calculateItemSize(wide) > 1024, "the stored numbers take it past 1KB");
+
+        assertEquals(1024, DynamoDbItemSize.billedItemSize(vectorTable(), wide));
+        assertEquals(1.0, DynamoDbWriteCapacity.forWrite(vectorTable(), null, wide).table());
+    }
+
+    @Test
+    void anyValueUnderTheVectorAttributeCostsFourBytesPerDimension() {
+        ObjectNode written = item("""
+                {"pk": {"S": "s1"}, "embedding": {"S": "%s"}}
+                """.formatted("x".repeat(2000)));
+        // 4 for the key, 9 for the vector's name and 12 for its dimensions.
+        assertEquals(25, DynamoDbItemSize.billedItemSize(vectorTable(), written));
+    }
+
+    @Test
+    void aVectorIndexStillCreatingLeavesTheStoredSize() {
+        TableDefinition creating = vectorTable();
+        creating.getVectorIndexes().forEach(index -> index.setIndexStatus("CREATING"));
+        ObjectNode written = item("""
+                {"pk": {"S": "s1"}, "embedding": {"S": "%s"}}
+                """.formatted("x".repeat(2000)));
+        assertEquals(DynamoDbItemSize.calculateItemSize(written),
+                DynamoDbItemSize.billedItemSize(creating, written));
+    }
+
+    @Test
     void itemMissingTheSearchSchemaHashEntersNoVectorIndex() {
         TableDefinition partitioned = new TableDefinition();
         partitioned.setKeySchema(List.of(new KeySchemaElement("pk", "HASH")));

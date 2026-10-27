@@ -16,6 +16,8 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Answers;
+import org.mockito.Mockito;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -167,7 +169,7 @@ class NodeAppSyncJsRuntimeTest {
         // A fluent builder that yields a spec, and a lifecycle manager that hands out a fresh
         // container each time, pointed at the stub whose /evaluate always fails.
         ContainerBuilder.Builder builder =
-                mock(ContainerBuilder.Builder.class, withSettings().defaultAnswer(org.mockito.Answers.RETURNS_SELF));
+                mock(ContainerBuilder.Builder.class, withSettings().defaultAnswer(Answers.RETURNS_SELF));
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(new ContainerSpec("test-image"));
 
@@ -180,7 +182,7 @@ class NodeAppSyncJsRuntimeTest {
             return new ContainerInfo(id, Map.of(4600,
                     new EndpointInfo("127.0.0.1", server.getAddress().getPort())));
         });
-        org.mockito.Mockito.doAnswer(invocation -> {
+        Mockito.doAnswer(invocation -> {
             stopped.add(invocation.getArgument(0));
             return null;
         }).when(lifecycleManager).stopAndRemove(anyString(), any());

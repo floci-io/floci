@@ -11,11 +11,13 @@ import jakarta.ws.rs.core.MultivaluedMap;
  * ValidationError} whether or not the thing it names exists, the ordering #6402 settled for this
  * package.
  *
- * <p>The vendored file carries one wave of operations rather than all 180, and grows a wave at a
- * time: the managed-policy family first, where no operation checks a declared constraint by hand,
- * so the model adds the refusals AWS answers without rewording an answer already given.
- * {@code AttachRolePolicy} and {@code DetachRolePolicy} are the exception and the parity case,
- * {@code IamService.validateRoleName} already answering {@code roleName} in the same form.
+ * <p>The vendored file carries a wave of operations rather than all 180, and grows a wave at a
+ * time, each one chosen where no operation checks a declared constraint by hand, so the model adds
+ * the refusals AWS answers without rewording an answer already given. The managed-policy family
+ * came first, with {@code AttachRolePolicy} and {@code DetachRolePolicy} as the exception and the
+ * parity case, {@code IamService.validateRoleName} already answering {@code roleName} in the same
+ * form. {@code GetAccountAuthorizationDetails} is the first read through the list walk, its
+ * {@code Filter}, {@code MaxItems} and {@code Marker} having been read by nothing at all.
  */
 final class IamRequestShapes {
 

@@ -76,6 +76,9 @@ class CloudFrontCustomOriginServingTest {
     /** The AWS managed CachingDisabled cache policy, which forwards no viewer values. */
     private static final String CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";
 
+    /** The AWS managed CachingOptimized cache policy: Accept-Encoding only, no cookies or query. */
+    private static final String CACHING_OPTIMIZED = "658327ea-f89d-4fab-a63d-7e88639e58f6";
+
     @Inject
     CloudFrontService cloudFrontService;
 
@@ -593,6 +596,28 @@ class CloudFrontCustomOriginServingTest {
         assertArrayEquals(Arrays.copyOfRange(video, 100, 200), response.asByteArray());
         assertEquals("bytes=100-199", received.get().header("Range"));
         assertEquals("\"v1\"", received.get().header("If-Range"));
+    }
+
+    @Test
+    void cachingOptimizedForwardsOnlyNormalizedAcceptEncoding() throws Exception {
+        AtomicReference<ReceivedRequest> received = new AtomicReference<>();
+        startRecordingOrigin(received, new AtomicInteger());
+        Distribution created = createDistribution(
+                customOriginDistribution(policyBehavior(CACHING_OPTIMIZED, null)));
+
+        given()
+            .header("Host", created.getDomainName())
+            .header("Accept-Encoding", "gzip, deflate, br")
+            .header("Cookie", "session=abc")
+            .queryParam("color", "blue")
+        .when()
+            .get("/asset.js")
+        .then()
+            .statusCode(200);
+
+        assertEquals("br,gzip", received.get().header("Accept-Encoding"));
+        assertNull(received.get().header("Cookie"));
+        assertNull(received.get().query());
     }
 
     @Test

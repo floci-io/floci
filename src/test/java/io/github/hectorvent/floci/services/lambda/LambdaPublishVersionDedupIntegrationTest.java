@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matchers;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -38,7 +40,7 @@ class LambdaPublishVersionDedupIntegrationTest {
                  "Code": {"ZipFile": "%s"}}
                 """.formatted(name, zipB64("v1")))
         .when().post("/2015-03-31/functions")
-        .then().statusCode(org.hamcrest.Matchers.anyOf(equalTo(200), equalTo(201)));
+        .then().statusCode(Matchers.anyOf(equalTo(200), equalTo(201)));
     }
 
     private static String publish(String name, String bodyJson) {
@@ -53,9 +55,9 @@ class LambdaPublishVersionDedupIntegrationTest {
         createFunction(fn);
 
         String first = publish(fn, "{}");
-        org.junit.jupiter.api.Assertions.assertEquals(first, publish(fn, "{}"),
+        Assertions.assertEquals(first, publish(fn, "{}"),
                 "an unchanged publish must return the existing version, not create a new one");
-        org.junit.jupiter.api.Assertions.assertEquals(first, publish(fn, "{}"),
+        Assertions.assertEquals(first, publish(fn, "{}"),
                 "repeated unchanged publishes must keep returning the same version");
 
         given().when().get("/2015-03-31/functions/" + fn + "/versions")
@@ -73,14 +75,14 @@ class LambdaPublishVersionDedupIntegrationTest {
             .body("{\"ZipFile\": \"%s\"}".formatted(zipB64("v2")))
         .when().put("/2015-03-31/functions/" + fn + "/code").then().statusCode(200);
         String second = publish(fn, "{}");
-        org.junit.jupiter.api.Assertions.assertNotEquals(first, second,
+        Assertions.assertNotEquals(first, second,
                 "a code change must still produce a new version");
 
         // Configuration counts too, since a version snapshots configuration as well as code.
         given().contentType("application/json").body("{\"Timeout\": 42}")
         .when().put("/2015-03-31/functions/" + fn + "/configuration").then().statusCode(200);
         String third = publish(fn, "{}");
-        org.junit.jupiter.api.Assertions.assertNotEquals(second, third,
+        Assertions.assertNotEquals(second, third,
                 "a configuration change must still produce a new version");
     }
 
@@ -96,9 +98,9 @@ class LambdaPublishVersionDedupIntegrationTest {
         String b = publish(fn, "{\"Description\": \"B\"}");
         String a2 = publish(fn, "{\"Description\": \"A\"}");
 
-        org.junit.jupiter.api.Assertions.assertNotEquals(a1, b);
-        org.junit.jupiter.api.Assertions.assertNotEquals(a1, a2,
+        Assertions.assertNotEquals(a1, b);
+        Assertions.assertNotEquals(a1, a2,
                 "returning to an earlier description must publish, not match the older version");
-        org.junit.jupiter.api.Assertions.assertNotEquals(b, a2);
+        Assertions.assertNotEquals(b, a2);
     }
 }

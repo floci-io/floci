@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
@@ -9,12 +10,17 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
+import java.util.Base64;
 import java.util.Map;
 import java.util.UUID;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -30,7 +36,7 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
     LambdaExecutionRoleCredentials executionRoleCredentials;
 
     @Inject
-    io.github.hectorvent.floci.services.lambda.LambdaService lambdaService;
+    LambdaService lambdaService;
 
     @Test
     void executionRoleDeniesS3ButCanGetCallerIdentity() {
@@ -107,12 +113,12 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
             // The gap this guards: publishVersion builds the snapshot field by field and currently
             // leaves accountId null, so the account has to come off the ARN. Asserting the account
             // resolves (rather than that the field is null) keeps this passing either way.
-            org.junit.jupiter.api.Assertions.assertEquals(
+            assertEquals(
                     ACCOUNT_ID, LambdaExecutionRoleCredentials.sessionAccountId(version));
 
             SessionCreds credentials = executionRoleCredentials.forFunction(version).orElseThrow();
             try {
-                org.junit.jupiter.api.Assertions.assertEquals(
+                assertEquals(
                         "arn:aws:sts::" + ACCOUNT_ID + ":assumed-role/" + roleName + "/" + functionName,
                         iamService.resolveCallerArn(credentials.accessKeyId()).orElseThrow());
             } finally {
@@ -127,13 +133,13 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
     }
 
     private static String handlerZipBase64() throws Exception {
-        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
-        try (java.util.zip.ZipOutputStream zip = new java.util.zip.ZipOutputStream(bytes)) {
-            zip.putNextEntry(new java.util.zip.ZipEntry("index.js"));
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
+            zip.putNextEntry(new ZipEntry("index.js"));
             zip.write("exports.handler = async () => ({});\n".getBytes());
             zip.closeEntry();
         }
-        return java.util.Base64.getEncoder().encodeToString(bytes.toByteArray());
+        return Base64.getEncoder().encodeToString(bytes.toByteArray());
     }
 
     private static String auth(String accessKeyId, String service) {

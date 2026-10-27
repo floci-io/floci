@@ -255,7 +255,7 @@ public class VerifiedPermissionsOidcSignatureVerifier implements AutoCloseable {
                 throw new VerificationException("Token header is not valid JSON");
             }
             return node;
-        } catch (IllegalArgumentException | java.io.IOException e) {
+        } catch (IllegalArgumentException | IOException e) {
             throw new VerificationException("Token header is not valid JSON", e);
         }
     }

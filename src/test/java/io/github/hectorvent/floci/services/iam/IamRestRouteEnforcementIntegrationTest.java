@@ -430,7 +430,8 @@ class IamRestRouteEnforcementIntegrationTest {
 
         policy(user, allow("lambda:RunMicrovm", "*") + "," + deny("lambda:RunMicrovm", image));
         refused(as(user, "lambda").body(run).post("/2025-09-09/microvms").then(), "lambda:RunMicrovm");
-        policy(user, allow("lambda:RunMicrovm", image));
+        // It also passes the managed connectors a MicroVM gets when it names none.
+        policy(user, allow("lambda:RunMicrovm", image) + "," + allow("lambda:PassNetworkConnector", "*"));
         String microvm = as(user, "lambda").body(run).post("/2025-09-09/microvms").then().statusCode(200)
                 .extract().path("microvmId");
         cleanup.register(() -> admin().delete("/2025-09-09/microvms/" + microvm));

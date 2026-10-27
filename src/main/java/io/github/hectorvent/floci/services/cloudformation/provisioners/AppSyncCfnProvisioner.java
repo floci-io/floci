@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * Provisions the AppSync resource types a GraphQL API is deployed from: the API itself, its schema,
@@ -366,7 +367,7 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
      * stack delete over a resource the emulator has no way to find.
      */
     private void deleteChild(StackResource r, String apiId, String description, String childId,
-                             java.util.function.Consumer<String> delete) {
+                             Consumer<String> delete) {
         if (blank(apiId) || blank(childId)) {
             LOG.warnv("Cannot delete AppSync {0} for {1}: no recorded api id/name, it is not removed",
                     description, r.getLogicalId());

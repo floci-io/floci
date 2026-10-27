@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -32,7 +33,7 @@ class StsWebIdentityEnforcementIntegrationTest {
             .body(containsString("InvalidIdentityToken"));
     }
 
-    private static io.restassured.response.Response assumeRole(String token) {
+    private static Response assumeRole(String token) {
         return given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "AssumeRoleWithWebIdentity")

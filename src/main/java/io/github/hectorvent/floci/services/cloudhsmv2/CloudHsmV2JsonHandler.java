@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Backup;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.BackupRetentionPolicy;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Certificates;
@@ -17,6 +18,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -74,10 +76,10 @@ public class CloudHsmV2JsonHandler {
                         .build();
             };
         } catch (AwsException e) {
-            return io.github.hectorvent.floci.core.common.JsonErrorResponseUtils.createErrorResponse(e);
+            return JsonErrorResponseUtils.createErrorResponse(e);
         } catch (Exception e) {
             LOG.errorf(e, "CloudHSM v2 error processing action %s", action);
-            return io.github.hectorvent.floci.core.common.JsonErrorResponseUtils.createErrorResponse(e);
+            return JsonErrorResponseUtils.createErrorResponse(e);
         }
     }
 
@@ -600,7 +602,7 @@ public class CloudHsmV2JsonHandler {
             return value;
         }
         try {
-            return new String(Base64.getDecoder().decode(value), java.nio.charset.StandardCharsets.UTF_8);
+            return new String(Base64.getDecoder().decode(value), StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
             return value;
         }

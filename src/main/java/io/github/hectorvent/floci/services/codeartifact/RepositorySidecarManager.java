@@ -218,6 +218,29 @@ public interface RepositorySidecarManager {
     }
 
     /**
+     * One package this sidecar holds, identified the same way {@link #packageExists} is:
+     * {@code namespace} is {@code null} for a format or package that has none.
+     */
+    record PackageIdentifier(String namespace, String packageName) {}
+
+    /**
+     * Every package this sidecar holds at least one real version of, for bridging {@code
+     * ListPackages} when there is no generic-format record to list packages from. Unlike {@link
+     * #listPackageVersions}, which already knows which one package to ask about, this has no
+     * known starting point at all: each implementation needs its own new, format-specific
+     * repository-wide enumeration, confirmed live against each real sidecar protocol rather than
+     * assumed (Verdaccio's {@code /-/all}, pypiserver's root simple index, BaGetter's Search
+     * resource pressed into service for this admin-only purpose, Reposilite's own directory
+     * listing walked recursively since it has no single list-everything endpoint). The default
+     * throws {@link UnsupportedOperationException}, the same convention {@link #deletePackage}
+     * already uses for a capability not every sidecar backs; every container-backed format's own
+     * client overrides this.
+     */
+    default List<PackageIdentifier> listPackages(String repositoryContainerId, String domain, String repository) {
+        throw new UnsupportedOperationException(format() + " packages cannot be listed through this sidecar");
+    }
+
+    /**
      * Marks that {@code repositoryContainerId} is about to be used for {@link
      * #listPackageVersions}, called by {@code CodeArtifactService} right after it resolves that
      * id and before it does anything else with it. Resolving the id and entering {@link

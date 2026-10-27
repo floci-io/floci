@@ -146,8 +146,14 @@ its lifecycle as in the `immediate` mode.
 * **Credentials**: the container gets a session for the step's `ExecutionRoleArn`, or else for the role
   of the cluster's `JobFlowRole` instance profile, when IAM knows it and the profile holds one role,
   and otherwise the account's placeholder credentials, with `AWS_ENDPOINT_URL` pointing at Floci.
-* **Output**: the driver's output goes to Floci's log, prefixed `emr:<stepId>`. Nothing is written
-  under `LogUri`.
+* **Output**: the driver's output goes to Floci's log, prefixed `emr:<stepId>`. With a `LogUri` on the
+  cluster, its standard output and error also go to Floci's S3 once the step ends, gzipped, as
+  `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/steps/<step-id>/`, the step log folder of the
+  Management Guide's "Log locations" (an `s3n://` or `s3a://` `LogUri` names the same bucket). A
+  cancelled step's logs hold what its driver wrote until it was stopped. Logs that cannot be written,
+  to a bucket that does not exist say, leave the step as it ended. The `controller` and `syslog` logs
+  and the other log folders are not written, nothing is copied while a step runs (EMR copies its logs
+  every five minutes), and `FailureDetails` has no `LogFile`.
 * **Image**: `image-template` names another image, such as a mirror or a dated tag of the release's
   image: `registry.internal/emr-serverless/spark/%s:20250425`. A release with no EMR Serverless image
   fails its steps with "The step could not start: Could not pull image".

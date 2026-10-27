@@ -6,6 +6,9 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
+import io.restassured.config.EncoderConfig;
+import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -33,9 +36,9 @@ class LambdaScopedTablePermissionIntegrationTest {
         String tableName = "granted-table-" + suffix;
         String roleName = "ScopedTableRole" + suffix;
         String tableArn = "arn:aws:dynamodb:" + REGION + ":" + ACCOUNT_ID + ":table/" + tableName;
-        given().config(io.restassured.RestAssured.config().encoderConfig(
-                        io.restassured.config.EncoderConfig.encoderConfig().encodeContentTypeAs(
-                                "application/x-amz-json-1.0", io.restassured.http.ContentType.TEXT)))
+        given().config(RestAssured.config().encoderConfig(
+                        EncoderConfig.encoderConfig().encodeContentTypeAs(
+                                "application/x-amz-json-1.0", ContentType.TEXT)))
                 .header("Authorization", auth("test"))
                 .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
                 .contentType("application/x-amz-json-1.0")
@@ -58,9 +61,9 @@ class LambdaScopedTablePermissionIntegrationTest {
         function.setRole("arn:aws:iam::" + ACCOUNT_ID + ":role/" + roleName);
         SessionCreds credentials = executionRoleCredentials.forFunction(function).orElseThrow();
         try {
-            given().config(io.restassured.RestAssured.config().encoderConfig(
-                        io.restassured.config.EncoderConfig.encoderConfig().encodeContentTypeAs(
-                                "application/x-amz-json-1.0", io.restassured.http.ContentType.TEXT)))
+            given().config(RestAssured.config().encoderConfig(
+                        EncoderConfig.encoderConfig().encodeContentTypeAs(
+                                "application/x-amz-json-1.0", ContentType.TEXT)))
                     .header("Authorization", auth(credentials.accessKeyId()))
                     .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
                     .contentType("application/x-amz-json-1.0")
@@ -70,9 +73,9 @@ class LambdaScopedTablePermissionIntegrationTest {
             .when().post("/")
             .then().statusCode(200);
 
-            given().config(io.restassured.RestAssured.config().encoderConfig(
-                        io.restassured.config.EncoderConfig.encoderConfig().encodeContentTypeAs(
-                                "application/x-amz-json-1.0", io.restassured.http.ContentType.TEXT)))
+            given().config(RestAssured.config().encoderConfig(
+                        EncoderConfig.encoderConfig().encodeContentTypeAs(
+                                "application/x-amz-json-1.0", ContentType.TEXT)))
                     .header("Authorization", auth(credentials.accessKeyId()))
                     .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
                     .contentType("application/x-amz-json-1.0")
@@ -82,9 +85,9 @@ class LambdaScopedTablePermissionIntegrationTest {
             .when().post("/")
             .then().statusCode(200).body(containsString("persisted"));
 
-            given().config(io.restassured.RestAssured.config().encoderConfig(
-                        io.restassured.config.EncoderConfig.encoderConfig().encodeContentTypeAs(
-                                "application/x-amz-json-1.0", io.restassured.http.ContentType.TEXT)))
+            given().config(RestAssured.config().encoderConfig(
+                        EncoderConfig.encoderConfig().encodeContentTypeAs(
+                                "application/x-amz-json-1.0", ContentType.TEXT)))
                     .header("Authorization", auth(credentials.accessKeyId()))
                     .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
                     .contentType("application/x-amz-json-1.0")

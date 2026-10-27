@@ -20,6 +20,7 @@ import java.io.UncheckedIOException;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
@@ -85,7 +86,7 @@ public final class Ec2KeyMaterial {
         try {
             KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
             generator.initialize(RSA_KEY_SIZE);
-            java.security.KeyPair pair = generator.generateKeyPair();
+            KeyPair pair = generator.generateKeyPair();
 
             StringWriter out = new StringWriter();
             try (JcaPEMWriter pem = new JcaPEMWriter(out)) {

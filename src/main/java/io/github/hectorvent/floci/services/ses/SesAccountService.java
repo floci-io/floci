@@ -162,16 +162,18 @@ public class SesAccountService {
                                                String useCaseDescription, List<String> additionalContacts) {
         List<String> errors = new ArrayList<>();
         if (mailType == null) {
-            errors.add(constraint("mailType", "Member must not be null"));
+            errors.add(SmithyValidationErrors.notNullWithoutValue("mailType"));
         } else if (!MAIL_TYPES.contains(mailType)) {
             errors.add(constraint("mailType", "Member must satisfy enum value set: [MARKETING, TRANSACTIONAL]"));
         }
         if (websiteUrl == null) {
-            errors.add(constraint("websiteURL", "Member must not be null"));
-        } else if (websiteUrl.isEmpty()) {
-            errors.add(constraint("websiteURL", "Member must have length greater than or equal to 1"));
-        } else if (websiteUrl.length() > WEBSITE_URL_MAX) {
-            errors.add(constraint("websiteURL", "Member must have length less than or equal to " + WEBSITE_URL_MAX));
+            errors.add(SmithyValidationErrors.notNullWithoutValue("websiteURL"));
+        } else {
+            String websiteUrlLength = SmithyValidationErrors.sizeOutOfRange("websiteURL", websiteUrl.length(),
+                    1, WEBSITE_URL_MAX);
+            if (websiteUrlLength != null) {
+                errors.add(websiteUrlLength);
+            }
         }
         if (contactLanguage != null && !CONTACT_LANGUAGES.contains(contactLanguage)) {
             errors.add(constraint("contactLanguage", "Member must satisfy enum value set: [EN, JA]"));
@@ -181,12 +183,10 @@ public class SesAccountService {
                     "Member must have length less than or equal to " + USE_CASE_DESCRIPTION_MAX));
         }
         if (additionalContacts != null) {
-            if (additionalContacts.isEmpty()) {
-                errors.add(constraint("additionalContactEmailAddresses",
-                        "Member must have length greater than or equal to 1"));
-            } else if (additionalContacts.size() > CONTACTS_MAX) {
-                errors.add(constraint("additionalContactEmailAddresses",
-                        "Member must have length less than or equal to " + CONTACTS_MAX));
+            String contactsSize = SmithyValidationErrors.sizeOutOfRange("additionalContactEmailAddresses",
+                    additionalContacts.size(), 1, CONTACTS_MAX);
+            if (contactsSize != null) {
+                errors.add(contactsSize);
             }
             for (String contact : additionalContacts) {
                 if (contact == null || contact.length() < CONTACT_MIN || contact.length() > CONTACT_MAX

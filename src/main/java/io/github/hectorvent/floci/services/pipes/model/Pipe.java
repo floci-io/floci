@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.pipes.model;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -65,7 +66,7 @@ public class Pipe {
     @JsonProperty("StateReason")
     private String stateReason;
 
-    @com.fasterxml.jackson.annotation.JsonIgnore
+    @JsonIgnore
     private String accountId;
 
     public Pipe() {}

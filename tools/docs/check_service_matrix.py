@@ -41,7 +41,10 @@ except ModuleNotFoundError:
 
 import yaml
 
-CATALOG_SOURCE = "src/main/java/io/github/hectorvent/floci/core/common/ResolvedServiceCatalog.java"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from java_sources import PACKAGE_DIR, package_source  # noqa: E402
+
+CATALOG_SOURCE = f"{PACKAGE_DIR}/core/common/ResolvedServiceCatalog.java"
 MATRIX_DOC = "docs/services/index.md"
 REGISTRY = "tools/docs/service_matrix.yaml"
 
@@ -236,7 +239,7 @@ def extract_action_counts(repo_root: Path, required_sources: frozenset[str] = fr
         if not isinstance(relative_path, str):
             raise ValueError(f"{REGISTRY}: action count source '{slug}' needs a source path")
         actions = regen_action_docs.extract_switch_actions(
-            (repo_root / relative_path).read_text(encoding="utf-8")
+            (repo_root / package_source(relative_path)).read_text(encoding="utf-8")
         )
         if not actions:
             raise ValueError(f"{REGISTRY}: action count source '{slug}' has no actions")

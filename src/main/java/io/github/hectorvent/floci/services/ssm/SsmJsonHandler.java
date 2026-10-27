@@ -185,7 +185,8 @@ public class SsmJsonHandler {
         }
         response.set("Parameters", parametersArray);
         response.set("InvalidParameters", invalidParameterNames(names,
-                params.stream().map(p -> p.getName() + (p.getSelector() == null ? "" : p.getSelector())).toList()));
+                params.stream().map(p -> p.getName() + (p.getSelector() == null ? "" : p.getSelector())).toList(),
+                name -> ssmService.parameterReadName(name, region)));
         return Response.ok(response).build();
     }
 
@@ -276,10 +277,15 @@ public class SsmJsonHandler {
     }
 
     private ArrayNode invalidParameterNames(List<String> requestedNames, List<String> returnedNames) {
+        return invalidParameterNames(requestedNames, returnedNames, Function.identity());
+    }
+
+    private ArrayNode invalidParameterNames(List<String> requestedNames, List<String> returnedNames,
+                                             Function<String, String> resolveName) {
         Set<String> returnedNameSet = new HashSet<>(returnedNames);
         ArrayNode invalidNames = objectMapper.createArrayNode();
         requestedNames.stream()
-                .filter(name -> !returnedNameSet.contains(name))
+                .filter(name -> !returnedNameSet.contains(resolveName.apply(name)))
                 .forEach(invalidNames::add);
         return invalidNames;
     }

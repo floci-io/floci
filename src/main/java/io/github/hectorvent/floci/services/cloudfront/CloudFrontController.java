@@ -351,7 +351,7 @@ public class CloudFrontController {
                                       @QueryParam("Type") String type) {
         try {
             Page<CachePolicy> page = page(
-                    service.listCachePolicies(marker, paginationFetchLimit(maxItems)),
+                    service.listCachePolicies(marker, paginationFetchLimit(maxItems), type),
                     maxItems, CachePolicy::getId);
 
             XmlBuilder xml = new XmlBuilder()
@@ -362,7 +362,8 @@ public class CloudFrontController {
                     .start("Items");
             for (CachePolicy p : page.items()) {
                 xml.start("CachePolicySummary")
-                        .elem("Type", "custom")
+                        .elem("Type", CloudFrontService.isManagedCachePolicy(p.getId())
+                                ? "managed" : "custom")
                         .raw(xmlCachePolicyResponse(p))
                         .end("CachePolicySummary");
             }

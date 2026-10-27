@@ -21,6 +21,7 @@ import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttSecurityException;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
+import org.eclipse.paho.mqttv5.client.MqttConnectionOptions;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -136,7 +137,7 @@ class IotMqttBrokerDeviceVerificationTest {
         when(service.findRegisteredCertificate(any())).thenReturn(Optional.empty());
         org.eclipse.paho.mqttv5.client.MqttClient client =
                 new org.eclipse.paho.mqttv5.client.MqttClient("ssl://127.0.0.1:" + tlsPort, "v5-unknown", null);
-        org.eclipse.paho.mqttv5.client.MqttConnectionOptions options = new org.eclipse.paho.mqttv5.client.MqttConnectionOptions();
+        MqttConnectionOptions options = new MqttConnectionOptions();
         options.setConnectionTimeout(10);
         options.setAutomaticReconnect(false);
         options.setSocketFactory(sslContext(keyManagers(deviceLeaf)).getSocketFactory());

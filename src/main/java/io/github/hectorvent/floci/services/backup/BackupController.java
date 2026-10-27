@@ -314,18 +314,29 @@ public class BackupController {
 
     @GET
     @Path("/backup/plans/")
-    public Response listBackupPlans() {
-        List<BackupPlan> plans = service.listBackupPlans();
+    public Response listBackupPlans(@Context HttpHeaders headers,
+                                      @QueryParam("includeDeleted") @DefaultValue("false") boolean includeDeleted,
+                                      @QueryParam("maxResults") String maxResults,
+                                      @QueryParam("nextToken") String nextToken) {
+        String region = regionResolver.resolveRegion(headers);
+        PaginatedResult<BackupPlan> page = service.listBackupPlans(region, includeDeleted,
+                Pagination.parseMaxResults(maxResults, "InvalidParameterValueException"), nextToken);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode list = out.putArray("BackupPlansList");
-        for (BackupPlan plan : plans) {
+        for (BackupPlan plan : page.items()) {
             ObjectNode item = objectMapper.createObjectNode();
             item.put("BackupPlanId", plan.getBackupPlanId());
             item.put("BackupPlanArn", plan.getBackupPlanArn());
             item.put("BackupPlanName", plan.getBackupPlanName());
             item.put("CreationDate", plan.getCreationDate());
             item.put("VersionId", plan.getVersionId());
+            if (plan.getDeletionDate() != null) {
+                item.put("DeletionDate", plan.getDeletionDate());
+            }
             list.add(item);
+        }
+        if (page.nextToken() != null) {
+            out.put("NextToken", page.nextToken());
         }
         return Response.ok(out).build();
     }

@@ -45,9 +45,12 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from java_sources import PACKAGE_DIR, SOURCE_ROOT as SOURCE_DIR  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SOURCE_ROOT = REPO_ROOT / "src/main/java"
-PACKAGE_ROOT = SOURCE_ROOT / "io/github/hectorvent/floci"
+SOURCE_ROOT = REPO_ROOT / SOURCE_DIR
+PACKAGE_ROOT = REPO_ROOT / PACKAGE_DIR
 TOOL_DIR = Path(__file__).resolve().parent
 ALLOWLIST = TOOL_DIR / "allowlist.yaml"
 BASELINE = TOOL_DIR / "baseline.tsv"

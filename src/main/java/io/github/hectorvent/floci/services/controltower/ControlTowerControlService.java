@@ -12,6 +12,7 @@ import jakarta.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -226,7 +227,7 @@ public class ControlTowerControlService {
     private static Set<String> stringSet(JsonNode node) {
         if (node == null || node.isNull()) return Set.of();
         if (!node.isArray() || node.size() == 0) throw validation("filter values must be non-empty arrays.");
-        Set<String> result = new java.util.HashSet<>();
+        Set<String> result = new HashSet<>();
         for (JsonNode item : node) {
             if (!item.isTextual() || item.asText().isBlank()) throw validation("filter values must be strings.");
             result.add(item.asText());

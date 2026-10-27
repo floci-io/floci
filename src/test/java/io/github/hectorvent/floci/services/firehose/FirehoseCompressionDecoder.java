@@ -8,6 +8,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.ZipEntry;
@@ -39,7 +40,7 @@ final class FirehoseCompressionDecoder {
 
     /** Fails when the archive does not hold exactly one entry, which is what AWS writes. */
     static ZipEntryContent singleZipEntry(byte[] body) throws IOException {
-        List<ZipEntryContent> entries = new java.util.ArrayList<>();
+        List<ZipEntryContent> entries = new ArrayList<>();
         try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(body))) {
             ZipEntry entry;
             while ((entry = zip.getNextEntry()) != null) {

@@ -100,10 +100,25 @@ class RequestResourceMembersTest {
                     + "{\"resources\":[],\"creates\":[{\"type\":\"part\",\"parent\":\"thing\",\"arn\":\"ThingArn\"}]}}}"),
                     part);
         }
-        // A member past one structure, or a structure's member filling a variable.
+        // A member past one structure, or filling a variable from a lone structure's member or a list in a list.
         assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].B.ThingArn\"}")));
-        assertThrows(IllegalStateException.class, () -> parse(document(formats,
-                "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A[].Name\"}}")));
+        for (String bad : List.of("A.Name", "A[].Names[]", "A[].B.Name")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                    "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"" + bad + "\"}}")), bad);
+        }
+        // A field of each of a list's structures fills a variable, read as given when absent or as an ARN, which
+        // only a member filling a variable is.
+        Member each = new Member("A", true, new Member("Name", false));
+        assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", each), Map.of(), Map.of(),
+                Map.of("A[].Name", "default"), Map.of("A[].Name", "thing"), null, null)),
+                parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A[].Name\"},"
+                        + "\"absent\":{\"A[].Name\":\"default\"},\"arnOf\":{\"A[].Name\":\"thing\"}}"))
+                        .operations().get("a:Op"));
+        assertEquals("A[].Name", each.path());
+        for (String bad : List.of("\"absent\":{\"A[].Name\":\"default\"}", "\"arnOf\":{\"A[].Name\":\"thing\"}")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                    "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"}," + bad + "}")), bad);
+        }
         assertEquals(List.of(new Resource(List.of("thing"), new Member("A", true, new Member("ThingArns", true)), Map.of(),
                 Map.of(), Map.of(), Map.of(), Map.of(), null, null)), parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].ThingArns[]\"}"))
                 .operations().get("a:Op"));

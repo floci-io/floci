@@ -485,6 +485,84 @@ class CloudFrontManagementProtocolTest {
                 .body(hasXPath("//*[local-name()='Code']/text()", equalTo("IllegalDelete")));
     }
 
+    @Test
+    void managedCachePolicyIsReadableAsPolicyAndConfig() {
+        String optimized = "658327ea-f89d-4fab-a63d-7e88639e58f6";
+        given()
+            .when()
+                .get(API + "cache-policy/" + optimized)
+            .then()
+                .statusCode(200)
+                .body(hasXPath("//*[local-name()='Name']/text()", equalTo("Managed-CachingOptimized")))
+                .body(hasXPath("//*[local-name()='MinTTL']/text()", equalTo("1")))
+                .body(hasXPath("//*[local-name()='DefaultTTL']/text()", equalTo("86400")))
+                .body(hasXPath("//*[local-name()='MaxTTL']/text()", equalTo("31536000")))
+                .body(hasXPath("//*[local-name()='EnableAcceptEncodingGzip']/text()", equalTo("true")))
+                .body(hasXPath("//*[local-name()='EnableAcceptEncodingBrotli']/text()", equalTo("true")))
+                .body(hasXPath("//*[local-name()='HeaderBehavior']/text()", equalTo("none")));
+
+        given()
+            .when()
+                .get(API + "cache-policy/" + optimized + "/config")
+            .then()
+                .statusCode(200)
+                .body(hasXPath("local-name(/*)", equalTo("CachePolicyConfig")))
+                .body(hasXPath("//*[local-name()='Name']/text()", equalTo("Managed-CachingOptimized")));
+    }
+
+    @Test
+    void managedCachePoliciesAreListedWithTheirType() {
+        String disabled = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";
+        given()
+                .queryParam("Type", "managed")
+            .when()
+                .get(API + "cache-policy")
+            .then()
+                .statusCode(200)
+                .body(hasXPath("/*/*[local-name()='Quantity']/text()", equalTo("7")))
+                .body(hasXPath("//*[local-name()='CachePolicySummary']"
+                        + "[.//*[local-name()='Id' and text()='" + disabled + "']]"
+                        + "/*[local-name()='Type']/text()", equalTo("managed")));
+
+        given()
+                .queryParam("Type", "custom")
+            .when()
+                .get(API + "cache-policy")
+            .then()
+                .statusCode(200)
+                .body(hasXPath("count(//*[local-name()='Id' and text()='" + disabled + "'])",
+                        equalTo("0")));
+    }
+
+    @Test
+    void managedCachePolicyCannotBeUpdatedOrDeleted() {
+        String optimized = "658327ea-f89d-4fab-a63d-7e88639e58f6";
+        given()
+                .header("If-Match", "E23ZP02F085DFQ")
+                .contentType("application/xml")
+                .body(cachePolicyBody("replacement", "c", "100", "session"))
+            .when()
+                .put(API + "cache-policy/" + optimized)
+            .then()
+                .statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']/text()", equalTo("IllegalUpdate")));
+
+        given()
+                .header("If-Match", "E23ZP02F085DFQ")
+            .when()
+                .delete(API + "cache-policy/" + optimized)
+            .then()
+                .statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']/text()", equalTo("IllegalDelete")));
+
+        given()
+            .when()
+                .get(API + "cache-policy/" + optimized)
+            .then()
+                .statusCode(200)
+                .body(hasXPath("//*[local-name()='Name']/text()", equalTo("Managed-CachingOptimized")));
+    }
+
     private static String cachePolicyBody(String name, String comment, String defaultTtl, String cookie) {
         return """
                 <CachePolicyConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">

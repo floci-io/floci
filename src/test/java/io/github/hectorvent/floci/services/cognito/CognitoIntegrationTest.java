@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testutil.SesMailbox;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -25,9 +26,11 @@ import java.security.Signature;
 import java.security.spec.RSAPublicKeySpec;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Spliterators;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -137,9 +140,9 @@ class CognitoIntegrationTest {
                 """.formatted(clientId, USERNAME, PASSWORD))
                 .then()
                 .statusCode(200)
-                .body("AuthenticationResult.AccessToken", org.hamcrest.Matchers.notNullValue())
-                .body("AuthenticationResult.IdToken", org.hamcrest.Matchers.notNullValue())
-                .body("AuthenticationResult.RefreshToken", org.hamcrest.Matchers.notNullValue());
+                .body("AuthenticationResult.AccessToken", Matchers.notNullValue())
+                .body("AuthenticationResult.IdToken", Matchers.notNullValue())
+                .body("AuthenticationResult.RefreshToken", Matchers.notNullValue());
     }
 
     @Test
@@ -157,7 +160,7 @@ class CognitoIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("__type", equalTo("InvalidParameterException"))
-                .body("AuthenticationResult", org.hamcrest.Matchers.nullValue());
+                .body("AuthenticationResult", Matchers.nullValue());
     }
 
     @Test
@@ -176,7 +179,7 @@ class CognitoIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("__type", equalTo("InvalidParameterException"))
-                .body("AuthenticationResult", org.hamcrest.Matchers.nullValue());
+                .body("AuthenticationResult", Matchers.nullValue());
     }
 
     @Test
@@ -210,7 +213,7 @@ class CognitoIntegrationTest {
                 """.formatted(poolId, clientId, USERNAME, PASSWORD))
                 .then()
                 .statusCode(200)
-                .body("AuthenticationResult.AccessToken", org.hamcrest.Matchers.notNullValue());
+                .body("AuthenticationResult.AccessToken", Matchers.notNullValue());
     }
 
     @Test
@@ -289,7 +292,7 @@ class CognitoIntegrationTest {
         assertTrue(schema.size() >= 20,
                 "DescribeUserPool must include all 20 Cognito standard attributes");
 
-        java.util.Set<String> names = new java.util.HashSet<>();
+        Set<String> names = new HashSet<>();
         schema.forEach(attr -> names.add(attr.path("Name").asText()));
 
         for (String expected : List.of("sub", "name", "given_name", "family_name", "middle_name",
@@ -386,8 +389,8 @@ class CognitoIntegrationTest {
                 """.formatted(forgotPasswordClientId, forgotPasswordUsername))
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("CodeMismatchException"))
-                .body("message", org.hamcrest.Matchers.equalTo("Invalid verification code provided, please try again."));
+                .body("__type", Matchers.equalTo("CodeMismatchException"))
+                .body("message", Matchers.equalTo("Invalid verification code provided, please try again."));
     }
 
     @Test
@@ -471,7 +474,7 @@ class CognitoIntegrationTest {
                 """.formatted(strictClientId))
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("InvalidPasswordException"));
+                .body("__type", Matchers.equalTo("InvalidPasswordException"));
 
         cognitoAction("SignUp", """
                 {
@@ -656,8 +659,8 @@ class CognitoIntegrationTest {
                 """.formatted(signUpClientId, signUpUsername))
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("CodeMismatchException"))
-                .body("message", org.hamcrest.Matchers.equalTo("Invalid verification code provided, please try again."));
+                .body("__type", Matchers.equalTo("CodeMismatchException"))
+                .body("message", Matchers.equalTo("Invalid verification code provided, please try again."));
 
         JsonNode stillUnconfirmedUser = cognitoJson("AdminGetUser", """
                 {
@@ -987,7 +990,7 @@ class CognitoIntegrationTest {
                 """.formatted(resendClientId, resendUsername, originalCode))
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("CodeMismatchException"));
+                .body("__type", Matchers.equalTo("CodeMismatchException"));
 
         cognitoAction("ConfirmSignUp", """
                 {
@@ -1007,7 +1010,7 @@ class CognitoIntegrationTest {
                 """.formatted(resendClientId, resendUsername))
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"));
+                .body("__type", Matchers.equalTo("NotAuthorizedException"));
     }
 
     @Test
@@ -1050,7 +1053,7 @@ class CognitoIntegrationTest {
                 """.formatted(client, user))
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("InvalidParameterException"));
+                .body("__type", Matchers.equalTo("InvalidParameterException"));
     }
 
     @Test
@@ -2222,7 +2225,7 @@ class CognitoIntegrationTest {
                 """.formatted(clientId, USERNAME, PASSWORD))
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.containsString("PasswordResetRequiredException"));
+                .body("__type", Matchers.containsString("PasswordResetRequiredException"));
 
         // 3. Admin sets a new password
         String newPassword = "NewPassword123!";
@@ -3051,7 +3054,7 @@ class CognitoIntegrationTest {
                 """.formatted(clientId))
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"));
+                .body("__type", Matchers.equalTo("NotAuthorizedException"));
     }
 
     @Test
@@ -3059,7 +3062,7 @@ class CognitoIntegrationTest {
     void initiateAuthRefreshTokenAuthRejectsUnknownWellFormedRefreshToken() {
         // Well-formed shape (poolId|username|clientId|iat|nonce) but for a user that
         // does not exist in this pool — must still be rejected, not silently accepted.
-        String bogusToken = java.util.Base64.getEncoder().withoutPadding().encodeToString(
+        String bogusToken = Base64.getEncoder().withoutPadding().encodeToString(
                 (poolId + "|nonexistent-user|" + clientId + "|" + System.currentTimeMillis() + "|"
                         + UUID.randomUUID()).getBytes(StandardCharsets.UTF_8));
 
@@ -3072,7 +3075,7 @@ class CognitoIntegrationTest {
                 """.formatted(clientId, bogusToken))
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"));
+                .body("__type", Matchers.equalTo("NotAuthorizedException"));
     }
 
     @Test
@@ -3080,7 +3083,7 @@ class CognitoIntegrationTest {
     void initiateAuthRefreshTokenAuthRejectsTokenWithNonNumericIssuedAt() {
         // Well-formed shape (5 base64 parts), but the issued-at field is not a number.
         // Must fail with NotAuthorizedException, not a 500 from an unguarded parseLong.
-        String bogusToken = java.util.Base64.getEncoder().withoutPadding().encodeToString(
+        String bogusToken = Base64.getEncoder().withoutPadding().encodeToString(
                 (poolId + "|" + USERNAME + "|" + clientId + "|not-a-number|"
                         + UUID.randomUUID()).getBytes(StandardCharsets.UTF_8));
 
@@ -3093,7 +3096,7 @@ class CognitoIntegrationTest {
                 """.formatted(clientId, bogusToken))
                 .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("NotAuthorizedException"));
+                .body("__type", Matchers.equalTo("NotAuthorizedException"));
     }
 
     /**

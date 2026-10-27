@@ -6,8 +6,10 @@ import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
+import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -60,8 +62,7 @@ class CloudFrontSignedUrlServingTest {
                 + Base64.getMimeEncoder().encodeToString(keyPair.getPublic().getEncoded())
                 + "\n-----END PUBLIC KEY-----";
 
-        io.github.hectorvent.floci.services.cloudfront.model.PublicKey publicKey =
-                new io.github.hectorvent.floci.services.cloudfront.model.PublicKey();
+        PublicKey publicKey = new PublicKey();
         publicKey.setName("pk-" + suffix);
         publicKey.setCallerReference("cr-" + suffix);
         publicKey.setEncodedKey(pem);
@@ -183,8 +184,7 @@ class CloudFrontSignedUrlServingTest {
         String pem = "-----BEGIN PUBLIC KEY-----\n"
                 + Base64.getMimeEncoder().encodeToString(keyPair.getPublic().getEncoded())
                 + "\n-----END PUBLIC KEY-----";
-        io.github.hectorvent.floci.services.cloudfront.model.PublicKey publicKey =
-                new io.github.hectorvent.floci.services.cloudfront.model.PublicKey();
+        PublicKey publicKey = new PublicKey();
         publicKey.setName("pk-" + suffix);
         publicKey.setCallerReference("cr-" + suffix);
         publicKey.setEncodedKey(pem);
@@ -234,7 +234,7 @@ class CloudFrontSignedUrlServingTest {
     }
 
     private static String rawGet(String host, String pathAndQuery) throws Exception {
-        try (Socket socket = new Socket("127.0.0.1", io.restassured.RestAssured.port)) {
+        try (Socket socket = new Socket("127.0.0.1", RestAssured.port)) {
             String request = "GET " + pathAndQuery + " HTTP/1.1\r\n"
                     + "Host: " + host + "\r\n"
                     + "Connection: close\r\n\r\n";

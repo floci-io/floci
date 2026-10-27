@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -280,7 +281,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
                 .body(containsString("boolean must follow xsd1.1 definition"));
     }
 
-    private static io.restassured.response.Response sendEmail(String configSet) {
+    private static Response sendEmail(String configSet) {
         return given()
                 .contentType("application/json")
                 .header("Authorization", SES_AUTH)

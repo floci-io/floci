@@ -2414,6 +2414,10 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean allowUnsafeHostVolumes();
 
+        /** Allow ECS task definitions to launch Docker containers with host-level privilege. */
+        @WithDefault("false")
+        boolean allowPrivilegedContainers();
+
         /**
          * When true, Floci removes on startup, in Docker mode, every ECS container a previous run
          * of <em>this same</em> Floci left on the daemon (matched by the {@code io.floci.owner}

@@ -86,7 +86,7 @@ public class SesReputationEntityService {
         requireReference(reference);
         if (status == null) {
             throw SmithyValidationErrors.badRequest(
-                    "Value at 'sendingStatus' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNullWithoutValue("sendingStatus"));
         }
         if (!SENDING_STATUSES.contains(status)) {
             throw SmithyValidationErrors.badRequest("Value at 'sendingStatus' failed to satisfy constraint: "

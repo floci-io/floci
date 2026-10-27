@@ -15,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -210,7 +211,7 @@ class KinesisAnalyticsV2ServiceTest {
     void deleteApplicationRejectsWrongTimestamp() {
         create("demo");
         assertThrows(AwsException.class,
-                () -> service.deleteApplication("demo", java.time.Instant.ofEpochSecond(1)));
+                () -> service.deleteApplication("demo", Instant.ofEpochSecond(1)));
     }
 
     @Test
@@ -497,7 +498,7 @@ class KinesisAnalyticsV2ServiceTest {
         createRunningWithCode("demo");
         service.createApplicationSnapshot("demo", "snap1");
         assertThrows(AwsException.class, () -> service.deleteApplicationSnapshot(
-                "demo", "snap1", java.time.Instant.ofEpochSecond(1)));
+                "demo", "snap1", Instant.ofEpochSecond(1)));
     }
 
     @Test

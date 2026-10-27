@@ -21,6 +21,8 @@ import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -494,8 +496,8 @@ class AppSyncServiceTest {
      * {@code arn:aws:appsync:} meant refusing to tag an API using the exact ARN just returned.
      * Botocore spells the literal, but this emulator has to accept its own output.
      */
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({
+    @ParameterizedTest
+    @CsvSource({
             "us-east-1,      aws",
             "us-gov-west-1,  aws-us-gov",
             "cn-north-1,     aws-cn",

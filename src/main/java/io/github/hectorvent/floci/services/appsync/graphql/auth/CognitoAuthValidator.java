@@ -15,6 +15,7 @@ import java.time.Clock;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 /**
@@ -172,7 +173,7 @@ public class CognitoAuthValidator {
         return clientId != null && clientMatches(claims, clientId::equals);
     }
 
-    static boolean clientMatches(Map<String, Object> claims, java.util.function.Predicate<String> matcher) {
+    static boolean clientMatches(Map<String, Object> claims, Predicate<String> matcher) {
         Object aud = claims.get("aud");
         if (aud instanceof String s && matcher.test(s)) {
             return true;

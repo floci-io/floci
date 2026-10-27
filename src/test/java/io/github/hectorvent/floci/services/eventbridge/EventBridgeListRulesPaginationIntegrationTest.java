@@ -140,6 +140,29 @@ class EventBridgeListRulesPaginationIntegrationTest {
                 .body("{\"Limit\":1,\"NextToken\":\"not-a-token!\"}")
                 .when().post("/")
                 .then().statusCode(400)
-                .body("__type", equalTo("InvalidToken"));
+                .body("__type", equalTo("InvalidToken"))
+                .body("message", equalTo("Invalid NextToken."));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 2049})
+    void outOfBoundsTokenLengthsFailValidation(int length) {
+        given().contentType(CT).header("X-Amz-Target", "AWSEvents.ListRules")
+                .body("{\"NextToken\":\"" + "a".repeat(length) + "\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("NextToken must contain 1 to 2048 characters."));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2048})
+    void inBoundsMalformedTokensReturnInvalidToken(int length) {
+        given().contentType(CT).header("X-Amz-Target", "AWSEvents.ListRules")
+                .body("{\"NextToken\":\"" + "a".repeat(length) + "\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidToken"))
+                .body("message", equalTo("Invalid NextToken."));
     }
 }

@@ -13,6 +13,7 @@ import software.amazon.awssdk.services.appconfigdata.model.StartConfigurationSes
 
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -300,7 +301,7 @@ class AppConfigTest {
         try {
             appConfig.tagResource(TagResourceRequest.builder()
                     .resourceArn(arn)
-                    .tags(java.util.Map.of("env", "prod", "owner", "Alice"))
+                    .tags(Map.of("env", "prod", "owner", "Alice"))
                     .build());
 
             ListTagsForResourceResponse listed = appConfig.listTagsForResource(
@@ -346,7 +347,7 @@ class AppConfigTest {
 
         appConfig.tagResource(TagResourceRequest.builder()
                 .resourceArn(arn)
-                .tags(java.util.Map.of("env", "prod"))
+                .tags(Map.of("env", "prod"))
                 .build());
 
         ListTagsForResourceResponse listed = appConfig.listTagsForResource(

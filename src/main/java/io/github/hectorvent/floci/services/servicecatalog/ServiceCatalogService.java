@@ -17,10 +17,14 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.regex.Pattern;
+import java.util.stream.StreamSupport;
 
 @ApplicationScoped
 public class ServiceCatalogService implements PassedRoleLookup {
@@ -191,7 +195,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         JsonNode terms = request.path("Filters").path("FullTextSearch");
         return productStore.scan(key -> true).stream()
                 .filter(product -> !terms.isArray() || terms.isEmpty()
-                        || java.util.stream.StreamSupport.stream(terms.spliterator(), false)
+                        || StreamSupport.stream(terms.spliterator(), false)
                         .allMatch(term -> (text(product, "Name") + " " + text(product, "Owner"))
                                 .toLowerCase().contains(term.asText().toLowerCase())))
                 .map(ObjectNode::deepCopy).toList();
@@ -235,7 +239,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
      * requested OU, and returns its account id.
      */
     private String accountFactoryAccountId(JsonNode request, String name, String accountId) {
-        Map<String, String> parameters = new java.util.HashMap<>();
+        Map<String, String> parameters = new HashMap<>();
         request.path("ProvisioningParameters").forEach(parameter ->
                 parameters.put(text(parameter, "Key"), text(parameter, "Value")));
         String email = parameters.get("AccountEmail");
@@ -495,7 +499,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
             return true;
         }
         JsonNode ids = product.path("ProvisioningArtifactIds");
-        return ids.isArray() && java.util.stream.StreamSupport.stream(ids.spliterator(), false)
+        return ids.isArray() && StreamSupport.stream(ids.spliterator(), false)
                 .anyMatch(id -> identifier.equals(id.asText()));
     }
 
@@ -523,8 +527,8 @@ public class ServiceCatalogService implements PassedRoleLookup {
     static final List<String> DESCRIBE_PORTFOLIO_SHARE_TYPES =
             List.of("ACCOUNT", "ORGANIZATION", "ORGANIZATIONAL_UNIT", "ORGANIZATION_MEMBER_ACCOUNT");
 
-    private static final java.util.regex.Pattern ACCOUNT_ID_PATTERN =
-            java.util.regex.Pattern.compile("[0-9]{12}");
+    private static final Pattern ACCOUNT_ID_PATTERN =
+            Pattern.compile("[0-9]{12}");
 
     /**
      * Rejects a value botocore does not list in the member's enum. Accepting one leaves the
@@ -614,7 +618,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         }
         require(portfolioStore, portfolioId, "portfolio");
         String prefix = portfolioId + "|";
-        List<ObjectNode> results = new java.util.ArrayList<>();
+        List<ObjectNode> results = new ArrayList<>();
         for (String key : shareStore.keys()) {
             if (!key.startsWith(prefix)) {
                 continue;
@@ -748,7 +752,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         }
         ObjectNode product = requireProduct(productId);
         JsonNode artifactIds = product.path("ProvisioningArtifactIds");
-        boolean found = artifactIds.isArray() && java.util.stream.StreamSupport.stream(artifactIds.spliterator(), false)
+        boolean found = artifactIds.isArray() && StreamSupport.stream(artifactIds.spliterator(), false)
                 .anyMatch(id -> provisioningArtifactId.equals(id.asText()));
         if (!found) {
             throw new AwsException("ResourceNotFoundException", "Unknown provisioning artifact: " + provisioningArtifactId, 400);
@@ -770,7 +774,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         if (!associations.isArray() || associations.isEmpty()) {
             throw new AwsException("InvalidParametersException", "ServiceActionAssociations is required", 400);
         }
-        List<ObjectNode> failures = new java.util.ArrayList<>();
+        List<ObjectNode> failures = new ArrayList<>();
         for (JsonNode assoc : associations) {
             String productId = text(assoc, "ProductId");
             String artifactId = text(assoc, "ProvisioningArtifactId");
@@ -789,7 +793,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
                 continue;
             }
             JsonNode artifactIds = product.path("ProvisioningArtifactIds");
-            boolean artifactFound = artifactIds.isArray() && java.util.stream.StreamSupport
+            boolean artifactFound = artifactIds.isArray() && StreamSupport
                     .stream(artifactIds.spliterator(), false)
                     .anyMatch(id -> artifactId.equals(id.asText()));
             if (!artifactFound) {
@@ -826,7 +830,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         if (!associations.isArray() || associations.isEmpty()) {
             throw new AwsException("InvalidParametersException", "ServiceActionAssociations is required", 400);
         }
-        List<ObjectNode> failures = new java.util.ArrayList<>();
+        List<ObjectNode> failures = new ArrayList<>();
         for (JsonNode assoc : associations) {
             String productId = text(assoc, "ProductId");
             String artifactId = text(assoc, "ProvisioningArtifactId");
@@ -1087,7 +1091,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         }
         ObjectNode product = requireProduct(productId);
         JsonNode artifactIds = product.path("ProvisioningArtifactIds");
-        boolean found = artifactIds.isArray() && java.util.stream.StreamSupport.stream(artifactIds.spliterator(), false)
+        boolean found = artifactIds.isArray() && StreamSupport.stream(artifactIds.spliterator(), false)
                 .anyMatch(id -> provisioningArtifactId.equals(id.asText()));
         if (!found) {
             throw new AwsException("ResourceNotFoundException", "Unknown provisioning artifact: " + provisioningArtifactId, 400);
@@ -1222,7 +1226,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         }
         require(portfolioStore, portfolioId, "portfolio");
         String prefix = portfolioId + "|";
-        List<String> accountIds = new java.util.ArrayList<>();
+        List<String> accountIds = new ArrayList<>();
         for (String key : shareStore.keys()) {
             if (!key.startsWith(prefix)) {
                 continue;
@@ -1273,7 +1277,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
             throw new AwsException("InvalidParametersException", "TagOptionId is required", 400);
         }
         require(tagOptionStore, tagOptionId, "TagOption");
-        List<ObjectNode> results = new java.util.ArrayList<>();
+        List<ObjectNode> results = new ArrayList<>();
         for (String key : associationStore.keys()) {
             associationStore.get(key).ifPresent(assoc -> {
                 if (!"TAG_OPTION".equals(text(assoc, "Type"))) {

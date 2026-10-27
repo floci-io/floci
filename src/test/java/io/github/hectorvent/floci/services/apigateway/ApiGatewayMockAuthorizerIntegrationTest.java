@@ -99,6 +99,7 @@ class ApiGatewayMockAuthorizerIntegrationTest {
         given().header("Authorization", "Bearer denied")
                 .get("/execute-api/" + apiId + "/test/claims")
                 .then().statusCode(403)
+                .header("x-amzn-ErrorType", equalTo("AccessDeniedException"))
                 .body(equalTo("{\"message\":\"User is not authorized to access this resource\"}"));
     }
 

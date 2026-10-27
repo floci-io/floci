@@ -84,6 +84,11 @@ public class EmrServerlessJobRunService implements Resettable {
     // The service a container run's driver belongs to, which names it and labels it.
     private static final String SERVICE = "emr-serverless";
     private static final String SPARK_DEFAULTS = "spark-defaults";
+    private static final String S3_MONITORING = "s3MonitoringConfiguration";
+    private static final String CLOUD_WATCH_LOGGING = "cloudWatchLoggingConfiguration";
+    // "If you don't specify the optional values, then CloudWatch publishes the logs to a default log group".
+    private static final String DEFAULT_LOG_GROUP = "/aws/emr-serverless";
+    private static final String SPARK_DRIVER = "SPARK_DRIVER";
     // No source gives AWS's wording for these; they are Floci's.
     static final String HIVE_NOT_RUN = "Floci runs Spark job runs only, and this is a Hive job run.";
     static final String INTERRUPTED = "Floci stopped while the job run was in progress.";
@@ -459,7 +464,8 @@ public class EmrServerlessJobRunService implements Resettable {
                 ? Duration.ZERO : Duration.ofMinutes(minutes);
         SparkJobRunner.Job job = new SparkJobRunner.Job(SERVICE, run.getJobRunId(), arn.accountId(), arn.region(),
                 run.getReleaseLabel(), imageTemplate, dockerNetwork, run.getExecutionRole(), sparkDefaults(app, run),
-                application(run.getJobDriver().getSparkSubmit()), timeout);
+                application(run.getJobDriver().getSparkSubmit()), timeout, driverLogFolder(app, run),
+                driverCloudWatchLogs(app, run));
         executing.add(run.getJobRunId());
         long launchedIn = generation;
         runExecutor.execute(() -> execute(job, launchedIn));
@@ -609,6 +615,88 @@ public class EmrServerlessJobRunService implements Resettable {
             }
         }
         return properties;
+    }
+
+    /**
+     * The S3 folder a run's driver logs go to, or null without an S3 log destination: the run's
+     * {@code s3MonitoringConfiguration} or else the application's, an empty one at the run removing it. Under
+     * its {@code logUri} the user guide puts a run's logs at {@code /applications/<applicationId>/jobs/<jobId>},
+     * with {@code /attempts/<attemptNumber>} after it for "all streaming jobs and any batch jobs that have retry
+     * enabled" from release 7.1.0, and the driver's in {@code SPARK_DRIVER/}.
+     */
+    static String driverLogFolder(Application app, JobRun run) {
+        String logUri = monitoring(app, run, S3_MONITORING) instanceof Map<?, ?> configuration
+                && configuration.get("logUri") instanceof String uri ? uri : null;
+        return EmrServerlessSparkRunner.logFolder(logUri, driverLogPath(run).substring(1) + "/");
+    }
+
+    /**
+     * Where in CloudWatch Logs a run's driver output goes, or null when CloudWatch logging is not enabled.
+     * The run's {@code cloudWatchLoggingConfiguration} supersedes the application's, and one with
+     * {@code enabled} false removes it. The user guide's defaults: the log group {@code /aws/emr-serverless}
+     * and the log stream {@code /applications/applicationId/jobs/jobId/worker-type}, after the
+     * {@code logStreamNamePrefix}, with the attempt as for S3, and "By default, EMR Serverless publishes only
+     * the driver stdout and stderr logs". Each goes to a stream of its own under the driver's, as the
+     * clients that read them (Dagster's EMR Serverless client) name them: {@code .../SPARK_DRIVER/stdout}
+     * and {@code .../SPARK_DRIVER/stderr}. A {@code logTypes} that names some types takes only those of the
+     * driver's it names, none when it names only other workers': "The types of logs that you want to publish
+     * to CloudWatch. If you don't specify any log types, driver STDOUT and STDERR logs will be published".
+     */
+    static SparkJobRunner.CloudWatchLogs driverCloudWatchLogs(Application app, JobRun run) {
+        if (!(monitoring(app, run, CLOUD_WATCH_LOGGING) instanceof Map<?, ?> configuration)
+                || !Boolean.TRUE.equals(configuration.get("enabled"))) {
+            return null;
+        }
+        String logGroup = configuration.get("logGroupName") instanceof String name ? name : DEFAULT_LOG_GROUP;
+        String prefix = configuration.get("logStreamNamePrefix") instanceof String named ? named : "";
+        String driver = prefix + driverLogPath(run) + "/";
+        List<?> driverTypes = null;
+        if (configuration.get("logTypes") instanceof Map<?, ?> logTypes && !logTypes.isEmpty()) {
+            driverTypes = logTypes.get(SPARK_DRIVER) instanceof List<?> types ? types : List.of();
+        }
+        String stdout = publishes(driverTypes, "stdout") ? driver + "stdout" : null;
+        String stderr = publishes(driverTypes, "stderr") ? driver + "stderr" : null;
+        return stdout == null && stderr == null ? null : new SparkJobRunner.CloudWatchLogs(logGroup, stdout, stderr);
+    }
+
+    // Whether the driver's log types, as logTypes lists them for SPARK_DRIVER, take this one; both without a list.
+    private static boolean publishes(List<?> driverTypes, String logType) {
+        return driverTypes == null
+                || driverTypes.stream().anyMatch(type -> logType.equalsIgnoreCase(String.valueOf(type)));
+    }
+
+    /**
+     * One of a run's monitoring configurations, {@code type}: the run's, which supersedes the application's
+     * ("The granularity level when the merge occurs ... MonitoringConfiguration - Configuration type"), or
+     * else the application's; null when neither has one.
+     */
+    private static Object monitoring(Application app, JobRun run, String type) {
+        Object overrides = run.getConfigurationOverrides() != null
+                ? run.getConfigurationOverrides().get("monitoringConfiguration") : null;
+        if (overrides instanceof Map<?, ?> monitoring && monitoring.containsKey(type)) {
+            return monitoring.get(type);
+        }
+        return app.getMonitoringConfiguration() != null
+                ? app.getMonitoringConfiguration().getProperties().get(type) : null;
+    }
+
+    // Where under a log destination the user guide puts a run's driver logs, the attempt for a retried run.
+    private static String driverLogPath(JobRun run) {
+        String attempts = retried(run) && retriesAttempts(run.getReleaseLabel()) ? "/attempts/" + ATTEMPT : "";
+        return "/applications/" + run.getApplicationId() + "/jobs/" + run.getJobRunId() + attempts + "/"
+                + SPARK_DRIVER;
+    }
+
+    // A STREAMING run is retried, and a BATCH run whose retryPolicy allows more than one attempt.
+    private static boolean retried(JobRun run) {
+        Object maxAttempts = run.getRetryPolicy() != null ? run.getRetryPolicy().get("maxAttempts") : null;
+        return MODE_STREAMING.equals(run.getMode()) || maxAttempts instanceof Number number && number.intValue() > 1;
+    }
+
+    // "EMR Serverless releases 7.1.0 and higher support retry attempts for streaming jobs and batch jobs."
+    private static boolean retriesAttempts(String releaseLabel) {
+        return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 1)
+                || SPARK_RUNTIME_RELEASE_LABEL.matcher(releaseLabel != null ? releaseLabel : "").matches();
     }
 
     private static void addSparkDefaults(Map<String, String> properties, Map<?, ?> configuration) {

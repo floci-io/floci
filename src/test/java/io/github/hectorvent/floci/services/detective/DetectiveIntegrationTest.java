@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.detective;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -93,7 +94,7 @@ class DetectiveIntegrationTest {
                 .statusCode(400).body("__type", equalTo("ValidationException"));
     }
 
-    private static io.restassured.response.ValidatableResponse post(String path, String body) {
+    private static ValidatableResponse post(String path, String body) {
         return given()
                 .contentType("application/json")
                 .header("Authorization", AUTH)

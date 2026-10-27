@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.codepipeline.CodePipelineService;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -283,7 +284,7 @@ class CodePipelineCfnProvisionerTest {
         props.putArray("DisableInboundStageTransitions").addObject()
                 .put("StageName", "Gate").put("Reason", "hold");
 
-        RuntimeException thrown = org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,
+        RuntimeException thrown = Assertions.assertThrows(RuntimeException.class,
                 () -> provisioner.provision(r, props, ctx()));
         assertEquals("boom", thrown.getMessage());
 

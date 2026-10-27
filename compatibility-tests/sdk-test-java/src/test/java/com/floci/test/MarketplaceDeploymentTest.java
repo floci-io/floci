@@ -5,6 +5,7 @@ import software.amazon.awssdk.services.marketplacedeployment.MarketplaceDeployme
 import software.amazon.awssdk.services.marketplacedeployment.model.PutDeploymentParameterResponse;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -24,7 +25,7 @@ class MarketplaceDeploymentTest {
                     .productId("prod-sdk-compat")
                     .agreementId("agr-sdk-compat")
                     .deploymentParameter(p -> p.name("ApiKey").secretString("local-secret"))
-                    .tags(java.util.Map.of("suite", "sdk-compat")));
+                    .tags(Map.of("suite", "sdk-compat")));
             assertNotNull(response.deploymentParameterId());
             assertNotNull(response.resourceArn());
             assertEquals("sdk-compat", response.tags().get("suite"));

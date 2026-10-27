@@ -148,7 +148,7 @@ public class LakeFormationService {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
         
         if (request.getPermissionsWithGrantOption() != null) {
-            java.util.List<String> perms = request.getPermissions() != null ? request.getPermissions() : java.util.List.of();
+            List<String> perms = request.getPermissions() != null ? request.getPermissions() : List.of();
             for (String grantOption : request.getPermissionsWithGrantOption()) {
                 if (!perms.contains(grantOption)) {
                     throw new AwsException("InvalidInputException", "PermissionsWithGrantOption must be a subset of Permissions", 400);

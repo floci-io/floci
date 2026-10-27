@@ -14,6 +14,10 @@
 | `UpdatePullThroughCacheRule` | Update a rule's credential or custom role |
 | `ValidatePullThroughCacheRule` | Validate that a configured rule exists and report it as usable |
 | `DeletePullThroughCacheRule` | Delete a pull-through cache rule by repository prefix |
+| `CreateRepositoryCreationTemplate` | Store a repository creation template under its prefix (recorded, not applied) |
+| `DescribeRepositoryCreationTemplates` | List templates, or those for given prefixes, with pagination |
+| `UpdateRepositoryCreationTemplate` | Replace the fields a request sets on a template |
+| `DeleteRepositoryCreationTemplate` | Delete a template by prefix |
 | `DescribeRepositories` | List repositories or fetch by name |
 | `DeleteRepository` | Delete a repository (with `force=true` semantics for non-empty repos) |
 | `GetAuthorizationToken` | Returns a docker-login token + proxy endpoint |
@@ -70,6 +74,7 @@ the optional `filter` fields.
   - `GetRegistryPolicy` and `DeleteRegistryPolicy` answer `RegistryPolicyNotFoundException` when no policy is set. `PutRegistryPolicy` refuses text that is not a JSON object.
   - An empty `rules` list in `PutReplicationConfiguration` clears the configuration. `DescribeRegistry` returns `{"rules": []}` until rules are set.
   - The scanning configuration is `BASIC` with no rules until one is put. `CONTINUOUS_SCAN` is refused with `BASIC`, since AWS offers it only with enhanced scanning. `BatchGetRepositoryScanningConfiguration` still reports each repository's own `scanOnPush`. Missing repository names appear in `failures` with `REPOSITORY_NOT_FOUND`, alongside configurations for the names that exist.
+- **Repository creation templates.** Templates are kept per account and Region, keyed by `prefix` (`ROOT` included). A new template defaults to `AES256` encryption and `MUTABLE` tags. `UpdateRepositoryCreationTemplate` replaces each field the request sets, an empty string or list clears it, and fields left out are kept. The exclusion filters are the exception: the model requires at least one, so `[]` is refused. Instead, an update that leaves the template in a mode without exclusions (`MUTABLE` or `IMMUTABLE`) drops the filters, which is what Terraform relies on, since it leaves the member out when the filters are removed. `DescribeRepositoryCreationTemplates` leaves out a requested prefix with no template rather than failing. Requests are checked against the vendored ECR model constraints, as the registry settings are, with `InvalidParameterException`. On top of the model, `appliedFor` must name at least one value, and policy text must be a JSON object. Nothing in Floci creates repositories through replication, pull through cache or create-on-push, so templates are never applied.
 - **Manifest format negotiation.** `BatchGetImage` forwards the caller's `acceptedMediaTypes` as the upstream `Accept` header. Modern OCI manifests (`application/vnd.oci.image.manifest.v1+json`) and Docker v2 schema 2 are both supported.
 - **Cross-account / cross-region isolation.** Internally the registry namespaces repositories as `<account>/<region>/<repoName>`, so the same repository name in different accounts or regions cannot collide.
 - **Reconcile on first start.** When the registry container starts, Floci queries `GET /v2/_catalog` and recreates `Repository` metadata entries for any namespaces present in the registry but missing from local storage. This means image bytes are never orphaned across restarts.
@@ -270,6 +275,7 @@ The following ECR features are **not** implemented. Stored values for policies a
 - Image scanning (`StartImageScan`, `DescribeImageScanFindings`)
 - Image signing and notary attachments
 - Lifecycle policy enforcement (the policy text is stored but not applied)
+- Applying repository creation templates (they are stored, but Floci never creates repositories through replication, pull through cache or create-on-push)
 - Repository policy enforcement (no IAM evaluation against repository-level policies)
 - TLS via emulated ACM
 

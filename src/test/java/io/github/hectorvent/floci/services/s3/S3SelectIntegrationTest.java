@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.s3.EventStreamMessages.Message;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -22,7 +23,7 @@ class S3SelectIntegrationTest {
         given().header("Host", bucket + ".localhost").body(body).when().put("/" + key).then().statusCode(200);
     }
 
-    private static io.restassured.response.ValidatableResponse select(
+    private static ValidatableResponse select(
             String bucket, String key, String expression,
             String inputSerialization, String outputSerialization) {
         // XML-escape the expression so operators like < and & are valid inside <Expression>
@@ -45,7 +46,7 @@ class S3SelectIntegrationTest {
                 .then().statusCode(200);
     }
     
-    private static io.restassured.response.ValidatableResponse selectExpectingStatus(
+    private static ValidatableResponse selectExpectingStatus(
             String bucket,
             String key,
             String expression,

@@ -26,6 +26,9 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from java_sources import SERVICES_PACKAGE_DIR, package_source  # noqa: E402
+
 MARKER_START = "<!-- floci:actions:start -->"
 MARKER_END = "<!-- floci:actions:end -->"
 
@@ -325,7 +328,7 @@ def _load_registry(repo_root: Path) -> tuple[list[ServiceEntry], set[Path]]:
     entries: list[ServiceEntry] = []
     for item in raw.get("services") or []:
         sources = [
-            Source(path=repo_root / s["path"], mode=s["mode"])
+            Source(path=repo_root / package_source(s["path"]), mode=s["mode"])
             for s in item.get("sources") or []
         ]
         handler = item.get("handler")
@@ -336,11 +339,11 @@ def _load_registry(repo_root: Path) -> tuple[list[ServiceEntry], set[Path]]:
                 sources=sources,
                 rename_actions=dict(item.get("rename_actions") or {}),
                 exclude_actions=frozenset(item.get("exclude_actions") or []),
-                handler=repo_root / handler if handler else None,
+                handler=repo_root / package_source(handler) if handler else None,
             )
         )
     deferred = {
-        (repo_root / d["path"]).resolve()
+        (repo_root / package_source(d["path"])).resolve()
         for d in raw.get("deferred_handlers") or []
     }
     return entries, deferred
@@ -369,7 +372,7 @@ def _find_unregistered_handlers(
     or added to deferred_handlers (with a reason), or this fails --strict. REST
     controllers are opt-in (per-judgment) and not flagged here.
     """
-    services_root = repo_root / "src/main/java/io/github/hectorvent/floci/services"
+    services_root = repo_root / SERVICES_PACKAGE_DIR
     registered = {s.path.resolve() for entry in entries for s in entry.sources}
     registered |= {entry.handler.resolve() for entry in entries if entry.handler}
     registered |= deferred

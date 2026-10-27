@@ -4,6 +4,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -107,13 +109,13 @@ class RouteAuthorizerIdResponseTest {
                         """.formatted(authorizerId))
                 .when().post("/v2/apis/" + apiId + "/routes")
                 .then().statusCode(201)
-                .body("authorizationScopes", equalTo(java.util.List.of("orders/read", "orders/write")))
+                .body("authorizationScopes", equalTo(List.of("orders/read", "orders/write")))
                 .extract().path("routeId");
 
         given()
                 .when().get("/v2/apis/" + apiId + "/routes/" + routeId)
                 .then().statusCode(200)
-                .body("authorizationScopes", equalTo(java.util.List.of("orders/read", "orders/write")));
+                .body("authorizationScopes", equalTo(List.of("orders/read", "orders/write")));
 
         given()
                 .contentType(ContentType.JSON)
@@ -122,7 +124,7 @@ class RouteAuthorizerIdResponseTest {
                         """)
                 .when().patch("/v2/apis/" + apiId + "/routes/" + routeId)
                 .then().statusCode(200)
-                .body("authorizationScopes", equalTo(java.util.List.of("orders/admin")));
+                .body("authorizationScopes", equalTo(List.of("orders/admin")));
     }
 
     @Test
@@ -150,7 +152,7 @@ class RouteAuthorizerIdResponseTest {
                         """)
                 .when().post("/v2/apis/" + apiId + "/routes")
                 .then().statusCode(201)
-                .body("authorizationScopes", equalTo(java.util.List.of("orders/read", "42")));
+                .body("authorizationScopes", equalTo(List.of("orders/read", "42")));
     }
 
     @Test
@@ -203,7 +205,7 @@ class RouteAuthorizerIdResponseTest {
         given()
                 .when().get("/v2/apis/" + apiId + "/routes/" + routeId)
                 .then().statusCode(200)
-                .body("authorizationScopes", equalTo(java.util.List.of("orders/read")));
+                .body("authorizationScopes", equalTo(List.of("orders/read")));
     }
 
     @Test

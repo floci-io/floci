@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -233,7 +236,7 @@ class ApiGatewayV2JsonHandlerTest {
                 .then().statusCode(200)
                 .extract().jsonPath().getList("items").size();
 
-        org.junit.jupiter.api.Assertions.assertEquals(beforeCount, afterCount,
+        Assertions.assertEquals(beforeCount, afterCount,
                 "No orphan deployment should be created when stageName is invalid");
     }
 
@@ -311,15 +314,15 @@ class ApiGatewayV2JsonHandlerTest {
                 .when().post("/")
                 .then().statusCode(201).extract().asString();
 
-        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-        com.fasterxml.jackson.databind.JsonNode created = mapper.readTree(createBody);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode created = mapper.readTree(createBody);
         String localIntegrationId = created.get("IntegrationId").asText();
-        org.junit.jupiter.api.Assertions.assertEquals("HTTP_PROXY", created.get("IntegrationType").asText());
-        com.fasterxml.jackson.databind.JsonNode createdRP = created.get("RequestParameters");
-        org.junit.jupiter.api.Assertions.assertNotNull(createdRP, "CreateIntegration response should include RequestParameters");
-        org.junit.jupiter.api.Assertions.assertEquals("/public/$request.path.proxy", createdRP.get("overwrite:path").asText());
-        org.junit.jupiter.api.Assertions.assertEquals("wallet.internal", createdRP.get("overwrite:header.Host").asText());
-        org.junit.jupiter.api.Assertions.assertEquals("$context.authorizer.claims.userId", createdRP.get("append:header.x-user-id").asText());
+        Assertions.assertEquals("HTTP_PROXY", created.get("IntegrationType").asText());
+        JsonNode createdRP = created.get("RequestParameters");
+        Assertions.assertNotNull(createdRP, "CreateIntegration response should include RequestParameters");
+        Assertions.assertEquals("/public/$request.path.proxy", createdRP.get("overwrite:path").asText());
+        Assertions.assertEquals("wallet.internal", createdRP.get("overwrite:header.Host").asText());
+        Assertions.assertEquals("$context.authorizer.claims.userId", createdRP.get("append:header.x-user-id").asText());
 
         // Get the integration and assert RequestParameters survived persistence
         String getBody = given()
@@ -332,10 +335,10 @@ class ApiGatewayV2JsonHandlerTest {
                 .when().post("/")
                 .then().statusCode(200).extract().asString();
 
-        com.fasterxml.jackson.databind.JsonNode getRP = mapper.readTree(getBody).get("RequestParameters");
-        org.junit.jupiter.api.Assertions.assertNotNull(getRP, "GetIntegration response should include RequestParameters");
-        org.junit.jupiter.api.Assertions.assertEquals("/public/$request.path.proxy", getRP.get("overwrite:path").asText());
-        org.junit.jupiter.api.Assertions.assertEquals("$context.authorizer.claims.userId", getRP.get("append:header.x-user-id").asText());
+        JsonNode getRP = mapper.readTree(getBody).get("RequestParameters");
+        Assertions.assertNotNull(getRP, "GetIntegration response should include RequestParameters");
+        Assertions.assertEquals("/public/$request.path.proxy", getRP.get("overwrite:path").asText());
+        Assertions.assertEquals("$context.authorizer.claims.userId", getRP.get("append:header.x-user-id").asText());
 
         // Cleanup
         given().when().delete("/v2/apis/" + localApiId).then().statusCode(204);

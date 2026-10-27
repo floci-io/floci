@@ -82,11 +82,11 @@ class BuildV2ProxyEventStageVariablesTest {
 
     private List<JsonNode> buildAuthorizerEvents(Map<String, String> stageVariables) throws Exception {
         return List.of(
-                MAPPER.readTree(controller.buildRequestAuthorizerEventV1(
+                controller.buildRequestAuthorizerEventV1(
                         "GET", "/echo", "abc123", "test", "us-east-1",
-                        headers, uriInfo, stageVariables)),
-                MAPPER.readTree(controller.buildRequestAuthorizerEventV2(
+                        headers, uriInfo, stageVariables),
+                controller.buildRequestAuthorizerEventV2(
                         "GET", "/echo", "GET /echo", "abc123", "test", "us-east-1",
-                        headers, uriInfo, stageVariables)));
+                        headers, uriInfo, stageVariables));
     }
 }

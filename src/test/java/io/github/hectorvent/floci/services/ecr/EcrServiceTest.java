@@ -15,10 +15,13 @@ import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.RegistrySettings;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
+import io.github.hectorvent.floci.services.ecr.model.RepositoryCreationTemplate;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.mockito.Mockito;
 
 import java.io.IOException;
@@ -31,9 +34,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -1375,6 +1381,7 @@ class EcrServiceTest {
         assertInvalid(() -> service.putRegistryPolicy("not json", REGION));
         assertInvalid(() -> service.putRegistryPolicy("[]", REGION));
         assertInvalid(() -> service.putRegistryPolicy("", REGION));
+        assertInvalid(() -> service.putRegistryPolicy("{} x", REGION));
     }
 
     @Test
@@ -1417,9 +1424,10 @@ class EcrServiceTest {
     void registrySettings_areKeptPerAccountAndRegion() {
         InMemoryStorage<String, RegistrySettings> store = new InMemoryStorage<>();
         EcrService first = new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                store, registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+                store, new InMemoryStorage<>(), registryManager, Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, ACCOUNT));
         EcrService other = new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                store, registryManager, Mockito.mock(EmulatorConfig.class),
+                store, new InMemoryStorage<>(), registryManager, Mockito.mock(EmulatorConfig.class),
                 new RegionResolver(REGION, "111111111111"));
 
         first.putRegistryPolicy(REGISTRY_POLICY, REGION);
@@ -1436,7 +1444,7 @@ class EcrServiceTest {
     @Test
     void registrySettings_parallelPutsAllSurvive() throws Exception {
         EcrService parallel = new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), registryManager, Mockito.mock(EmulatorConfig.class),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), registryManager, Mockito.mock(EmulatorConfig.class),
                 new RegionResolver(REGION, ACCOUNT));
         List<RegistrySettings.ReplicationRule> rules = List.of(replicateTo("eu-west-1", ACCOUNT, null));
         ExecutorService pool = Executors.newFixedThreadPool(3);
@@ -1464,5 +1472,231 @@ class EcrServiceTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    // ------------------------------------------------------------
+    // Repository creation templates
+    // ------------------------------------------------------------
+
+    private static RepositoryCreationTemplate template(String prefix, String... appliedFor) {
+        RepositoryCreationTemplate t = new RepositoryCreationTemplate();
+        t.setPrefix(prefix);
+        t.setAppliedFor(appliedFor.length == 0 ? null : List.of(appliedFor));
+        return t;
+    }
+
+    private static void assertInvalidTemplate(Executable call) {
+        assertEquals("InvalidParameterException", assertThrows(AwsException.class, call).getErrorCode());
+    }
+
+    @Test
+    void creationTemplate_createsWithDefaultsAndRefusesADuplicate() {
+        RepositoryCreationTemplate created = service.createRepositoryCreationTemplate(
+                template("prod", "PULL_THROUGH_CACHE", "REPLICATION"), REGION);
+
+        assertEquals("prod", created.getPrefix());
+        assertEquals("AES256", created.getEncryptionConfiguration().encryptionType());
+        assertEquals("MUTABLE", created.getImageTagMutability());
+        assertEquals(List.of("PULL_THROUGH_CACHE", "REPLICATION"), created.getAppliedFor());
+        assertNotNull(created.getCreatedAt());
+        assertEquals(created.getCreatedAt(), created.getUpdatedAt());
+
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> service.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION));
+        assertEquals("TemplateAlreadyExistsException", duplicate.getErrorCode());
+    }
+
+    /** The rules the model can't state; the model's own are in {@code EcrRequestShapesTest}. */
+    @Test
+    void creationTemplate_checksWhatTheModelCannotState() {
+        RepositoryCreationTemplate noAppliedFor = template("prod");
+        noAppliedFor.setAppliedFor(List.of());
+        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(noAppliedFor, REGION));
+        RepositoryCreationTemplate badPolicy = template("prod", "REPLICATION");
+        badPolicy.setRepositoryPolicy("[]");
+        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(badPolicy, REGION));
+        RepositoryCreationTemplate badLifecycle = template("prod", "REPLICATION");
+        badLifecycle.setLifecyclePolicy("not json");
+        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(badLifecycle, REGION));
+        // A JSON object followed by more text is still not a JSON object.
+        RepositoryCreationTemplate trailingPolicy = template("prod", "REPLICATION");
+        trailingPolicy.setRepositoryPolicy("{}{}");
+        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(trailingPolicy, REGION));
+        RepositoryCreationTemplate trailingLifecycle = template("prod", "REPLICATION");
+        trailingLifecycle.setLifecyclePolicy("{\"rules\":[]} []");
+        assertInvalidTemplate(() -> service.createRepositoryCreationTemplate(trailingLifecycle, REGION));
+
+        RepositoryCreationTemplate full = template("ROOT", "CREATE_ON_PUSH");
+        full.setEncryptionConfiguration(new RepositoryCreationTemplate.EncryptionConfiguration("KMS_DSSE",
+                "arn:aws:kms:us-east-1:000000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab"));
+        full.setImageTagMutability("IMMUTABLE_WITH_EXCLUSION");
+        full.setImageTagMutabilityExclusionFilters(
+                List.of(new RepositoryCreationTemplate.ExclusionFilter("WILDCARD", "latest*")));
+        full.setRepositoryPolicy("{\"Version\":\"2012-10-17\",\"Statement\":[]}");
+        full.setLifecyclePolicy("{\"rules\":[]}");
+        assertEquals("KMS_DSSE", service.createRepositoryCreationTemplate(full, REGION)
+                .getEncryptionConfiguration().encryptionType());
+    }
+
+    @Test
+    void creationTemplate_updateReplacesWhatIsSentAndKeepsTheRest() {
+        RepositoryCreationTemplate created = template("team/app", "REPLICATION");
+        created.setDescription("first");
+        created.setRepositoryPolicy("{\"Version\":\"2012-10-17\"}");
+        service.createRepositoryCreationTemplate(created, REGION);
+
+        RepositoryCreationTemplate change = template("team/app");
+        change.setImageTagMutability("IMMUTABLE");
+        change.setRepositoryPolicy("");
+        RepositoryCreationTemplate updated = service.updateRepositoryCreationTemplate(change, REGION);
+
+        assertEquals("first", updated.getDescription());
+        assertEquals(List.of("REPLICATION"), updated.getAppliedFor());
+        assertEquals("IMMUTABLE", updated.getImageTagMutability());
+        assertNull(updated.getRepositoryPolicy());
+
+        RepositoryCreationTemplate badChange = template("team/app");
+        badChange.setAppliedFor(List.of());
+        assertInvalidTemplate(() -> service.updateRepositoryCreationTemplate(badChange, REGION));
+        assertEquals("TemplateNotFoundException", assertThrows(AwsException.class,
+                () -> service.updateRepositoryCreationTemplate(template("other"), REGION)).getErrorCode());
+    }
+
+    @Test
+    void creationTemplate_filtersGoWhenAnUpdateLeavesAnExclusionMode() {
+        RepositoryCreationTemplate created = template("team/app", "REPLICATION");
+        created.setImageTagMutability("IMMUTABLE_WITH_EXCLUSION");
+        created.setImageTagMutabilityExclusionFilters(
+                List.of(new RepositoryCreationTemplate.ExclusionFilter("WILDCARD", "latest*")));
+        service.createRepositoryCreationTemplate(created, REGION);
+
+        RepositoryCreationTemplate otherMode = template("team/app");
+        otherMode.setImageTagMutability("MUTABLE_WITH_EXCLUSION");
+        assertEquals(1, service.updateRepositoryCreationTemplate(otherMode, REGION)
+                .getImageTagMutabilityExclusionFilters().size(), "an exclusion mode keeps them");
+
+        RepositoryCreationTemplate plain = template("team/app");
+        plain.setImageTagMutability("MUTABLE");
+        assertNull(service.updateRepositoryCreationTemplate(plain, REGION).getImageTagMutabilityExclusionFilters());
+    }
+
+    @Test
+    void creationTemplate_describeFiltersAndPagesAndDeleteRemoves() {
+        for (String prefix : List.of("c", "a", "b")) {
+            service.createRepositoryCreationTemplate(template(prefix, "REPLICATION"), REGION);
+        }
+        PaginatedResult<RepositoryCreationTemplate> first =
+                service.describeRepositoryCreationTemplates(null, 2, null, REGION);
+        assertEquals(List.of("a", "b"), first.items().stream().map(RepositoryCreationTemplate::getPrefix).toList());
+        PaginatedResult<RepositoryCreationTemplate> second =
+                service.describeRepositoryCreationTemplates(null, 2, first.nextToken(), REGION);
+        assertEquals(List.of("c"), second.items().stream().map(RepositoryCreationTemplate::getPrefix).toList());
+        assertNull(second.nextToken());
+
+        // A prefix with no template is left out rather than refused.
+        assertEquals(List.of("b"), service.describeRepositoryCreationTemplates(List.of("b", "missing"), null, null, REGION)
+                .items().stream().map(RepositoryCreationTemplate::getPrefix).toList());
+        assertInvalidTemplate(() -> service.describeRepositoryCreationTemplates(null, 1001, null, REGION));
+
+        assertEquals("b", service.deleteRepositoryCreationTemplate("b", REGION).getPrefix());
+        assertEquals("TemplateNotFoundException", assertThrows(AwsException.class,
+                () -> service.deleteRepositoryCreationTemplate("b", REGION)).getErrorCode());
+        assertEquals(2, service.describeRepositoryCreationTemplates(null, null, null, REGION).items().size());
+    }
+
+    @Test
+    void creationTemplate_isKeptPerAccountAndRegion() {
+        InMemoryStorage<String, RepositoryCreationTemplate> shared = new InMemoryStorage<>();
+        EcrService home = new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), shared, registryManager, Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, ACCOUNT));
+        EcrService other = new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), shared, registryManager, Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, "111111111111"));
+        home.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION);
+
+        assertTrue(other.describeRepositoryCreationTemplates(null, null, null, REGION).items().isEmpty());
+        assertTrue(home.describeRepositoryCreationTemplates(null, null, null, "eu-west-1").items().isEmpty());
+        other.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION);
+        assertEquals("TemplateNotFoundException", assertThrows(AwsException.class,
+                () -> home.deleteRepositoryCreationTemplate("prod", "eu-west-1")).getErrorCode());
+    }
+
+    /** ECR assumes a {@code /} after every prefix, so a trailing one names the same template. */
+    @Test
+    void creationTemplate_aTrailingSlashNamesTheSameTemplate() {
+        service.createRepositoryCreationTemplate(template("prod/", "REPLICATION"), REGION);
+
+        assertEquals("TemplateAlreadyExistsException", assertThrows(AwsException.class,
+                () -> service.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION)).getErrorCode());
+        assertEquals(1, service.describeRepositoryCreationTemplates(List.of("prod"), null, null, REGION)
+                .items().size());
+        PaginatedResult<RepositoryCreationTemplate> both =
+                service.describeRepositoryCreationTemplates(List.of("prod", "prod/"), 1, null, REGION);
+        assertEquals(1, both.items().size());
+        assertNull(both.nextToken());
+        RepositoryCreationTemplate change = template("prod");
+        change.setDescription("changed");
+        assertEquals("changed", service.updateRepositoryCreationTemplate(change, REGION).getDescription());
+        service.deleteRepositoryCreationTemplate("prod", REGION);
+        assertTrue(service.describeRepositoryCreationTemplates(null, null, null, REGION).items().isEmpty());
+    }
+
+    @Test
+    void creationTemplate_aSecondCreateOfThePrefixWaitsAndIsRefused() throws Exception {
+        ParkingStore<RepositoryCreationTemplate> store = new ParkingStore<>();
+        EcrService templates = templateService(store);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            store.parkNextRead();
+            Future<?> first = pool.submit(() -> templates.createRepositoryCreationTemplate(
+                    template("prod", "REPLICATION"), REGION));
+            assertTrue(store.awaitParked());
+            Future<?> second = pool.submit(() -> templates.createRepositoryCreationTemplate(
+                    template("prod", "REPLICATION"), REGION));
+            assertThrows(TimeoutException.class, () -> second.get(200, TimeUnit.MILLISECONDS),
+                    "the second create must wait for the first");
+
+            store.release();
+            first.get(5, TimeUnit.SECONDS);
+            ExecutionException refused = assertThrows(ExecutionException.class, () -> second.get(5, TimeUnit.SECONDS));
+            assertEquals("TemplateAlreadyExistsException", ((AwsException) refused.getCause()).getErrorCode());
+        } finally {
+            store.release();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void creationTemplate_aDeleteDuringAnUpdateStaysDeleted() throws Exception {
+        ParkingStore<RepositoryCreationTemplate> store = new ParkingStore<>();
+        EcrService templates = templateService(store);
+        templates.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION);
+        RepositoryCreationTemplate change = template("prod");
+        change.setDescription("changed");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            store.parkNextRead();
+            Future<?> update = pool.submit(() -> templates.updateRepositoryCreationTemplate(change, REGION));
+            assertTrue(store.awaitParked());
+            Future<?> delete = pool.submit(() -> templates.deleteRepositoryCreationTemplate("prod", REGION));
+            assertThrows(TimeoutException.class, () -> delete.get(200, TimeUnit.MILLISECONDS),
+                    "the delete must wait for the update");
+
+            store.release();
+            update.get(5, TimeUnit.SECONDS);
+            delete.get(5, TimeUnit.SECONDS);
+        } finally {
+            store.release();
+            pool.shutdownNow();
+        }
+
+        assertTrue(templates.describeRepositoryCreationTemplates(null, null, null, REGION).items().isEmpty());
+    }
+
+    private EcrService templateService(InMemoryStorage<String, RepositoryCreationTemplate> store) {
+        return new EcrService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), store, registryManager, Mockito.mock(EmulatorConfig.class),
+                new RegionResolver(REGION, ACCOUNT));
     }
 }

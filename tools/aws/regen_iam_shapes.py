@@ -24,15 +24,23 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-shapes.json"
 MODEL = Path("iam/2010-05-08")
 GENERATOR = "tools/aws/regen_iam_shapes.py"
 
-# The managed-policy family: every member a scalar, and no operation here checks a declared
-# constraint by hand today, so the vendored shapes add the refusals AWS answers without rewording
-# anything already answered. `AttachRolePolicy` and `DetachRolePolicy` are the exception and the
-# parity case: `IamService.validateRoleName` already answers `roleName` in Smithy's form.
+# One wave per group, each chosen so that no operation in it checks a declared constraint by hand,
+# which is what keeps the vendored shapes adding the refusals AWS answers rather than rewording an
+# answer already given.
+#
+# The managed-policy family, every member a scalar. `AttachRolePolicy` and `DetachRolePolicy` are
+# the exception and the parity case: `IamService.validateRoleName` already answers `roleName` in
+# Smithy's form.
+#
+# `GetAccountAuthorizationDetails` is the first operation read through the list walk. Its three
+# members are declared and none of them is read at all today: `Filter` is a list of an enum,
+# `MaxItems` a range and `Marker` a length and a pattern.
 OPERATIONS = (
     "AttachGroupPolicy", "AttachRolePolicy", "AttachUserPolicy",
     "DetachGroupPolicy", "DetachRolePolicy", "DetachUserPolicy",
     "GetPolicy", "DeletePolicy",
     "CreatePolicyVersion", "GetPolicyVersion", "DeletePolicyVersion", "SetDefaultPolicyVersion",
+    "GetAccountAuthorizationDetails",
 )
 
 

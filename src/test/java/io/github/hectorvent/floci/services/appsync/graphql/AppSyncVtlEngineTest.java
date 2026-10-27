@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.util.*;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -29,7 +30,7 @@ class AppSyncVtlEngineTest {
         );
     }
 
-    private AppSyncVtlContext ctxWith(java.util.function.Consumer<AppSyncVtlContext.Builder> customizer) {
+    private AppSyncVtlContext ctxWith(Consumer<AppSyncVtlContext.Builder> customizer) {
         AppSyncVtlContext.Builder builder = AppSyncVtlContext.builder(objectMapper);
         customizer.accept(builder);
         return builder.build();

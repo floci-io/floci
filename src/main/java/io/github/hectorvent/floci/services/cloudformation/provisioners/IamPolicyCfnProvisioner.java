@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -343,8 +344,7 @@ public class IamPolicyCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private boolean isIamManagedPolicyArn(String physicalId) {
-        return physicalId != null
-                && physicalId.startsWith("arn:")
+        return AwsArnUtils.isArn(physicalId)
                 && physicalId.contains(":iam::")
                 && physicalId.contains(":policy/");
     }

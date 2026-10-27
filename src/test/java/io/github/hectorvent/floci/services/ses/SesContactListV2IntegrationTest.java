@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -445,7 +446,7 @@ class SesContactListV2IntegrationTest {
                 .body("message", equalTo("Cannot provide multiple tags with the same key"));
     }
 
-    private static io.restassured.response.Response post(String body) {
+    private static Response post(String body) {
         return given()
                 .contentType("application/json")
                 .header("Authorization", SES_AUTH)

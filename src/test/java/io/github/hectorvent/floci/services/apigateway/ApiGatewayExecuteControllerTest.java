@@ -767,7 +767,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         assertEnglishUtcTimeUnderNonUtcHost(() -> controller.buildRequestAuthorizerEventV2("GET", "/items",
                 "GET /items", "api1", "$default", "us-east-1", emptyHeaders(),
-                uriInfoFor("http://localhost/items"), null));
+                uriInfoFor("http://localhost/items"), null).toString());
     }
 
     private static HttpHeaders emptyHeaders() {

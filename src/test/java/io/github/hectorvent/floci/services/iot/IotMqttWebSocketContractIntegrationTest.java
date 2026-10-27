@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
@@ -238,7 +239,7 @@ class IotMqttWebSocketContractIntegrationTest {
             }
 
             @Override
-            public void deliveryComplete(org.eclipse.paho.client.mqttv3.IMqttDeliveryToken token) {
+            public void deliveryComplete(IMqttDeliveryToken token) {
             }
         });
         tcp.connect();
@@ -460,7 +461,7 @@ class IotMqttWebSocketContractIntegrationTest {
                 }
 
                 @Override
-                public void deliveryComplete(org.eclipse.paho.client.mqttv3.IMqttDeliveryToken token) {
+                public void deliveryComplete(IMqttDeliveryToken token) {
                 }
             });
             MqttConnectOptions options = new MqttConnectOptions();

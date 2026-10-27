@@ -7,10 +7,12 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.emrserverless.model.Application;
 import io.github.hectorvent.floci.services.emrserverless.model.CreateApplicationRequest;
 import io.github.hectorvent.floci.services.emrserverless.model.JobDriver;
 import io.github.hectorvent.floci.services.emrserverless.model.JobRun;
 import io.github.hectorvent.floci.services.emrserverless.model.JobRunRecord;
+import io.github.hectorvent.floci.services.emrserverless.model.MonitoringConfiguration;
 import io.github.hectorvent.floci.services.emrserverless.model.RuntimeConfiguration;
 import io.github.hectorvent.floci.services.emrserverless.model.StartJobRunRequest;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -261,6 +263,144 @@ class EmrServerlessJobRunServiceTest {
         assertEquals(List.of("s3://bucket/jobs/app.jar"), job.application());
         assertEquals(Duration.ofMinutes(30), job.timeout());
         assertEquals(Duration.ZERO, runner.jobs.get(1).timeout());
+        assertNull(job.logFolder());
+        assertNull(job.cloudWatchLogs());
+    }
+
+    @Test
+    void aRunsDriverOutputGoesToCloudWatchWhenItsOwnOrTheApplicationsLoggingIsEnabled() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        CreateApplicationRequest create = new CreateApplicationRequest();
+        create.setName("watched");
+        create.setReleaseLabel("emr-7.5.0");
+        create.setType("SPARK");
+        create.setClientToken(UUID.randomUUID().toString());
+        create.setMonitoringConfiguration(cloudWatchLogging(Map.of("enabled", true)));
+        String watched = applications.createApplication(create).getApplicationId();
+        StartJobRunRequest own = request(null, null);
+        own.setConfigurationOverrides(Map.of("monitoringConfiguration", Map.of("cloudWatchLoggingConfiguration",
+                Map.of("enabled", true, "logGroupName", "spark-jobs", "logStreamNamePrefix", "nightly",
+                        "logTypes", Map.of("SPARK_DRIVER", List.of("STDERR"))))));
+        // "To remove cloudWatchLogging, pass the enabled flag as false."
+        StartJobRunRequest removed = request(null, null);
+        removed.setConfigurationOverrides(Map.of("monitoringConfiguration",
+                Map.of("cloudWatchLoggingConfiguration", Map.of("enabled", false))));
+
+        String inherited = service.startJobRun(watched, request(null, null)).getJobRunId();
+        String overridden = service.startJobRun(watched, own).getJobRunId();
+        service.startJobRun(watched, removed);
+        for (int i = 0; i < 3; i++) {
+            runNext();
+        }
+
+        String driver = "/applications/" + watched + "/jobs/" + inherited + "/SPARK_DRIVER/";
+        assertEquals(new SparkJobRunner.CloudWatchLogs("/aws/emr-serverless", driver + "stdout", driver + "stderr"),
+                runner.jobs.get(0).cloudWatchLogs());
+        assertEquals(new SparkJobRunner.CloudWatchLogs("spark-jobs", null,
+                "nightly/applications/" + watched + "/jobs/" + overridden + "/SPARK_DRIVER/stderr"),
+                runner.jobs.get(1).cloudWatchLogs());
+        assertNull(runner.jobs.get(2).cloudWatchLogs());
+    }
+
+    @Test
+    void aRetriedRunsCloudWatchLogStreamsAreUnderItsAttempt() {
+        Application app = new Application();
+        app.setMonitoringConfiguration(cloudWatchLogging(Map.of("enabled", true)));
+
+        assertEquals("/applications/app/jobs/run/attempts/1/SPARK_DRIVER/stdout",
+                EmrServerlessJobRunService.driverCloudWatchLogs(app, run("emr-7.1.0", "STREAMING", null))
+                        .stdoutStream());
+        assertEquals("/applications/app/jobs/run/SPARK_DRIVER/stdout",
+                EmrServerlessJobRunService.driverCloudWatchLogs(app, run("emr-7.0.0", "STREAMING", null))
+                        .stdoutStream());
+    }
+
+    @Test
+    void logTypesThatNameOnlyTheExecutorsSendNoneOfTheDriversOutput() {
+        Application app = new Application();
+        // "If you don't specify any log types, driver STDOUT and STDERR logs will be published to CloudWatch Logs
+        // by default."
+        app.setMonitoringConfiguration(cloudWatchLogging(Map.of("enabled", true,
+                "logTypes", Map.of("SPARK_EXECUTOR", List.of("STDOUT", "STDERR")))));
+
+        assertNull(EmrServerlessJobRunService.driverCloudWatchLogs(app, run("emr-7.5.0", "BATCH", null)));
+
+        app.setMonitoringConfiguration(cloudWatchLogging(Map.of("enabled", true, "logTypes", Map.of())));
+
+        assertEquals(new SparkJobRunner.CloudWatchLogs("/aws/emr-serverless",
+                "/applications/app/jobs/run/SPARK_DRIVER/stdout", "/applications/app/jobs/run/SPARK_DRIVER/stderr"),
+                EmrServerlessJobRunService.driverCloudWatchLogs(app, run("emr-7.5.0", "BATCH", null)));
+    }
+
+    private static MonitoringConfiguration cloudWatchLogging(Map<String, Object> configuration) {
+        MonitoringConfiguration monitoring = new MonitoringConfiguration();
+        monitoring.setProperty("cloudWatchLoggingConfiguration", configuration);
+        return monitoring;
+    }
+
+    @Test
+    void aRunsDriverLogsGoUnderItsOwnS3LogUriOrElseTheApplications() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        CreateApplicationRequest create = new CreateApplicationRequest();
+        create.setName("logged");
+        create.setReleaseLabel("emr-7.5.0");
+        create.setType("SPARK");
+        create.setClientToken(UUID.randomUUID().toString());
+        create.setMonitoringConfiguration(s3LogUri("s3://logs/app-level"));
+        String logged = applications.createApplication(create).getApplicationId();
+        StartJobRunRequest ownLogUri = request(null, null);
+        ownLogUri.setConfigurationOverrides(Map.of("monitoringConfiguration",
+                Map.of("s3MonitoringConfiguration", Map.of("logUri", "s3://logs/job-level/"))));
+        // "To remove s3MonitoringConfiguration, pass an empty declaration {} for the configuration."
+        StartJobRunRequest removed = request(null, null);
+        removed.setConfigurationOverrides(Map.of("monitoringConfiguration",
+                Map.of("s3MonitoringConfiguration", Map.of())));
+
+        String inherited = service.startJobRun(logged, request(null, null)).getJobRunId();
+        String overridden = service.startJobRun(logged, ownLogUri).getJobRunId();
+        service.startJobRun(logged, removed);
+        for (int i = 0; i < 3; i++) {
+            runNext();
+        }
+
+        assertEquals("s3://logs/app-level/applications/" + logged + "/jobs/" + inherited + "/SPARK_DRIVER/",
+                runner.jobs.get(0).logFolder());
+        assertEquals("s3://logs/job-level/applications/" + logged + "/jobs/" + overridden + "/SPARK_DRIVER/",
+                runner.jobs.get(1).logFolder());
+        assertNull(runner.jobs.get(2).logFolder());
+    }
+
+    @Test
+    void aRetriedRunsDriverLogsAreUnderItsAttemptFromRelease710() {
+        Application app = new Application();
+        app.setMonitoringConfiguration(s3LogUri("s3://logs"));
+
+        assertEquals("s3://logs/applications/app/jobs/run/attempts/1/SPARK_DRIVER/",
+                EmrServerlessJobRunService.driverLogFolder(app, run("emr-7.1.0", "STREAMING", null)));
+        assertEquals("s3://logs/applications/app/jobs/run/attempts/1/SPARK_DRIVER/",
+                EmrServerlessJobRunService.driverLogFolder(app, run("emr-spark-8.1.0", "BATCH", 3)));
+        assertEquals("s3://logs/applications/app/jobs/run/SPARK_DRIVER/",
+                EmrServerlessJobRunService.driverLogFolder(app, run("emr-7.1.0", "BATCH", 1)));
+        assertEquals("s3://logs/applications/app/jobs/run/SPARK_DRIVER/",
+                EmrServerlessJobRunService.driverLogFolder(app, run("emr-7.0.0", "STREAMING", null)));
+    }
+
+    private static MonitoringConfiguration s3LogUri(String logUri) {
+        MonitoringConfiguration monitoring = new MonitoringConfiguration();
+        monitoring.setProperty("s3MonitoringConfiguration", Map.of("logUri", logUri));
+        return monitoring;
+    }
+
+    private static JobRun run(String releaseLabel, String mode, Integer maxAttempts) {
+        JobRun run = new JobRun();
+        run.setApplicationId("app");
+        run.setJobRunId("run");
+        run.setReleaseLabel(releaseLabel);
+        run.setMode(mode);
+        run.setRetryPolicy(maxAttempts != null ? Map.of("maxAttempts", maxAttempts) : null);
+        return run;
     }
 
     @Test

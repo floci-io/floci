@@ -46,6 +46,7 @@ behind them yet.
 | `GetPackageVersionAsset` | Downloads one asset from a package version by name, optionally pinned to a specific revision. |
 | `ListPackageVersionAssets` | Lists the assets of a package version, with size and hashes. |
 | `ListPackageVersions` | Lists a package's versions with status, revision, and origin, paginated and sorted most recently published first; `defaultDisplayVersion` is `dist-tags.latest` for npm, the most recently published version otherwise. |
+| `ListPackages` | Lists package names across every format in a repository, with each package's origin controls; paginated, optionally filtered by format, namespace prefix, package-name prefix, or publish/upstream restriction. |
 | `GetPackageVersionReadme` | Returns the readme text for a package version; `npm`, `pypi`, and `nuget` only, matching AWS's own restriction for this action. |
 | `CopyPackageVersions` | Copies one or more versions of a package from one repository to another in the same domain. |
 | `UpdatePackageVersionsStatus` | Moves one or more versions of a package to `Published`, `Unlisted`, or `Archived`; all-or-nothing per call, with `versionRevisions`/`expectedStatus` as optional preconditions. |
@@ -257,12 +258,11 @@ state.
   that is not the caller's own account looks up that account's domain/repository with no
   trust-policy or permissions-policy enforcement, consistent with Floci's IAM enforcement being
   opt-in elsewhere, but worth knowing if you rely on domain-sharing semantics.
-- **`ListPackages` isn't implemented.** Every package-version lifecycle action now is: a version
-  can be moved to `Unlisted`/`Archived`/`Published` with `UpdatePackageVersionsStatus`, to
-  `Disposed` (assets permanently deleted) with `DisposePackageVersions`, or removed outright,
-  from every status including `Disposed`, with `DeletePackageVersions`. The only way to move a
-  version out of `Unfinished` today is still either a follow-up `PublishPackageVersion` call that
-  omits the `unfinished` flag, or `UpdatePackageVersionsStatus` itself.
+- **The native per-format download routes don't consult a container-backed version's status
+  override.** `GetPackageVersionAsset` correctly blocks an Archived/Disposed version, but a plain
+  `mvn`/`npm install`/`pip install`/`nuget` fetch against the Maven GAV, npm tarball, pypi
+  filename, or nuget content route proxies straight to the sidecar and never checks it, so that
+  same version's bytes are still fetchable through those routes.
 - **A container-backed (`maven`/`npm`/`pypi`/`nuget`) version's status override does not survive a
   Floci restart.** It's kept in memory only, for the same reason the byte-count and readme
   bookkeeping those formats already need are: the sidecar content it describes doesn't survive a

@@ -5,9 +5,9 @@ package io.github.hectorvent.floci.services.lambda.launcher;
  * its package or layer directory. Moving the supplied file changes its {@code $0}
  * and breaks runtimes that locate companion files relative to that path.
  */
-final class ProvidedRuntimeBootstrap {
+public final class ProvidedRuntimeBootstrap {
 
-    static final String SCRIPT = """
+    public static final String SCRIPT = """
             #!/bin/sh
             set -eu
             if [ -e /var/task/bootstrap ]; then

@@ -38,6 +38,7 @@ import java.security.SecureRandom;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
@@ -256,13 +257,13 @@ public final class FlociCertificateAuthority {
         Instant caNotAfter = certificate.getNotAfter().toInstant();
         Instant wanted = DEVICE_CERTIFICATE_NOT_AFTER.isAfter(now)
                 ? DEVICE_CERTIFICATE_NOT_AFTER
-                : now.plus(ONE_YEAR_IN_DAYS, java.time.temporal.ChronoUnit.DAYS);
+                : now.plus(ONE_YEAR_IN_DAYS, ChronoUnit.DAYS);
         return caNotAfter.isBefore(wanted) ? caNotAfter : wanted;
     }
 
     /** A new CA ends in 2050, or ten years from now when that is later, so it is never born expired. */
     static Instant caNotAfter(Instant now) {
-        Instant tenYears = now.plus(TEN_YEARS_IN_DAYS, java.time.temporal.ChronoUnit.DAYS);
+        Instant tenYears = now.plus(TEN_YEARS_IN_DAYS, ChronoUnit.DAYS);
         return tenYears.isAfter(CA_NOT_AFTER) ? tenYears : CA_NOT_AFTER;
     }
 

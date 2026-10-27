@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.testing.S3EnforceAuthProfile;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
@@ -300,7 +301,7 @@ class S3AuthEnforcementIntegrationTest {
 
         given()
             .header("Host", WEBSITE_BUCKET + ".s3-website-us-east-1.localhost:"
-                    + io.restassured.RestAssured.port)
+                    + RestAssured.port)
         .when()
             .get("/")
         .then()
@@ -358,7 +359,7 @@ class S3AuthEnforcementIntegrationTest {
 
         given()
             .header("Host", WEBSITE_ERROR_BUCKET + ".s3-website-us-east-1.localhost:"
-                    + io.restassured.RestAssured.port)
+                    + RestAssured.port)
         .when()
             .get("/")
         .then()
@@ -623,7 +624,7 @@ class S3AuthEnforcementIntegrationTest {
     @Order(23)
     void virtualHostedPresignedRequestUsesOriginalHostAndPath() throws Exception {
         String path = "/" + PRIVATE_KEY;
-        String authority = PRIVATE_BUCKET + ".localhost:" + io.restassured.RestAssured.port;
+        String authority = PRIVATE_BUCKET + ".localhost:" + RestAssured.port;
         String signature = presignedSignature(
                 "GET", path, "test", "test", "3600", "UNSIGNED-PAYLOAD", authority);
 
@@ -2217,7 +2218,7 @@ class S3AuthEnforcementIntegrationTest {
 
     private static HttpResponse<String> putWithoutContentType(String pathAndQuery, byte[] body,
                                                               S3RequestSigner signer) throws Exception {
-        URI uri = URI.create("http://localhost:" + io.restassured.RestAssured.port + "/" + pathAndQuery);
+        URI uri = URI.create("http://localhost:" + RestAssured.port + "/" + pathAndQuery);
         HttpRequest.Builder request = HttpRequest.newBuilder(uri)
                 .PUT(HttpRequest.BodyPublishers.ofByteArray(body));
         signer.headersFor("PUT", uri, body).forEach(request::header);
@@ -2233,7 +2234,7 @@ class S3AuthEnforcementIntegrationTest {
                                               String accessKeyId, String secretKey,
                                               String expires, String payloadHash) {
         return presignedSignature(method, path, accessKeyId, secretKey, expires, payloadHash,
-                "localhost:" + io.restassured.RestAssured.port);
+                "localhost:" + RestAssured.port);
     }
 
     private static String presignedSignature(String method, String path,

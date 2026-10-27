@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -317,7 +318,7 @@ class ProvisionContextTest {
 
     @Test
     void staleTagKeysListsTheCurrentKeysTheTemplateDropped() {
-        Map<String, String> current = new java.util.LinkedHashMap<>();
+        Map<String, String> current = new LinkedHashMap<>();
         current.put("Keep", "same");
         current.put("Old", "value");
         current.put("Gone", "too");

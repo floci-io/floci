@@ -1,15 +1,27 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.NullNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Alarm;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.AlarmHistoryItem;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.CompositeAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
@@ -18,7 +30,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -26,12 +41,16 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @ApplicationScoped
 public class CloudWatchMetricsService {
@@ -39,11 +58,25 @@ public class CloudWatchMetricsService {
     private static final Logger LOG = Logger.getLogger(CloudWatchMetricsService.class);
 
     private static final List<String> ALARM_TYPES = List.of("CompositeAlarm", "MetricAlarm", "LogAlarm");
+    private static final List<String> HISTORY_ALARM_TYPES = List.of("MetricAlarm", "CompositeAlarm");
+    private static final List<String> HISTORY_ITEM_TYPES = List.of("AlarmContributorAction",
+            "AlarmContributorStateUpdate", "Action", "StateUpdate", "ConfigurationUpdate");
+    private static final List<String> SCAN_BY = List.of("TimestampAscending", "TimestampDescending");
+    private static final Duration HISTORY_RETENTION = Duration.ofDays(30);
+    /** The form of {@code java.util.Date#toString} in UTC, which AWS's date range error prints. */
+    private static final DateTimeFormatter HISTORY_DATE_FORMAT = DateTimeFormatter
+            .ofPattern("EEE MMM dd HH:mm:ss 'UTC' yyyy", Locale.ROOT).withZone(ZoneOffset.UTC);
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .setSerializationInclusion(JsonInclude.Include.NON_NULL)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     private final StorageBackend<String, MetricDatum> metricStore;
     private final StorageBackend<String, Alarm> alarmStore;
+    private final StorageBackend<String, AlarmHistoryItem> historyStore;
     private final RegionResolver regionResolver;
     private final AlarmSnsNotifier alarmSnsNotifier;
+    private long lastHistorySequence;
+    private Instant nextHistoryPrune = Instant.MIN;
 
     public CloudWatchMetricsService(StorageFactory storageFactory, RegionResolver regionResolver) {
         this(storageFactory, regionResolver, null);
@@ -58,6 +91,8 @@ public class CloudWatchMetricsService {
                 new TypeReference<Map<String, MetricDatum>>() {}, WriteProfile.APPEND_HEAVY);
         this.alarmStore = storageFactory.create("cloudwatchmetrics", "cwalarms.json",
                 new TypeReference<Map<String, Alarm>>() {});
+        this.historyStore = storageFactory.create("cloudwatchmetrics", "cwalarmhistory.json",
+                new TypeReference<Map<String, AlarmHistoryItem>>() {}, WriteProfile.APPEND_HEAVY);
         this.regionResolver = regionResolver;
         this.alarmSnsNotifier = alarmSnsNotifier;
     }
@@ -71,8 +106,16 @@ public class CloudWatchMetricsService {
     CloudWatchMetricsService(StorageBackend<String, MetricDatum> metricStore,
                              StorageBackend<String, Alarm> alarmStore,
                              RegionResolver regionResolver, AlarmSnsNotifier alarmSnsNotifier) {
+        this(metricStore, alarmStore, new InMemoryStorage<>(), regionResolver, alarmSnsNotifier);
+    }
+
+    CloudWatchMetricsService(StorageBackend<String, MetricDatum> metricStore,
+                             StorageBackend<String, Alarm> alarmStore,
+                             StorageBackend<String, AlarmHistoryItem> historyStore,
+                             RegionResolver regionResolver, AlarmSnsNotifier alarmSnsNotifier) {
         this.metricStore = metricStore;
         this.alarmStore = alarmStore;
+        this.historyStore = historyStore;
         this.regionResolver = regionResolver;
         this.alarmSnsNotifier = alarmSnsNotifier;
     }
@@ -151,13 +194,16 @@ public class CloudWatchMetricsService {
      */
     public void deleteMetricDataBefore(String namespace, Instant cutoff) {
         long cutoffSeconds = cutoff.getEpochSecond();
-        Predicate<MetricDatum> expired = d -> namespace.equals(d.getNamespace()) && d.getTimestamp() < cutoffSeconds;
-        if (metricStore instanceof AccountAwareStorageBackend<MetricDatum> aware) {
+        deleteInEveryAccount(metricStore, d -> namespace.equals(d.getNamespace()) && d.getTimestamp() < cutoffSeconds);
+    }
+
+    private static <V> void deleteInEveryAccount(StorageBackend<String, V> store, Predicate<V> expired) {
+        if (store instanceof AccountAwareStorageBackend<V> aware) {
             aware.deleteAllAccountsMatching(expired);
             return;
         }
-        for (String key : List.copyOf(metricStore.keys())) {
-            metricStore.get(key).filter(expired).ifPresent(ignored -> metricStore.delete(key));
+        for (String key : List.copyOf(store.keys())) {
+            store.get(key).filter(expired).ifPresent(ignored -> store.delete(key));
         }
     }
 
@@ -378,6 +424,7 @@ public class CloudWatchMetricsService {
             throw SmithyValidationErrors.validationError(violation);
         }
         Alarm previous = alarmStore.get(region + "::" + name).orElse(null);
+        ObjectNode before = previous == null ? null : snapshot(previous);
         if (previous != null) {
             if (!previous.getClass().equals(alarm.getClass())) {
                 throw new AwsException("ValidationError", "An alarm of another type already has this name", 400);
@@ -386,7 +433,10 @@ public class CloudWatchMetricsService {
             alarm.setStateReason(previous.getStateReason());
             alarm.setStateReasonData(previous.getStateReasonData());
             alarm.setStateUpdatedTimestamp(previous.getStateUpdatedTimestamp());
+            alarm.setStateTransitionedTimestamp(previous.getStateTransitionedTimestamp());
             alarm.setTags(new HashMap<>(previous.getTags()));
+        } else {
+            alarm.setStateTransitionedTimestamp(alarm.getStateUpdatedTimestamp());
         }
         if (alarm.getAlarmArn() == null) {
             alarm.setAlarmArn(regionResolver.buildArn("cloudwatch", region, "alarm:" + name));
@@ -394,7 +444,37 @@ public class CloudWatchMetricsService {
         alarm.setRegion(region);
         alarm.setAlarmConfigurationUpdatedTimestamp(Instant.now().getEpochSecond());
         alarmStore.put(region + "::" + name, alarm);
+        ObjectNode after = snapshot(alarm);
+        ObjectNode data = MAPPER.createObjectNode().put("version", "1.0");
+        if (before == null) {
+            data.put("type", "Create").set("createdAlarm", after);
+            recordHistory(alarm, region, "ConfigurationUpdate", "Alarm \"" + name + "\" created", data);
+        } else {
+            data.put("type", "Update").set("updatedAlarm", after);
+            ObjectNode original = data.putObject("originalUpdatedFields");
+            Set<String> fields = new LinkedHashSet<>();
+            before.fieldNames().forEachRemaining(fields::add);
+            after.fieldNames().forEachRemaining(fields::add);
+            for (String field : fields) {
+                if (!Objects.equals(before.get(field), after.get(field))) {
+                    original.set(field, before.has(field) ? before.get(field) : NullNode.getInstance());
+                }
+            }
+            recordHistory(alarm, region, "ConfigurationUpdate", "Alarm \"" + name + "\" updated", data);
+        }
         LOG.infov("Put {0}: {1} in {2}", alarm.getClass().getSimpleName(), name, region);
+    }
+
+    /** The alarm as history items show it: AWS's timestamp strings, without state reasons, tags or Floci's bookkeeping. */
+    private static ObjectNode snapshot(Alarm alarm) {
+        ObjectNode node = MAPPER.valueToTree(alarm);
+        node.remove(List.of("region", "tags", "stateReason", "stateReasonData", "alarmType",
+                "stateTransitionedTimestamp"));
+        node.put("alarmConfigurationUpdatedTimestamp", AlarmSnsNotifier.TIMESTAMP_FORMAT.format(
+                Instant.ofEpochSecond(alarm.getAlarmConfigurationUpdatedTimestamp())));
+        node.put("stateUpdatedTimestamp", AlarmSnsNotifier.TIMESTAMP_FORMAT.format(
+                Instant.ofEpochSecond(alarm.getStateUpdatedTimestamp())));
+        return node;
     }
 
     /** Metric alarms evaluated by the existing metric evaluator. */
@@ -493,11 +573,7 @@ public class CloudWatchMetricsService {
                 });
                 String state = triggered ? "ALARM" : "OK";
                 if (!state.equals(alarm.getStateValue())) {
-                    alarm.setStateValue(state);
-                    alarm.setStateReason("AlarmRule evaluated to " + state);
-                    alarm.setStateReasonData(null);
-                    alarm.setStateUpdatedTimestamp(Instant.now().getEpochSecond());
-                    alarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
+                    changeState(alarm, region, state, "AlarmRule evaluated to " + state, null);
                     changed.add(alarm.getAlarmName());
                     changed.add(alarm.getAlarmArn());
                 }
@@ -523,8 +599,12 @@ public class CloudWatchMetricsService {
         }
         Set<String> deletedNames = new HashSet<>();
         for (String name : alarmNames) {
-            if (alarmStore.get(region + "::" + name).isPresent()) {
+            Alarm existing = alarmStore.get(region + "::" + name).orElse(null);
+            if (existing != null) {
                 deletedNames.add(name);
+                ObjectNode data = MAPPER.createObjectNode().put("version", "1.0").put("type", "Delete");
+                data.set("deletedAlarm", snapshot(existing));
+                recordHistory(existing, region, "ConfigurationUpdate", "Alarm \"" + name + "\" deleted", data);
             }
             alarmStore.delete(region + "::" + name);
         }
@@ -554,7 +634,7 @@ public class CloudWatchMetricsService {
     }
 
     public void setAlarmState(String alarmName, String stateValue, String stateReason, String stateReasonData, String region) {
-        List<String> states = List.of("OK", "ALARM", "INSUFFICIENT_DATA");
+        List<String> states = List.of("INSUFFICIENT_DATA", "ALARM", "OK");
         if (stateValue == null || !states.contains(stateValue)) {
             throw SmithyValidationErrors.validationError(stateValue == null ? SmithyValidationErrors.notNull("stateValue")
                     : SmithyValidationErrors.notInEnum(stateValue, "stateValue", states));
@@ -579,12 +659,7 @@ public class CloudWatchMetricsService {
                     .orElseThrow(() -> new AwsException("ResourceNotFound", "Alarm not found: " + alarmName, 404));
 
             String oldState = alarm.getStateValue();
-            alarm.setStateValue(stateValue);
-            alarm.setStateReason(stateReason);
-            alarm.setStateReasonData(stateReasonData);
-            alarm.setStateUpdatedTimestamp(Instant.now().getEpochSecond());
-
-            alarmStore.put(key, alarm);
+            changeState(alarm, region, stateValue, stateReason, stateReasonData);
             evaluateComposites(region, Set.of(alarmName), null);
             LOG.infov("SetAlarmState: {0} -> {1}", alarmName, stateValue);
             if (alarmSnsNotifier != null && alarm instanceof MetricAlarm metricAlarm) {
@@ -594,6 +669,111 @@ public class CloudWatchMetricsService {
         if (alarmSnsNotifier != null) {
             alarmSnsNotifier.publish(notifications);
         }
+    }
+
+    private void changeState(Alarm alarm, String region, String state, String reason, String reasonData) {
+        String oldState = alarm.getStateValue();
+        ObjectNode data = MAPPER.createObjectNode().put("version", "1.0");
+        data.set("oldState", stateNode(oldState, alarm.getStateReason(), alarm.getStateReasonData()));
+        data.set("newState", stateNode(state, reason, reasonData));
+        Instant now = Instant.now();
+        alarm.setStateValue(state);
+        alarm.setStateReason(reason);
+        alarm.setStateReasonData(reasonData);
+        if (alarm.getStateTransitionedTimestamp() == 0) {
+            // Stored before transitions were recorded: its last state update is the best known transition.
+            alarm.setStateTransitionedTimestamp(alarm.getStateUpdatedTimestamp());
+        }
+        alarm.setStateUpdatedTimestamp(now.getEpochSecond());
+        if (!state.equals(oldState)) {
+            alarm.setStateTransitionedTimestamp(now.getEpochSecond());
+        }
+        alarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
+        if (!state.equals(oldState)) {
+            recordHistory(alarm, region, "StateUpdate", "Alarm updated from " + oldState + " to " + state, data, now);
+        }
+    }
+
+    private static ObjectNode stateNode(String value, String reason, String reasonData) {
+        ObjectNode node = MAPPER.createObjectNode().put("stateValue", value).put("stateReason", reason);
+        if (reasonData != null) {
+            JsonNode parsed;
+            try {
+                parsed = MAPPER.readTree(reasonData);
+            } catch (JsonProcessingException ignored) {
+                // SetAlarmState does not require JSON here, so text that is not JSON is kept as a string.
+                parsed = null;
+            }
+            node.set("stateReasonData", parsed == null || parsed.isMissingNode() ? TextNode.valueOf(reasonData) : parsed);
+        }
+        return node;
+    }
+
+    /** Called only under this service's monitor, which also guards the sequence and the prune deadline. */
+    private void recordHistory(Alarm alarm, String region, String type, String summary, ObjectNode data) {
+        recordHistory(alarm, region, type, summary, data, Instant.now());
+    }
+
+    /** As above, stamped with {@code now}: a state change passes the instant it gave the alarm. */
+    private void recordHistory(Alarm alarm, String region, String type, String summary, ObjectNode data, Instant now) {
+        if (!now.isBefore(nextHistoryPrune)) {
+            long cutoffMillis = now.minus(HISTORY_RETENTION).toEpochMilli();
+            deleteInEveryAccount(historyStore, item -> item.timestamp() < cutoffMillis);
+            nextHistoryPrune = now.plus(Duration.ofHours(1));
+        }
+        lastHistorySequence = Math.max(epochMicros(now), lastHistorySequence + 1);
+        historyStore.put(region + "::" + String.format("%020d", lastHistorySequence),
+                new AlarmHistoryItem(lastHistorySequence, alarm.getAlarmName(), alarm.getAlarmType(),
+                        now.toEpochMilli(), type, summary, data.toString()));
+    }
+
+    private static long epochMicros(Instant instant) {
+        return instant.getEpochSecond() * 1_000_000 + instant.getNano() / 1_000;
+    }
+
+    public synchronized PaginatedResult<AlarmHistoryItem> describeAlarmHistory(String alarmName, List<String> alarmTypes,
+            String historyItemType, Instant startDate, Instant endDate, Integer maxRecords, String nextToken,
+            String scanBy, String region) {
+        List<String> violations = Stream.of(
+                alarmName == null ? null : SmithyValidationErrors.lengthOutOfRange("alarmName", alarmName, 1, 255),
+                alarmTypes == null || HISTORY_ALARM_TYPES.containsAll(alarmTypes) ? null
+                        : SmithyValidationErrors.notAllInEnum(alarmTypes, "alarmTypes", HISTORY_ALARM_TYPES),
+                historyItemType == null || HISTORY_ITEM_TYPES.contains(historyItemType) ? null
+                        : SmithyValidationErrors.notInEnum(historyItemType, "historyItemType", HISTORY_ITEM_TYPES),
+                maxRecords == null ? null : SmithyValidationErrors.outOfRange("maxRecords", maxRecords, 1, 100),
+                scanBy == null || SCAN_BY.contains(scanBy) ? null
+                        : SmithyValidationErrors.notInEnum(scanBy, "scanBy", SCAN_BY))
+                .filter(Objects::nonNull).toList();
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
+        if (alarmName == null && historyItemType != null && historyItemType.startsWith("AlarmContributor")) {
+            throw new AwsException("ValidationError",
+                    "Alarm name must be provided to query history for alarm contributors.", 400);
+        }
+        if (startDate != null && endDate != null && startDate.toEpochMilli() > endDate.toEpochMilli()) {
+            throw CloudWatchMetricsException.invalidParameterValue("Start date " + HISTORY_DATE_FORMAT.format(startDate)
+                    + " must be before end date " + HISTORY_DATE_FORMAT.format(endDate));
+        }
+        boolean ascending = "TimestampAscending".equals(scanBy);
+        if (nextToken != null && Pagination.tokenStartsWith(nextToken,
+                (ascending ? "alarm-history-desc" : "alarm-history-asc") + ":")) {
+            return new PaginatedResult<>(List.of(), null);
+        }
+        List<String> types = alarmTypes == null || alarmTypes.isEmpty() ? List.of("MetricAlarm") : alarmTypes;
+        long retained = Instant.now().minus(HISTORY_RETENTION).toEpochMilli();
+        long start = startDate == null ? retained : Math.max(retained, startDate.toEpochMilli());
+        long end = endDate == null ? Long.MAX_VALUE : endDate.toEpochMilli();
+        List<AlarmHistoryItem> matching = historyStore.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(item -> alarmName == null || alarmName.equals(item.alarmName()))
+                .filter(item -> types.contains(item.alarmType()))
+                .filter(item -> historyItemType == null || historyItemType.equals(item.historyItemType()))
+                .filter(item -> item.timestamp() >= start && item.timestamp() <= end)
+                .toList();
+        return Pagination.paginate(matching,
+                item -> String.format("%020d", ascending ? item.sequence() : Long.MAX_VALUE - item.sequence()),
+                maxRecords == null ? 50 : maxRecords, nextToken, ascending ? "alarm-history-asc" : "alarm-history-desc",
+                token -> new AwsException("InvalidNextToken", "Invalid NextToken : " + token, 400));
     }
 
     /**

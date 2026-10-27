@@ -275,6 +275,22 @@ def test_a_member_taking_an_arn_before_a_name_is_read_as_the_variable_of_that_ty
         dict(rules[0], arnOf={"BusName": "bus"}), dict(rules[1], arnOf={"BusName": "bus"}), rules[2]]
 
 
+def test_a_field_of_each_of_a_lists_structures_taking_an_arn_before_a_name_is_read_by_its_path():
+    shapes = {"String": {"type": "string"},
+              "BusNameOrArn": {"type": "string", "pattern": "(arn:aws[\\w-]*:svc:[a-z]+-[a-z]+-[\\w-]+:[0-9]{12}:bus\\/)?[\\.\\-_A-Za-z0-9]+"},
+              "Entry": {"type": "structure", "members": {"Source": {"shape": "String"}, "BusName": {"shape": "BusNameOrArn"}}},
+              "Entries": {"type": "list", "member": {"shape": "Entry"}},
+              "Config": {"type": "structure", "members": {"BusName": {"shape": "BusNameOrArn"}}},
+              "In": {"type": "structure", "members": {"Entries": {"shape": "Entries"}, "Config": {"shape": "Config"}}}}
+    models = {"svc": {"metadata": {"protocol": "json"}, "operations": {"PutEvents": {"input": {"shape": "In"}}}, "shapes": shapes}}
+    # Only a list's structures give one value for each, so a lone structure's field is not read.
+    assert r.name_or_arn_members(models, "PutEvents") == {"Entries[].BusName": "bus"}
+    formats = {"bus": "arn:${Partition}:svc:${Region}:${Account}:bus/${BusName}"}
+    buses = [{"type": "bus", "fill": {"BusName": "Entries[].BusName"}, "absent": {"Entries[].BusName": "default"}}]
+    assert r.with_arn_of(buses, formats, r.name_or_arn_members(models, "PutEvents")) == [
+        dict(buses[0], arnOf={"Entries[].BusName": "bus"})]
+
+
 def test_a_correction_for_an_operation_the_file_does_not_read_fails(corrections, tmp_path):
     corrections.setattr(r, "CORRECTIONS", {"svc:Gone": ([], "no longer there")})
     with pytest.raises(ValueError, match="svc:Gone"):
@@ -303,6 +319,11 @@ def test_a_well_formed_document_validates():
     document["operations"]["svc:A"]["resources"][0]["before"] = "#"
     assert r.validate(document) == []
     assert r.validate(with_a_create()) == []
+    # A field of each of a list's structures fills a variable, read as given when absent, or as an ARN.
+    document = good_document()
+    document["operations"]["svc:B"]["resources"][0].update(
+        fill={"GroupName": "Groups[].Name"}, absent={"Groups[].Name": "default"}, arnOf={"Groups[].Name": "thing"})
+    assert r.validate(document) == []
 
 
 def with_a_create() -> dict:
@@ -316,7 +337,11 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(types=["pool"]), "not resource types"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a.b.c"), "no member"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a[][]"), "no member"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Groups[].Name"), "no variables"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Group.Name"), "no variables"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Groups[].Names[]"), "no variables"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupId="Groups[].Id"), "more than one list"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(absent={"Groups[].Name": "default"}), "absent members"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(arnOf={"Groups[].Name": "thing"}), "types of one variable"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(Other="Name"), "no variables"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupId="Ids[]"), "more than one list"),
     (lambda d: d["operations"]["svc:A"].update(action="other:A"), "no action of its namespace"),
@@ -428,6 +453,10 @@ def test_the_vendored_file_is_well_formed():
          "unless": {"EventBusName": ["default"]}, "absent": {"EventBusName": "default"}, "arnOf": {"EventBusName": "event-bus"}}]
     assert operations["events:DescribeEventBus"]["resources"] == [
         {"type": "event-bus", "fill": {"EventBusName": "Name"}, "absent": {"Name": "default"}, "arnOf": {"Name": "event-bus"}}]
+    # Each PutEvents entry is on the bus it names, by name or ARN, or the default one when it names none.
+    assert operations["events:PutEvents"]["resources"] == [
+        {"type": "event-bus", "fill": {"EventBusName": "Entries[].EventBusName"},
+         "absent": {"Entries[].EventBusName": "default"}, "arnOf": {"Entries[].EventBusName": "event-bus"}}]
     assert document["namespaces"]["events"] == ["events"] and "eventbridgev2" in document["clientsNotRead"]
     # A state machine's version or alias is checked on the state machine.
     assert document["unqualified"] == {"states": ["statemachine"]}

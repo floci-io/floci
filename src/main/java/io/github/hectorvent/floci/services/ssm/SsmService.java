@@ -350,10 +350,11 @@ public class SsmService implements ResourceProvider {
         return getParameter(parameterName(nameOrArn, region), true, region);
     }
 
-    public Parameter getParameter(String name, boolean withDecryption, String region) {
-        if (name != null && name.startsWith(SECRET_REFERENCE_PREFIX)) {
-            return secretReference(name, withDecryption, region);
+    public Parameter getParameter(String nameOrArn, boolean withDecryption, String region) {
+        if (nameOrArn != null && nameOrArn.startsWith(SECRET_REFERENCE_PREFIX)) {
+            return secretReference(nameOrArn, withDecryption, region);
         }
+        String name = parameterReadName(nameOrArn, region);
         return findParameter(name, region).orElseThrow(() -> {
             int separator = name == null ? -1 : name.lastIndexOf(':');
             if (separator > 0 && separator < name.length() - 1
@@ -1109,10 +1110,25 @@ public class SsmService implements ResourceProvider {
      * label selector after the last colon is kept, but the fallback checks the name without it.
      */
     private String parameterName(String nameOrArn, String region) {
+        return parameterName(nameOrArn, region, false);
+    }
+
+    String parameterReadName(String nameOrArn, String region) {
+        return parameterName(nameOrArn, region, true);
+    }
+
+    private String parameterName(String nameOrArn, String region, boolean parameterRead) {
         if (nameOrArn != null && nameOrArn.startsWith("arn:")) {
             try {
                 AwsArnUtils.Arn arn = AwsArnUtils.parse(nameOrArn);
                 if ("ssm".equals(arn.service()) && arn.resource().startsWith("parameter")) {
+                    if (parameterRead && (!arn.resource().startsWith("parameter/")
+                            || arn.resource().startsWith("parameter" + SECRET_REFERENCE_PREFIX)
+                            || !arn.accountId().equals(regionResolver.getAccountId())
+                            || !arn.region().equals(region)
+                            || !arn.partition().equals(regionResolver.partitionForRegion(region)))) {
+                        return nameOrArn;
+                    }
                     String name = arn.resource().substring("parameter".length());
                     int separator = name.lastIndexOf(':');
                     String baseName = separator > 0 ? name.substring(0, separator) : name;

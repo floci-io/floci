@@ -41,10 +41,11 @@ class CloudWatchMetricsJsonHandlerTest {
     private static final Instant EPOCH_OLD = EPOCH_NOW.minusSeconds(86400);
 
     private CloudWatchMetricsJsonHandler handler;
+    private CloudWatchMetricsService service;
 
     @BeforeEach
     void setUp() {
-        CloudWatchMetricsService service = new CloudWatchMetricsService(
+        service = new CloudWatchMetricsService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver(REGION, "000000000000")
@@ -347,6 +348,33 @@ class CloudWatchMetricsJsonHandlerTest {
         assertEquals("Count", alarm.get("Unit").asText());
     }
 
+    @Test
+    void describeAlarms_reportsStateTransitionedTimestampForBothAlarmKinds() {
+        handler.handle("PutMetricAlarm", alarmRequest("TransitionedMetric"), REGION);
+        ObjectNode composite = MAPPER.createObjectNode();
+        composite.put("AlarmName", "TransitionedComposite");
+        composite.put("AlarmRule", "ALARM(TransitionedMetric)");
+        handler.handle("PutCompositeAlarm", composite, REGION);
+        ObjectNode describe = MAPPER.createObjectNode();
+        describe.putArray("AlarmTypes").add("MetricAlarm").add("CompositeAlarm");
+
+        ObjectNode response = (ObjectNode) handler.handle("DescribeAlarms", describe, REGION).getEntity();
+
+        for (String kind : List.of("MetricAlarms", "CompositeAlarms")) {
+            JsonNode alarm = response.get(kind).get(0);
+            assertTrue(alarm.has("StateTransitionedTimestamp"), kind + ": " + alarm);
+            assertEquals(alarm.get("StateUpdatedTimestamp").asLong(), alarm.get("StateTransitionedTimestamp").asLong());
+        }
+
+        service.describeAlarms(List.of("TransitionedMetric"), null, REGION).getFirst().setStateTransitionedTimestamp(100);
+        service.describeCompositeAlarms(List.of("TransitionedComposite"), null, REGION).getFirst()
+                .setStateTransitionedTimestamp(100);
+        response = (ObjectNode) handler.handle("DescribeAlarms", describe, REGION).getEntity();
+        for (String kind : List.of("MetricAlarms", "CompositeAlarms")) {
+            assertEquals(100, response.get(kind).get(0).get("StateTransitionedTimestamp").asLong(), kind);
+        }
+    }
+
     // AWS sends every alarm collection even when it is empty. The CLI's text output writes a
     // None line for each paginator result key missing from the page (floci-io/floci#6362).
     @Test
@@ -455,5 +483,64 @@ class CloudWatchMetricsJsonHandlerTest {
         ObjectNode body = (ObjectNode) resp.getEntity();
         assertTrue(body.get("MetricDataResults").get(0).get("Values").size() > 0,
                 "an explicit JSON null Unit must not filter every datapoint out");
+    }
+
+    @Test
+    void describeAlarmHistoryReturnsAwsShapedItemsAndPages() {
+        handler.handle("PutMetricAlarm", MAPPER.createObjectNode().put("AlarmName", "json-history"), REGION);
+        for (String state : List.of("OK", "ALARM", "OK")) {
+            handler.handle("SetAlarmState", MAPPER.createObjectNode().put("AlarmName", "json-history")
+                    .put("StateValue", state).put("StateReason", "manual"), REGION);
+        }
+        ObjectNode request = MAPPER.createObjectNode().put("AlarmName", "json-history")
+                .put("HistoryItemType", "StateUpdate").put("MaxRecords", 2);
+        request.putArray("AlarmTypes").add("MetricAlarm");
+
+        Response response = handler.handle("DescribeAlarmHistory", request, REGION);
+        assertEquals(200, response.getStatus());
+        ObjectNode body = (ObjectNode) response.getEntity();
+        JsonNode items = body.get("AlarmHistoryItems");
+        assertEquals(2, items.size());
+        JsonNode newest = items.get(0);
+        List<String> fields = new ArrayList<>();
+        newest.fieldNames().forEachRemaining(fields::add);
+        assertEquals(List.of("AlarmName", "AlarmType", "HistoryData", "HistoryItemType", "HistorySummary", "Timestamp"),
+                fields);
+        assertEquals("json-history", newest.get("AlarmName").asText());
+        assertEquals("MetricAlarm", newest.get("AlarmType").asText());
+        assertEquals("StateUpdate", newest.get("HistoryItemType").asText());
+        assertEquals("Alarm updated from ALARM to OK", newest.get("HistorySummary").asText());
+        assertTrue(newest.get("HistoryData").asText().startsWith("{\"version\":\"1.0\",\"oldState\""));
+        assertTrue(newest.get("Timestamp").isDouble());
+        assertTrue(Math.abs(newest.get("Timestamp").asDouble() - Instant.now().getEpochSecond()) < 60);
+        assertTrue(body.get("NextToken").isTextual());
+
+        request.put("NextToken", body.get("NextToken").asText());
+        ObjectNode last = (ObjectNode) handler.handle("DescribeAlarmHistory", request, REGION).getEntity();
+        assertEquals("Alarm updated from INSUFFICIENT_DATA to OK",
+                last.get("AlarmHistoryItems").get(0).get("HistorySummary").asText());
+        assertFalse(last.has("NextToken"));
+
+        ObjectNode future = MAPPER.createObjectNode().put("AlarmName", "json-history")
+                .put("StartDate", sdkTimestamp(Instant.now().plusSeconds(3600)));
+        assertEquals(0, ((ObjectNode) handler.handle("DescribeAlarmHistory", future, REGION).getEntity())
+                .get("AlarmHistoryItems").size());
+
+        ObjectNode distant = MAPPER.createObjectNode().put("AlarmName", "json-history")
+                .put("HistoryItemType", "StateUpdate").put("EndDate", 253402300799L);
+        assertEquals(3, ((ObjectNode) handler.handle("DescribeAlarmHistory", distant, REGION).getEntity())
+                .get("AlarmHistoryItems").size(), "9999-12-31 is after every item");
+    }
+
+    @Test
+    void describeAlarmHistoryRejectsAStartDateAfterTheEndDate() {
+        ObjectNode request = MAPPER.createObjectNode()
+                .put("StartDate", sdkTimestamp(Instant.parse("2026-10-26T16:23:10Z")))
+                .put("EndDate", sdkTimestamp(Instant.parse("2026-10-26T16:22:10Z")));
+        AwsException e = assertThrows(AwsException.class,
+                () -> handler.handle("DescribeAlarmHistory", request, REGION));
+        assertEquals("InvalidParameterValueException", e.jsonType());
+        assertEquals("Start date Mon Oct 26 16:23:10 UTC 2026 must be before end date Mon Oct 26 16:22:10 UTC 2026",
+                e.getMessage());
     }
 }

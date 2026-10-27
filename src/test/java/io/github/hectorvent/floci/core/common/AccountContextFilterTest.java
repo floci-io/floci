@@ -15,6 +15,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -49,7 +50,7 @@ class AccountContextFilterTest {
         accountResolver = new AccountResolver(DEFAULT_ACCOUNT);
         regionResolver = new RegionResolver(DEFAULT_REGION, DEFAULT_ACCOUNT);
         requestContext = new RequestContext();
-        sessionAccounts = new java.util.HashMap<>();
+        sessionAccounts = new HashMap<>();
         allowUnknownRegions = false;
         strictPartitions = false;
         enforceIam = false;

@@ -8,6 +8,7 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -39,7 +40,7 @@ class AutoScalingQueryHandlerTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none());
+                Map.of(), Map.of(), AsgOptionalFields.none());
 
         AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
         MultivaluedHashMap<String, String> startParams = new MultivaluedHashMap<>();
@@ -104,8 +105,8 @@ class AutoScalingQueryHandlerTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(),
-                java.util.Map.of(), AsgOptionalFields.none());
+                Map.of(),
+                Map.of(), AsgOptionalFields.none());
         AsgInstance instance = new AsgInstance();
         instance.setInstanceId("i-original");
         instance.setAvailabilityZone("us-east-1a");
@@ -160,7 +161,7 @@ class AutoScalingQueryHandlerTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none());
+                Map.of(), Map.of(), AsgOptionalFields.none());
         AsgInstance instance = new AsgInstance();
         instance.setInstanceId("i-current");
         instance.setAvailabilityZone("us-east-1a");
@@ -193,7 +194,7 @@ class AutoScalingQueryHandlerTest {
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.createAutoScalingGroup(REGION, "protected-asg", null, "lt", null, "1", null,
                 0, 2, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(),
-                "EC2", 0, List.of("Default"), java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none());
+                "EC2", 0, List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
         AsgInstance instance = new AsgInstance();
         instance.setInstanceId("i-protected");
         instance.setLifecycleState("InService");
@@ -220,7 +221,7 @@ class AutoScalingQueryHandlerTest {
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.createAutoScalingGroup(REGION, "health-asg", null, "lt", null, "1", null,
                 0, 2, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(),
-                "EC2", 0, List.of("Default"), java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none());
+                "EC2", 0, List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
         AsgInstance instance = new AsgInstance();
         instance.setInstanceId("i-unhealthy");
         instance.setLifecycleState("InService");
@@ -246,7 +247,7 @@ class AutoScalingQueryHandlerTest {
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.createAutoScalingGroup(REGION, "no-protection-flag-asg", null, "lt", null, "1", null,
                 0, 2, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(),
-                "EC2", 0, List.of("Default"), java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none());
+                "EC2", 0, List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
         AsgInstance instance = new AsgInstance();
         instance.setInstanceId("i-flagless");
         instance.setLifecycleState("InService");
@@ -275,7 +276,7 @@ class AutoScalingQueryHandlerTest {
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.createAutoScalingGroup(REGION, "malformed-flag-asg", null, "lt", null, "1", null,
                 0, 2, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(),
-                "EC2", 0, List.of("Default"), java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none());
+                "EC2", 0, List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
         AsgInstance instance = new AsgInstance();
         instance.setInstanceId("i-malformed");
         instance.setLifecycleState("InService");
@@ -303,7 +304,7 @@ class AutoScalingQueryHandlerTest {
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.createAutoScalingGroup(REGION, "grace-asg", null, "lt", null, "1", null,
                 0, 2, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(),
-                "EC2", 0, List.of("Default"), java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none());
+                "EC2", 0, List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
         AsgInstance instance = new AsgInstance();
         instance.setInstanceId("i-grace");
         instance.setLifecycleState("InService");
@@ -344,7 +345,7 @@ class AutoScalingQueryHandlerTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none());
+                Map.of(), Map.of(), AsgOptionalFields.none());
 
         AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
         MultivaluedHashMap<String, String> putParams = new MultivaluedHashMap<>();

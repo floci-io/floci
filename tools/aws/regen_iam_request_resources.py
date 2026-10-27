@@ -42,7 +42,9 @@ A member whose botocore shape is an account id (a string of pattern `[0-9]{12}`)
 the types the request names by their variables: ECR's `registryId` selects the registry its handler
 acts in, so `repository/<name>` is that account's. A member whose shape's pattern takes an ARN before
 the name (`(arn:...:event-bus/)?<name>`) may give the ARN of the type of that name instead, whose one
-variable it is then read as, in the ARN's account and Region: EventBridge's `EventBusName`.
+variable it is then read as, in the ARN's account and Region: EventBridge's `EventBusName`. So may a
+field of each element of a list of structures, each element's resource in the account and Region of
+the ARN it gives: `PutEvents`' `Entries[].EventBusName`.
 
 An operation that creates a type its action does not act on names the new resource from the ARN of the
 parent it acts on, when the child's ARN format is the parent's with its resource type word replaced and
@@ -61,7 +63,9 @@ or not. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources fo
 `CORRECTIONS` gives an operation's resources where the rule gets them wrong, each with its reason; a
 resource there may apply only `when` a member has one of some values (`Type` picks the load balancer
 v2 `CreateLoadBalancer` creates), or `unless` it has, read as a value when it is `absent` (an
-EventBridge request naming no event bus names the default one), and an ARN member's value may be read
+EventBridge request naming no event bus names the default one), a variable may be filled from a field
+of each element of a list of structures, one resource for each element and the `absent` value for an
+element lacking it (`PutEvents` publishes each entry to its bus), and an ARN member's value may be read
 only up to a character `before` which its handler drops the rest (`StartExecution`'s
 `<stateMachineArn>#<test case>`). `CLIENTS_NOT_READ` are SDK clients the reference lists for a
 namespace's operations whose requests Floci does not serve, each with its reason.
@@ -250,6 +254,12 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
     "events:DescribeEventBus": ([{"type": "event-bus", "fill": {"EventBusName": "Name"}, "absent": {"Name": "default"}}],
                                 "a request naming no event bus describes the default one ('If you omit this, the "
                                 "default event bus is displayed')"),
+    "events:PutEvents": ([{"type": "event-bus", "fill": {"EventBusName": "Entries[].EventBusName"},
+                           "absent": {"Entries[].EventBusName": "default"}}],
+                         "each entry goes to the event bus its EventBusName names, the default one when it names "
+                         "none ('If you omit this, the default event bus is used'), and publishing is authorized "
+                         "against the bus for every entry in the request; the rule reads no member of a list's "
+                         "structures"),
     **{f"states:{operation}": ([{"types": ["statemachine"], "arn": "stateMachineArn", "before": "#"}],
                               "Floci takes Step Functions Local's <stateMachineArn>#<test case> and runs the machine "
                               "the part before the # names, so that part is the one checked")
@@ -413,18 +423,33 @@ NAME_OR_ARN_RE = re.compile(r"^\(arn:[^)]*:([A-Za-z][A-Za-z0-9-]*)\\?/\)\?")
 
 def name_or_arn_members(models: dict[str, dict], operation: str) -> dict[str, str]:
     """The top-level members of the operation's request whose shape's pattern takes an ARN before a name, by name,
-    each with the resource type word of that ARN."""
+    and the fields of each element of a list of structures whose shape's does, as `Name[].Field`, each with the
+    resource type word of that ARN."""
     found: dict[str, str] = {}
     for model in models.values():
         spec = model["operations"].get(operation)
         if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
             continue
         for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            if member.get("location") not in BODY_LOCATIONS:
+                continue
             shape = model["shapes"][member["shape"]]
-            match = NAME_OR_ARN_RE.match(shape.get("pattern") or "") if shape["type"] == "string" else None
-            if member.get("location") in BODY_LOCATIONS and match:
-                found.setdefault(name, match.group(1))
+            word = _name_or_arn(shape)
+            if word:
+                found.setdefault(name, word)
+            element = model["shapes"][shape["member"]["shape"]] if shape["type"] == "list" else {}
+            if element.get("type") == "structure":
+                for field, nested in element.get("members", {}).items():
+                    word = _name_or_arn(model["shapes"][nested["shape"]])
+                    if word:
+                        found.setdefault(f"{name}[].{field}", word)
     return found
+
+
+def _name_or_arn(shape: dict) -> str | None:
+    """The resource type word of the ARN a string shape's pattern takes before a name; None for another shape."""
+    match = NAME_OR_ARN_RE.match(shape.get("pattern") or "") if shape["type"] == "string" else None
+    return match.group(1) if match else None
 
 
 def named_by(word: str, formats: dict[str, str]) -> str | None:
@@ -704,6 +729,8 @@ def render(document: dict) -> str:
 # Gates
 # --------------------------------------------------------------------------- #
 PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?$")
+# A member filling a variable may also be a field of each element of a list of structures, one value for each.
+FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]*)?$")
 # An ARN member's path may go one level into a structure or a list's structures.
 ARN_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)?$")
 # A format's resource that is a literal and one variable, at its end.
@@ -784,9 +811,9 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
     fill = resource["fill"]
     variables = set(VARIABLE_RE.findall(formats[kinds[0]])) - KNOWN_VARIABLES
     if not isinstance(fill, dict) or set(fill) - variables or not all(
-            isinstance(path, str) and PATH_RE.match(path) for path in fill.values()):
+            isinstance(path, str) and FILL_PATH_RE.match(path) for path in fill.values()):
         return [f"{operation} fills {fill!r}, which are no variables of {kinds[0]}'s ARN by members"]
-    if sum(path.endswith("[]") for path in fill.values()) > 1:
+    if sum("[]" in path for path in fill.values()) > 1:
         return [f"{operation} fills {kinds[0]} from more than one list"]
     for key in ("when", "unless"):
         when = resource.get(key, {})
@@ -795,12 +822,12 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
                 and values and all(value is None or isinstance(value, str) for value in values) for path, values in when.items()):
             return [f"{operation} names {kinds[0]} {key} {when!r}, which is no member's values"]
     absent = resource.get("absent", {})
-    if not isinstance(absent, dict) or not all(isinstance(path, str) and PATH_RE.match(path) and not path.endswith("[]")
-                                               and isinstance(value, str) and value for path, value in absent.items()):
+    if not isinstance(absent, dict) or not all(_read_as_one(path, fill) and isinstance(value, str) and value
+                                               for path, value in absent.items()):
         return [f"{operation} reads {absent!r} for absent members, which is no member's value"]
     arn_of = resource.get("arnOf", {})
     if not isinstance(arn_of, dict) or not all(
-            isinstance(path, str) and PATH_RE.match(path) and not path.endswith("[]") and isinstance(kind, str)
+            _read_as_one(path, fill) and isinstance(kind, str)
             and len(set(VARIABLE_RE.findall(formats.get(kind, ""))) - KNOWN_VARIABLES) == 1
             and formats[kind].endswith("}") for path, kind in arn_of.items()):
         return [f"{operation} reads {arn_of!r} as ARNs of types, which are no members or types of one variable"]
@@ -809,6 +836,16 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
                                 or "${Account}" not in formats[kinds[0]]):
         return [f"{operation} takes {kinds[0]}'s account from {account!r}, which is no member or no account of its ARN"]
     return []
+
+
+def _read_as_one(path: object, fill: dict) -> bool:
+    """Whether a member gives one value as it is read: a top-level one that is no list, or a field of each element
+    of a list of structures that fills a variable, one value for each element."""
+    if not isinstance(path, str):
+        return False
+    if "[]." in path:
+        return bool(FILL_PATH_RE.match(path)) and path in fill.values()
+    return bool(PATH_RE.match(path)) and not path.endswith("[]")
 
 
 def _created_problems(operation: str, created: object, types: set[str], formats: dict[str, str]) -> list[str]:

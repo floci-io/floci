@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.servicecatalog;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -80,7 +81,7 @@ class ServiceCatalogResourceInUseConsumerTest {
         call("ListPortfoliosForProduct", "{\"ProductId\":\"" + productId + "\"}")
         .then()
             .statusCode(200)
-            .body("PortfolioDetails.Id", org.hamcrest.Matchers.hasItem(portfolioId));
+            .body("PortfolioDetails.Id", Matchers.hasItem(portfolioId));
     }
 
     @Test

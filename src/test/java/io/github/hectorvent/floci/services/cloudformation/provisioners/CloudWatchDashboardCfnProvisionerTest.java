@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -369,7 +370,7 @@ class CloudWatchDashboardCfnProvisionerTest {
     @Test
     void anInPlaceUpdateIsRolledBackFromTheBodyAndTagsItReplaced() {
         Dashboard before = new Dashboard("ops", arn("ops"), "{\"widgets\":[{\"type\":\"text\"}]}");
-        before.setTags(new java.util.LinkedHashMap<>(Map.of("team", "platform")));
+        before.setTags(new LinkedHashMap<>(Map.of("team", "platform")));
         when(dashboards.getDashboard("ops", REGION)).thenReturn(before);
         when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("team", "platform"));
 
@@ -454,7 +455,7 @@ class CloudWatchDashboardCfnProvisionerTest {
     @Test
     void anInPlaceUpdateThatFailedOnItsTagsPutsTheBodyBack() {
         Dashboard before = new Dashboard("ops", arn("ops"), OLD_BODY);
-        before.setTags(new java.util.LinkedHashMap<>(Map.of("team", "platform")));
+        before.setTags(new LinkedHashMap<>(Map.of("team", "platform")));
         when(dashboards.getDashboard("ops", REGION)).thenReturn(before);
         when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("team", "platform"));
         doThrow(new AwsException("InternalServiceError", "boom", 500))
@@ -471,7 +472,7 @@ class CloudWatchDashboardCfnProvisionerTest {
     @Test
     void anUnwoundInPlaceUpdateIsMarkedRestored() {
         Dashboard before = new Dashboard("ops", arn("ops"), OLD_BODY);
-        before.setTags(new java.util.LinkedHashMap<>(Map.of("team", "platform")));
+        before.setTags(new LinkedHashMap<>(Map.of("team", "platform")));
         when(dashboards.getDashboard("ops", REGION)).thenReturn(before);
         when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("team", "platform"));
         doThrow(new AwsException("InternalServiceError", "boom", 500))
@@ -530,7 +531,7 @@ class CloudWatchDashboardCfnProvisionerTest {
     @Test
     void anUnwindThatCannotRestoreIsReportedAsARollbackFailure() {
         Dashboard before = new Dashboard("ops", arn("ops"), OLD_BODY);
-        before.setTags(new java.util.LinkedHashMap<>(Map.of("team", "platform")));
+        before.setTags(new LinkedHashMap<>(Map.of("team", "platform")));
         when(dashboards.getDashboard("ops", REGION)).thenReturn(before);
         when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("team", "platform"));
         doThrow(new AwsException("InternalServiceError", "boom", 500))
@@ -560,7 +561,7 @@ class CloudWatchDashboardCfnProvisionerTest {
     @Test
     void anUnwindThatFailsWithTheUpdatesOwnExceptionIsStillRecorded() {
         Dashboard before = new Dashboard("ops", arn("ops"), OLD_BODY);
-        before.setTags(new java.util.LinkedHashMap<>(Map.of("team", "platform")));
+        before.setTags(new LinkedHashMap<>(Map.of("team", "platform")));
         when(dashboards.getDashboard("ops", REGION)).thenReturn(before);
         when(dashboards.listTagsForResource(arn("ops"), REGION)).thenReturn(Map.of("team", "platform"));
         when(dashboards.putDashboard(eq("ops"), anyString(), anyMap(), eq(REGION))).thenReturn(before);

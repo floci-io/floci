@@ -182,8 +182,8 @@ public class ElbV2DataPlane {
         }
     }
 
-    private final java.util.concurrent.atomic.AtomicBoolean releaseHandlerRegistered =
-            new java.util.concurrent.atomic.AtomicBoolean();
+    private final AtomicBoolean releaseHandlerRegistered =
+            new AtomicBoolean();
     private final Map<Integer, Map<String, String>> listenersByHostAndPort = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, ListenerBinding> listenerBindings;
     private final Map<String, AtomicReference<List<CompiledRule>>> ruleChains = new ConcurrentHashMap<>();
@@ -855,7 +855,7 @@ public class ElbV2DataPlane {
         return normalized;
     }
 
-    private void executeAction(io.vertx.core.http.HttpServerRequest req, Action action, String region, String listenerArn) {
+    private void executeAction(HttpServerRequest req, Action action, String region, String listenerArn) {
         if (action == null) {
             req.response().setStatusCode(502).end("No action");
             return;
@@ -868,7 +868,7 @@ public class ElbV2DataPlane {
         }
     }
 
-    private void executeForward(io.vertx.core.http.HttpServerRequest req, Action action, String region, String listenerArn) {
+    private void executeForward(HttpServerRequest req, Action action, String region, String listenerArn) {
         String tgArn = resolveTgArn(action);
         if (tgArn == null) {
             req.response().setStatusCode(502).end("No target group");
@@ -950,7 +950,7 @@ public class ElbV2DataPlane {
         return Math.max(1, seconds) * 1000;
     }
 
-    private void invokeLambdaTarget(io.vertx.core.http.HttpServerRequest req, String functionArn, String region) {
+    private void invokeLambdaTarget(HttpServerRequest req, String functionArn, String region) {
         if (req.isEnded()) {
             invokeLambdaWithBody(req, functionArn, region, Buffer.buffer());
             return;
@@ -981,7 +981,7 @@ public class ElbV2DataPlane {
         });
     }
 
-    private void invokeLambdaWithBody(io.vertx.core.http.HttpServerRequest req, String functionArn,
+    private void invokeLambdaWithBody(HttpServerRequest req, String functionArn,
                                       String region, Buffer body) {
         Map<String, Object> event = buildAlbEvent(req, body);
         // Lambda invocation is synchronous and may take seconds while a cold container
@@ -1005,7 +1005,7 @@ public class ElbV2DataPlane {
         });
     }
 
-    private void writeLambdaResponse(io.vertx.core.http.HttpServerRequest req, InvokeResult result) throws java.io.IOException {
+    private void writeLambdaResponse(HttpServerRequest req, InvokeResult result) throws IOException {
         if (result.getFunctionError() != null) {
             req.response().setStatusCode(502).end("Lambda function error: " + result.getFunctionError());
             return;
@@ -1072,7 +1072,7 @@ public class ElbV2DataPlane {
         }
     }
 
-    private Map<String, Object> buildAlbEvent(io.vertx.core.http.HttpServerRequest req, Buffer body) {
+    private Map<String, Object> buildAlbEvent(HttpServerRequest req, Buffer body) {
         Map<String, Object> event = new HashMap<>();
         event.put("requestContext", Map.of("elb", Map.of("targetGroupArn", "")));
         event.put("httpMethod", req.method().name());
@@ -1141,7 +1141,7 @@ public class ElbV2DataPlane {
         return tuples.get(tuples.size() - 1).getTargetGroupArn();
     }
 
-    private void proxyRequest(io.vertx.core.http.HttpServerRequest req, String host, int port,
+    private void proxyRequest(HttpServerRequest req, String host, int port,
                               boolean preserveHostHeader, List<String> cookies) {
         req.pause();
         if (ElbV2TargetResolver.isIpLiteral(host)) {
@@ -1386,7 +1386,7 @@ public class ElbV2DataPlane {
         source.exceptionHandler(err -> close.run());
     }
 
-    private void executeRedirect(io.vertx.core.http.HttpServerRequest req, Action action) {
+    private void executeRedirect(HttpServerRequest req, Action action) {
         String reqHost = req.host();
         String reqPort = "";
         if (reqHost != null && reqHost.contains(":")) {
@@ -1446,7 +1446,7 @@ public class ElbV2DataPlane {
         return result;
     }
 
-    private void executeFixedResponse(io.vertx.core.http.HttpServerRequest req, Action action) {
+    private void executeFixedResponse(HttpServerRequest req, Action action) {
         int statusCode = 200;
         try {
             if (action.getFixedResponseStatusCode() != null) {
@@ -1537,7 +1537,7 @@ public class ElbV2DataPlane {
             return hostHeaderPatterns.stream().anyMatch(p -> globMatches(p, host));
         }
 
-        boolean matches(io.vertx.core.http.HttpServerRequest req) {
+        boolean matches(HttpServerRequest req) {
             if (rule.isDefault()) {
                 return true;
             }
@@ -1549,7 +1549,7 @@ public class ElbV2DataPlane {
             return true;
         }
 
-        private boolean matchesCondition(RuleCondition condition, io.vertx.core.http.HttpServerRequest req) {
+        private boolean matchesCondition(RuleCondition condition, HttpServerRequest req) {
             String field = condition.getField();
             if (field == null) {
                 return true;
@@ -1605,7 +1605,7 @@ public class ElbV2DataPlane {
         }
 
         private Map<String, String> parseQueryString(String query) {
-            Map<String, String> params = new java.util.LinkedHashMap<>();
+            Map<String, String> params = new LinkedHashMap<>();
             if (query == null || query.isEmpty()) {
                 return params;
             }

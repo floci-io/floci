@@ -40,7 +40,7 @@ class DynamoDbStreamServiceTest {
     }
 
     private TableDefinition createTestTableWithStream() {
-        var tableDef = new TableDefinition("TestTable",
+        TableDefinition tableDef = new TableDefinition("TestTable",
                         List.of(new KeySchemaElement("userId", "HASH")),
                 List.of(new AttributeDefinition("userId", "S")),
                 "us-east-1", "000000000000");
@@ -68,7 +68,7 @@ class DynamoDbStreamServiceTest {
     /** The retarget must reach the records themselves, not just the reported configuration. */
     @Test
     void recordsEmittedAfterARetargetUseTheNewViewType() throws Exception {
-        var table = new TableDefinition("ViewTypeTable",
+        TableDefinition table = new TableDefinition("ViewTypeTable",
                 List.of(new KeySchemaElement("userId", "HASH")),
                 List.of(new AttributeDefinition("userId", "S")),
                 "us-east-1", "000000000000");
@@ -83,7 +83,7 @@ class DynamoDbStreamServiceTest {
 
         String iterator = service.getShardIterator(
                 sd.getStreamArn(), "shardId-000000000000", "TRIM_HORIZON", null);
-        var records = service.getRecords(iterator, 10).records();
+        List<DynamoDbStreamRecord> records = service.getRecords(iterator, 10).records();
 
         assertEquals(1, records.size());
         assertEquals("KEYS_ONLY", records.get(0).getStreamViewType());
@@ -120,7 +120,7 @@ class DynamoDbStreamServiceTest {
 
     @Test
     void rejectsAnIteratorWhenItsSequenceNumberHasBeenTrimmed() throws Exception {
-        var table = createTestTableWithStream();
+        TableDefinition table = createTestTableWithStream();
         service.enableStream(table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
 
@@ -140,7 +140,7 @@ class DynamoDbStreamServiceTest {
 
     @Test
     void rejectsAnEmptyStreamIteratorWhenRecordsAreTrimmedBeforeFirstPoll() throws Exception {
-        var table = new TableDefinition("EmptyTable",
+        TableDefinition table = new TableDefinition("EmptyTable",
                 List.of(new KeySchemaElement("userId", "HASH")),
                 List.of(new AttributeDefinition("userId", "S")),
                 "us-east-1", "000000000000");
@@ -163,7 +163,7 @@ class DynamoDbStreamServiceTest {
 
     @Test
     void rejectsAnEmptyLatestIteratorWhenRecordsAreTrimmedBeforeFirstPoll() throws Exception {
-        var table = new TableDefinition("EmptyLatestTable",
+        TableDefinition table = new TableDefinition("EmptyLatestTable",
                 List.of(new KeySchemaElement("userId", "HASH")),
                 List.of(new AttributeDefinition("userId", "S")),
                 "us-east-1", "000000000000");
@@ -186,7 +186,7 @@ class DynamoDbStreamServiceTest {
 
     @Test
     void allowsAnEmptyStreamIteratorWhenRetentionHasNotBeenExceeded() throws Exception {
-        var table = new TableDefinition("EmptyTable",
+        TableDefinition table = new TableDefinition("EmptyTable",
                 List.of(new KeySchemaElement("userId", "HASH")),
                 List.of(new AttributeDefinition("userId", "S")),
                 "us-east-1", "000000000000");
@@ -201,7 +201,7 @@ class DynamoDbStreamServiceTest {
             service.captureEvent("INSERT", null, item, table, "us-east-1");
         }
 
-        var result = service.getRecords(iterator, 1);
+        DynamoDbStreamService.GetRecordsResult result = service.getRecords(iterator, 1);
 
         assertEquals(1, result.records().size());
         assertEquals("000000000000000000001", result.records().get(0).getSequenceNumber());
@@ -209,7 +209,7 @@ class DynamoDbStreamServiceTest {
 
     @Test
     void appliesInclusiveAndExclusiveSequencePositions() throws Exception {
-        var table = createTestTableWithStream();
+        TableDefinition table = createTestTableWithStream();
         service.enableStream(table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
 
@@ -223,8 +223,8 @@ class DynamoDbStreamServiceTest {
                 table.getStreamArn(), DynamoDbStreamService.SHARD_ID,
                 "AFTER_SEQUENCE_NUMBER", "000000000000000000001");
 
-        var atRecords = service.getRecords(at, 1).records();
-        var afterRecords = service.getRecords(after, 1).records();
+        List<DynamoDbStreamRecord> atRecords = service.getRecords(at, 1).records();
+        List<DynamoDbStreamRecord> afterRecords = service.getRecords(after, 1).records();
 
         assertEquals("000000000000000000001", atRecords.get(0).getSequenceNumber());
         assertEquals("000000000000000000002", afterRecords.get(0).getSequenceNumber());
@@ -233,7 +233,7 @@ class DynamoDbStreamServiceTest {
 
     @Test
     void resumesAtTheRetainedSequenceAfterTheHeadIsTrimmed() throws Exception {
-        var table = createTestTableWithStream();
+        TableDefinition table = createTestTableWithStream();
         service.enableStream(table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
 
@@ -247,7 +247,7 @@ class DynamoDbStreamServiceTest {
             service.captureEvent("EVENT_" + i, null, item, table, "us-east-1");
         }
 
-        var records = service.getRecords(iterator, 1).records();
+        List<DynamoDbStreamRecord> records = service.getRecords(iterator, 1).records();
 
         assertEquals(1, records.size());
         assertEquals("EVENT_2", records.get(0).getEventName());
@@ -255,7 +255,7 @@ class DynamoDbStreamServiceTest {
 
     @Test
     void advancesToTheNextSequenceWithoutDuplicatingRecords() throws Exception {
-        var table = createTestTableWithStream();
+        TableDefinition table = createTestTableWithStream();
         service.enableStream(table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
         JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
 
@@ -265,8 +265,8 @@ class DynamoDbStreamServiceTest {
                 table.getStreamArn(), DynamoDbStreamService.SHARD_ID,
                 "TRIM_HORIZON", null);
 
-        var firstPage = service.getRecords(iterator, 1);
-        var secondPage = service.getRecords(firstPage.nextShardIterator(), 1);
+        DynamoDbStreamService.GetRecordsResult firstPage = service.getRecords(iterator, 1);
+        DynamoDbStreamService.GetRecordsResult secondPage = service.getRecords(firstPage.nextShardIterator(), 1);
 
         assertEquals("000000000000000000001", firstPage.records().get(0).getSequenceNumber());
         assertEquals("000000000000000000002", secondPage.records().get(0).getSequenceNumber());
@@ -338,7 +338,7 @@ class DynamoDbStreamServiceTest {
 
     @Test
     void requiresASequenceNumberForSequenceBasedIterators() {
-        var table = createTestTableWithStream();
+        TableDefinition table = createTestTableWithStream();
 
         AwsException nullSequence = assertThrows(AwsException.class,
                 () -> service.getShardIterator(table.getStreamArn(), DynamoDbStreamService.SHARD_ID,

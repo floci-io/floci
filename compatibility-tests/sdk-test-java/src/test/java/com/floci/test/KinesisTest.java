@@ -13,14 +13,17 @@ import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 import software.amazon.awssdk.http.SdkHttpRequest;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
+import software.amazon.awssdk.services.kinesis.model.ChildShard;
 import software.amazon.awssdk.services.kinesis.model.CreateStreamRequest;
 import software.amazon.awssdk.services.kinesis.model.DeleteStreamRequest;
 import software.amazon.awssdk.services.kinesis.model.DescribeStreamSummaryRequest;
 import software.amazon.awssdk.services.kinesis.model.DescribeStreamSummaryResponse;
 import software.amazon.awssdk.services.kinesis.model.GetRecordsRequest;
+import software.amazon.awssdk.services.kinesis.model.GetRecordsResponse;
 import software.amazon.awssdk.services.kinesis.model.GetShardIteratorRequest;
 import software.amazon.awssdk.services.kinesis.model.ListShardsRequest;
 import software.amazon.awssdk.services.kinesis.model.ListShardsResponse;
+import software.amazon.awssdk.services.kinesis.model.MergeShardsRequest;
 import software.amazon.awssdk.services.kinesis.model.PutRecordRequest;
 import software.amazon.awssdk.services.kinesis.model.PutRecordResponse;
 import software.amazon.awssdk.services.kinesis.model.PutRecordsRequest;
@@ -101,6 +104,58 @@ class KinesisTest {
                                 assertThat(record.data().asUtf8String()).isEqualTo("before split"));
             } finally {
                 client.deleteStream(DeleteStreamRequest.builder().streamName(streamName).build());
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Closed shards terminate with typed split and merge child metadata")
+    void closedShardsReturnNullIteratorAndTypedChildren() {
+        try (KinesisClient client = TestFixtures.kinesisClient()) {
+            String name = TestFixtures.uniqueName("sdk-kinesis-terminal");
+            client.createStream(CreateStreamRequest.builder().streamName(name).shardCount(1).build());
+            try {
+                Shard parent = client.listShards(ListShardsRequest.builder().streamName(name).build()).shards().get(0);
+                for (String data : List.of("first", "last")) {
+                    client.putRecord(PutRecordRequest.builder().streamName(name).partitionKey("pk")
+                            .data(SdkBytes.fromUtf8String(data)).build());
+                }
+                split(client, name, parent);
+                String cursor = client.getShardIterator(GetShardIteratorRequest.builder().streamName(name)
+                        .shardId(parent.shardId()).shardIteratorType(ShardIteratorType.TRIM_HORIZON).build()).shardIterator();
+                GetRecordsResponse first = client.getRecords(GetRecordsRequest.builder().shardIterator(cursor).limit(1).build());
+                assertThat(first.records()).hasSize(1);
+                assertThat(first.nextShardIterator()).isNotNull();
+                assertThat(first.hasChildShards()).isFalse();
+                GetRecordsResponse last = client.getRecords(GetRecordsRequest.builder()
+                        .shardIterator(first.nextShardIterator()).limit(1).build());
+                assertThat(last.records()).singleElement().satisfies(record ->
+                        assertThat(record.data().asUtf8String()).isEqualTo("last"));
+                assertThat(last.nextShardIterator()).isNull();
+                List<Shard> children = client.listShards(ListShardsRequest.builder().streamName(name).build())
+                        .shards().stream().filter(shard -> parent.shardId().equals(shard.parentShardId()))
+                        .collect(Collectors.toList());
+                assertThat(last.childShards()).hasSize(2);
+                for (int i = 0; i < children.size(); i++) {
+                    ChildShard child = last.childShards().get(i);
+                    assertThat(child.shardId()).isEqualTo(children.get(i).shardId());
+                    assertThat(child.parentShards()).containsExactly(parent.shardId());
+                    assertThat(child.hashKeyRange()).isEqualTo(children.get(i).hashKeyRange());
+                }
+                client.mergeShards(MergeShardsRequest.builder().streamName(name)
+                        .shardToMerge(children.get(0).shardId()).adjacentShardToMerge(children.get(1).shardId()).build());
+                for (Shard child : children) {
+                    String mergedCursor = client.getShardIterator(GetShardIteratorRequest.builder().streamName(name)
+                            .shardId(child.shardId()).shardIteratorType(ShardIteratorType.TRIM_HORIZON).build()).shardIterator();
+                    GetRecordsResponse merged = client.getRecords(GetRecordsRequest.builder().shardIterator(mergedCursor).build());
+                    assertThat(merged.nextShardIterator()).isNull();
+                    assertThat(merged.childShards()).singleElement().satisfies(descendant -> {
+                        assertThat(descendant.parentShards()).containsExactly(children.get(0).shardId(), children.get(1).shardId());
+                        assertThat(descendant.hashKeyRange()).isEqualTo(parent.hashKeyRange());
+                    });
+                }
+            } finally {
+                client.deleteStream(DeleteStreamRequest.builder().streamName(name).build());
             }
         }
     }

@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.emr;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.emr.model.EmrCluster;
 import io.github.hectorvent.floci.services.emr.model.EmrStep;
+import io.github.hectorvent.floci.services.emrserverless.EmrServerlessSparkRunner;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -63,6 +65,16 @@ final class EmrSparkSteps {
         application.add(jar);
         application.addAll(args);
         return application;
+    }
+
+    /**
+     * The S3 folder a step's logs go to, or null when its cluster has no {@code LogUri}: "If a value is not
+     * provided, logs are not created". The Management Guide's "Log locations" puts step logs at
+     * {@code <LogUri>/<cluster-id>/steps/<step-id>/}.
+     */
+    static String logFolder(EmrCluster cluster, EmrStep step) {
+        return EmrServerlessSparkRunner.logFolder(cluster.getLogUri(),
+                cluster.getId() + "/steps/" + step.getId() + "/");
     }
 
     /**

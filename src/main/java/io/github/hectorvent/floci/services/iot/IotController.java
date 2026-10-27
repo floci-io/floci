@@ -112,21 +112,31 @@ public class IotController {
     public Response updateThing(@PathParam("thingName") String thingName,
                                 @Context HttpHeaders headers,
                                 String body) {
-        String region = regionResolver.resolveRegion(headers);
-        Thing thing = iotService.updateThing(thingName, parseAttributes(body), parseExpectedVersion(body), region);
-        ObjectNode response = objectMapper.createObjectNode();
-        response.put("thingName", thing.getThingName());
-        response.put("thingArn", thing.getThingArn());
-        response.put("version", thing.getVersion());
-        return Response.ok(response).build();
+        try {
+            JsonNode request = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+            JsonNode payload = request.path("attributePayload");
+            Map<String, String> attributes = payload.path("attributes").isObject() ? parseAttributes(body) : null;
+            Long expectedVersion = request.hasNonNull("expectedVersion") ? request.path("expectedVersion").asLong() : null;
+            Thing thing = iotService.updateThing(thingName, attributes, payload.path("merge").asBoolean(),
+                    request.path("thingTypeName").asText(null), request.path("removeThingType").asBoolean(),
+                    expectedVersion, regionResolver.resolveRegion(headers));
+            ObjectNode response = objectMapper.createObjectNode();
+            response.put("thingName", thing.getThingName());
+            response.put("thingArn", thing.getThingArn());
+            response.put("version", thing.getVersion());
+            return Response.ok(response).build();
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
     }
 
     @DELETE
     @Path("/things/{thingName}")
     public Response deleteThing(@PathParam("thingName") String thingName,
+                                @QueryParam("expectedVersion") Long expectedVersion,
                                 @Context HttpHeaders headers) {
         String region = regionResolver.resolveRegion(headers);
-        iotService.deleteThing(thingName, region);
+        iotService.deleteThing(thingName, expectedVersion, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -890,15 +900,6 @@ public class IotController {
                 attributesNode.fields().forEachRemaining(entry -> attributes.put(entry.getKey(), entry.getValue().asText()));
             }
             return attributes;
-        } catch (JsonProcessingException e) {
-            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
-        }
-    }
-
-    private Long parseExpectedVersion(String body) {
-        try {
-            JsonNode request = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
-            return request.hasNonNull("expectedVersion") ? request.path("expectedVersion").asLong() : null;
         } catch (JsonProcessingException e) {
             throw new AwsException("InvalidRequestException", e.getMessage(), 400);
         }

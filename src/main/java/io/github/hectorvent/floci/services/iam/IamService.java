@@ -6005,64 +6005,68 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return passwordPolicies.get(ACCOUNT_PASSWORD_POLICY_KEY);
     }
 
+    /** An identity policy as an access denied message names it: a managed one by its ARN, an inline one by none. */
+    public record HeldPolicy(String arn, String document) {}
+
+    /** The identity policies of an IAM user or role, in the order they are collected, and its permissions boundary. */
+    public record HeldPolicies(List<HeldPolicy> identity, String permissionsBoundaryArn) {}
+
+    /** What the IAM user or role behind {@code accessKeyId} holds, or nothing for any other caller. */
+    public Optional<HeldPolicies> heldPolicies(String accessKeyId) {
+        Optional<AccessKey> key = accessKeys.get(accessKeyId);
+        if (key.isPresent()) {
+            return users.get(key.get().getUserName()).map(this::heldPolicies);
+        }
+        Optional<SessionCredential> session = findSessionForCallerContext(accessKeyId)
+                .filter(found -> found.getDelegatedApproverArn() == null && !isFederatedUserSession(found));
+        if (session.isPresent() && session.get().getRoleArn() == null) {
+            // GetSessionToken credentials act with the policies of the user that minted them.
+            return session.filter(found -> found.getPresignedAction() == null)
+                    .flatMap(this::issuingUser)
+                    .map(this::heldPolicies);
+        }
+        return session.flatMap(found -> roleFromArnOrName(found.getRoleArn()))
+                .map(role -> new HeldPolicies(rolePolicies(role), role.getPermissionsBoundaryArn()));
+    }
+
+    private HeldPolicies heldPolicies(IamUser user) {
+        return new HeldPolicies(userPolicies(user), user.getPermissionsBoundaryArn());
+    }
+
     private List<String> collectUserPolicies(String userArnOrName) {
-        Optional<IamUser> userOpt = userFromArnOrName(userArnOrName);
-        if (userOpt.isEmpty()) {
-            return null;
-        }
-        IamUser user = userOpt.get();
-
-        // User inline policies
-        List<String> docs = new ArrayList<>(user.getInlinePolicies().values());
-
-        // User attached managed policies
-        for (String arn : user.getAttachedPolicyArns()) {
-            Optional<IamPolicy> p = resolvePolicy(arn);
-            if (p.isPresent() && p.get().getDefaultDocument() != null) {
-                docs.add(p.get().getDefaultDocument());
-            }
-        }
-
-        // Group policies
-        for (String groupName : user.getGroupNames()) {
-            Optional<IamGroup> groupOpt = groups.get(groupName);
-            if (groupOpt.isEmpty()) continue;
-            IamGroup group = groupOpt.get();
-            docs.addAll(group.getInlinePolicies().values());
-            for (String arn : group.getAttachedPolicyArns()) {
-                Optional<IamPolicy> p = resolvePolicy(arn);
-                if (p.isPresent() && p.get().getDefaultDocument() != null) {
-                    docs.add(p.get().getDefaultDocument());
-                }
-            }
-        }
-
-        return docs;
+        return userFromArnOrName(userArnOrName).map(user -> documents(userPolicies(user))).orElse(null);
     }
 
     private List<String> collectRolePolicies(String roleArn) {
-        if (roleArn == null) {
-            return null;
-        }
-        Optional<IamRole> roleOpt = roleFromArnOrName(roleArn);
-        if (roleOpt.isEmpty()) {
-            return null;
-        }
-        IamRole role = roleOpt.get();
-        List<String> docs = new ArrayList<>();
+        return roleFromArnOrName(roleArn).map(role -> documents(rolePolicies(role))).orElse(null);
+    }
 
-        // Role inline policies
-        docs.addAll(role.getInlinePolicies().values());
-
-        // Role attached managed policies
-        for (String arn : role.getAttachedPolicyArns()) {
-            Optional<IamPolicy> p = resolvePolicy(arn);
-            if (p.isPresent() && p.get().getDefaultDocument() != null) {
-                docs.add(p.get().getDefaultDocument());
-            }
+    /** The user's inline and managed policies, then each group's. */
+    private List<HeldPolicy> userPolicies(IamUser user) {
+        List<HeldPolicy> held = inlineThenManaged(user.getInlinePolicies(), user.getAttachedPolicyArns());
+        for (String groupName : user.getGroupNames()) {
+            groups.get(groupName).ifPresent(group ->
+                    held.addAll(inlineThenManaged(group.getInlinePolicies(), group.getAttachedPolicyArns())));
         }
+        return held;
+    }
 
-        return docs;
+    private List<HeldPolicy> rolePolicies(IamRole role) {
+        return inlineThenManaged(role.getInlinePolicies(), role.getAttachedPolicyArns());
+    }
+
+    private List<HeldPolicy> inlineThenManaged(Map<String, String> inline, List<String> attachedArns) {
+        List<HeldPolicy> held = new ArrayList<>();
+        inline.values().forEach(document -> held.add(new HeldPolicy(null, document)));
+        for (String arn : attachedArns) {
+            resolvePolicy(arn).map(IamPolicy::getDefaultDocument)
+                    .ifPresent(document -> held.add(new HeldPolicy(arn, document)));
+        }
+        return held;
+    }
+
+    private static List<String> documents(List<HeldPolicy> held) {
+        return held.stream().map(HeldPolicy::document).collect(Collectors.toCollection(ArrayList::new));
     }
 
     /**

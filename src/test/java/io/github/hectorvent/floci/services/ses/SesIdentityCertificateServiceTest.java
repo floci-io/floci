@@ -118,6 +118,15 @@ class SesIdentityCertificateServiceTest {
     }
 
     @Test
+    void associate_overlongArnReportsTheLengthConstraint() {
+        String arn = CERT_ARN + "a".repeat(2049 - CERT_ARN.length());
+
+        assertBadRequest("1 validation error detected: Value at 'certificateArn' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 2048",
+                () -> service.associate(DOMAIN, "alice@example.com", arn, REGION));
+    }
+
+    @Test
     void associate_missingIdentityIsNotFound() {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.associate("missing.example.com", "alice@missing.example.com", CERT_ARN, REGION));

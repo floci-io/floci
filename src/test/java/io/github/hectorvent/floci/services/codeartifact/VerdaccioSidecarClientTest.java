@@ -14,6 +14,7 @@ import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
@@ -255,6 +256,23 @@ class VerdaccioSidecarClientTest {
             exchange.getResponseBody().write(bytes);
             exchange.close();
         });
+    }
+
+    /**
+     * Raised by hectorvent's review: every CodeArtifact repository gets an npm sidecar id at
+     * creation regardless of whether it is ever actually used through npm, so {@code
+     * ListPackages} with no format filter must not start this repository's own Verdaccio
+     * container just to find out it was never used. No context is registered on {@code backend}
+     * at all here: a real container start would have nothing to connect to and throw.
+     */
+    @Test
+    void listPackagesReturnsEmptyWithoutStartingAContainerThatWasNeverUsed() {
+        VerdaccioSidecarManager manager = manager();
+
+        List<RepositorySidecarManager.PackageIdentifier> packages = client(manager).listPackages("npm-repo-1",
+                "dom", "repo");
+
+        assertTrue(packages.isEmpty());
     }
 
     private VerdaccioSidecarManager manager() {

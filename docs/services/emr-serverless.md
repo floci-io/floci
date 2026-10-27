@@ -128,13 +128,27 @@ publishes for customizing EMR Serverless images (`public.ecr.aws/emr-serverless/
 * **Credentials**: the container gets a session for the run's execution role when IAM knows the role,
   otherwise the account's placeholder credentials, and `AWS_ENDPOINT_URL` pointing at Floci, so the
   job's own SDK clients reach Floci too.
-* **Output**: the driver's output goes to Floci's log, prefixed `emr-serverless:<jobRunId>`.
+* **Output**: the driver's output goes to Floci's log, prefixed `emr-serverless:<jobRunId>`. With an S3
+  log destination, the run's `s3MonitoringConfiguration` or else the application's, its standard output
+  and error also go to Floci's S3 once the run ends, gzipped, as `stdout.gz` and `stderr.gz` under
+  `<logUri>/applications/<applicationId>/jobs/<jobRunId>/SPARK_DRIVER/`, with `attempts/1/` before
+  `SPARK_DRIVER/` for a `STREAMING` run, or a `BATCH` run whose `retryPolicy` allows more than one
+  attempt, on release 7.1.0 or later. A cancelled run's logs hold what its driver wrote until it was
+  stopped. Logs that cannot be written, to a bucket that does not exist say, leave the run as it
+  ended.
+* **CloudWatch Logs**: with CloudWatch logging enabled, the run's `cloudWatchLoggingConfiguration` or
+  else the application's (`"enabled": false` at the run turns it off), the driver's standard output and
+  error go line by line, while it runs, to the log streams `<prefix>/applications/<applicationId>/jobs/<jobRunId>/SPARK_DRIVER/stdout`
+  and `.../stderr` in Floci's CloudWatch Logs, with `attempts/1/` before `SPARK_DRIVER` as for S3. The log
+  group is `logGroupName`, `/aws/emr-serverless` by default, and `<prefix>` the `logStreamNamePrefix`, if
+  any; both are created as needed, in the run's account and Region. A `logTypes` sends only the driver's
+  types it names, and none of the driver's output when it names only `SPARK_EXECUTOR`.
 * **Image**: `image-template` names another image, such as a mirror or a dated tag of the release's
   image: `registry.internal/emr-serverless/spark/%s:20250425`.
 
 ## Limitations and Differences from AWS
 
-* **Jobs do not execute by default**: in the `immediate` runner mode `StartJobRun` records a job run and moves it through its states, but nothing runs. In the `docker` mode a Spark run executes in local mode in one container, so worker counts and sizes, initial and maximum capacity are not applied; a Hive run is `FAILED` without running, in Floci's own wording, as is a driver's failure. The monitoring configuration's S3 and CloudWatch log destinations are not written to, and Floci's CA is not in the job's Java truststore, so a job reaches Floci over its HTTP endpoint only.
+* **Jobs do not execute by default**: in the `immediate` runner mode `StartJobRun` records a job run and moves it through its states, but nothing runs. In the `docker` mode a Spark run executes in local mode in one container, so worker counts and sizes, initial and maximum capacity are not applied; a Hive run is `FAILED` without running, in Floci's own wording, as is a driver's failure. Of the monitoring configuration, the S3 log destination gets the driver's `stdout.gz` and `stderr.gz` once a run ends (no event logs, rotated files or uploads while it runs), and CloudWatch Logs the driver's output while it runs (there are no executor logs, local mode having no executors, and `encryptionKeyArn` is ignored), and Floci's CA is not in the job's Java truststore, so a job reaches Floci over its HTTP endpoint only.
 * **Unsourced errors**: AWS documents neither the error for a run submitted to an application whose auto-start is off nor the one for a run on a terminated application; Floci answers both with `ValidationException`. The same holds for a `BATCH` timeout outside 1 to 10080 minutes on `emr-7.11.0` or later (`ValidationException`) and for `GetJobRun` naming an attempt a run never made (`ResourceNotFoundException`), both in Floci's own wording. A run needs a `jobDriver`, as every `JobRun` carries one, and `jobDriver` is a union, so a run without a driver, or with one that sets both `sparkSubmit` and `hive` or neither, is refused with `ValidationException` too, in Floci's own wording.
 * **StopApplication with running jobs**: AWS requires running jobs to finish or be cancelled before an application stops. Floci does not enforce it; with the default duration of `0` no `BATCH` run is ever running.
 * **Not emulated**: retries (`retryPolicy` is stored and returned, but no run is retried), queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization`, and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).

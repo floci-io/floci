@@ -5,6 +5,9 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -40,15 +43,15 @@ class OamIntegrationTest {
                 + "\"AWS::CloudWatch::Metric\",\"AWS::Logs::LogGroup\"]}}}]}";
 
         given().header("Authorization", MONITORING).contentType("application/json")
-                .body(java.util.Map.of("SinkIdentifier", sinkArn, "Policy", policy))
+                .body(Map.of("SinkIdentifier", sinkArn, "Policy", policy))
             .when().post("/PutSinkPolicy")
             .then().statusCode(200).body("SinkArn", equalTo(sinkArn));
 
         String linkArn = given().header("Authorization", SOURCE).contentType("application/json")
-                .body(java.util.Map.of(
+                .body(Map.of(
                         "SinkIdentifier", sinkArn,
                         "LabelTemplate", "source-account",
-                        "ResourceTypes", java.util.List.of("AWS::CloudWatch::Metric")))
+                        "ResourceTypes", List.of("AWS::CloudWatch::Metric")))
             .when().post("/CreateLink")
             .then().statusCode(200)
                 .body("SinkArn", equalTo(sinkArn))
@@ -60,28 +63,28 @@ class OamIntegrationTest {
             .then().statusCode(200).body("Items.Arn", contains(linkArn));
 
         given().header("Authorization", MONITORING).contentType("application/json")
-                .body(java.util.Map.of("SinkIdentifier", sinkArn))
+                .body(Map.of("SinkIdentifier", sinkArn))
             .when().post("/ListAttachedLinks")
             .then().statusCode(200).body("Items.LinkArn", contains(linkArn));
 
         given().header("Authorization", SOURCE).contentType("application/json")
-                .body(java.util.Map.of(
+                .body(Map.of(
                         "Identifier", linkArn,
-                        "ResourceTypes", java.util.List.of("AWS::CloudWatch::Metric", "AWS::Logs::LogGroup"),
-                        "LinkConfiguration", java.util.Map.of(
-                                "MetricConfiguration", java.util.Map.of("Filter", "Namespace LIKE 'AWS/%'"))))
+                        "ResourceTypes", List.of("AWS::CloudWatch::Metric", "AWS::Logs::LogGroup"),
+                        "LinkConfiguration", Map.of(
+                                "MetricConfiguration", Map.of("Filter", "Namespace LIKE 'AWS/%'"))))
             .when().post("/UpdateLink")
             .then().statusCode(200)
                 .body("ResourceTypes.size()", equalTo(2))
                 .body("LinkConfiguration.MetricConfiguration.Filter", equalTo("Namespace LIKE 'AWS/%'"));
 
         given().header("Authorization", SOURCE).contentType("application/json")
-                .body(java.util.Map.of("Identifier", linkArn))
+                .body(Map.of("Identifier", linkArn))
             .when().post("/DeleteLink")
             .then().statusCode(200);
 
         given().header("Authorization", MONITORING).contentType("application/json")
-                .body(java.util.Map.of("Identifier", sinkArn))
+                .body(Map.of("Identifier", sinkArn))
             .when().post("/DeleteSink")
             .then().statusCode(200);
     }
@@ -97,20 +100,20 @@ class OamIntegrationTest {
                 + "\"Principal\":{\"AWS\":\"arn:aws:iam::333333333333:root\"},"
                 + "\"Action\":\"oam:CreateLink\",\"Resource\":\"*\"}]}";
         given().header("Authorization", MONITORING).contentType("application/json")
-                .body(java.util.Map.of("SinkIdentifier", sinkArn, "Policy", policy))
+                .body(Map.of("SinkIdentifier", sinkArn, "Policy", policy))
             .when().post("/PutSinkPolicy")
             .then().statusCode(200);
 
         given().header("Authorization", SOURCE).contentType("application/json")
-                .body(java.util.Map.of(
+                .body(Map.of(
                         "SinkIdentifier", sinkArn,
                         "LabelTemplate", "denied",
-                        "ResourceTypes", java.util.List.of("AWS::CloudWatch::Metric")))
+                        "ResourceTypes", List.of("AWS::CloudWatch::Metric")))
             .when().post("/CreateLink")
             .then().statusCode(400).body("__type", containsString("InvalidParameterException"));
 
         given().header("Authorization", MONITORING).contentType("application/json")
-                .body(java.util.Map.of("Identifier", sinkArn))
+                .body(Map.of("Identifier", sinkArn))
             .when().post("/DeleteSink")
             .then().statusCode(200);
     }
@@ -125,17 +128,17 @@ class OamIntegrationTest {
                 + "\"Principal\":\"*\",\"Action\":\"oam:CreateLink\",\"Resource\":\"*\","
                 + "\"Condition\":{\"StringEquals\":{\"aws:PrincipalOrgID\":\"o-example\"}}}]}";
         given().header("Authorization", MONITORING).contentType("application/json")
-                .body(java.util.Map.of("SinkIdentifier", sinkArn, "Policy", policy))
+                .body(Map.of("SinkIdentifier", sinkArn, "Policy", policy))
             .when().post("/PutSinkPolicy").then().statusCode(200);
 
         given().header("Authorization", SOURCE).contentType("application/json")
-                .body(java.util.Map.of("SinkIdentifier", sinkArn, "LabelTemplate", "source",
-                        "ResourceTypes", java.util.List.of("AWS::CloudWatch::Metric")))
+                .body(Map.of("SinkIdentifier", sinkArn, "LabelTemplate", "source",
+                        "ResourceTypes", List.of("AWS::CloudWatch::Metric")))
             .when().post("/CreateLink")
             .then().statusCode(400).body("__type", containsString("InvalidParameterException"));
 
         given().header("Authorization", MONITORING).contentType("application/json")
-                .body(java.util.Map.of("Identifier", sinkArn))
+                .body(Map.of("Identifier", sinkArn))
             .when().post("/DeleteSink").then().statusCode(200);
     }
 
@@ -151,17 +154,17 @@ class OamIntegrationTest {
                 + "{\"Effect\":\"Deny\",\"Principal\":{\"AWS\":\"arn:aws:iam::222222222222:root\"},"
                 + "\"Action\":\"oam:CreateLink\",\"Resource\":\"*\"}]}";
         given().header("Authorization", MONITORING).contentType("application/json")
-                .body(java.util.Map.of("SinkIdentifier", sinkArn, "Policy", policy))
+                .body(Map.of("SinkIdentifier", sinkArn, "Policy", policy))
             .when().post("/PutSinkPolicy").then().statusCode(200);
 
         given().header("Authorization", SOURCE).contentType("application/json")
-                .body(java.util.Map.of("SinkIdentifier", sinkArn, "LabelTemplate", "source",
-                        "ResourceTypes", java.util.List.of("AWS::CloudWatch::Metric")))
+                .body(Map.of("SinkIdentifier", sinkArn, "LabelTemplate", "source",
+                        "ResourceTypes", List.of("AWS::CloudWatch::Metric")))
             .when().post("/CreateLink")
             .then().statusCode(400).body("__type", containsString("InvalidParameterException"));
 
         given().header("Authorization", MONITORING).contentType("application/json")
-                .body(java.util.Map.of("Identifier", sinkArn))
+                .body(Map.of("Identifier", sinkArn))
             .when().post("/DeleteSink").then().statusCode(200);
     }
 

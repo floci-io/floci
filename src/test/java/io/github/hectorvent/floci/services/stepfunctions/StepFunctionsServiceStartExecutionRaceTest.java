@@ -23,6 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntConsumer;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -148,7 +149,7 @@ class StepFunctionsServiceStartExecutionRaceTest {
         return new Fixture(service, executor);
     }
 
-    private void runConcurrently(java.util.function.IntConsumer body) throws Exception {
+    private void runConcurrently(IntConsumer body) throws Exception {
         CyclicBarrier barrier = new CyclicBarrier(N);
         ExecutorService pool = Executors.newFixedThreadPool(N);
         List<Future<?>> futures = new ArrayList<>();

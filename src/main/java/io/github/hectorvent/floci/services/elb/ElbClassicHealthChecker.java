@@ -17,6 +17,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -60,10 +61,13 @@ public class ElbClassicHealthChecker implements Resettable {
     private final EmulatorConfig config;
     private final Ec2Service ec2Service;
 
-    // "region|lbName" → instanceId → state
+    // "account|region|lbName" → instanceId → state
     private final Map<String, Map<String, InstanceState>> states = new ConcurrentHashMap<>();
-    // "region|lbName" → Vert.x timer id
-    private final Map<String, Long> timers = new ConcurrentHashMap<>();
+    // "account|region|lbName" → the periodic check armed for it
+    private final Map<String, ArmedCheck> timers = new ConcurrentHashMap<>();
+
+    /** A periodic check: its Vert.x timer and the tick that timer runs. */
+    private record ArmedCheck(long id, Runnable tick) {}
 
     @Inject
     public ElbClassicHealthChecker(Vertx vertx, EmulatorConfig config, Ec2Service ec2Service) {
@@ -72,12 +76,16 @@ public class ElbClassicHealthChecker implements Resettable {
         this.ec2Service = ec2Service;
     }
 
-    public static String key(String region, String loadBalancerName) {
-        return region + "|" + loadBalancerName;
+    /**
+     * A Classic name is unique only within one account and region, so two accounts can each have
+     * a load balancer called {@code web}; without the account they would share one state and timer.
+     */
+    private static String key(ClassicLoadBalancer lb) {
+        return lb.getAccountId() + "|" + lb.getRegion() + "|" + lb.getLoadBalancerName();
     }
 
     public void startMonitoring(ClassicLoadBalancer lb) {
-        String k = key(lb.getRegion(), lb.getLoadBalancerName());
+        String k = key(lb);
         states.computeIfAbsent(k, x -> new ConcurrentHashMap<>());
         if (mock() || vertx == null) {
             return;
@@ -85,26 +93,33 @@ public class ElbClassicHealthChecker implements Resettable {
         stopTimer(k);
         int interval = lb.getHealthCheck() != null && lb.getHealthCheck().getInterval() != null
                 ? lb.getHealthCheck().getInterval() : 30;
-        timers.put(k, vertx.setPeriodic(interval * 1000L, id -> probeAll(lb)));
+        Runnable tick = () -> probeAll(lb);
+        timers.put(k, new ArmedCheck(vertx.setPeriodic(interval * 1000L, id -> tick.run()), tick));
     }
 
-    public void stopMonitoring(String region, String loadBalancerName) {
-        String k = key(region, loadBalancerName);
+    /**
+     * Runs one tick of every armed periodic check now, probing what each timer would probe, so
+     * tests need not wait out a check interval. The timers themselves keep their schedule.
+     */
+    void runArmedChecks() {
+        List.copyOf(timers.values()).forEach(timer -> timer.tick().run());
+    }
+
+    public void stopMonitoring(ClassicLoadBalancer lb) {
+        String k = key(lb);
         stopTimer(k);
         states.remove(k);
     }
 
     /** Re-arms the periodic timer after {@code ConfigureHealthCheck} changed the interval. */
     public void healthCheckChanged(ClassicLoadBalancer lb) {
-        if (states.containsKey(key(lb.getRegion(), lb.getLoadBalancerName()))) {
+        if (states.containsKey(key(lb))) {
             startMonitoring(lb);
         }
     }
 
     public void registerInstances(ClassicLoadBalancer lb, Collection<String> instanceIds) {
-        Map<String, InstanceState> lbStates =
-                states.computeIfAbsent(key(lb.getRegion(), lb.getLoadBalancerName()),
-                        k -> new ConcurrentHashMap<>());
+        Map<String, InstanceState> lbStates = states.computeIfAbsent(key(lb), k -> new ConcurrentHashMap<>());
         for (String id : instanceIds) {
             lbStates.putIfAbsent(id, new InstanceState());
         }
@@ -113,8 +128,8 @@ public class ElbClassicHealthChecker implements Resettable {
         }
     }
 
-    public void deregisterInstances(String region, String loadBalancerName, Collection<String> instanceIds) {
-        Map<String, InstanceState> lbStates = states.get(key(region, loadBalancerName));
+    public void deregisterInstances(ClassicLoadBalancer lb, Collection<String> instanceIds) {
+        Map<String, InstanceState> lbStates = states.get(key(lb));
         if (lbStates != null) {
             instanceIds.forEach(lbStates::remove);
         }
@@ -127,11 +142,11 @@ public class ElbClassicHealthChecker implements Resettable {
      * live Classic load balancer reports between {@code RegisterInstancesWithLoadBalancer} and the
      * first successful check.
      */
-    public InstanceHealth getHealth(String region, String loadBalancerName, String instanceId) {
+    public InstanceHealth getHealth(ClassicLoadBalancer lb, String instanceId) {
         if (mock()) {
             return InstanceHealth.inService();
         }
-        Map<String, InstanceState> lbStates = states.get(key(region, loadBalancerName));
+        Map<String, InstanceState> lbStates = states.get(key(lb));
         InstanceState s = lbStates != null ? lbStates.get(instanceId) : null;
         if (s == null || s.health == null) {
             return InstanceHealth.registering();
@@ -142,7 +157,7 @@ public class ElbClassicHealthChecker implements Resettable {
     @Override
     public void clear() {
         if (vertx != null) {
-            timers.values().forEach(vertx::cancelTimer);
+            timers.values().forEach(timer -> vertx.cancelTimer(timer.id()));
         }
         timers.clear();
         states.clear();
@@ -153,14 +168,14 @@ public class ElbClassicHealthChecker implements Resettable {
     }
 
     private void stopTimer(String k) {
-        Long timerId = timers.remove(k);
-        if (timerId != null && vertx != null) {
-            vertx.cancelTimer(timerId);
+        ArmedCheck timer = timers.remove(k);
+        if (timer != null && vertx != null) {
+            vertx.cancelTimer(timer.id());
         }
     }
 
     private void probeAll(ClassicLoadBalancer lb) {
-        Map<String, InstanceState> lbStates = states.get(key(lb.getRegion(), lb.getLoadBalancerName()));
+        Map<String, InstanceState> lbStates = states.get(key(lb));
         if (lbStates == null || lbStates.isEmpty()) {
             return;
         }

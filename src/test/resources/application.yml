@@ -354,6 +354,7 @@ floci:
       dynamic-awsvpc-host-ports: false
       host-volume-roots: []
       allow-unsafe-host-volumes: false
+      allow-privileged-containers: false
       image-pull-behavior: prefer-cached
     appconfig:
       enabled: true

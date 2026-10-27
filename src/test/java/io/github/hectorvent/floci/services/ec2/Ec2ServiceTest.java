@@ -63,6 +63,7 @@ import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.testing.ParkingStore;
 import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.Response;
 import org.awaitility.Awaitility;
 import org.bouncycastle.openssl.PEMKeyPair;
 import org.bouncycastle.openssl.PEMParser;
@@ -132,6 +133,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -140,9 +142,11 @@ import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -303,6 +307,91 @@ class Ec2ServiceTest {
         assertEquals("InvalidGroup.NotFound", error.getErrorCode());
         assertTrue(service.describeInstances(region, List.of(), Map.of()).isEmpty());
         assertTrue(service.describeVolumes(region, List.of(), Map.of()).isEmpty());
+    }
+
+    @Test
+    void aRollbackDeletesALaunchVolumeWhoseAttachmentEndedFirst() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation launch = launchKeepingADataVolume(service);
+        String instanceId = launch.getInstances().getFirst().getInstanceId();
+        String dataVolume = service.describeVolumes("us-east-1", List.of(), Map.of()).stream()
+                .filter(volume -> "/dev/sdf".equals(volume.getAttachments().getFirst().getDevice()))
+                .findFirst().orElseThrow().getVolumeId();
+        // A failed container's launch volumes are settled by whichever call reads them first, which
+        // can end this attachment before a later launch of the same fleet fails.
+        service.detachVolume("us-east-1", dataVolume, instanceId, null, false);
+
+        service.rollBackLaunch("us-east-1", launch);
+
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+    }
+
+    @Test
+    void describeInstancesReadsTheVolumeAttachmentsOnceWhateverTheInstanceCount() {
+        Ec2Service service = spy(new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory()));
+        service.runInstances("us-east-1", "ami-test", "t3.micro", 3, 3, null, List.of(), null, null,
+                List.of(), null, null);
+        Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
+                mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
+                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class),
+                new RegionResolver("us-east-1", "000000000000"));
+
+        Response response = handler.handle("DescribeInstances", new MultivaluedHashMap<>(), "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        assertEquals(3, response.getEntity().toString().split("<volumeId>", -1).length - 1);
+        assertEquals(1, mockingDetails(service).getInvocations().stream()
+                .filter(invocation -> invocation.getMethod().getName().equals("instanceVolumeAttachments"))
+                .count());
+    }
+
+    @Test
+    void aLaunchRefusedWhenItTakesCapacityLeavesNoVolumeBehind() {
+        Ec2Service service = spy(new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory()));
+        // Another launch took the capacity between this launch's check and its claim on it.
+        doThrow(new AwsException("InsufficientInstanceCapacity", "taken in the meantime", 400))
+                .when(service).acquireCapacity(anyString(), anyList());
+
+        assertThrows(AwsException.class, () -> launchKeepingADataVolume(service));
+
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+    }
+
+    @Test
+    void aRollbackWhoseTerminationFailsKeepsEachVolumesDeleteOnTermination() {
+        Ec2Service service = spy(new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory()));
+        Reservation launch = launchKeepingADataVolume(service);
+        doThrow(new AwsException("InternalError", "termination failed", 500))
+                .when(service).terminateInstances(anyString(), anyList());
+
+        assertThrows(AwsException.class, () -> service.rollBackLaunch("us-east-1", launch));
+
+        // The instance is still there, so a later TerminateInstances must keep what the launch asked to keep.
+        assertEquals(Set.of("/dev/xvda=true", "/dev/sdf=false"),
+                service.describeVolumes("us-east-1", List.of(), Map.of()).stream()
+                        .map(volume -> volume.getAttachments().getFirst())
+                        .map(a -> a.getDevice() + "=" + a.isDeleteOnTermination())
+                        .collect(Collectors.toSet()));
+    }
+
+    private static Reservation launchKeepingADataVolume(Ec2Service service) {
+        LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+        ebs.setVolumeSize(5);
+        ebs.setDeleteOnTermination(false);
+        LaunchTemplateData.BlockDeviceMapping data = new LaunchTemplateData.BlockDeviceMapping();
+        data.setDeviceName("/dev/sdf");
+        data.setEbs(ebs);
+        return service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1, null, List.of(), null, null,
+                List.of(), null, null, null, null, 0, null, null, null, null, false, null, null,
+                List.of(data), false, null, null);
     }
 
     @Test

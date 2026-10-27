@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigatewayv2;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.MethodOrderer;
@@ -12,6 +13,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
+import java.nio.ByteBuffer;
+import java.util.Base64;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
@@ -34,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class WebSocketProxyEventFormatTest {
 
-    @io.quarkus.test.common.http.TestHTTPResource("/")
+    @TestHTTPResource("/")
     URI baseUri;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -378,7 +381,7 @@ class WebSocketProxyEventFormatTest {
 
         // Send a binary frame
         byte[] binaryData = new byte[]{0x01, 0x02, 0x03, 0x04, 0x05};
-        ws.sendBinary(java.nio.ByteBuffer.wrap(binaryData), true).join();
+        ws.sendBinary(ByteBuffer.wrap(binaryData), true).join();
 
         String response = capture.getNextMessage(15, TimeUnit.SECONDS);
         assertNotNull(response, "Should receive echoed event for binary frame");
@@ -395,7 +398,7 @@ class WebSocketProxyEventFormatTest {
         String body = event.get("body").asText();
         assertNotNull(body, "body should not be null for binary frames");
         // Decode and verify it matches the original binary data
-        byte[] decoded = java.util.Base64.getDecoder().decode(body);
+        byte[] decoded = Base64.getDecoder().decode(body);
         assertArrayEquals(binaryData, decoded,
                 "Decoded body should match the original binary data");
 

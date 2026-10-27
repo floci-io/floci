@@ -106,7 +106,7 @@ type_order:
   AWS::ElasticLoadBalancingV2: [LoadBalancer, TargetGroup, Listener, ListenerRule]
   AWS::ApplicationAutoScaling: [ScalableTarget, ScalingPolicy]
   AWS::AutoScaling: [LaunchConfiguration, AutoScalingGroup, LifecycleHook]
-  AWS::Route53: [HostedZone, RecordSet, HealthCheck]
+  AWS::Route53: [HostedZone, RecordSet, RecordSetGroup, HealthCheck]
   AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account, DomainName, BasePathMapping, GatewayResponse]
   AWS::ApiGatewayV2: [Api, Authorizer, Route, Integration, Stage, Deployment, DomainName, ApiMapping]
   AWS::AppSync: [GraphQLApi, GraphQLSchema, DataSource, FunctionConfiguration, Resolver, ApiKey]
@@ -205,6 +205,7 @@ notes:
   AWS::IAM::User: 'template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete'
   AWS::IoT::DomainConfiguration: '`ServerCertificates` resolves to a JSON string'
   AWS::IoT::Policy: 'deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached'
+  AWS::Route53::RecordSetGroup: 'written in one change batch, so a record set that cannot be written leaves the zone unchanged; every record set must be in the group''s hosted zone'
   Custom::DynamoDBReplica: applied natively against DynamoDB, not via a provider Lambda
   AWS::DynamoDB::Table: '`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one'
   AWS::Cognito::UserPool: '`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`'

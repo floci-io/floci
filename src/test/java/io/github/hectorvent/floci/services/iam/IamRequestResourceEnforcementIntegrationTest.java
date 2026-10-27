@@ -23,6 +23,7 @@ import java.util.Map;
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -374,6 +375,36 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .then(), "events:DescribeEventBus");
     }
 
+    /**
+     * Publishing is authorized on the bus of every entry, the one it names by name or ARN or the default one when
+     * it names none, so a grant on one bus refuses a batch with an entry for another, and a deny on one bus holds
+     * however many entries go elsewhere.
+     */
+    @Test
+    void eachEventIsCheckedOnTheBusItsEntryNames() {
+        String bus = "res-bus-" + suffix();
+        admin("events").header("X-Amz-Target", "AWSEvents.CreateEventBus").contentType("application/x-amz-json-1.1")
+                .body("{\"Name\":\"" + bus + "\"}").post("/").then().statusCode(200);
+        cleanup.register(() -> admin("events").header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + bus + "\"}").post("/"));
+        String byName = ",\"EventBusName\":\"" + bus + "\"";
+        String byArn = ",\"EventBusName\":\"" + EVENTS + "event-bus/" + bus + "\"";
+
+        User user = user("res-put-events");
+        user.policy(allowOn("events:PutEvents", EVENTS + "event-bus/" + bus));
+        putEvents(user, byName, byArn).statusCode(200).body("FailedEntryCount", equalTo(0));
+        refusedJson(putEvents(user, byName, ""), "events:PutEvents");
+        refusedJson(putEvents(user, ""), "events:PutEvents");
+        user.policy(allowOn("events:PutEvents", EVENTS + "event-bus/" + bus) + ","
+                + allowOn("events:PutEvents", EVENTS + "event-bus/default"));
+        putEvents(user, byName, "").statusCode(200).body("FailedEntryCount", equalTo(0));
+
+        user.policy(allowOn("events:PutEvents", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"events:PutEvents\","
+                + "\"Resource\":\"" + EVENTS + "event-bus/" + bus + "\"}");
+        refusedJson(putEvents(user, "", "", byArn), "events:PutEvents");
+        putEvents(user, "", ",\"EventBusName\":null").statusCode(200).body("FailedEntryCount", equalTo(0));
+    }
+
     @Test
     void aUserPoolIsCheckedOnTheArnItsIdNames() {
         String id = admin("cognito-idp").header("X-Amz-Target", "AWSCognitoIdentityProviderService.CreateUserPool")
@@ -519,6 +550,17 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     private static ValidatableResponse describeRule(User user, String name, String bus) {
         return user.json("events", "AWSEvents.DescribeRule", "1.1").body("{\"Name\":\"" + name + "\"" + bus + "}")
+                .post("/").then();
+    }
+
+    /** Publishes an event for each of {@code buses}, the bus of its entry as a JSON member or none. */
+    private static ValidatableResponse putEvents(User user, String... buses) {
+        StringBuilder entries = new StringBuilder();
+        for (String bus : buses) {
+            entries.append(entries.isEmpty() ? "" : ",")
+                    .append("{\"Source\":\"res.test\",\"DetailType\":\"t\",\"Detail\":\"{}\"").append(bus).append('}');
+        }
+        return user.json("events", "AWSEvents.PutEvents", "1.1").body("{\"Entries\":[" + entries + "]}")
                 .post("/").then();
     }
 

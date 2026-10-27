@@ -190,6 +190,14 @@ The CloudFormation `Arn` attribute of an `AWS::SSM::Parameter` is the same ARN, 
 `AddTagsToResource`, `ListTagsForResource` and `RemoveTagsFromResource` accept it as `ResourceId`.
 An ECS container secret's `valueFrom` accepts it too.
 
+`GetParameter` and `GetParameters` accept the returned ARN, optionally followed by
+`:version` or `:label`, for parameters in the caller's account and request region.
+Batch reads keep unresolved inputs in `InvalidParameters` in their original form.
+ARNs naming another account, region or partition never resolve to a same-name local
+parameter. Cross-account shared parameters are not modeled. Secrets Manager
+references continue to use `/aws/reference/secretsmanager/<secret-id>`, not a
+parameter ARN.
+
 ## Parameter Types
 
 All AWS parameter types are accepted: `String`, `StringList`, `SecureString`.

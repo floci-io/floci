@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.SimulationDecision;
@@ -58,8 +60,9 @@ public class GetStackOutputRoleAuthorizer {
         if (role.isEmpty() || (enforced() && !trustEvaluator.allowsAnyPrincipalOf(
                 role.get().getAssumeRolePolicyDocument(), consumerAccount, partition))) {
             throw new AwsException("AccessDenied", CloudFormationTemplateEngine.sdkErrorMessage(
-                    "User: " + AwsArnUtils.Arn.global(partition, "iam", consumerAccount, "root")
-                            + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
+                    AccessDeniedMessages.notAuthorized(
+                            AwsArnUtils.Arn.global(partition, "iam", consumerAccount, "root").toString(),
+                            "sts:AssumeRole", roleArn, null),
                     "AWSSecurityTokenService", 403, "AccessDenied"), 403);
         }
         return AwsArnUtils.parse(roleArn).accountId();
@@ -83,14 +86,12 @@ public class GetStackOutputRoleAuthorizer {
         if (decision == SimulationDecision.ALLOWED) {
             return;
         }
-        String reason = decision == SimulationDecision.EXPLICIT_DENY
-                ? "with an explicit deny in an identity-based policy"
-                : "because no identity-based policy allows the " + DESCRIBE_STACKS + " action";
         String session = AwsArnUtils.Arn.global(partition, "sts", stack.accountId(),
                 "assumed-role/" + role.getRoleName() + "/" + SESSION_NAME).toString();
         throw new AwsException("AccessDenied", CloudFormationTemplateEngine.sdkErrorMessage(
-                "User: " + session + " is not authorized to perform: " + DESCRIBE_STACKS + " on resource: "
-                        + stackId + " " + reason, "AmazonCloudFormation", 403, "AccessDenied"), 403);
+                AccessDeniedMessages.notAuthorized(session, DESCRIBE_STACKS, stackId,
+                        PolicyType.IDENTITY_BASED_POLICY.refusal(decision, DESCRIBE_STACKS, null)),
+                "AmazonCloudFormation", 403, "AccessDenied"), 403);
     }
 
     private boolean enforced() {

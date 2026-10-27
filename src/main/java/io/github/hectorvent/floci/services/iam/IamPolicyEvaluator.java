@@ -25,7 +25,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
@@ -806,9 +808,9 @@ public class IamPolicyEvaluator {
                 continue;
             }
             List<String> values = entry.getValue().stream()
-                    .filter(java.util.Objects::nonNull)
+                    .filter(Objects::nonNull)
                     .toList();
-            normalized.putIfAbsent(entry.getKey().toLowerCase(java.util.Locale.ROOT), values);
+            normalized.putIfAbsent(entry.getKey().toLowerCase(Locale.ROOT), values);
         }
         return normalized;
     }
@@ -1391,7 +1393,7 @@ public class IamPolicyEvaluator {
         boolean substitute = policyVariables && VARIABLE_CONDITION_OPERATORS.contains(baseOp);
 
         for (Map.Entry<String, List<String>> entry : keyValueMap.entrySet()) {
-            String condKey = entry.getKey().toLowerCase(java.util.Locale.ROOT);
+            String condKey = entry.getKey().toLowerCase(Locale.ROOT);
             List<String> condValues = entry.getValue();
             List<String> ctxValues = ctx.get(condKey);
 

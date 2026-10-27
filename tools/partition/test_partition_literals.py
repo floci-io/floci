@@ -476,10 +476,11 @@ def test_check_treats_an_escaped_literal_as_absent(tmp_path):
 # Audit and CLI
 # --------------------------------------------------------------------------- #
 def test_package_of_groups_by_service_and_falls_back_to_the_parent():
-    assert p.package_of("src/main/java/io/github/hectorvent/floci/services/s3/S3Service.java") == "services/s3"
-    assert p.package_of("src/main/java/io/github/hectorvent/floci/core/common/AwsArnUtils.java") == "core/common"
-    assert p.package_of("src/main/java/io/github/hectorvent/floci/config/EmulatorConfig.java") == "config"
-    assert p.package_of("src/main/java/io/github/hectorvent/floci/services/s3/model/Bucket.java") == "services/s3"
+    root = p.PACKAGE_ROOT.relative_to(p.REPO_ROOT).as_posix()
+    assert p.package_of(f"{root}/services/s3/S3Service.java") == "services/s3"
+    assert p.package_of(f"{root}/core/common/AwsArnUtils.java") == "core/common"
+    assert p.package_of(f"{root}/config/EmulatorConfig.java") == "config"
+    assert p.package_of(f"{root}/services/s3/model/Bucket.java") == "services/s3"
     assert p.package_of("elsewhere/x/Y.java") == "elsewhere/x"
 
 

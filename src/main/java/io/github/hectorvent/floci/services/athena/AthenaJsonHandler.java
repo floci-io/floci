@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.athena.model.CreateWorkGroupRequest;
 import io.github.hectorvent.floci.services.athena.model.QueryExecution;
 import io.github.hectorvent.floci.services.athena.model.QueryExecutionContext;
@@ -99,8 +100,17 @@ public class AthenaJsonHandler {
                 athenaService.updateWorkGroup(updateRequest, region);
                 yield Response.ok(Map.of()).build();
             }
-            case "ListDataCatalogs" ->
-                    Response.ok(Map.of("DataCatalogsSummary", athenaService.listDataCatalogs(region))).build();
+            case "ListDataCatalogs" -> {
+                Integer maxResults = Pagination.parseMaxResults(request, "MaxResults", "InvalidRequestException");
+                String nextToken = Pagination.parseNextToken(request, "NextToken", "InvalidRequestException");
+                PaginatedResult<Map<String, Object>> page = athenaService.listDataCatalogsPage(region, maxResults, nextToken);
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("DataCatalogsSummary", page.items());
+                if (page.nextToken() != null) {
+                    response.put("NextToken", page.nextToken());
+                }
+                yield Response.ok(response).build();
+            }
             case "GetDataCatalog" -> {
                 String name = request.has("Name") ? request.get("Name").asText() : AthenaService.DEFAULT_CATALOG;
                 yield Response.ok(Map.of("DataCatalog", athenaService.getDataCatalog(region, name))).build();

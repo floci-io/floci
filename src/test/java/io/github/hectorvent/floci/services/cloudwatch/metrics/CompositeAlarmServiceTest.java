@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Alarm;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.AlarmHistoryItem;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.CompositeAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.testing.ThreadStates;
@@ -290,6 +292,39 @@ class CompositeAlarmServiceTest {
         assertEquals("1 validation error detected: Value null at 'alarmRule' failed to satisfy constraint: "
                 + "Member must not be null", assertThrows(AwsException.class,
                         () -> CompositeAlarmRule.parse(null)).getMessage());
+    }
+
+    @Test
+    void compositeHistoryIsListedOnlyForTheCompositeAlarmType() {
+        put("aggregate", "TRUE");
+        assertTrue(service.describeAlarmHistory("aggregate", null, null, null, null, null, null, null, REGION)
+                .items().isEmpty());
+        List<AlarmHistoryItem> items = service.describeAlarmHistory("aggregate", List.of("CompositeAlarm"), null,
+                null, null, null, null, null, REGION).items();
+        assertEquals(List.of("Alarm updated from INSUFFICIENT_DATA to ALARM", "Alarm \"aggregate\" created"),
+                items.stream().map(AlarmHistoryItem::historySummary).toList());
+        assertEquals(List.of("CompositeAlarm", "CompositeAlarm"), items.stream().map(AlarmHistoryItem::alarmType).toList());
+        assertEquals(List.of("Alarm \"aggregate\" created", "Alarm updated from INSUFFICIENT_DATA to ALARM"),
+                service.describeAlarmHistory("aggregate", List.of("CompositeAlarm"), null, null, null, null, null,
+                        "TimestampAscending", REGION).items().stream().map(AlarmHistoryItem::historySummary).toList());
+    }
+
+    @Test
+    void childTransitionsRecordCompositeStateUpdates() throws Exception {
+        MetricAlarm metric = new MetricAlarm();
+        metric.setAlarmName("child");
+        service.putMetricAlarm(metric, REGION);
+        put("parent", "ALARM(child)");
+        service.setAlarmState("child", "ALARM", "breached", null, REGION);
+
+        List<AlarmHistoryItem> items = service.describeAlarmHistory(null, List.of("MetricAlarm", "CompositeAlarm"),
+                "StateUpdate", null, null, null, null, null, REGION).items();
+        assertEquals(List.of("parent:Alarm updated from OK to ALARM", "child:Alarm updated from INSUFFICIENT_DATA to ALARM",
+                "parent:Alarm updated from INSUFFICIENT_DATA to OK"),
+                items.stream().map(item -> item.alarmName() + ":" + item.historySummary()).toList());
+        JsonNode data = new ObjectMapper().readTree(items.getFirst().historyData());
+        assertEquals("AlarmRule evaluated to ALARM", data.path("newState").path("stateReason").asText());
+        assertEquals("AlarmRule evaluated to OK", data.path("oldState").path("stateReason").asText());
     }
 
     private CompositeAlarm put(String name, String rule) {

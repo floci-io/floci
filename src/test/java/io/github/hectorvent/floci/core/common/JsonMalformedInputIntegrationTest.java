@@ -9,6 +9,9 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
@@ -218,8 +221,8 @@ class JsonMalformedInputIntegrationTest {
     @Test
     void kinesisGetRecordsIteratorWithNonNumericIndexIsInvalidArgument() {
         // valid base64 of "stream|shard|type|seq|NOTANUMBER" — decodes fine, parseInt(index) would throw
-        String iterator = java.util.Base64.getEncoder()
-                .encodeToString("s|shard-0|AT|0|xyz".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String iterator = Base64.getEncoder()
+                .encodeToString("s|shard-0|AT|0|xyz".getBytes(StandardCharsets.UTF_8));
         req(JSON_1_1, "Kinesis_20131202.GetRecords", "{\"ShardIterator\":\"" + iterator + "\"}")
         .when().post("/")
         .then()
@@ -242,9 +245,9 @@ class JsonMalformedInputIntegrationTest {
     @Test
     void dynamoDbStreamsGetRecordsIteratorWithNonNumericPositionIsNot500() {
         // valid base64 of "arn|NOTANUMBER" — decodeIterator succeeds, Integer.parseInt(position) would throw
-        String iterator = java.util.Base64.getEncoder()
+        String iterator = Base64.getEncoder()
                 .encodeToString("arn:aws:dynamodb:us-east-1:0:table/T/stream/x|notanumber"
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        .getBytes(StandardCharsets.UTF_8));
         req(JSON_1_0, "DynamoDBStreams_20120810.GetRecords", "{\"ShardIterator\":\"" + iterator + "\"}")
         .when().post("/")
         .then()

@@ -17,7 +17,7 @@ import static io.restassured.RestAssured.given;
  * {@link SignedIamEnforcementProfile}), where {@link EnforcementFixtures}' placeholder signatures
  * are refused. Every call is signed as the root {@code test} key.
  *
- * <p>{@link #createUser} makes an IAM user with an access key and one inline policy; closing the
+ * <p>{@link #createUser} makes an IAM user with an access key and an optional inline policy; closing the
  * returned {@link User} deletes the key, the policy and the user, so a test can hold it in a
  * try-with-resources block.
  */
@@ -37,6 +37,11 @@ public final class SignedIamUsers {
                 .contentType("application/x-www-form-urlencoded").body(body).post(endpoint);
     }
 
+    /** Creates a user with one access key and no inline policy. */
+    public static User createUser(URI endpoint, String namePrefix) throws Exception {
+        return createUser(endpoint, namePrefix, null, null);
+    }
+
     /**
      * Creates a user named {@code namePrefix} plus a random suffix, with one access key and the
      * inline policy {@code policyName} holding {@code policyDocument}. If a later step fails, the
@@ -53,8 +58,10 @@ public final class SignedIamUsers {
             user = new User(endpoint, name, policyName,
                     credentials.xmlPath().getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId"),
                     credentials.xmlPath().getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey"));
-            iam(endpoint, "PutUserPolicy", Map.of("UserName", name, "PolicyName", policyName,
-                    "PolicyDocument", policyDocument)).then().statusCode(200);
+            if (policyName != null) {
+                iam(endpoint, "PutUserPolicy", Map.of("UserName", name, "PolicyName", policyName,
+                        "PolicyDocument", policyDocument)).then().statusCode(200);
+            }
             return user;
         } catch (Exception | AssertionError e) {
             try {
@@ -81,7 +88,9 @@ public final class SignedIamUsers {
                 iam(endpoint, "DeleteAccessKey", Map.of("UserName", name, "AccessKeyId", accessKeyId))
                         .then().statusCode(200);
             }
-            iam(endpoint, "DeleteUserPolicy", Map.of("UserName", name, "PolicyName", policyName));
+            if (policyName != null) {
+                iam(endpoint, "DeleteUserPolicy", Map.of("UserName", name, "PolicyName", policyName));
+            }
             iam(endpoint, "DeleteUser", Map.of("UserName", name)).then().statusCode(200);
         }
     }

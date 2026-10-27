@@ -2012,7 +2012,6 @@ public class CloudFormationService implements ResourceProvider {
                     JsonNode resDef = resources.get(logicalId);
                     String type = resDef.path("Type").asText();
                     String deletionPolicy = resDef.path("DeletionPolicy").asText(null);
-                    JsonNode props = resDef.path("Properties");
 
                     CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
                             accountId, region, stack.getStackName(),
@@ -2024,6 +2023,9 @@ public class CloudFormationService implements ResourceProvider {
                             parameterTypes,
                             (id, attribute, value) -> dispatcher.attributeValue(
                                     resources.path(id).path("Type").asText(), attribute, value));
+                    // AWS::NoValue removes the property, wherever the template puts it, so no
+                    // provisioner sees it: not a member, a list item or a whole property.
+                    JsonNode props = engine.omitNoValue(resDef.path("Properties"));
 
                     StackResource resource = stack.getResources().get(logicalId);
                     StackResource previousResource = resource;
@@ -4349,7 +4351,7 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private Stack resolveDeletedStack(String stackNameOrArn, String region, String accountId) {
-        if (stackNameOrArn != null && stackNameOrArn.startsWith("arn:")) {
+        if (AwsArnUtils.isArn(stackNameOrArn)) {
             DeletedStackEntry deleted = deletedStacks.get(stackNameOrArn);
             if (deleted != null) {
                 if (deleted.isExpired(now())) {
@@ -4455,7 +4457,7 @@ public class CloudFormationService implements ResourceProvider {
                                     String region, String accountId) {
         ChangeSet changeSet = stack.getChangeSets().get(
                 resolveChangeSetName(changeSetNameOrArn, region, accountId));
-        if (changeSet == null || (changeSetNameOrArn != null && changeSetNameOrArn.startsWith("arn:")
+        if (changeSet == null || (AwsArnUtils.isArn(changeSetNameOrArn)
                 && !changeSetNameOrArn.equals(changeSet.getChangeSetId()))) {
             return null;
         }
@@ -4648,7 +4650,7 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         // If input looks like an ARN, extract the stack name and retry
-        if (stackNameOrArn != null && stackNameOrArn.startsWith("arn:")) {
+        if (AwsArnUtils.isArn(stackNameOrArn)) {
             try {
                 AwsArnUtils.Arn arn = AwsArnUtils.parse(stackNameOrArn);
                 if (!accountId.equals(arn.accountId()) || !region.equals(arn.region())) {

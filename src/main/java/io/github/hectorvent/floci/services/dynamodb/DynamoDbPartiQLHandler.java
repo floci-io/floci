@@ -122,7 +122,7 @@ class DynamoDbPartiQLHandler {
         if (fetchesFromTable(stmt, table, accessPath)) {
             for (JsonNode item : page.scannedItems()) {
                 tableUnits += NativeDynamoDbJsonHandler.readCapacityUnits(
-                        DynamoDbItemSize.calculateItemSize(item), consistentRead);
+                        DynamoDbItemSize.billedItemSize(table, item), consistentRead);
             }
         }
         Map<String, Double> indexUnits = Map.of(accessPath.indexName(), units);
@@ -215,7 +215,7 @@ class DynamoDbPartiQLHandler {
             if (item == null) {
                 return new Page(Collections.emptyList(), null, 0, List.of());
             }
-            return new Page(List.of(item), null, DynamoDbItemSize.calculateItemSize(item), List.of(item));
+            return new Page(List.of(item), null, DynamoDbItemSize.billedItemSize(table, item), List.of(item));
         }
         ExprAttrBuilder eav = new ExprAttrBuilder();
         ExprAttrNameBuilder ean = new ExprAttrNameBuilder();

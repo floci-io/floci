@@ -754,6 +754,7 @@ floci:
       host-port-bind-address: "127.0.0.1"
       host-volume-roots: []
       allow-unsafe-host-volumes: false
+      allow-privileged-containers: false
       # Remove the ECS containers a previous run of this deployment left on the daemon before
       # the service scheduler starts replacements. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.sagemaker;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
@@ -138,7 +139,7 @@ class SageMakerIntegrationTest {
         }
     }
 
-    private io.restassured.response.Response post(String target, String body) {
+    private Response post(String target, String body) {
         return given().header("Authorization", AUTH)
                 .header("X-Amz-Target", target)
                 .contentType("application/x-amz-json-1.1")

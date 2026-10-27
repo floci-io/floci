@@ -22,22 +22,22 @@ final class DynamoDbTransactCapacity {
         return cost.withTable(cost.table() * 2);
     }
 
-    static DynamoDbWriteCapacity.Cost conditionCheck(JsonNode item) {
-        return tableOnly(2 * units(item, WRITE_UNIT_BYTES));
+    static DynamoDbWriteCapacity.Cost conditionCheck(TableDefinition table, JsonNode item) {
+        return tableOnly(2 * units(table, item, WRITE_UNIT_BYTES));
     }
 
-    static DynamoDbWriteCapacity.Cost read(JsonNode oldItem, JsonNode newItem) {
-        return tableOnly(2 * Math.max(units(oldItem, READ_UNIT_BYTES), units(newItem, READ_UNIT_BYTES)));
+    static DynamoDbWriteCapacity.Cost read(TableDefinition table, JsonNode oldItem, JsonNode newItem) {
+        return tableOnly(2 * Math.max(units(table, oldItem, READ_UNIT_BYTES), units(table, newItem, READ_UNIT_BYTES)));
     }
 
     private static DynamoDbWriteCapacity.Cost tableOnly(long units) {
         return new DynamoDbWriteCapacity.Cost(units, Map.of(), Map.of());
     }
 
-    private static long units(JsonNode item, int unitBytes) {
+    private static long units(TableDefinition table, JsonNode item, int unitBytes) {
         if (item == null) {
             return 1;
         }
-        return Math.max(1, (DynamoDbItemSize.calculateItemSize(item) + unitBytes - 1) / unitBytes);
+        return Math.max(1, (DynamoDbItemSize.billedItemSize(table, item) + unitBytes - 1) / unitBytes);
     }
 }

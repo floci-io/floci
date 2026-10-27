@@ -83,7 +83,7 @@ class JsonataEdgeCaseTest {
                                 "city", "Springfield",
                                 "zip", "62704"
                         ),
-                        "tags", java.util.List.of("admin", "active")
+                        "tags", List.of("admin", "active")
                 )
         ));
 

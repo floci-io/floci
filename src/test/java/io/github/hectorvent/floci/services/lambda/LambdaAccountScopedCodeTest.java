@@ -13,6 +13,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.zip.ZipEntry;
@@ -278,7 +279,7 @@ class LambdaAccountScopedCodeTest {
     }
 
     private Map<String, Object> zipRequest(String name, String handlerSource) throws Exception {
-        return new java.util.HashMap<>(Map.of(
+        return new HashMap<>(Map.of(
                 "FunctionName", name,
                 "Runtime", "nodejs20.x",
                 "Role", "arn:aws:iam::000000000000:role/test-role",

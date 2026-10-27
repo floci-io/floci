@@ -30,6 +30,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     private final PasswordValidator passwordValidator;
     private final SigV4Validator sigV4Validator;
     private final Supplier<SSLContext> tlsContext;
+    private final ElastiCacheBackendAcl backendAcl = new ElastiCacheBackendAcl();
 
     public ElastiCacheAuthProxy(String groupId, AuthMode authMode,
                                 String backendHost, int backendPort,
@@ -81,6 +82,25 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
         encrypted.setSoTimeout(client.getSoTimeout());
         encrypted.startHandshake();
         return encrypted;
+    }
+
+    @Override
+    protected void initializeBackend(Socket backend, String username) throws IOException {
+        boolean members = passwordValidator.hasMembers();
+        if (!members && !backendAcl.initialized()) {
+            return;
+        }
+        // Disabling default without configuring replication credentials breaks cluster nodes.
+        // Until that path is implemented, fail closed rather than ignore the user's ACL.
+        if (passwordValidator.clusterMode()) {
+            throw new IOException("Cluster-mode user ACL transport is not supported yet");
+        }
+        String name = username == null || username.isEmpty() ? "default" : username;
+        String access = members ? passwordValidator.accessString(name) : "on ~* &* +@all";
+        if (access == null) {
+            throw new IOException("Cache user is no longer associated with this resource");
+        }
+        backendAcl.authenticate(backend, name, access);
     }
 
     @Override
@@ -166,6 +186,14 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
         /** Read per connection: a modify can move the cache from preferred to required while the proxy runs. */
         default TransitEncryption transitEncryption() {
             return TransitEncryption.NONE;
+        }
+
+        default String accessString(String username) {
+            return null;
+        }
+
+        default boolean clusterMode() {
+            return false;
         }
 
         default boolean hasMembers() {

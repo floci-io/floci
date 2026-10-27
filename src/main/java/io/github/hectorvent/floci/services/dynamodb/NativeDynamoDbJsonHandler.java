@@ -19,7 +19,10 @@ import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.T
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.UpdateTableRequest;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
+import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
+import io.github.hectorvent.floci.services.dynamodb.model.ImportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.ImportTableDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.KinesisStreamingDestination;
@@ -147,9 +150,9 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleCreateTable(JsonNode request, String region) {
-        var table = createTableFromSpec(request, "", region, "ACTIVE");
+        TableDefinition table = createTableFromSpec(request, "", region, "ACTIVE");
 
-        var response = objectMapper.createObjectNode();
+        ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
     }
@@ -185,7 +188,7 @@ public class NativeDynamoDbJsonHandler {
         List<GlobalSecondaryIndex> gsis = new ArrayList<>();
         JsonNode gsiArray = request.path("GlobalSecondaryIndexes");
         if (!gsiArray.isMissingNode() && gsiArray.isArray()) {
-            var gsiPosition = 0;
+            int gsiPosition = 0;
             for (JsonNode gsiNode : gsiArray) {
                 gsiPosition++;
                 String indexName = requireIndexName(gsiNode,
@@ -227,7 +230,7 @@ public class NativeDynamoDbJsonHandler {
         List<LocalSecondaryIndex> lsis = new ArrayList<>();
         JsonNode lsiArray = request.path("LocalSecondaryIndexes");
         if (!lsiArray.isMissingNode() && lsiArray.isArray()) {
-            var lsiPosition = 0;
+            int lsiPosition = 0;
             for (JsonNode lsiNode : lsiArray) {
                 lsiPosition++;
                 String indexName = requireIndexName(lsiNode,
@@ -647,6 +650,7 @@ public class NativeDynamoDbJsonHandler {
                 ? request.get("ExpressionAttributeNames") : null;
         JsonNode attributesToGet = request.has("AttributesToGet") ? request.get("AttributesToGet") : null;
 
+        DynamoDbAccessPathValidator.validateAttributesToGet(attributesToGet);
         if (attributesToGet != null && projectionExpression != null) {
             throw new AwsException("ValidationException",
                     "Can not use both expression and non-expression parameters in the same request: "
@@ -663,7 +667,9 @@ public class NativeDynamoDbJsonHandler {
         }
 
         JsonNode item = dynamoDbService.getItem(tableName, key, region);
-        var itemBytes = item != null ? DynamoDbItemSize.calculateItemSize(item) : 0;
+        int itemBytes = item != null
+                ? DynamoDbItemSize.billedItemSize(dynamoDbService.requireTableForItemCall(tableName, region), item)
+                : 0;
         if (item != null && projectionExpression != null) {
             item = ProjectionEvaluator.project(item, projectionExpression, exprAttrNames);
         } else if (item != null && attributesToGet != null) {
@@ -778,7 +784,7 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
-        var attributeUpdateValues = legacyValues(attributeUpdates);
+        ObjectNode attributeUpdateValues = legacyValues(attributeUpdates);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(attributeUpdateValues);
         DynamoDbNumberUtils.requireStorable(attributeUpdateValues, true);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(
@@ -854,7 +860,7 @@ public class NativeDynamoDbJsonHandler {
         } else if ("ALL_OLD" .equals(returnValues) && result.oldItem() != null) {
             response.set("Attributes", result.oldItem());
         } else if ("UPDATED_NEW".equals(returnValues) || "UPDATED_OLD".equals(returnValues)) {
-            var updated = DynamoDbUpdatedAttributes.collect(result.touched(), "UPDATED_NEW".equals(returnValues));
+            ObjectNode updated = DynamoDbUpdatedAttributes.collect(result.touched(), "UPDATED_NEW".equals(returnValues));
             // AWS omits Attributes when no touched path has a value on that side.
             if (!updated.isEmpty()) {
                 response.set("Attributes", updated);
@@ -887,9 +893,9 @@ public class NativeDynamoDbJsonHandler {
                                           String returnValuesOnConditionCheckFailure) {
         boolean useOr = "OR".equals(conditionalOperator);
         boolean overall = !useOr;
-        var fields = expected.fields();
+        Iterator<Map.Entry<String, JsonNode>> fields = expected.fields();
         while (fields.hasNext()) {
-            var entry = fields.next();
+            Map.Entry<String, JsonNode> entry = fields.next();
             String attrName = entry.getKey();
             JsonNode condition = entry.getValue();
             JsonNode attrValue = existing != null ? existing.get(attrName) : null;
@@ -930,9 +936,9 @@ public class NativeDynamoDbJsonHandler {
      * DynamoDB reports only the first offending entry, so validation stops at the first error.
      */
     private void validateLegacyExpected(JsonNode expected) {
-        var fields = expected.fields();
+        Iterator<Map.Entry<String, JsonNode>> fields = expected.fields();
         while (fields.hasNext()) {
-            var entry = fields.next();
+            Map.Entry<String, JsonNode> entry = fields.next();
             String attrName = entry.getKey();
             JsonNode condition = entry.getValue();
             boolean hasComparisonOperator = condition.has("ComparisonOperator");
@@ -1004,13 +1010,13 @@ public class NativeDynamoDbJsonHandler {
         if (!condition.has("Value") || condition.has("AttributeValueList")) {
             return condition;
         }
-        com.fasterxml.jackson.databind.node.ObjectNode normalized = objectMapper.createObjectNode();
+        ObjectNode normalized = objectMapper.createObjectNode();
         condition.fields().forEachRemaining(e -> {
             if (!"Value".equals(e.getKey())) {
                 normalized.set(e.getKey(), e.getValue());
             }
         });
-        com.fasterxml.jackson.databind.node.ArrayNode avl = objectMapper.createArrayNode();
+        ArrayNode avl = objectMapper.createArrayNode();
         avl.add(condition.get("Value"));
         normalized.set("AttributeValueList", avl);
         return normalized;
@@ -1043,16 +1049,16 @@ public class NativeDynamoDbJsonHandler {
     // The AttributeValues inside a legacy container. AttributeUpdates, Expected,
     // KeyConditions and QueryFilter carry them under Value or AttributeValueList.
     private ObjectNode legacyValues(JsonNode container) {
-        var values = objectMapper.createObjectNode();
+        ObjectNode values = objectMapper.createObjectNode();
         if (container == null || !container.isObject()) {
             return values;
         }
-        var i = 0;
-        for (var spec : container) {
+        int i = 0;
+        for (JsonNode spec : container) {
             if (spec.has("Value")) {
                 values.set("v" + i++, spec.get("Value"));
             }
-            for (var value : spec.path("AttributeValueList")) {
+            for (JsonNode value : spec.path("AttributeValueList")) {
                 values.set("v" + i++, value);
             }
         }
@@ -1145,7 +1151,8 @@ public class NativeDynamoDbJsonHandler {
         }
 
         boolean hasAttributesToGet = attributesToGet != null && attributesToGet.size() > 0;
-        if ("SPECIFIC_ATTRIBUTES".equals(select) && projectionExpression == null && !hasAttributesToGet) {
+        if ("SPECIFIC_ATTRIBUTES".equals(select) && !ProjectionEvaluator.hasProjection(projectionExpression)
+                && !hasAttributesToGet) {
             throw SmithyValidationErrors.validationException(
                     SELECT_NEEDS_PROJECTION);
         }
@@ -1183,7 +1190,7 @@ public class NativeDynamoDbJsonHandler {
                     .toList();
         }
         // Apply index projection (KEYS_ONLY / INCLUDE) when querying a secondary index
-        if (indexName != null && projectionExpression == null && attributesToGet == null) {
+        if (indexName != null && !ProjectionEvaluator.hasProjection(projectionExpression) && attributesToGet == null) {
             queryItems = applyIndexProjection(queryItems, queryTable, queryAccessPath, select);
         }
         if (projectionExpression != null) {
@@ -1294,7 +1301,7 @@ public class NativeDynamoDbJsonHandler {
         }
         boolean hasAttributesToGetScan = attributesToGetScan != null && attributesToGetScan.size() > 0;
         if ("SPECIFIC_ATTRIBUTES".equals(select)
-                && projectionExpressionScan == null && !hasAttributesToGetScan) {
+                && !ProjectionEvaluator.hasProjection(projectionExpressionScan) && !hasAttributesToGetScan) {
             throw SmithyValidationErrors.validationException(
                     SELECT_NEEDS_PROJECTION);
         }
@@ -1329,7 +1336,7 @@ public class NativeDynamoDbJsonHandler {
 
         List<JsonNode> scanItems = result.items();
         // Apply index projection (KEYS_ONLY / INCLUDE) when scanning a secondary index
-        if (indexNameScan != null && projectionExpressionScan == null && attributesToGetScan == null) {
+        if (indexNameScan != null && !ProjectionEvaluator.hasProjection(projectionExpressionScan) && attributesToGetScan == null) {
             scanItems = applyIndexProjection(scanItems, scanTable, scanAccessPath, select);
         }
         if (projectionExpressionScan != null) {
@@ -1475,7 +1482,7 @@ public class NativeDynamoDbJsonHandler {
         Map<String, List<JsonNode>> items = new HashMap<>();
         Iterator<Map.Entry<String, JsonNode>> tables = requestItems.fields();
         while (tables.hasNext()) {
-            var entry = tables.next();
+            Map.Entry<String, JsonNode> entry = tables.next();
             List<JsonNode> writes = new ArrayList<>();
             for (JsonNode writeReq : entry.getValue()) {
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(
@@ -1520,22 +1527,22 @@ public class NativeDynamoDbJsonHandler {
         }
 
         // The per-table write cost needs the stored images from before the batch runs.
-        var returnCCBatch = request.path("ReturnConsumedCapacity").asText("NONE");
+        String returnCCBatch = request.path("ReturnConsumedCapacity").asText("NONE");
         requireValidReturnConsumedCapacity(request);
         Map<String, DynamoDbWriteCapacity.Cost> costs = null;
         if (!"NONE".equals(returnCCBatch)) {
             costs = new LinkedHashMap<>();
-            for (var entry : items.entrySet()) {
+            for (Map.Entry<String, List<JsonNode>> entry : items.entrySet()) {
                 TableDefinition costTable = dynamoDbService.requireTableForItemCall(entry.getKey(), region);
-                var cost = DynamoDbWriteCapacity.Cost.zero();
-                for (var writeReq : entry.getValue()) {
-                    var newItem = writeReq.has("PutRequest")
+                DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.Cost.zero();
+                for (JsonNode writeReq : entry.getValue()) {
+                    ObjectNode newItem = writeReq.has("PutRequest")
                             ? DynamoDbNumberUtils.normalizeNumbersInItem(writeReq.get("PutRequest").get("Item"))
                             : null;
-                    var keyNode = writeReq.has("PutRequest")
+                    JsonNode keyNode = writeReq.has("PutRequest")
                             ? writeReq.get("PutRequest").get("Item")
                             : writeReq.get("DeleteRequest").get("Key");
-                    var previous = dynamoDbService.getItem(entry.getKey(), keyNode, region);
+                    JsonNode previous = dynamoDbService.getItem(entry.getKey(), keyNode, region);
                     cost = cost.plus(DynamoDbWriteCapacity.forWrite(costTable, previous, newItem));
                 }
                 costs.put(entry.getKey(), cost);
@@ -1547,8 +1554,8 @@ public class NativeDynamoDbJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.set("UnprocessedItems", objectMapper.createObjectNode());
         if (costs != null) {
-            var ccArray = objectMapper.createArrayNode();
-            for (var entry : costs.entrySet()) {
+            ArrayNode ccArray = objectMapper.createArrayNode();
+            for (Map.Entry<String, DynamoDbWriteCapacity.Cost> entry : costs.entrySet()) {
                 ccArray.add(writeCapacityNode(entry.getKey(), entry.getValue(),
                         "INDEXES".equals(returnCCBatch)));
             }
@@ -1573,7 +1580,7 @@ public class NativeDynamoDbJsonHandler {
         Map<String, JsonNode> items = new HashMap<>();
         Iterator<Map.Entry<String, JsonNode>> tables = requestItems.fields();
         while (tables.hasNext()) {
-            var entry = tables.next();
+            Map.Entry<String, JsonNode> entry = tables.next();
             items.put(entry.getKey(), entry.getValue());
         }
 
@@ -1582,6 +1589,7 @@ public class NativeDynamoDbJsonHandler {
         boolean usesAttributesToGet = false;
         boolean usesProjectionExpression = false;
         for (JsonNode tableRequest : items.values()) {
+            DynamoDbAccessPathValidator.validateAttributesToGet(tableRequest.get("AttributesToGet"));
             usesAttributesToGet |= tableRequest.hasNonNull("AttributesToGet");
             usesProjectionExpression |= tableRequest.hasNonNull("ProjectionExpression");
         }
@@ -1593,7 +1601,7 @@ public class NativeDynamoDbJsonHandler {
 
         // Per-table check: max 100 keys
         for (Map.Entry<String, JsonNode> entry : items.entrySet()) {
-            var projection = entry.getValue().path("ProjectionExpression");
+            JsonNode projection = entry.getValue().path("ProjectionExpression");
             if (projection.isTextual()) {
                 DynamoDbExpressionSize.checkRead(projection.asText(), "ProjectionExpression");
                 ProjectionEvaluator.validateExpression(projection.asText(),
@@ -1626,6 +1634,8 @@ public class NativeDynamoDbJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode responses = objectMapper.createObjectNode();
+        boolean capacityRequested = !"NONE".equals(request.path("ReturnConsumedCapacity").asText("NONE"));
+        Map<String, Double> unitsByTable = new LinkedHashMap<>();
         for (Map.Entry<String, List<JsonNode>> entry : result.responses().entrySet()) {
             String tblName = entry.getKey();
             JsonNode tableRequest = requestItems.get(tblName);
@@ -1650,11 +1660,29 @@ public class NativeDynamoDbJsonHandler {
                 tableItems.add(projected);
             }
             responses.set(tblName, tableItems);
+            if (capacityRequested) {
+                unitsByTable.put(tblName, batchGetReadUnits(tblName, tableRequest, entry.getValue(), region));
+            }
         }
         response.set("Responses", responses);
         response.set("UnprocessedKeys", objectMapper.createObjectNode());
-        addBatchConsumedCapacity(response, request, items, false);
+        addBatchConsumedCapacity(response, request, unitsByTable);
         return Response.ok(response).build();
+    }
+
+    /**
+     * Each key costs what a GetItem of the whole item costs, even a missing or projected one.
+     */
+    private double batchGetReadUnits(String tableName, JsonNode tableRequest, List<JsonNode> found,
+                                     String region) {
+        TableDefinition table = dynamoDbService.requireTableForItemCall(tableName, region);
+        boolean consistentRead = tableRequest != null && tableRequest.path("ConsistentRead").asBoolean(false);
+        int missingKeys = (tableRequest != null ? tableRequest.path("Keys").size() : 0) - found.size();
+        double units = missingKeys * readCapacityUnits(0, consistentRead);
+        for (JsonNode item : found) {
+            units += readCapacityUnits(DynamoDbItemSize.billedItemSize(table, item), consistentRead);
+        }
+        return units;
     }
 
     private Response handleUpdateTable(JsonNode request, String region) {
@@ -1703,7 +1731,7 @@ public class NativeDynamoDbJsonHandler {
         List<GsiThroughputUpdate> gsiThroughputUpdates = new ArrayList<>();
         JsonNode gsiUpdates = request.path("GlobalSecondaryIndexUpdates");
         if (!gsiUpdates.isMissingNode() && gsiUpdates.isArray()) {
-            var updatePosition = 0;
+            int updatePosition = 0;
             for (JsonNode update : gsiUpdates) {
                 updatePosition++;
                 JsonNode createNode = update.path("Create");
@@ -2587,8 +2615,8 @@ public class NativeDynamoDbJsonHandler {
      * so this shape is the emulator's own. Widening the partition keeps it from rejecting a legal
      * GovCloud or China table ARN.
      */
-    private static final java.util.regex.Pattern DYNAMODB_TABLE_ARN_PATTERN =
-            java.util.regex.Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX
+    private static final Pattern DYNAMODB_TABLE_ARN_PATTERN =
+            Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX
                     + ":dynamodb:[a-z0-9-]+:\\d{12}:table/[a-zA-Z0-9._-]+$");
 
     private static boolean isValidDynamoDbTableArn(String arn) {
@@ -2977,7 +3005,7 @@ public class NativeDynamoDbJsonHandler {
      * half-unit minimum DynamoDB charges even when nothing is found.
      */
     static double readCapacityUnits(long bytes, boolean consistentRead) {
-        var units = Math.max(1, (bytes + 4095) / 4096) * 0.5;
+        double units = Math.max(1, (bytes + 4095) / 4096) * 0.5;
         return consistentRead ? units * 2 : units;
     }
 
@@ -2992,7 +3020,7 @@ public class NativeDynamoDbJsonHandler {
         String returnCC = request.path("ReturnConsumedCapacity").asText("NONE");
         if ("NONE".equals(returnCC)) return;
         TableDefinition table = dynamoDbService.requireTableForItemCall(tableName, region);
-        var cost = DynamoDbWriteCapacity.forWrite(table, oldItem,
+        DynamoDbWriteCapacity.Cost cost = DynamoDbWriteCapacity.forWrite(table, oldItem,
                 newItem != null ? DynamoDbNumberUtils.normalizeNumbersInItem(newItem) : null);
         response.set("ConsumedCapacity",
                 writeCapacityNode(tableName, cost, "INDEXES".equals(returnCC)));
@@ -3098,25 +3126,23 @@ public class NativeDynamoDbJsonHandler {
     }
 
     /**
-     * Builds a list-style ConsumedCapacity for batch operations.
+     * Builds the list-style ConsumedCapacity of BatchGetItem, one entry per table.
      */
     private void addBatchConsumedCapacity(ObjectNode response, JsonNode request,
-                                           Map<String, ?> tableItems, boolean isWrite) {
+                                           Map<String, Double> unitsByTable) {
         String returnCC = request.path("ReturnConsumedCapacity").asText("NONE");
         if ("NONE".equals(returnCC)) return;
 
         ArrayNode ccArray = objectMapper.createArrayNode();
-        for (String tableName : tableItems.keySet()) {
+        unitsByTable.forEach((tableName, units) -> {
             ObjectNode cc = objectMapper.createObjectNode();
             cc.put("TableName", DynamoDbTableNames.resolve(tableName));
-            cc.put("CapacityUnits", isWrite ? 1.0 : 0.5);
+            cc.put("CapacityUnits", units);
             if ("INDEXES".equals(returnCC)) {
-                ObjectNode tableCap = objectMapper.createObjectNode();
-                tableCap.put("CapacityUnits", isWrite ? 1.0 : 0.5);
-                cc.set("Table", tableCap);
+                cc.set("Table", capacityUnitsNode(units, null));
             }
             ccArray.add(cc);
-        }
+        });
         response.set("ConsumedCapacity", ccArray);
     }
 
@@ -3187,7 +3213,7 @@ public class NativeDynamoDbJsonHandler {
         }
 
         ArrayNode keySchemaArray = objectMapper.createArrayNode();
-        for (var ks : table.getKeySchema()) {
+        for (KeySchemaElement ks : table.getKeySchema()) {
             ObjectNode ksNode = objectMapper.createObjectNode();
             ksNode.put("AttributeName", ks.getAttributeName());
             ksNode.put("KeyType", ks.getKeyType());
@@ -3196,7 +3222,7 @@ public class NativeDynamoDbJsonHandler {
         node.set("KeySchema", keySchemaArray);
 
         ArrayNode attrDefsArray = objectMapper.createArrayNode();
-        for (var ad : table.getAttributeDefinitions()) {
+        for (AttributeDefinition ad : table.getAttributeDefinitions()) {
             ObjectNode adNode = objectMapper.createObjectNode();
             adNode.put("AttributeName", ad.getAttributeName());
             adNode.put("AttributeType", ad.getAttributeType());
@@ -3234,7 +3260,7 @@ public class NativeDynamoDbJsonHandler {
                 gsiNode.put("IndexStatus", "ACTIVE");
 
                 ArrayNode gsiKeySchema = objectMapper.createArrayNode();
-                for (var ks : gsi.getKeySchema()) {
+                for (KeySchemaElement ks : gsi.getKeySchema()) {
                     ObjectNode ksNode = objectMapper.createObjectNode();
                     ksNode.put("AttributeName", ks.getAttributeName());
                     ksNode.put("KeyType", ks.getKeyType());
@@ -3247,7 +3273,7 @@ public class NativeDynamoDbJsonHandler {
                         gsi.getProjectionType() != null ? gsi.getProjectionType() : "ALL");
                 if ("INCLUDE".equals(gsi.getProjectionType())){
                     ArrayNode nonKeyAttributes = objectMapper.createArrayNode();
-                    for (var attr : gsi.getNonKeyAttributes()){
+                    for (String attr : gsi.getNonKeyAttributes()){
                         nonKeyAttributes.add(attr);
                     }
                     projection.put("NonKeyAttributes", nonKeyAttributes);
@@ -3288,7 +3314,7 @@ public class NativeDynamoDbJsonHandler {
                 lsiNode.put("IndexArn", lsi.getIndexArn());
 
                 ArrayNode lsiKeySchema = objectMapper.createArrayNode();
-                for (var ks : lsi.getKeySchema()) {
+                for (KeySchemaElement ks : lsi.getKeySchema()) {
                     ObjectNode ksNode = objectMapper.createObjectNode();
                     ksNode.put("AttributeName", ks.getAttributeName());
                     ksNode.put("KeyType", ks.getKeyType());
@@ -3401,7 +3427,7 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleExportTable(JsonNode request, String region) {
-        Map<String, Object> params = new java.util.HashMap<>();
+        Map<String, Object> params = new HashMap<>();
         request.fields().forEachRemaining(e -> params.put(e.getKey(), e.getValue().isTextual()
                 ? e.getValue().asText() : e.getValue()));
 
@@ -3410,7 +3436,7 @@ public class NativeDynamoDbJsonHandler {
                 ? new DynamoDbService.IncrementalExportRequest(timestampOrNull(spec, "ExportFromTime"),
                         timestampOrNull(spec, "ExportToTime"), spec.path("ExportViewType").textValue())
                 : null;
-        io.github.hectorvent.floci.services.dynamodb.model.ExportDescription desc =
+        ExportDescription desc =
                 dynamoDbService.exportTable(params, timestampOrNull(request, "ExportTime"), incremental, region);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -3420,7 +3446,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleDescribeExport(JsonNode request, String region) {
         String exportArn = request.path("ExportArn").asText();
-        io.github.hectorvent.floci.services.dynamodb.model.ExportDescription desc =
+        ExportDescription desc =
                 dynamoDbService.describeExport(exportArn);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -3438,7 +3464,7 @@ public class NativeDynamoDbJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode summaries = objectMapper.createArrayNode();
-        for (io.github.hectorvent.floci.services.dynamodb.model.ExportSummary s : result.exportSummaries()) {
+        for (ExportSummary s : result.exportSummaries()) {
             summaries.add(objectMapper.valueToTree(s));
         }
         response.set("ExportSummaries", summaries);
@@ -3449,7 +3475,7 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleImportTable(JsonNode request, String region) {
-        var response = objectMapper.createObjectNode();
+        ObjectNode response = objectMapper.createObjectNode();
         response.set("ImportTableDescription", objectMapper.valueToTree(findOrStartImport(request, region)));
         return Response.ok(response).build();
     }
@@ -3457,7 +3483,7 @@ public class NativeDynamoDbJsonHandler {
     /** Held across the ClientToken lookup and the table creation so identical concurrent requests share one import. */
     private ImportTableDescription findOrStartImport(JsonNode request, String region) {
         synchronized (importLock) {
-            var existing = dynamoDbService.validateImportRequest(request);
+            ImportTableDescription existing = dynamoDbService.validateImportRequest(request);
             if (existing != null) {
                 return existing;
             }
@@ -3468,23 +3494,23 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleDescribeImport(JsonNode request, String region) {
-        var desc = dynamoDbService.describeImport(request.path("ImportArn").asText());
+        ImportTableDescription desc = dynamoDbService.describeImport(request.path("ImportArn").asText());
 
-        var response = objectMapper.createObjectNode();
+        ObjectNode response = objectMapper.createObjectNode();
         response.set("ImportTableDescription", objectMapper.valueToTree(desc));
         return Response.ok(response).build();
     }
 
     private Response handleListImports(JsonNode request, String region) {
-        var tableArn = request.hasNonNull("TableArn") ? request.get("TableArn").asText() : null;
-        var pageSize = request.hasNonNull("PageSize") ? request.get("PageSize").asInt() : null;
-        var nextToken = request.hasNonNull("NextToken") ? request.get("NextToken").asText() : null;
+        String tableArn = request.hasNonNull("TableArn") ? request.get("TableArn").asText() : null;
+        Integer pageSize = request.hasNonNull("PageSize") ? request.get("PageSize").asInt() : null;
+        String nextToken = request.hasNonNull("NextToken") ? request.get("NextToken").asText() : null;
 
-        var result = dynamoDbService.listImports(tableArn, pageSize, nextToken);
+        DynamoDbService.ListImportsResult result = dynamoDbService.listImports(tableArn, pageSize, nextToken);
 
-        var response = objectMapper.createObjectNode();
-        var summaries = objectMapper.createArrayNode();
-        for (var summary : result.importSummaryList()) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = objectMapper.createArrayNode();
+        for (ImportSummary summary : result.importSummaryList()) {
             summaries.add(objectMapper.valueToTree(summary));
         }
         response.set("ImportSummaryList", summaries);

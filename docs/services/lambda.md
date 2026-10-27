@@ -109,6 +109,14 @@ part in authorizing calls to the function:
 - `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
   admits no caller.
 
+### Qualified reads
+
+`GetFunction` and `GetFunctionConfiguration` preserve an alias in the returned
+`FunctionArn`, while `Version` identifies that alias's primary published version.
+This applies to a `Qualifier` parameter and aliases embedded in a name, full ARN
+or partial ARN. Reading an alias does not change the stored version or the
+identities returned by subsequent unqualified and numeric-version reads.
+
 ### Reserved Concurrency
 
 Unqualified `GetFunction` reads include `Concurrency.ReservedConcurrentExecutions` when a reservation
@@ -1319,10 +1327,13 @@ of `{}` or with an empty `Filters` array clears any existing filters.
 
 Any runtime that has an official AWS Lambda container image works with Floci (e.g. `nodejs22.x`, `python3.13`, `java21`, `go1.x`, `provided.al2023`).
 
-With the Docker executor, ZIP-based `provided.*` runtimes execute the package's
+With the Docker and Kubernetes executors, ZIP-based `provided.*` runtimes execute the package's
 `/var/task/bootstrap`, falling back to `/opt/bootstrap` only when the package has
 no bootstrap. The supplied executable stays in place, so scripts that locate
-companion files relative to their own path continue to work.
+companion files relative to their own path continue to work. The Kubernetes init
+container restores executable permission on package and layer bootstrap files
+after extraction and installs the shared delegate in `/var/runtime`. Managed
+runtimes keep their image-provided `/var/runtime` unchanged.
 
 By default, Floci builds each runtime image reference from `floci.services.lambda.ecr-base-uri`
 and the runtime tag. To pin one runtime to a full image reference, set

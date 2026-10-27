@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -30,7 +31,7 @@ class SesTenantTagV2IntegrationTest {
     private static String tenantArn;
     private static String tenantId;
 
-    private static io.restassured.specification.RequestSpecification v2() {
+    private static RequestSpecification v2() {
         return given().contentType("application/json").header("Authorization", AUTH);
     }
 

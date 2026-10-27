@@ -279,8 +279,7 @@ public class SesIdentityController {
         if (policyNode.isMissingNode() || policyNode.isNull()) {
             // Verified against AWS: a missing/null required member is a Smithy validation error.
             throw SmithyValidationErrors.badRequest(
-                    "Value at 'policy' failed to satisfy constraint: "
-                            + "Member must not be null");
+                    SmithyValidationErrors.notNullWithoutValue("policy"));
         }
         if (!policyNode.isTextual()) {
             // Policy is a String; AWS rejects a non-string with an empty-bodied 400. Don't coerce

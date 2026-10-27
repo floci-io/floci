@@ -643,6 +643,53 @@ class DynamoDbConsumedCapacityIntegrationTest {
                 .statusCode(200);
     }
 
+    @Test
+    @Order(20)
+    void batchGetItemChargesEachKeyLikeAGetItemOfTheWholeItem() {
+        putItem("""
+            {"pk": {"S": "cc-bg-small"}}
+            """);
+        // 11 for the key and 3 for the pad's name bring it to 8193 bytes, three 4KB reads.
+        putItem("""
+            {"pk": {"S": "cc-bg-big"}, "pad": {"S": "%s"}}
+            """.formatted("x".repeat(8179)));
+        String keys = """
+            [{"pk": {"S": "cc-bg-small"}}, {"pk": {"S": "cc-bg-big"}}, {"pk": {"S": "cc-bg-missing"}}]
+            """;
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.BatchGetItem")
+            .contentType(CT)
+            .body("""
+                {
+                    "RequestItems": {"%s": {"Keys": %s, "ConsistentRead": true, "ProjectionExpression": "pk"}},
+                    "ReturnConsumedCapacity": "TOTAL"
+                }
+                """.formatted(TABLE, keys))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConsumedCapacity", hasSize(1))
+            .body("ConsumedCapacity[0].TableName", equalTo(TABLE))
+            .body("ConsumedCapacity[0].CapacityUnits", equalTo(5.0f))
+            .body("ConsumedCapacity[0].Table", nullValue());
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.BatchGetItem")
+            .contentType(CT)
+            .body("""
+                {"RequestItems": {"%s": {"Keys": %s}}, "ReturnConsumedCapacity": "INDEXES"}
+                """.formatted(TABLE, keys))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConsumedCapacity[0].CapacityUnits", equalTo(2.5f))
+            .body("ConsumedCapacity[0].Table.CapacityUnits", equalTo(2.5f))
+            .body("ConsumedCapacity[0].GlobalSecondaryIndexes", nullValue());
+    }
+
     private static void putItem(String itemJson) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.PutItem")

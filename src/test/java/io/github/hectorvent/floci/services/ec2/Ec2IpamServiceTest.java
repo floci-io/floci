@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.ec2.model.AsnAssociation;
 import io.github.hectorvent.floci.services.ec2.model.Ipam;
 import io.github.hectorvent.floci.services.ec2.model.IpamPool;
 import io.github.hectorvent.floci.services.ec2.model.IpamPoolAllocation;
@@ -196,7 +197,7 @@ class Ec2IpamServiceTest {
     void associateIpamByoasnPersistsAcrossServiceInstances() {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn("000000000000");
-        InMemoryStorage<String, io.github.hectorvent.floci.services.ec2.model.AsnAssociation> backend = new InMemoryStorage<>();
+        InMemoryStorage<String, AsnAssociation> backend = new InMemoryStorage<>();
         Ec2IpamService firstService = new Ec2IpamService(config,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), backend);
         firstService.associateIpamByoasn("us-west-2", "65001", "192.168.0.0/16");

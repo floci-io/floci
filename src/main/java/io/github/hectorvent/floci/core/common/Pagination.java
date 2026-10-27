@@ -53,7 +53,8 @@ public final class Pagination {
         }
         int limit = maxResults != null ? maxResults : defaultPageSize;
         return slice(all, cursorOf, limit,
-                decodeCursor(nextToken, "", token -> new AwsException(errorCode, "Invalid " + tokenName + ".", 400)), "");
+                decodeCursor(nextToken, "", token -> new AwsException(errorCode, "Invalid " + tokenName + ".", 400)),
+                "", Pagination::encodeToken);
     }
 
     /**
@@ -70,7 +71,26 @@ public final class Pagination {
             throw new IllegalArgumentException("limit must be at least 1, was " + limit);
         }
         String prefix = namespace + ":";
-        return slice(all, cursorOf, limit, decodeCursor(nextToken, prefix, invalidToken), prefix);
+        return slice(all, cursorOf, limit, decodeCursor(nextToken, prefix, invalidToken),
+                prefix, Pagination::encodeToken);
+    }
+
+    /** Paginates with instance-signed markers, optionally scoped by a prefix within the signed cursor. */
+    public static <T> PaginatedResult<T> paginate(List<T> all, Function<T, String> cursorOf,
+                                                  int limit, String marker, SignedMarkers markers,
+                                                  String scope, Function<String, AwsException> invalidMarker) {
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was " + limit);
+        }
+        String after = null;
+        if (marker != null) {
+            String cursor = markers.cursorOf(marker);
+            if (cursor == null || !cursor.startsWith(scope)) {
+                throw invalidMarker.apply(marker);
+            }
+            after = cursor.substring(scope.length());
+        }
+        return slice(all, cursorOf, limit, after, scope, markers::issue);
     }
 
     /** Validates service-specific bounds before applying the existing namespaced cursor format. */
@@ -113,7 +133,8 @@ public final class Pagination {
     }
 
     private static <T> PaginatedResult<T> slice(List<T> all, Function<T, String> cursorOf, int limit,
-                                                String after, String tokenPrefix) {
+                                                String after, String tokenPrefix,
+                                                Function<String, String> issueToken) {
         List<T> sorted = all.stream().sorted(Comparator.comparing(cursorOf)).collect(Collectors.toList());
         int start = 0;
         if (after != null) {
@@ -128,7 +149,7 @@ public final class Pagination {
         List<T> page = sorted.stream().skip(start).limit(limit).collect(Collectors.toList());
         String token = null;
         if (limit < sorted.size() - start && !page.isEmpty()) {
-            token = encodeToken(tokenPrefix + cursorOf.apply(page.get(page.size() - 1)));
+            token = issueToken.apply(tokenPrefix + cursorOf.apply(page.get(page.size() - 1)));
         }
         return new PaginatedResult<>(page, token);
     }

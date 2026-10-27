@@ -10,6 +10,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -298,7 +299,7 @@ public class WebSocketProxyEventBuilder {
 
     private String formatRequestTime(long epochMillis) {
         ZonedDateTime time = ZonedDateTime.ofInstant(
-                java.time.Instant.ofEpochMilli(epochMillis), ZoneOffset.UTC);
+                Instant.ofEpochMilli(epochMillis), ZoneOffset.UTC);
         return REQUEST_TIME_FORMATTER.format(time);
     }
 }

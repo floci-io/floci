@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -25,7 +26,7 @@ class SesSendCustomVerificationEmailV1IntegrationTest {
     private static final String RECIPIENT = "scve-v1-recipient@floci.test";
     private static final String NAME = "scve-v1-template";
 
-    private static io.restassured.specification.RequestSpecification query(String action) {
+    private static RequestSpecification query(String action) {
         return given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
                 .formParam("Action", action);
     }

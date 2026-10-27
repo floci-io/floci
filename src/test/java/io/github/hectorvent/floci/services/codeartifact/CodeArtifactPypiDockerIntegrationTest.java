@@ -772,6 +772,33 @@ class CodeArtifactPypiDockerIntegrationTest {
     }
 
     /**
+     * Bridges to pypiserver's own root {@code /simple/} index, confirmed live: uploads a package
+     * with a mixed-case, dotted name to confirm {@code PypiserverSidecarClient#listPackages}'s own
+     * href parsing really gets back the PEP 503-normalized project name a live pypiserver root
+     * index reports, not the originally-uploaded spelling, matching what {@code
+     * CodeArtifactService}'s own {@code accountingPackageName} already normalizes pypi names to.
+     */
+    @Test
+    @Order(22)
+    void listPackagesBridgesToTheRealPypiserverRootSimpleIndex() {
+        String packageName = "List.Packages_Probe";
+        String filename = "list_packages_probe-1.0.0.tar.gz";
+        byte[] content = "list-packages-probe-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, content))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        JsonPath body = given().header("Authorization", AUTH)
+                .post("/v1/packages?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi")
+                .then().statusCode(200)
+                .extract().jsonPath();
+        List<String> names = body.getList("packages.package", String.class);
+        assertTrue(names.contains("list-packages-probe"), "expected list-packages-probe among " + names);
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code PypiserverSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container.

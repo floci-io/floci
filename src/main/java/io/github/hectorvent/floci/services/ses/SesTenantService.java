@@ -407,8 +407,7 @@ public class SesTenantService implements SesTaggable {
     public static AssociationResource parseResourceArn(String resourceArn, String accountId, String region) {
         if (resourceArn == null) {
             throw SmithyValidationErrors.badRequest(
-                    "Value at 'resourceArn' failed to satisfy constraint: "
-                            + "Member must not be null");
+                    SmithyValidationErrors.notNullWithoutValue("resourceArn"));
         }
         String[] parts = resourceArn.split(":", 6);
         if (parts.length < 6 || !"arn".equals(parts[0])) {
@@ -678,8 +677,7 @@ public class SesTenantService implements SesTaggable {
         if (name == null) {
             if (createTenantSmithyVariants) {
                 throw SmithyValidationErrors.badRequest(
-                        "Value at 'tenantName' failed to satisfy "
-                                + "constraint: Member must not be null");
+                        SmithyValidationErrors.notNullWithoutValue("tenantName"));
             }
             throw new AwsException("BadRequestException", "TenantName cannot be empty", 400);
         }

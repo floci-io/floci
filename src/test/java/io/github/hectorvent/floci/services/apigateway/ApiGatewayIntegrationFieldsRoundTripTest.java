@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import com.sun.net.httpserver.HttpServer;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
@@ -7,12 +8,17 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 /**
  * Round-trips the {@code PutIntegration} fields AWS documents that Floci previously accepted and
@@ -310,6 +316,133 @@ class ApiGatewayIntegrationFieldsRoundTripTest {
                 .then().statusCode(200)
                 .body("timeoutInMillis", equalTo(30000))
                 .body("passthroughBehavior", equalTo("WHEN_NO_MATCH"));
+    }
+
+    @Test
+    void updateIntegrationCanPatchVpcLinkConnection() {
+        given().contentType(ContentType.JSON)
+                .body("{\"type\":\"HTTP_PROXY\",\"httpMethod\":\"POST\","
+                        + "\"uri\":\"http://example.invalid/widget\"}")
+                .when().put(integrationPath()).then().statusCode(201);
+
+        String linkId = given().contentType(ContentType.JSON)
+                .body("""
+                        {"name":"integration-patch-link","targetArns":[
+                          "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/net/test/abc"
+                        ]}
+                        """)
+                .when().post("/vpclinks").then().statusCode(202)
+                .extract().path("id");
+        try {
+            given().contentType(ContentType.JSON)
+                    .body("""
+                            {"patchOperations":[
+                              {"op":"replace","path":"/connectionType","value":"VPC_LINK"},
+                              {"op":"replace","path":"/connectionId","value":"%s"}
+                            ]}
+                            """.formatted(linkId))
+                    .when().patch(integrationPath()).then().statusCode(200)
+                    .body("connectionType", equalTo("VPC_LINK"))
+                    .body("connectionId", equalTo(linkId));
+
+            given().when().get(integrationPath()).then().statusCode(200)
+                    .body("connectionType", equalTo("VPC_LINK"))
+                    .body("connectionId", equalTo(linkId));
+
+            given().contentType(ContentType.JSON)
+                    .body("""
+                            {"patchOperations":[
+                              {"op":"replace","path":"/uri","value":"http://changed.invalid/widget"},
+                              {"op":"replace","path":"/connectionId","value":"missing-link"}
+                            ]}
+                            """)
+                    .when().patch(integrationPath()).then().statusCode(400);
+
+            given().when().get(integrationPath()).then().statusCode(200)
+                    .body("uri", equalTo("http://example.invalid/widget"))
+                    .body("connectionType", equalTo("VPC_LINK"))
+                    .body("connectionId", equalTo(linkId));
+
+            given().contentType(ContentType.JSON)
+                    .body("""
+                            {"patchOperations":[
+                              {"op":"replace","path":"/connectionType","value":"INTERNET"}
+                            ]}
+                            """)
+                    .when().patch(integrationPath()).then().statusCode(200)
+                    .body("connectionType", equalTo("INTERNET"));
+
+            given().when().get(integrationPath()).then().statusCode(200)
+                    .body("connectionType", equalTo("INTERNET"))
+                    .body("connectionId", nullValue());
+
+            given().contentType(ContentType.JSON)
+                    .body("""
+                            {"patchOperations":[
+                              {"op":"replace","path":"/connectionType","value":"VPC_LINK"},
+                              {"op":"replace","path":"/connectionId","value":"${stageVariables.vpcLinkId}"}
+                            ]}
+                            """)
+                    .when().patch(integrationPath()).then().statusCode(200)
+                    .body("connectionId", equalTo("${stageVariables.vpcLinkId}"));
+        } finally {
+            given().when().delete("/vpclinks/" + linkId).then().statusCode(202);
+        }
+    }
+
+    @Test
+    void updateIntegrationAcceptsVpcLinkV2Connection() throws IOException {
+        HttpServer backend = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        backend.createContext("/widget", exchange -> {
+            byte[] response = "v2-link-ok".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        backend.start();
+        try {
+            given().contentType(ContentType.JSON)
+                    .body("{\"type\":\"HTTP_PROXY\",\"httpMethod\":\"POST\","
+                            + "\"uri\":\"http://127.0.0.1:" + backend.getAddress().getPort() + "/widget\"}")
+                    .when().put(integrationPath()).then().statusCode(201);
+
+            String linkId = given().contentType(ContentType.JSON)
+                    .body("""
+                            {"name":"integration-patch-v2-link","subnetIds":["subnet-test"],
+                             "securityGroupIds":["sg-test"]}
+                            """)
+                    .when().post("/v2/vpclinks").then().statusCode(201)
+                    .extract().path("vpcLinkId");
+            try {
+                given().contentType(ContentType.JSON)
+                        .body("""
+                                {"patchOperations":[
+                                  {"op":"replace","path":"/connectionType","value":"VPC_LINK"},
+                                  {"op":"replace","path":"/connectionId","value":"%s"}
+                                ]}
+                                """.formatted(linkId))
+                        .when().patch(integrationPath()).then().statusCode(200)
+                        .body("connectionType", equalTo("VPC_LINK"))
+                        .body("connectionId", equalTo(linkId));
+
+                given().when().get(integrationPath()).then().statusCode(200)
+                        .body("connectionId", equalTo(linkId));
+
+                String deploymentId = given().contentType(ContentType.JSON).body("{}")
+                        .when().post("/restapis/" + apiId + "/deployments")
+                        .then().statusCode(201).extract().path("id");
+                given().contentType(ContentType.JSON)
+                        .body("{\"stageName\":\"test\",\"deploymentId\":\"" + deploymentId + "\"}")
+                        .when().post("/restapis/" + apiId + "/stages").then().statusCode(201);
+
+                given().when().post("/execute-api/" + apiId + "/test/widget")
+                        .then().statusCode(200).body(equalTo("v2-link-ok"));
+            } finally {
+                given().when().delete("/v2/vpclinks/" + linkId).then().statusCode(202);
+            }
+        } finally {
+            backend.stop(0);
+        }
     }
 
     @Test
