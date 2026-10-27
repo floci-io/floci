@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.wafv2;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -166,7 +167,7 @@ class WafV2IntegrationTest {
                         + "\"CloudWatchMetricsEnabled\":true,\"MetricName\":\"acl\"}}");
         resp.then().statusCode(200).body("NextLockToken", notNullValue());
         String next = resp.jsonPath().getString("NextLockToken");
-        org.junit.jupiter.api.Assertions.assertNotEquals(webAclLockToken, next);
+        Assertions.assertNotEquals(webAclLockToken, next);
     }
 
     @Test

@@ -92,6 +92,52 @@ class Ec2PrefixListCidrIntegrationTest {
         }
     }
 
+    @Test
+    void cloudFormationRejectsSameBlockHostBitUpdateBeforeMutation() {
+        verifyUpdate("cfn-same-block-host-bits", "192.0.2.19/24", "UPDATE_ROLLBACK_COMPLETE", "192.0.2.0/24", 1L);
+    }
+
+    @Test
+    void cloudFormationAppliesCanonicalBlockUpdate() {
+        verifyUpdate("cfn-canonical-block-update", "198.51.100.0/24", "UPDATE_COMPLETE", "198.51.100.0/24", 2L);
+    }
+
+    private static void verifyUpdate(String name, String desired, String status, String expected, long version) {
+        try (Ec2Client client = client()) {
+            try {
+                stackRequest("CreateStack", name, "192.0.2.0/24");
+                assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(name, CFN_AUTH).status());
+                String id = ids(client, name).getFirst();
+                stackRequest("UpdateStack", name, desired);
+                assertEquals(status, CfnStackWaits.awaitTerminal(name, CFN_AUTH).status());
+                if (status.equals("UPDATE_ROLLBACK_COMPLETE")) {
+                    assertTrue(CfnStackWaits.failedResourceReason(name, CFN_AUTH)
+                            .contains("The specified CIDR (192.0.2.19/24) is not valid."));
+                }
+                assertEquals(List.of(id), ids(client, name));
+                assertEquals(expected, client.getManagedPrefixListEntries(r -> r.prefixListId(id))
+                        .entries().getFirst().cidr());
+                assertEquals(version, client.describeManagedPrefixLists(r -> r.prefixListIds(id))
+                        .prefixLists().getFirst().version());
+            } finally {
+                given().header("Authorization", CFN_AUTH).formParam("Action", "DeleteStack")
+                        .formParam("StackName", name).post("/").then().statusCode(200);
+                CfnStackWaits.awaitStackDeleted(name);
+            }
+            assertTrue(ids(client, name).isEmpty());
+        }
+    }
+
+    private static void stackRequest(String action, String name, String cidr) {
+        given().header("Authorization", CFN_AUTH).formParam("Action", action).formParam("StackName", name)
+                .formParam("TemplateBody", """
+                        {"Resources":{"List":{"Type":"AWS::EC2::PrefixList","Properties":{
+                          "PrefixListName":"%s","AddressFamily":"IPv4","MaxEntries":2,
+                          "Entries":[{"Cidr":"%s"}]}}}}
+                        """.formatted(name, cidr))
+                .post("/").then().statusCode(200);
+    }
+
     private static List<String> ids(Ec2Client client, String name) {
         return client.describeManagedPrefixLists(r -> r.filters(Filter.builder()
                         .name("prefix-list-name").values(name).build())).prefixLists().stream()

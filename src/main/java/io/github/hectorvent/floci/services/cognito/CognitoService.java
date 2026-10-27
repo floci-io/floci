@@ -80,6 +80,8 @@ import java.security.spec.X509EncodedKeySpec;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -1994,9 +1996,9 @@ public class CognitoService implements ResourceProvider {
     }
 
     private String generateDomainVersion() {
-        return java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
-                .withZone(java.time.ZoneOffset.UTC)
-                .format(java.time.Instant.now());
+        return DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
+                .withZone(ZoneOffset.UTC)
+                .format(Instant.now());
     }
 
     // ──────────────────────────── Log Delivery ────────────────────────────

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -91,19 +92,19 @@ class Ec2MonitorInstancesIntegrationTest {
     void monitoringStateSurvivesToDescribeInstances() {
         String id = launchInstance();
         // A fresh instance reports the AWS default before anything asks for monitoring.
-        org.junit.jupiter.api.Assertions.assertEquals("disabled", monitoringStateOf(id));
+        Assertions.assertEquals("disabled", monitoringStateOf(id));
 
         given().formParam("Action", "MonitorInstances").formParam("InstanceId.1", id)
                .header("Authorization", AUTH_HEADER)
         .when().post("/").then().statusCode(200);
 
-        org.junit.jupiter.api.Assertions.assertEquals("enabled", monitoringStateOf(id));
+        Assertions.assertEquals("enabled", monitoringStateOf(id));
 
         given().formParam("Action", "UnmonitorInstances").formParam("InstanceId.1", id)
                .header("Authorization", AUTH_HEADER)
         .when().post("/").then().statusCode(200);
 
-        org.junit.jupiter.api.Assertions.assertEquals("disabled", monitoringStateOf(id));
+        Assertions.assertEquals("disabled", monitoringStateOf(id));
     }
 
     /**

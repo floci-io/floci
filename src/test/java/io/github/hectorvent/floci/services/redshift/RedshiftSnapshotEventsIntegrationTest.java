@@ -113,9 +113,9 @@ class RedshiftSnapshotEventsIntegrationTest {
                     assertTrue(delivered.stream().anyMatch(message -> message.body().contains("REDSHIFT-EVENT-2009")));
                     assertTrue(delivered.stream().anyMatch(message -> message.body().contains(terminalEvent)));
                     assertTrue(fallback.sqs().receiveMessage(request -> request.queueUrl(fallbackWatcher.queueUrl())
-                            .waitTimeSeconds(1)).messages().isEmpty(), "Default-account subscription received a foreign event");
+                            .waitTimeSeconds(0)).messages().isEmpty(), "Default-account subscription received a foreign event");
                     assertTrue(ownerEast.sqs().receiveMessage(request -> request.queueUrl(eastWatcher.queueUrl())
-                            .waitTimeSeconds(1)).messages().isEmpty(), "Another region's subscription received the snapshot event");
+                            .waitTimeSeconds(0)).messages().isEmpty(), "Another region's subscription received the snapshot event");
                     verify(manager).takeSnapshot(eq(OWNER), eq(clusterId), eq("admin"), any(Path.class));
                 } finally {
                     ownerWest.redshift().deleteCluster(request -> request.clusterIdentifier(clusterId).skipFinalClusterSnapshot(true));

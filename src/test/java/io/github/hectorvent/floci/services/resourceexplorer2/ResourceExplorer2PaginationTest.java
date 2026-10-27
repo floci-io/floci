@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.resourceexplorer2;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Test;
 
 import java.util.Base64;
@@ -65,13 +66,13 @@ class ResourceExplorer2PaginationTest {
 
     @Test
     void garbageTokenIsRejected() {
-        assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+        assertThrows(AwsException.class,
                 () -> ResourceExplorer2Service.pageBounds(50, 10, "!!!not-base64!!!", CAP));
     }
 
     @Test
     void negativeTokenOffsetIsRejected() {
-        assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+        assertThrows(AwsException.class,
                 () -> ResourceExplorer2Service.pageBounds(50, 10, token(-1), CAP));
     }
 

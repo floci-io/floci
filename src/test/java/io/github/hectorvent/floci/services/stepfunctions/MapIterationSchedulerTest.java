@@ -14,6 +14,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -33,7 +34,7 @@ class MapIterationSchedulerTest {
 
     @Test
     void maxConcurrencyOneStartsEachItemStrictlyInInputOrder() throws Exception {
-        List<Integer> starts = new java.util.concurrent.CopyOnWriteArrayList<>();
+        List<Integer> starts = new CopyOnWriteArrayList<>();
 
         List<Integer> results = MapIterationScheduler.execute(5, 1, index -> () -> {
             starts.add(index);
@@ -73,7 +74,7 @@ class MapIterationSchedulerTest {
             assertEquals(maxConcurrency, started.get(), "queued items must not be submitted early");
             release.countDown();
 
-            assertEquals(java.util.stream.IntStream.range(0, itemCount).boxed().toList(),
+            assertEquals(IntStream.range(0, itemCount).boxed().toList(),
                     execution.get(5, TimeUnit.SECONDS));
             assertEquals(maxConcurrency, maxObserved.get());
         }

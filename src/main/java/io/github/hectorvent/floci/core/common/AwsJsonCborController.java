@@ -25,12 +25,14 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.zip.GZIPInputStream;
 
@@ -366,7 +368,7 @@ public class AwsJsonCborController {
             return false;
         }
         for (String header : contentEncodingHeaders) {
-            if (header != null && header.toLowerCase(java.util.Locale.ROOT).contains("gzip")) {
+            if (header != null && header.toLowerCase(Locale.ROOT).contains("gzip")) {
                 return true;
             }
         }
@@ -460,7 +462,7 @@ public class AwsJsonCborController {
         int totalRead = 0;
         int maxRead = 10 * 1024 * 1024; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (GZIPInputStream gis = new GZIPInputStream(new java.io.ByteArrayInputStream(compressed))) {
+        try (GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(compressed))) {
             int read;
             while ((read = gis.read(buffer)) != -1) {
                 totalRead += read;

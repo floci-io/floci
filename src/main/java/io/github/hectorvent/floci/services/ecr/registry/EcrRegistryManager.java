@@ -36,6 +36,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -88,7 +89,7 @@ public class EcrRegistryManager {
     private volatile int hostPort;
     private volatile String containerId;
     private volatile Closeable logStream;
-    private volatile java.util.function.Consumer<List<String>> reconcileHook;
+    private volatile Consumer<List<String>> reconcileHook;
 
     @Inject
     public EcrRegistryManager(ContainerBuilder containerBuilder,
@@ -261,7 +262,7 @@ public class EcrRegistryManager {
      * list of repository names known to the backing registry. EcrService uses this
      * to recreate metadata entries for blobs whose metadata is missing (FR-013).
      */
-    public void setReconcileHook(java.util.function.Consumer<List<String>> hook) {
+    public void setReconcileHook(Consumer<List<String>> hook) {
         this.reconcileHook = hook;
     }
 

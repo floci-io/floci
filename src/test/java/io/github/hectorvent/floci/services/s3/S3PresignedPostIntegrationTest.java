@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -245,7 +246,7 @@ class S3PresignedPostIntegrationTest {
             .statusCode(200)
             .extract().body().asByteArray();
 
-        org.junit.jupiter.api.Assertions.assertArrayEquals(binaryData, retrieved);
+        Assertions.assertArrayEquals(binaryData, retrieved);
     }
 
     @Test

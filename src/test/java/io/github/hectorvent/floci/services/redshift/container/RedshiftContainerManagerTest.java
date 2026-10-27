@@ -21,11 +21,15 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
+import org.mockito.Mockito;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -120,7 +124,7 @@ class RedshiftContainerManagerTest {
         lifecycleManager = mock(ContainerLifecycleManager.class);
         logStreamer = mock(ContainerLogStreamer.class);
         containerDetector = mock(ContainerDetector.class);
-        config = mock(EmulatorConfig.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        config = mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
         dockerClient = mock(DockerClient.class);
 
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
@@ -129,7 +133,7 @@ class RedshiftContainerManagerTest {
         when(config.defaultRegion()).thenReturn("us-east-1");
 
         // Default mock for execCreateCmd/execStartCmd/inspectExecCmd to make waitForReady succeed instantly
-        ExecCreateCmd defaultCreateCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmd defaultCreateCmd = mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
         ExecCreateCmdResponse defaultCreateResponse = mock(ExecCreateCmdResponse.class);
         when(defaultCreateResponse.getId()).thenReturn("exec-default");
         when(defaultCreateCmd.exec()).thenReturn(defaultCreateResponse);
@@ -150,7 +154,7 @@ class RedshiftContainerManagerTest {
         when(defaultInspectCmd.exec()).thenReturn(defaultInspectResponse);
         when(dockerClient.inspectExecCmd(anyString())).thenReturn(defaultInspectCmd);
 
-        CopyArchiveToContainerCmd defaultCopyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        CopyArchiveToContainerCmd defaultCopyCmd = mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
         when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(defaultCopyCmd);
 
         manager = new RedshiftContainerManager(
@@ -198,7 +202,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void takeSnapshotSuccess() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
@@ -209,7 +213,7 @@ class RedshiftContainerManagerTest {
         assertTrue(manager.getContainer(ACCOUNT_ID, "test-cluster").isPresent());
 
         // Mock docker exec for pg_dump
-        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
         when(createResponse.getId()).thenReturn("exec-1");
         when(createCmd.exec()).thenReturn(createResponse);
@@ -231,11 +235,11 @@ class RedshiftContainerManagerTest {
         when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectCmd);
 
         // mock copyArchiveFromContainerCmd
-        CopyArchiveFromContainerCmd copyCmd = mock(CopyArchiveFromContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        CopyArchiveFromContainerCmd copyCmd = mock(CopyArchiveFromContainerCmd.class, Mockito.RETURNS_SELF);
         byte[] tarBytes = "-- PostgreSQL dump\nCREATE TABLE foo (id int);\n".getBytes(StandardCharsets.UTF_8);
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        try (org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar = new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos)) {
-            org.apache.commons.compress.archivers.tar.TarArchiveEntry entry = new org.apache.commons.compress.archivers.tar.TarArchiveEntry("dump.sql");
+        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
+            TarArchiveEntry entry = new TarArchiveEntry("dump.sql");
             entry.setSize(tarBytes.length);
             tar.putArchiveEntry(entry);
             tar.write(tarBytes);
@@ -257,14 +261,14 @@ class RedshiftContainerManagerTest {
 
     @Test
     void takeSnapshotFailureExitCode() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
 
         manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
-        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
         when(createResponse.getId()).thenReturn("exec-fail");
         when(createCmd.exec()).thenReturn(createResponse);
@@ -295,7 +299,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void restoreSnapshotEmptyDump() {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
@@ -309,7 +313,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void restoreSnapshotSuccess() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
@@ -317,11 +321,11 @@ class RedshiftContainerManagerTest {
         manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
         // Mock copyArchiveToContainerCmd
-        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
         when(dockerClient.copyArchiveToContainerCmd("cont-123")).thenReturn(copyCmd);
 
         // Mock docker exec for psql
-        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
         when(createResponse.getId()).thenReturn("exec-restore");
         when(createCmd.exec()).thenReturn(createResponse);
@@ -345,8 +349,8 @@ class RedshiftContainerManagerTest {
         Path tempFile = Files.createTempFile("test-restore-snapshot", ".sql");
         try {
             manager.restoreSnapshot(ACCOUNT_ID, "test-cluster", "admin", "dev",tempFile);
-            verify(dockerClient, org.mockito.Mockito.times(2)).copyArchiveToContainerCmd("cont-123");
-            verify(dockerClient, org.mockito.Mockito.times(4)).execCreateCmd("cont-123");
+            verify(dockerClient, Mockito.times(2)).copyArchiveToContainerCmd("cont-123");
+            verify(dockerClient, Mockito.times(4)).execCreateCmd("cont-123");
         } finally {
             Files.deleteIfExists(tempFile);
         }
@@ -354,7 +358,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void stopRemovesContainer() {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
@@ -442,7 +446,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void sameClusterIdentifierAcrossAccountsDoesNotCollide() {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo infoA = new ContainerInfo("cont-account-a", Map.of(5432, new EndpointInfo("localhost", 5432)));
         ContainerInfo infoB = new ContainerInfo("cont-account-b", Map.of(5432, new EndpointInfo("localhost", 5433)));
@@ -484,7 +488,7 @@ class RedshiftContainerManagerTest {
     void adoptOrStartFallsBackToStartWhenNoExistingContainer() {
         String containerName = "floci-aws-redshift-" + ACCOUNT_ID + "-test-cluster";
         when(lifecycleManager.findByName(containerName)).thenReturn(Optional.empty());
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-fresh", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
@@ -497,13 +501,13 @@ class RedshiftContainerManagerTest {
 
     @Test
     void alterUserPasswordSuccess() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
         manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
-        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
         when(createResponse.getId()).thenReturn("exec-alter");
         when(createCmd.exec()).thenReturn(createResponse);
@@ -526,7 +530,7 @@ class RedshiftContainerManagerTest {
 
         manager.alterUserPassword(ACCOUNT_ID, "test-cluster", "admin", "NewSecret1");
 
-        verify(dockerClient, org.mockito.Mockito.times(4)).execCreateCmd("cont-123");
+        verify(dockerClient, Mockito.times(4)).execCreateCmd("cont-123");
     }
 
     @Test
@@ -539,7 +543,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void alterUserPasswordInvalidUsername() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
@@ -560,7 +564,7 @@ class RedshiftContainerManagerTest {
 
     @Test
     void alterUserPasswordInvalidPassword() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
@@ -593,13 +597,13 @@ class RedshiftContainerManagerTest {
 
     @Test
     void alterUserPasswordExecFailure() throws Exception {
-        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, org.mockito.Mockito.RETURNS_SELF);
+        ContainerBuilder.Builder specBuilder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(specBuilder);
         ContainerInfo info = new ContainerInfo("cont-123", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
         manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
 
-        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
         when(createResponse.getId()).thenReturn("exec-fail");
         when(createCmd.exec()).thenReturn(createResponse);
@@ -678,10 +682,10 @@ class RedshiftContainerManagerTest {
 
     @Test
     void bootstrapCatalogSuccess() {
-        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
         when(dockerClient.copyArchiveToContainerCmd("cont-bootstrap")).thenReturn(copyCmd);
 
-        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
         ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
         when(createResponse.getId()).thenReturn("exec-bootstrap");
         when(createCmd.exec()).thenReturn(createResponse);
@@ -696,17 +700,17 @@ class RedshiftContainerManagerTest {
         manager.bootstrapCatalog("cont-bootstrap", "admin", "dev");
 
         verify(dockerClient).copyArchiveToContainerCmd("cont-bootstrap");
-        verify(dockerClient, org.mockito.Mockito.times(2)).execCreateCmd("cont-bootstrap");
+        verify(dockerClient, Mockito.times(2)).execCreateCmd("cont-bootstrap");
     }
 
     @Test
     void bootstrapCatalogFailureDoesNotThrow() {
-        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, org.mockito.Mockito.RETURNS_SELF);
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
         when(copyCmd.exec()).thenThrow(new RuntimeException("Docker copy error"));
         when(dockerClient.copyArchiveToContainerCmd("cont-bootstrap-fail")).thenReturn(copyCmd);
 
         // Must not bubble an exception that fails cluster startup
-        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
+        Assertions.assertDoesNotThrow(() ->
                 manager.bootstrapCatalog("cont-bootstrap-fail", "admin", "dev"));
     }
 

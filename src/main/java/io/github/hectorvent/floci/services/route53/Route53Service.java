@@ -829,9 +829,9 @@ public class Route53Service implements Resettable {
         return regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
     }
 
-    private java.util.Optional<String> resolveVpcOwnerAccount(VpcAssociation vpc) {
+    private Optional<String> resolveVpcOwnerAccount(VpcAssociation vpc) {
         if (vpc == null || ec2Service == null) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
         return ec2Service.findVpcOwnerAccount(vpc.getVpcRegion(), vpc.getVpcId());
     }
@@ -840,7 +840,7 @@ public class Route53Service implements Resettable {
         if (vpc == null) {
             return;
         }
-        java.util.Optional<String> owner = resolveVpcOwnerAccount(vpc);
+        Optional<String> owner = resolveVpcOwnerAccount(vpc);
         if (owner.isPresent() && !owner.get().equals(callerAccountId)) {
             throw new AwsException("InvalidVPCId",
                     "The VPC ID that you specified either isn't a valid ID or the current account is not authorized to access this VPC.",

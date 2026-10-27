@@ -19,6 +19,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -195,7 +196,7 @@ public class ConnectService implements TagHandler {
             throw new AwsException("InvalidParameterException",
                     "Value must be 'true' or 'false' for attribute " + attributeType, 400);
         }
-        String canonical = value.toLowerCase(java.util.Locale.ROOT);
+        String canonical = value.toLowerCase(Locale.ROOT);
         ConnectInstance instance = describeInstance(instanceId, region);
         instance.getAttributes().put(attributeType, canonical);
         if ("INBOUND_CALLS".equals(attributeType)) {

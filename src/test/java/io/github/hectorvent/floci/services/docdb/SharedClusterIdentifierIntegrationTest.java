@@ -132,7 +132,7 @@ class SharedClusterIdentifierIntegrationTest {
             .body(containsString("<Value>docdb</Value>"));
 
         // The write went to the record that answers for the identifier, not to the other one.
-        assertEquals(java.util.Map.of("answered-by", "docdb"),
+        assertEquals(Map.of("answered-by", "docdb"),
                 docDbService.listTagsForResource(arn));
         assertTrue(rdsService.listTagsForResource(arn, "us-east-1").isEmpty());
 

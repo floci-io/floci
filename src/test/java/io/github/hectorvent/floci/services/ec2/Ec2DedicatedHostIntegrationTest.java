@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -279,7 +280,7 @@ class Ec2DedicatedHostIntegrationTest {
         int before = hostCount();
         post("Action", "AllocateHosts", "InstanceType", "m5.large", "AvailabilityZone", "us-east-1aa")
                 .statusCode(400).body(containsString("InvalidParameterValue"));
-        org.junit.jupiter.api.Assertions.assertEquals(before, hostCount());
+        Assertions.assertEquals(before, hostCount());
     }
 
     @Test

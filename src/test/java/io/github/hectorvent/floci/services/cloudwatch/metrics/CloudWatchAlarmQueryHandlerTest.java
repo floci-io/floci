@@ -49,6 +49,18 @@ class CloudWatchAlarmQueryHandlerTest {
         assertEquals(List.of("ok-action"), alarm.getOkActions());
         assertEquals(List.of("missing-action"), alarm.getInsufficientDataActions());
         assertEquals(Map.of("team", "metrics"), alarm.getTags());
+
+        MultivaluedMap<String, String> describe = new MultivaluedHashMap<>();
+        describe.putSingle("AlarmTypes.member.1", "MetricAlarm");
+        describe.putSingle("AlarmTypes.member.2", "CompositeAlarm");
+        String xml = (String) handler.handle("DescribeAlarms", describe, region).getEntity();
+        String updated = Instant.ofEpochSecond(alarm.getStateUpdatedTimestamp()).toString();
+        assertTrue(xml.contains("<StateTransitionedTimestamp>" + updated + "</StateTransitionedTimestamp>"), xml);
+
+        alarm.setStateTransitionedTimestamp(100);
+        xml = (String) handler.handle("DescribeAlarms", describe, region).getEntity();
+        assertTrue(xml.contains("<StateUpdatedTimestamp>" + updated + "</StateUpdatedTimestamp>"), xml);
+        assertTrue(xml.contains("<StateTransitionedTimestamp>1970-01-01T00:01:40Z</StateTransitionedTimestamp>"), xml);
     }
 
     @Test

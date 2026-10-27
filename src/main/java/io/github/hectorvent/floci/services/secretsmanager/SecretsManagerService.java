@@ -29,6 +29,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -1698,7 +1699,7 @@ public class SecretsManagerService implements ResourceProvider {
 
             String payloadStr = objectMapper.writeValueAsString(payload);
 
-            InvokeResult result = lambdaService.invoke(region, lambdaArn, payloadStr.getBytes(java.nio.charset.StandardCharsets.UTF_8), InvocationType.RequestResponse);
+            InvokeResult result = lambdaService.invoke(region, lambdaArn, payloadStr.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
             if (result.getFunctionError() != null) {
                 throw new AwsException("InternalServiceError",
                         "Rotation lambda returned an error during " + step + ": " + result.getFunctionError(), 500);

@@ -23,6 +23,8 @@ import software.amazon.awssdk.services.sesv2.model.PutConfigurationSetSuppressio
 import software.amazon.awssdk.services.sesv2.model.SuppressionListReason;
 import software.amazon.awssdk.services.sesv2.model.Tag;
 
+import java.util.Collections;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -266,7 +268,7 @@ class SesConfigurationSetTest {
         // to disable suppression filtering for a configuration set.
         sesV2.putConfigurationSetSuppressionOptions(PutConfigurationSetSuppressionOptionsRequest.builder()
                 .configurationSetName(suppressionCsName)
-                .suppressedReasons(java.util.Collections.emptyList())
+                .suppressedReasons(Collections.emptyList())
                 .build());
 
         GetConfigurationSetResponse after = sesV2.getConfigurationSet(GetConfigurationSetRequest.builder()

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.timestreaminfluxdb;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import org.hamcrest.Matcher;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -457,7 +458,7 @@ class TimestreamInfluxDbIntegrationTest {
                 .body("restoredDbResourceId", equalTo(instanceId));
     }
 
-    private static org.hamcrest.Matcher<String> endsWithResource(String resourceType) {
+    private static Matcher<String> endsWithResource(String resourceType) {
         return matchesPattern("arn:aws:timestream-influxdb:us-east-1:" + ACCOUNT + ":" + resourceType + "/" + ID_PATTERN);
     }
 

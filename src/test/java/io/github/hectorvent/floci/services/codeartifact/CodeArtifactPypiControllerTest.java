@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
@@ -626,13 +628,13 @@ class CodeArtifactPypiControllerTest {
         return body.getBytes(StandardCharsets.UTF_8);
     }
 
-    private static void respond(com.sun.net.httpserver.HttpExchange exchange, int status, String contentType,
-                                 String body) throws java.io.IOException {
+    private static void respond(HttpExchange exchange, int status, String contentType,
+                                 String body) throws IOException {
         respond(exchange, status, contentType, body.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static void respond(com.sun.net.httpserver.HttpExchange exchange, int status, String contentType,
-                                 byte[] body) throws java.io.IOException {
+    private static void respond(HttpExchange exchange, int status, String contentType,
+                                 byte[] body) throws IOException {
         exchange.getResponseHeaders().add("Content-Type", contentType);
         exchange.sendResponseHeaders(status, body.length);
         exchange.getResponseBody().write(body);

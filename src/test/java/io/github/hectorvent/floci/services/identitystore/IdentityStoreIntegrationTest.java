@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.identitystore;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -147,7 +148,7 @@ class IdentityStoreIntegrationTest {
                 .body("UserName", equalTo("immutable@example.com"));
     }
 
-    private static io.restassured.response.ValidatableResponse json(String target, String body) {
+    private static ValidatableResponse json(String target, String body) {
         return given()
                 .contentType(TYPE)
                 .header("Authorization", AUTH)

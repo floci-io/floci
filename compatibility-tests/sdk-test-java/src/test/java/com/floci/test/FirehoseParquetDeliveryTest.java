@@ -54,6 +54,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 
@@ -276,10 +277,10 @@ class FirehoseParquetDeliveryTest {
         byte[] body = s3.getObject(GetObjectRequest.builder().bucket(bucket).key(key).build())
                 .readAllBytes();
         assertThat(body.length).isGreaterThan(PARQUET_MAGIC.length * 2);
-        assertThat(java.util.Arrays.copyOfRange(body, 0, PARQUET_MAGIC.length))
+        assertThat(Arrays.copyOfRange(body, 0, PARQUET_MAGIC.length))
                 .as("delivered object must start with the Parquet magic")
                 .isEqualTo(PARQUET_MAGIC);
-        assertThat(java.util.Arrays.copyOfRange(body, body.length - PARQUET_MAGIC.length, body.length))
+        assertThat(Arrays.copyOfRange(body, body.length - PARQUET_MAGIC.length, body.length))
                 .as("delivered object must end with the Parquet magic")
                 .isEqualTo(PARQUET_MAGIC);
     }

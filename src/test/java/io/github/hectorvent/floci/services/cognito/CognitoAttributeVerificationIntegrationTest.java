@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
 import java.util.UUID;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
@@ -377,7 +378,7 @@ class CognitoAttributeVerificationIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("UserPool.UserAttributeUpdateSettings.AttributesRequireVerificationBeforeUpdate",
-                        equalTo(java.util.List.of("email", "phone_number")));
+                        equalTo(List.of("email", "phone_number")));
 
         cognitoAction("UpdateUserPool", """
                 {
@@ -398,7 +399,7 @@ class CognitoAttributeVerificationIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("UserPool.UserAttributeUpdateSettings.AttributesRequireVerificationBeforeUpdate",
-                        equalTo(java.util.List.of("phone_number")));
+                        equalTo(List.of("phone_number")));
     }
 
     private static void clearInspectionEndpoint(String path) {

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.S3DestinationValidation;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.bcmdataexports.model.DataQuery;
@@ -22,6 +23,7 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -129,15 +131,15 @@ public class BcmDataExportsService {
      */
     public Map<String, List<Export>> listAllExportsByAccount() {
         Collection<Export> all;
-        if (exportStore instanceof io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<?> aware) {
+        if (exportStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
-            io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<Export> typed =
-                    (io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<Export>) aware;
+            AccountAwareStorageBackend<Export> typed =
+                    (AccountAwareStorageBackend<Export>) aware;
             all = typed.scanAllAccounts();
         } else {
             all = exportStore.scan(key -> true);
         }
-        Map<String, List<Export>> result = new java.util.LinkedHashMap<>();
+        Map<String, List<Export>> result = new LinkedHashMap<>();
         for (Export export : all) {
             String account = export.getOwnerAccountId();
             if (account == null || account.isEmpty()) {
@@ -229,10 +231,10 @@ public class BcmDataExportsService {
         exec.setCreatedBy(createdBy);
         exec.setCreatedAt(System.currentTimeMillis());
         String key = executionKey(exportArn, exec.getExecutionId());
-        if (executionStore instanceof io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<?> aware) {
+        if (executionStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
-            io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution> typed =
-                    (io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution>) aware;
+            AccountAwareStorageBackend<ExportExecution> typed =
+                    (AccountAwareStorageBackend<ExportExecution>) aware;
             typed.putForAccount(accountId, key, exec);
         } else {
             executionStore.put(key, exec);
@@ -256,10 +258,10 @@ public class BcmDataExportsService {
             exec.setStatusReason(reason);
         }
         String key = executionKey(exec.getExportArn(), exec.getExecutionId());
-        if (executionStore instanceof io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<?> aware) {
+        if (executionStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
-            io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution> typed =
-                    (io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution>) aware;
+            AccountAwareStorageBackend<ExportExecution> typed =
+                    (AccountAwareStorageBackend<ExportExecution>) aware;
             typed.putForAccount(accountId, key, exec);
         } else {
             executionStore.put(key, exec);

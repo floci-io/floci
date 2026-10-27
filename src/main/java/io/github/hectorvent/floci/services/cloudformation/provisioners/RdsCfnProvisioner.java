@@ -30,6 +30,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * CloudFormation provisioning for RDS: the two parameter-group types, {@code DBSubnetGroup},
@@ -928,7 +930,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private io.github.hectorvent.floci.services.rds.model.DbProxy updateDbProxy(
+    private DbProxy updateDbProxy(
             StackResource resource, String name, String engineFamily, String defaultAuthScheme,
             boolean requireTls, int idleClientTimeout, boolean debugLogging, String roleArn,
             List<String> subnetIds, List<String> securityGroupIds, List<DbProxyAuth> auth,
@@ -1161,7 +1163,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private <T> T sameNameExistingResource(String priorPhysicalId, String name,
-                                           java.util.function.Function<String, T> lookup) {
+                                           Function<String, T> lookup) {
         if (priorPhysicalId == null || !priorPhysicalId.equals(name)) {
             return null;
         }
@@ -1176,7 +1178,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void deleteRenamedResource(String priorPhysicalId, String newName,
-                                       java.util.function.Consumer<String> delete, String resourceKind) {
+                                       Consumer<String> delete, String resourceKind) {
         if (priorPhysicalId == null || priorPhysicalId.equals(newName)) {
             return;
         }

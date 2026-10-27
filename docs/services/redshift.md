@@ -47,8 +47,11 @@ The JSON message includes `Event Source`, `Event Time`, `Source ID`, `Event ID`,
 `Event Categories`, `Severity` and `Event Message`. AWS does not specify a stable
 notification-body schema in the API reference; this message format is Floci's
 representation of the event details, not a claim of byte-for-byte AWS parity.
-A deleted topic changes subscription status to `topic-not-exist`; authorization
-failures change it to `no-permission`. Notification delivery failures are logged
+With IAM enforcement on, the topic's policy must allow the `redshift.amazonaws.com`
+principal to `sns:Publish` (conditions on `aws:SourceArn`, the subscription's ARN, and
+`aws:SourceAccount` apply); otherwise nothing is published and the subscription becomes
+`no-permission`. A deleted topic changes subscription status to `topic-not-exist`;
+other authorization failures also change it to `no-permission`. Notification delivery failures are logged
 and do not roll back the Redshift operation.
 
 For example, parameter-group events work without a database container:

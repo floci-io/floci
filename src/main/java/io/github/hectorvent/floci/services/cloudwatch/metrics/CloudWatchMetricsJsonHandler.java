@@ -388,6 +388,7 @@ public class CloudWatchMetricsJsonHandler {
             node.put("StateReasonData", a.getStateReasonData());
         }
         node.put("StateUpdatedTimestamp", a.getStateUpdatedTimestamp());
+        node.put("StateTransitionedTimestamp", a.lastTransitionTimestamp());
         node.put("AlarmConfigurationUpdatedTimestamp", a.getAlarmConfigurationUpdatedTimestamp());
     }
 

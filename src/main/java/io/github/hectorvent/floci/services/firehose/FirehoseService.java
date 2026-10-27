@@ -987,12 +987,18 @@ public class FirehoseService implements ResourceProvider {
             @SuppressWarnings("unchecked")
             List<KinesisRecord> records = (List<KinesisRecord>) page.get("Records");
             String next = (String) page.get("NextShardIterator");
-            String advanced = next != null ? next : iterator;
+            String advanced = next != null || records == null || records.isEmpty() ? next :
+                    kinesisService.getShardIteratorForAccount(sourceAccountId, sourceName, shard.getShardId(),
+                            "AFTER_SEQUENCE_NUMBER", records.getLast().getSequenceNumber(), region);
+            if (advanced == null) {
+                advanced = iterator;
+            }
+            String checkpoint = advanced;
             String shardId = shard.getShardId();
             if (records == null || records.isEmpty()) {
                 // Nothing was buffered, so this advance owes S3 nothing and is safe to
                 // park as pending on its own.
-                advanceSourceIterator(streamKey, shardId, advanced);
+                advanceSourceIterator(streamKey, shardId, checkpoint);
                 continue;
             }
             // Through putRecordBatch so source records buffer, and trigger a flush, on
@@ -1002,7 +1008,7 @@ public class FirehoseService implements ResourceProvider {
             putRecordBatch(streamKey, deliveryStreamName, records.stream()
                             .map(record -> new Record(record.getData()))
                             .toList(),
-                    () -> advanceSourceIterator(streamKey, shardId, advanced));
+                    () -> advanceSourceIterator(streamKey, shardId, checkpoint));
         }
     }
 

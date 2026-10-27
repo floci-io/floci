@@ -112,7 +112,7 @@ class ApplicationAutoScalingCfnProvisionerTest {
         provisioner.provision(r, targetProps(), ctx());
 
         verify(service).registerScalableTarget("ecs", "service/my-cluster/my-service",
-                "ecs:service:DesiredCount", 1, 4, null, null, java.util.Map.of(), "us-east-1");
+                "ecs:service:DesiredCount", 1, 4, null, null, Map.of(), "us-east-1");
         // CloudFormation's Ref for a scalable target is resourceId|scalableDimension|serviceNamespace.
         assertEquals(TARGET_ID, r.getPhysicalId());
         assertEquals(TARGET_ID, r.getAttributes().get("Id"));

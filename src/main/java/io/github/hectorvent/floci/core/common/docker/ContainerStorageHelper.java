@@ -6,6 +6,7 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -310,7 +311,7 @@ public final class ContainerStorageHelper {
         if (path == null || path.isBlank()) {
             return true;
         }
-        return !java.nio.file.Paths.get(path).isAbsolute() && !path.startsWith("/");
+        return !Paths.get(path).isAbsolute() && !path.startsWith("/");
     }
 
     /**

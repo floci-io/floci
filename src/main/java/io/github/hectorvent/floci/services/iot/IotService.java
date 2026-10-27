@@ -71,9 +71,11 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
@@ -254,7 +256,7 @@ public class IotService {
         Thing existing = thingStore.get(key).orElse(null);
         if (existing != null) {
             if (existing.getAttributes().equals(attributes)
-                    && java.util.Objects.equals(existing.getThingTypeName(), blankToNull(thingTypeName))) {
+                    && Objects.equals(existing.getThingTypeName(), blankToNull(thingTypeName))) {
                 return existing;
             }
             throw new AwsException("ResourceAlreadyExistsException", "Thing already exists: " + thingName, 409);
@@ -860,12 +862,12 @@ public class IotService {
 
     public Set<String> listThingPrincipals(String thingName, String region) {
         describeThing(thingName, region);
-        return new java.util.TreeSet<>(thingPrincipalStore.get(thingPrincipalKey(region, thingName)).orElse(Set.of()));
+        return new TreeSet<>(thingPrincipalStore.get(thingPrincipalKey(region, thingName)).orElse(Set.of()));
     }
 
     public Set<String> listPrincipalThings(String principal, String region) {
         String prefix = "thing-principal:" + region + ":";
-        Set<String> things = new java.util.TreeSet<>();
+        Set<String> things = new TreeSet<>();
         for (String key : thingPrincipalStore.keys()) {
             if (key.startsWith(prefix) && thingPrincipalStore.get(key).orElse(Set.of()).contains(principal)) {
                 things.add(key.substring(prefix.length()));
@@ -920,7 +922,7 @@ public class IotService {
 
     public Set<String> listTargetsForPolicy(String policyName, String region) {
         getPolicy(policyName, region);
-        return new java.util.TreeSet<>(policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()));
+        return new TreeSet<>(policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()));
     }
 
     /**
@@ -1251,7 +1253,7 @@ public class IotService {
         String key = thingTypeKey(region, thingTypeName);
         IotThingType existing = thingTypeStore.get(key).orElse(null);
         if (existing != null) {
-            if (java.util.Objects.equals(existing.getDescription(), properties.path("thingTypeDescription").asText(null))
+            if (Objects.equals(existing.getDescription(), properties.path("thingTypeDescription").asText(null))
                     && existing.getSearchableAttributes().equals(stringList(properties.path("searchableAttributes")))) {
                 return existing;
             }
@@ -1305,7 +1307,7 @@ public class IotService {
         String key = thingGroupKey(region, thingGroupName);
         IotThingGroup existing = thingGroupStore.get(key).orElse(null);
         if (existing != null) {
-            if (java.util.Objects.equals(existing.getDescription(), properties.path("thingGroupDescription").asText(null))
+            if (Objects.equals(existing.getDescription(), properties.path("thingGroupDescription").asText(null))
                     && existing.getAttributes().equals(parseAttributePayload(properties.path("attributePayload")))) {
                 return existing;
             }
@@ -1366,7 +1368,7 @@ public class IotService {
 
     public Set<String> listThingsInThingGroup(String thingGroupName, String region) {
         describeThingGroup(thingGroupName, region);
-        return new java.util.TreeSet<>(thingGroupMembershipStore.get(thingGroupMembershipKey(region, thingGroupName)).orElse(Set.of()));
+        return new TreeSet<>(thingGroupMembershipStore.get(thingGroupMembershipKey(region, thingGroupName)).orElse(Set.of()));
     }
 
     public List<IotThingGroup> listThingGroupsForThing(String thingName, String region) {
@@ -1402,8 +1404,8 @@ public class IotService {
         job.setCreatedAt(now);
         job.setLastUpdatedAt(now);
 
-        List<String> targets = new java.util.ArrayList<>();
-        Set<String> thingNames = new java.util.TreeSet<>();
+        List<String> targets = new ArrayList<>();
+        Set<String> thingNames = new TreeSet<>();
         targetsNode.forEach(target -> {
             String value = target.asText();
             if (value != null && !value.isBlank()) {
@@ -2284,7 +2286,7 @@ public class IotService {
     }
 
     private List<String> stringList(JsonNode node) {
-        List<String> values = new java.util.ArrayList<>();
+        List<String> values = new ArrayList<>();
         if (node != null && node.isArray()) {
             node.forEach(item -> values.add(item.asText()));
         }
@@ -2369,6 +2371,6 @@ public class IotService {
     private record ShadowUpdate(ObjectNode accepted, ObjectNode documents, ObjectNode delta) {
     }
 
-    private record TaggableResource(Map<String, String> tags, java.util.function.Consumer<Map<String, String>> updateTags) {
+    private record TaggableResource(Map<String, String> tags, Consumer<Map<String, String>> updateTags) {
     }
 }

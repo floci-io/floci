@@ -276,7 +276,8 @@ class ApiGatewayHttpNonProxyIntegrationTest {
 
         given().contentType(ContentType.JSON).body("{}")
                 .when().post("/execute-api/" + apiId + "/test/widget")
-                .then().statusCode(415);
+                .then().statusCode(415)
+                .header("x-amzn-ErrorType", equalTo("BadRequestException"));
     }
 
     @Test

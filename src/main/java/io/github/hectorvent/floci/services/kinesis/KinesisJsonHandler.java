@@ -417,7 +417,7 @@ public class KinesisJsonHandler {
         List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
         long millisBehind = ((Number) result.get("MillisBehindLatest")).longValue();
 
-        String continuationSeqNo = records.isEmpty() ? null
+        String continuationSeqNo = result.get("NextShardIterator") == null || records.isEmpty() ? null
                 : records.get(records.size() - 1).getSequenceNumber();
 
         ObjectNode eventPayload = objectMapper.createObjectNode();
@@ -435,7 +435,7 @@ public class KinesisJsonHandler {
             eventPayload.put("ContinuationSequenceNumber", continuationSeqNo);
         }
         eventPayload.put("MillisBehindLatest", millisBehind);
-        eventPayload.putArray("ChildShards");
+        writeChildShards(eventPayload, result);
 
         try {
             // The Go SDK (and other SDKs) expect an initial-response message before
@@ -735,8 +735,27 @@ public class KinesisJsonHandler {
             }
         }
         response.put("NextShardIterator", (String) result.get("NextShardIterator"));
+        writeChildShards(response, result);
         response.put("MillisBehindLatest", ((Number) result.get("MillisBehindLatest")).longValue());
         return Response.ok(response).build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void writeChildShards(ObjectNode response, Map<String, Object> result) {
+        List<KinesisService.ChildShard> children = (List<KinesisService.ChildShard>) result.get("ChildShards");
+        if (children == null) {
+            return;
+        }
+        ArrayNode childNodes = response.putArray("ChildShards");
+        for (KinesisService.ChildShard child : children) {
+            ObjectNode node = childNodes.addObject();
+            node.put("ShardId", child.shardId());
+            ArrayNode parents = node.putArray("ParentShards");
+            child.parentShards().forEach(parents::add);
+            node.putObject("HashKeyRange")
+                    .put("StartingHashKey", child.hashKeyRange().startingHashKey())
+                    .put("EndingHashKey", child.hashKeyRange().endingHashKey());
+        }
     }
 
     private Response handleIncreaseStreamRetentionPeriod(JsonNode request, String region) {

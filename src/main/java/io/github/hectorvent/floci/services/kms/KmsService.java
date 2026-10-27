@@ -398,15 +398,15 @@ public class KmsService implements ResourceProvider {
             "GenerateMac", "VerifyMac", "DeriveSharedSecret"));
 
     /** GrantNameType pattern/length from the KMS model (kms/2014-11-01/service-2.json). */
-    private static final java.util.regex.Pattern GRANT_NAME_PATTERN =
-            java.util.regex.Pattern.compile("^[a-zA-Z0-9:/_-]+$");
+    private static final Pattern GRANT_NAME_PATTERN =
+            Pattern.compile("^[a-zA-Z0-9:/_-]+$");
 
     /**
      * GrantConstraintSourceArnType pattern from the KMS model (kms/2014-11-01/service-2.json),
      * quoted verbatim in AWS's validation message; it already accepts every partition.
      */
-    private static final java.util.regex.Pattern GRANT_CONSTRAINT_SOURCE_ARN_PATTERN =
-            java.util.regex.Pattern.compile("^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$"); // partition-literal: model pattern quoted in AWS's message
+    private static final Pattern GRANT_CONSTRAINT_SOURCE_ARN_PATTERN =
+            Pattern.compile("^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$"); // partition-literal: model pattern quoted in AWS's message
 
     private static final Set<String> GRANT_CONSTRAINT_MEMBERS =
             Set.of("EncryptionContextSubset", "EncryptionContextEquals", "SourceArn");

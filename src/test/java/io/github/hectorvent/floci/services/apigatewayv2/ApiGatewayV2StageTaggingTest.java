@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.apigatewayv2;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import org.hamcrest.Matcher;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -82,8 +84,8 @@ class ApiGatewayV2StageTaggingTest {
     }
 
     /** UntagResource replies 204 on AWS; accept 200 too rather than pin an unrelated detail. */
-    private static org.hamcrest.Matcher<Integer> anyOf204() {
-        return org.hamcrest.Matchers.anyOf(equalTo(204), equalTo(200));
+    private static Matcher<Integer> anyOf204() {
+        return Matchers.anyOf(equalTo(204), equalTo(200));
     }
 
     @Test

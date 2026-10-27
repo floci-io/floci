@@ -433,7 +433,10 @@ public class CloudWatchMetricsService {
             alarm.setStateReason(previous.getStateReason());
             alarm.setStateReasonData(previous.getStateReasonData());
             alarm.setStateUpdatedTimestamp(previous.getStateUpdatedTimestamp());
+            alarm.setStateTransitionedTimestamp(previous.getStateTransitionedTimestamp());
             alarm.setTags(new HashMap<>(previous.getTags()));
+        } else {
+            alarm.setStateTransitionedTimestamp(alarm.getStateUpdatedTimestamp());
         }
         if (alarm.getAlarmArn() == null) {
             alarm.setAlarmArn(regionResolver.buildArn("cloudwatch", region, "alarm:" + name));
@@ -465,7 +468,8 @@ public class CloudWatchMetricsService {
     /** The alarm as history items show it: AWS's timestamp strings, without state reasons, tags or Floci's bookkeeping. */
     private static ObjectNode snapshot(Alarm alarm) {
         ObjectNode node = MAPPER.valueToTree(alarm);
-        node.remove(List.of("region", "tags", "stateReason", "stateReasonData", "alarmType"));
+        node.remove(List.of("region", "tags", "stateReason", "stateReasonData", "alarmType",
+                "stateTransitionedTimestamp"));
         node.put("alarmConfigurationUpdatedTimestamp", AlarmSnsNotifier.TIMESTAMP_FORMAT.format(
                 Instant.ofEpochSecond(alarm.getAlarmConfigurationUpdatedTimestamp())));
         node.put("stateUpdatedTimestamp", AlarmSnsNotifier.TIMESTAMP_FORMAT.format(
@@ -630,7 +634,7 @@ public class CloudWatchMetricsService {
     }
 
     public void setAlarmState(String alarmName, String stateValue, String stateReason, String stateReasonData, String region) {
-        List<String> states = List.of("OK", "ALARM", "INSUFFICIENT_DATA");
+        List<String> states = List.of("INSUFFICIENT_DATA", "ALARM", "OK");
         if (stateValue == null || !states.contains(stateValue)) {
             throw SmithyValidationErrors.validationError(stateValue == null ? SmithyValidationErrors.notNull("stateValue")
                     : SmithyValidationErrors.notInEnum(stateValue, "stateValue", states));
@@ -672,13 +676,21 @@ public class CloudWatchMetricsService {
         ObjectNode data = MAPPER.createObjectNode().put("version", "1.0");
         data.set("oldState", stateNode(oldState, alarm.getStateReason(), alarm.getStateReasonData()));
         data.set("newState", stateNode(state, reason, reasonData));
+        Instant now = Instant.now();
         alarm.setStateValue(state);
         alarm.setStateReason(reason);
         alarm.setStateReasonData(reasonData);
-        alarm.setStateUpdatedTimestamp(Instant.now().getEpochSecond());
+        if (alarm.getStateTransitionedTimestamp() == 0) {
+            // Stored before transitions were recorded: its last state update is the best known transition.
+            alarm.setStateTransitionedTimestamp(alarm.getStateUpdatedTimestamp());
+        }
+        alarm.setStateUpdatedTimestamp(now.getEpochSecond());
+        if (!state.equals(oldState)) {
+            alarm.setStateTransitionedTimestamp(now.getEpochSecond());
+        }
         alarmStore.put(region + "::" + alarm.getAlarmName(), alarm);
         if (!state.equals(oldState)) {
-            recordHistory(alarm, region, "StateUpdate", "Alarm updated from " + oldState + " to " + state, data);
+            recordHistory(alarm, region, "StateUpdate", "Alarm updated from " + oldState + " to " + state, data, now);
         }
     }
 
@@ -699,7 +711,11 @@ public class CloudWatchMetricsService {
 
     /** Called only under this service's monitor, which also guards the sequence and the prune deadline. */
     private void recordHistory(Alarm alarm, String region, String type, String summary, ObjectNode data) {
-        Instant now = Instant.now();
+        recordHistory(alarm, region, type, summary, data, Instant.now());
+    }
+
+    /** As above, stamped with {@code now}: a state change passes the instant it gave the alarm. */
+    private void recordHistory(Alarm alarm, String region, String type, String summary, ObjectNode data, Instant now) {
         if (!now.isBefore(nextHistoryPrune)) {
             long cutoffMillis = now.minus(HISTORY_RETENTION).toEpochMilli();
             deleteInEveryAccount(historyStore, item -> item.timestamp() < cutoffMillis);

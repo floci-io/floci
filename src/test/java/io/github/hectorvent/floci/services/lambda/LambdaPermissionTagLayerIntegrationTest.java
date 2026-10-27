@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.io.ByteArrayOutputStream;
+import java.util.Base64;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -44,7 +45,7 @@ class LambdaPermissionTagLayerIntegrationTest {
     @Order(1)
     void createFunction() throws Exception {
         byte[] zip = minimalZip();
-        String zipBase64 = java.util.Base64.getEncoder().encodeToString(zip);
+        String zipBase64 = Base64.getEncoder().encodeToString(zip);
 
         given()
             .contentType("application/json")

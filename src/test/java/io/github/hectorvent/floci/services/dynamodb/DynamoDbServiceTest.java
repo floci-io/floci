@@ -4335,7 +4335,7 @@ class DynamoDbServiceTest {
         ObjectNode transactGet = mapper.createObjectNode();
         transactGet.putObject("Get").put("TableName", "Users").set("Key", key);
 
-        List<org.junit.jupiter.api.function.Executable> itemCalls = List.of(
+        List<Executable> itemCalls = List.of(
                 () -> svc.getItem("Users", key, region),
                 () -> svc.putItem("Users", key, null, null, null, region, "NONE"),
                 () -> svc.updateItem("Users", key, null, "SET x = :v", null, item("v", "1"), "NONE", region),

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecr;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -157,7 +158,7 @@ class EcrIntegrationTest {
             .extract().jsonPath().getString("authorizationData[0].authorizationToken");
 
         String decoded = new String(Base64.getDecoder().decode(token));
-        org.junit.jupiter.api.Assertions.assertTrue(decoded.startsWith("AWS:"),
+        Assertions.assertTrue(decoded.startsWith("AWS:"),
                 "Decoded auth token must start with 'AWS:' but was: " + decoded);
     }
 

@@ -22,7 +22,9 @@ import java.security.KeyPairGenerator;
 import java.security.Signature;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -202,7 +204,7 @@ class HttpApiJwtAuthorizerScopesTest {
                 .header("Authorization", "Bearer " + signedToken(Map.of(
                         "iss", issuer, "aud", AUDIENCE, "exp", farFuture(),
                         "scope", "read write",
-                        "cognito:groups", java.util.List.of("admin", "poweruser"))))
+                        "cognito:groups", List.of("admin", "poweruser"))))
                 .when().get("/execute-api/" + httpApiId + "/test/unscoped")
                 .then().statusCode(200)
                 .extract().asString();
@@ -323,7 +325,7 @@ class HttpApiJwtAuthorizerScopesTest {
     private static String base64UrlUnsigned(BigInteger value) {
         byte[] bytes = value.toByteArray();
         if (bytes.length > 1 && bytes[0] == 0) {
-            bytes = java.util.Arrays.copyOfRange(bytes, 1, bytes.length);
+            bytes = Arrays.copyOfRange(bytes, 1, bytes.length);
         }
         return Base64Url.encode(bytes);
     }

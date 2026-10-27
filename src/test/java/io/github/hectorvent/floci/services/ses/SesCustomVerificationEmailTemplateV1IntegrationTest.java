@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -25,12 +26,12 @@ class SesCustomVerificationEmailTemplateV1IntegrationTest {
     private static final String FROM = "cvet-v1-sender@floci.test";
     private static final String NAME = "cvet-v1-a";
 
-    private static io.restassured.specification.RequestSpecification query(String action) {
+    private static RequestSpecification query(String action) {
         return given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
                 .formParam("Action", action);
     }
 
-    private static io.restassured.specification.RequestSpecification create(String name, String subject) {
+    private static RequestSpecification create(String name, String subject) {
         return query("CreateCustomVerificationEmailTemplate")
                 .formParam("TemplateName", name)
                 .formParam("FromEmailAddress", FROM)

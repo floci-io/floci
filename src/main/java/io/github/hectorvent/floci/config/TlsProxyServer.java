@@ -20,6 +20,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.IntConsumer;
 
 /**
  * A TCP proxy server that enables HTTP and HTTPS on the same port (LocalStack parity).
@@ -79,10 +81,10 @@ public class TlsProxyServer {
      * was still unresolved has no other way to learn the port came free, and would otherwise stay
      * registered with nothing serving it.
      */
-    private final List<java.util.function.IntConsumer> portReleasedHandlers = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final List<IntConsumer> portReleasedHandlers = new CopyOnWriteArrayList<>();
 
     /** Registers a callback invoked when a bind fails and the port stops being reserved. */
-    public void onPortReleased(java.util.function.IntConsumer handler) {
+    public void onPortReleased(IntConsumer handler) {
         portReleasedHandlers.add(handler);
         failedPorts.forEach(handler::accept);
     }

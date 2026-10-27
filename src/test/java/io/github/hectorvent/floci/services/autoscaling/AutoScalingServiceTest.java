@@ -82,7 +82,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none());
+                Map.of(), Map.of(), AsgOptionalFields.none());
     }
 
     @Test
@@ -313,7 +313,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none()));
+                Map.of(), Map.of(), AsgOptionalFields.none()));
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE, error.getMessage());
@@ -417,7 +417,7 @@ class AutoScalingServiceTest {
                 .thenReturn(source.getIamInstanceProfileArn());
         Reservation reservation = new Reservation();
         reservation.getInstances().add(source);
-        when(ec2Service.describeInstances(REGION, List.of("i-1234567890abcdef0"), java.util.Map.of()))
+        when(ec2Service.describeInstances(REGION, List.of("i-1234567890abcdef0"), Map.of()))
                 .thenReturn(List.of(reservation));
 
         LaunchConfiguration launchConfiguration = service.createLaunchConfiguration(REGION,
@@ -517,7 +517,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none()));
+                Map.of(), Map.of(), AsgOptionalFields.none()));
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.INVALID_LAUNCH_TEMPLATE_MESSAGE, error.getMessage());
@@ -934,7 +934,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of(), java.util.Map.of(), AsgOptionalFields.none());
+                Map.of(), Map.of(), AsgOptionalFields.none());
     }
 
     @Test

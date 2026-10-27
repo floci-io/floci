@@ -9,9 +9,11 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * Wraps the storage backend for Lambda Layer Versions.
@@ -79,7 +81,7 @@ public class LambdaLayerStore {
     public List<LambdaLayerVersion> listAllVersions(String region) {
         String prefix = "layer::" + region + "::";
         return backend.scan(k -> k.startsWith(prefix)).stream()
-                .sorted(java.util.Comparator.comparing(LambdaLayerVersion::getLayerName)
+                .sorted(Comparator.comparing(LambdaLayerVersion::getLayerName)
                         .thenComparingLong(LambdaLayerVersion::getVersion))
                 .toList();
     }
@@ -92,7 +94,7 @@ public class LambdaLayerStore {
         List<LambdaLayerVersion> all = backend.scan(k -> k.startsWith(prefix));
         // Group by layer name and return the latest version of each
         return all.stream()
-                .collect(java.util.stream.Collectors.groupingBy(LambdaLayerVersion::getLayerName))
+                .collect(Collectors.groupingBy(LambdaLayerVersion::getLayerName))
                 .values().stream()
                 .map(versions -> versions.stream()
                         .max((a, b) -> Long.compare(a.getVersion(), b.getVersion()))

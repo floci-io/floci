@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -107,7 +108,7 @@ class IamRolePolicyConcurrencyTest {
     }
 
     private static List<String> sorted(List<String> in) {
-        List<String> copy = new java.util.ArrayList<>(in);
+        List<String> copy = new ArrayList<>(in);
         Collections.sort(copy);
         return copy;
     }

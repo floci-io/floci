@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudtrail;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -154,7 +155,7 @@ class CloudTrailListingAndTagsIntegrationTest {
 
     // --- Helpers ---
 
-    private static io.restassured.response.Response invokeCloudTrail(String action, String body) {
+    private static Response invokeCloudTrail(String action, String body) {
         return given()
                 .header("X-Amz-Target", CT_TARGET + action)
                 .contentType(JSON11)

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -16,6 +17,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.S
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
 import io.github.hectorvent.floci.services.iot.model.IotShadow;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
@@ -148,8 +150,8 @@ class IotServiceTest {
                 lambda,
                 firehose,
                 logs,
-                inlineMock(io.github.hectorvent.floci.config.FlociCertificateAuthority.class),
-                new io.github.hectorvent.floci.services.iam.IamPolicyEvaluator(mapper));
+                inlineMock(FlociCertificateAuthority.class),
+                new IamPolicyEvaluator(mapper));
     }
 
     private IotTopicRule createRule(String name, String payloadJson) throws Exception {

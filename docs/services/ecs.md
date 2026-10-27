@@ -899,6 +899,11 @@ them: Floci
 writes `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` into every container in the task, pointing at one
 `/v2/credentials/{id}` path per task, and the AWS SDKs pick it up with no code change.
 
+The published path stays the same when credentials renew, including when a task first reads it
+after the previous credentials expire. Reads near expiry return a fresh session. Credentials
+already cached by another client remain valid until their original expiry; stopping the task
+revokes every generation. A deleted or recreated task role invalidates the endpoint.
+
 **A user-defined Docker network is required.** Set `FLOCI_SERVICES_ECS_DOCKER_NETWORK` to a network
 you created; the default bridge will not work. The SDKs hardcode `169.254.170.2` for this endpoint,
 so Floci runs a small proxy container that holds that address on the task's network and forwards to

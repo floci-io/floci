@@ -38,6 +38,7 @@ import jakarta.inject.Inject;
 import org.apache.james.mime4j.dom.Message;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -1030,7 +1031,7 @@ public class SesService {
             return false;
         }
         try {
-            java.net.URI uri = java.net.URI.create(url);
+            URI uri = URI.create(url);
             String scheme = uri.getScheme();
             return uri.getHost() != null
                     && ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));

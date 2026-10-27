@@ -243,7 +243,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // is how AWS describes it: "the account settings for the root user or the default setting".
     private Map<String, String> accountSettings = new ConcurrentHashMap<>();
     // deploymentIds for which SERVICE_DEPLOYMENT_IN_PROGRESS has already been emitted this process.
-    private final Set<String> inProgressEmitted = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Set<String> inProgressEmitted = ConcurrentHashMap.newKeySet();
     // serviceArn → why the reconciler's last attempt to launch one of its tasks failed, and for which
     // deployment. Memory-only.
     private final Map<String, LaunchFailure> launchFailures = new ConcurrentHashMap<>();
@@ -4240,7 +4240,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private static String newDeploymentId() {
-        return "ecs-svc/" + java.util.UUID.randomUUID().toString().replace("-", "");
+        return "ecs-svc/" + UUID.randomUUID().toString().replace("-", "");
     }
 
     /**

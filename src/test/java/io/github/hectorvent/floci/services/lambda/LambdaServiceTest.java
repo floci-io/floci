@@ -43,7 +43,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
@@ -78,7 +80,7 @@ class LambdaServiceTest {
     }
 
     private Map<String, Object> baseRequest(String name) {
-        return new java.util.HashMap<>(Map.of(
+        return new HashMap<>(Map.of(
                 "FunctionName", name,
                 "Runtime", "nodejs20.x",
                 "Role", "arn:aws:iam::000000000000:role/test-role",
@@ -324,7 +326,7 @@ class LambdaServiceTest {
     @Test
     void updateFunctionConfigurationRejectsExplicitNullHandler() {
         service.createFunction(REGION, baseRequest("update-handler-null-function"));
-        Map<String, Object> request = new java.util.HashMap<>();
+        Map<String, Object> request = new HashMap<>();
         request.put("Handler", null);
 
         AwsException error = assertThrows(AwsException.class,
@@ -554,7 +556,7 @@ class LambdaServiceTest {
 
     @Test
     void createImageFunctionSucceedsWithoutHandler() {
-        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+        Map<String, Object> req = new HashMap<>(Map.of(
                 "FunctionName", "image-fn",
                 "Role", "arn:aws:iam::000000000000:role/test-role",
                 "PackageType", "Image",
@@ -568,7 +570,7 @@ class LambdaServiceTest {
 
     @Test
     void createImageFunctionSucceedsWithHandler() {
-        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+        Map<String, Object> req = new HashMap<>(Map.of(
                 "FunctionName", "image-fn-with-handler",
                 "Role", "arn:aws:iam::000000000000:role/test-role",
                 "PackageType", "Image",
@@ -617,7 +619,7 @@ class LambdaServiceTest {
 
     @Test
     void createFunctionWithSubdirectoryHandler() throws Exception {
-        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+        Map<String, Object> req = new HashMap<>(Map.of(
                 "FunctionName", "subdir-handler-fn",
                 "Runtime", "nodejs20.x",
                 "Role", "arn:aws:iam::000000000000:role/test-role",
@@ -630,7 +632,7 @@ class LambdaServiceTest {
 
     @Test
     void createFunctionWithRootHandler() throws Exception {
-        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+        Map<String, Object> req = new HashMap<>(Map.of(
                 "FunctionName", "root-handler-fn",
                 "Runtime", "nodejs20.x",
                 "Role", "arn:aws:iam::000000000000:role/test-role",
@@ -643,7 +645,7 @@ class LambdaServiceTest {
 
     @Test
     void createFunctionWithNestedPythonModuleHandler() throws Exception {
-        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+        Map<String, Object> req = new HashMap<>(Map.of(
                 "FunctionName", "nested-python-handler-fn",
                 "Runtime", "python3.11",
                 "Role", "arn:aws:iam::000000000000:role/test-role",
@@ -656,7 +658,7 @@ class LambdaServiceTest {
 
     @Test
     void createFunctionWithNestedPythonPackageHandler() throws Exception {
-        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+        Map<String, Object> req = new HashMap<>(Map.of(
                 "FunctionName", "nested-python-package-handler-fn",
                 "Runtime", "python3.11",
                 "Role", "arn:aws:iam::000000000000:role/test-role",
@@ -669,7 +671,7 @@ class LambdaServiceTest {
 
     @Test
     void createFunctionDoesNotValidateHandlerAtDeployTime() throws Exception {
-        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+        Map<String, Object> req = new HashMap<>(Map.of(
                 "FunctionName", "missing-handler-fn",
                 "Runtime", "nodejs20.x",
                 "Role", "arn:aws:iam::000000000000:role/test-role",
@@ -682,7 +684,7 @@ class LambdaServiceTest {
 
     @Test
     void updateFunctionCodeDoesNotValidateHandlerAtDeployTime() throws Exception {
-        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+        Map<String, Object> req = new HashMap<>(Map.of(
                 "FunctionName", "missing-nested-python-handler-fn",
                 "Runtime", "python3.11",
                 "Role", "arn:aws:iam::000000000000:role/test-role",
@@ -698,7 +700,7 @@ class LambdaServiceTest {
 
     @Test
     void createDotnetFunctionWithAssemblyHandler() throws Exception {
-        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+        Map<String, Object> req = new HashMap<>(Map.of(
                 "FunctionName", "dotnet-fn",
                 "Runtime", "dotnet6",
                 "Role", "arn:aws:iam::000000000000:role/test-role",
@@ -890,7 +892,7 @@ class LambdaServiceTest {
         LambdaFunctionStore store = new LambdaFunctionStore(new InMemoryStorage<>());
         // Copy the two persisted functions into the new store to emulate a
         // restart with the same disk state.
-        for (LambdaFunction fn : new java.util.ArrayList<>(
+        for (LambdaFunction fn : new ArrayList<>(
                 service.listFunctions(REGION))) {
             store.save(REGION, fn);
         }
@@ -916,17 +918,17 @@ class LambdaServiceTest {
 
         // Defaults: regionLimit=1000, unreservedMin=100. Each Put asks for
         // 500; together they would leave 0 unreserved.
-        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
-        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
         try {
-            java.util.concurrent.Future<Throwable> fA = pool.submit(() -> {
+            Future<Throwable> fA = pool.submit(() -> {
                 start.await();
                 try {
                     service.putFunctionConcurrency(REGION, "multi-a", 500);
                     return null;
                 } catch (Throwable t) { return t; }
             });
-            java.util.concurrent.Future<Throwable> fB = pool.submit(() -> {
+            Future<Throwable> fB = pool.submit(() -> {
                 start.await();
                 try {
                     service.putFunctionConcurrency(REGION, "multi-b", 500);
@@ -1367,18 +1369,18 @@ class LambdaServiceTest {
         service.createFunction(REGION, baseRequest("race-fn"));
 
         int iterations = 50;
-        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             for (int i = 0; i < iterations; i++) {
                 int a = 100 + i;
                 int b = 200 + i;
-                java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-                java.util.concurrent.Future<Integer> fA = pool.submit(() -> {
+                CountDownLatch start = new CountDownLatch(1);
+                Future<Integer> fA = pool.submit(() -> {
                     start.await();
                     return service.putFunctionConcurrency(REGION, "race-fn", a)
                             .getReservedConcurrentExecutions();
                 });
-                java.util.concurrent.Future<Integer> fB = pool.submit(() -> {
+                Future<Integer> fB = pool.submit(() -> {
                     start.await();
                     return service.putFunctionConcurrency(REGION, "race-fn", b)
                             .getReservedConcurrentExecutions();
@@ -1416,7 +1418,7 @@ class LambdaServiceTest {
         int mutationCount = 16;
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(8);
-        List<Future<?>> futures = new java.util.ArrayList<>();
+        List<Future<?>> futures = new ArrayList<>();
         Set<String> expectedStatementIds = new HashSet<>();
         expectedStatementIds.add("baseline");
 
@@ -1471,7 +1473,7 @@ class LambdaServiceTest {
         List<Map<String, Object>> statements = (List<Map<String, Object>>) policy.get("Statement");
         Set<String> actualStatementIds = statements.stream()
                 .map(statement -> (String) statement.get("Sid"))
-                .collect(java.util.stream.Collectors.toSet());
+                .collect(Collectors.toSet());
 
         assertEquals(expectedStatementIds, actualStatementIds);
     }
@@ -1504,17 +1506,17 @@ class LambdaServiceTest {
         });
         try {
             holder.start();
-            assertTrue(acquired.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue(acquired.await(2, TimeUnit.SECONDS));
 
             Future<LambdaFunction> publishFuture = pool.submit(
                     () -> service.publishVersion(REGION, "lock-race-fn", null));
-            assertThrows(java.util.concurrent.TimeoutException.class,
-                    () -> publishFuture.get(200, java.util.concurrent.TimeUnit.MILLISECONDS),
+            assertThrows(TimeoutException.class,
+                    () -> publishFuture.get(200, TimeUnit.MILLISECONDS),
                     "publishVersion must block while another operation holds this function's lock");
 
             release.countDown();
             holder.join();
-            assertNotNull(publishFuture.get(2, java.util.concurrent.TimeUnit.SECONDS));
+            assertNotNull(publishFuture.get(2, TimeUnit.SECONDS));
         } finally {
             release.countDown();
             pool.shutdownNow();
@@ -1934,7 +1936,7 @@ class LambdaServiceTest {
     void createEventSourceMapping_selfManagedKafka_success() {
         service.createFunction(REGION, baseRequest("kafka-fn"));
 
-        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+        Map<String, Object> request = new HashMap<>(Map.of(
                 "FunctionName", "kafka-fn",
                 "Topics", List.of("my-topic"),
                 "SelfManagedEventSource", Map.of(
@@ -1973,7 +1975,7 @@ class LambdaServiceTest {
     void createEventSourceMapping_selfManagedKafka_missingTopics_throws() {
         service.createFunction(REGION, baseRequest("kafka-fn-missing-topics"));
 
-        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+        Map<String, Object> request = new HashMap<>(Map.of(
                 "FunctionName", "kafka-fn-missing-topics",
                 "SelfManagedEventSource", Map.of(
                         "Endpoints", Map.of(
@@ -1993,7 +1995,7 @@ class LambdaServiceTest {
     void createEventSourceMapping_selfManagedKafka_missingBootstrapServers_throws() {
         service.createFunction(REGION, baseRequest("kafka-fn-missing-servers"));
 
-        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+        Map<String, Object> request = new HashMap<>(Map.of(
                 "FunctionName", "kafka-fn-missing-servers",
                 "Topics", List.of("my-topic"),
                 "SelfManagedEventSource", Map.of(
@@ -2012,7 +2014,7 @@ class LambdaServiceTest {
     void createEventSourceMapping_selfManagedKafka_atTimestamp_succeeds() {
         service.createFunction(REGION, baseRequest("kafka-fn-at-timestamp"));
 
-        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+        Map<String, Object> request = new HashMap<>(Map.of(
                 "FunctionName", "kafka-fn-at-timestamp",
                 "Topics", List.of("my-topic"),
                 "SelfManagedEventSource", Map.of(
@@ -2034,7 +2036,7 @@ class LambdaServiceTest {
     void createEventSourceMapping_dynamoDb_atTimestamp_throws() {
         service.createFunction(REGION, baseRequest("dynamo-fn-at-timestamp"));
 
-        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+        Map<String, Object> request = new HashMap<>(Map.of(
                 "FunctionName", "dynamo-fn-at-timestamp",
                 "EventSourceArn", "arn:aws:dynamodb:us-east-1:000000000000:table/my-table/stream/2026-01-01T00:00:00.000",
                 "StartingPosition", "AT_TIMESTAMP",
@@ -2052,7 +2054,7 @@ class LambdaServiceTest {
     void createEventSourceMapping_selfManagedKafka_crossRegionFunctionArn_throws() {
         service.createFunction(REGION, baseRequest("kafka-fn-cross-region"));
 
-        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+        Map<String, Object> request = new HashMap<>(Map.of(
                 "FunctionName", "arn:aws:lambda:us-west-2:000000000000:function:kafka-fn-cross-region",
                 "Topics", List.of("my-topic"),
                 "SelfManagedEventSource", Map.of(
@@ -2073,7 +2075,7 @@ class LambdaServiceTest {
     void createEventSourceMapping_mixedSources_throws() {
         service.createFunction(REGION, baseRequest("kafka-fn-mixed"));
 
-        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+        Map<String, Object> request = new HashMap<>(Map.of(
                 "FunctionName", "kafka-fn-mixed",
                 "EventSourceArn", "arn:aws:sqs:us-east-1:000000000000:my-queue",
                 "Topics", List.of("my-topic"),
@@ -2095,7 +2097,7 @@ class LambdaServiceTest {
     void createEventSourceMapping_selfManagedKafka_malformedTopics_throws() {
         service.createFunction(REGION, baseRequest("kafka-fn-malformed-topics"));
 
-        Map<String, Object> request = new java.util.HashMap<>(Map.of(
+        Map<String, Object> request = new HashMap<>(Map.of(
                 "FunctionName", "kafka-fn-malformed-topics",
                 "Topics", List.of(123),
                 "SelfManagedEventSource", Map.of(
@@ -2779,7 +2781,7 @@ class LambdaServiceTest {
      */
     private void assertUpdaterWaitsForTheLock(
             String functionName,
-            java.util.function.BiFunction<LambdaService, String, LambdaFunction> updater) throws Exception {
+            BiFunction<LambdaService, String, LambdaFunction> updater) throws Exception {
         LambdaFunction fn = service.createFunction(REGION, baseRequest(functionName));
         Object lock = service.lockForConcurrencyOp(fn.getFunctionArn());
 
@@ -2798,16 +2800,16 @@ class LambdaServiceTest {
         });
         try {
             holder.start();
-            assertTrue(acquired.await(2, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue(acquired.await(2, TimeUnit.SECONDS));
 
             Future<LambdaFunction> updateFuture = pool.submit(() -> updater.apply(service, functionName));
-            assertThrows(java.util.concurrent.TimeoutException.class,
-                    () -> updateFuture.get(200, java.util.concurrent.TimeUnit.MILLISECONDS),
+            assertThrows(TimeoutException.class,
+                    () -> updateFuture.get(200, TimeUnit.MILLISECONDS),
                     "the updater must block while another operation holds this function's lock");
 
             release.countDown();
             holder.join();
-            assertNotNull(updateFuture.get(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertNotNull(updateFuture.get(5, TimeUnit.SECONDS));
         } finally {
             release.countDown();
             pool.shutdownNow();

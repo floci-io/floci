@@ -34,11 +34,13 @@ import org.mockito.Mockito;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -269,7 +271,7 @@ class FlinkContainerManagerTest {
                 "FLINK-2_3", "arn:aws:iam::000000000000:role/x", "STREAMING");
         app.setApplicationVersionId(2L);
 
-        String config = new String(manager.msfStyleLog4j2Config(app), java.nio.charset.StandardCharsets.UTF_8);
+        String config = new String(manager.msfStyleLog4j2Config(app), StandardCharsets.UTF_8);
 
         assertTrue(config.contains(
                 "\"applicationARN\":\"%enc{arn:aws:kinesisanalytics:us-east-1:000000000000:application/demo}{JSON}\""));
@@ -291,13 +293,13 @@ class FlinkContainerManagerTest {
                 "FLINK-2_3", "arn:aws:iam::000000000000:role/x", "STREAMING");
         app.setApplicationVersionId(1L);
 
-        String config = new String(manager.msfStyleLog4j2Config(app), java.nio.charset.StandardCharsets.UTF_8);
+        String config = new String(manager.msfStyleLog4j2Config(app), StandardCharsets.UTF_8);
 
         assertTrue(config.contains(
                 "\"applicationARN\":\"%enc{arn:aws:kinesisanalytics:us-east-1:000000000000:application/100%%-\\\\-{env:PATH}-owned}{JSON}\""));
 
-        java.util.Properties parsed = new java.util.Properties();
-        parsed.load(new java.io.ByteArrayInputStream(config.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        Properties parsed = new Properties();
+        parsed.load(new ByteArrayInputStream(config.getBytes(StandardCharsets.UTF_8)));
         String loadedPattern = parsed.getProperty("appender.console.layout.pattern");
         assertTrue(loadedPattern.contains(
                 "\"applicationARN\":\"%enc{arn:aws:kinesisanalytics:us-east-1:000000000000:application/100%%-\\-{env:PATH}-owned}{JSON}\""));

@@ -175,6 +175,7 @@ import javax.net.ssl.X509TrustManager;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -196,6 +197,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.zip.ZipEntry;
@@ -876,7 +878,7 @@ public final class TestFixtures {
 
     private static boolean isDnsResolvable(String hostname) {
         try {
-            java.net.InetAddress.getByName(hostname);
+            InetAddress.getByName(hostname);
             return true;
         } catch (Exception e) {
             return false;
@@ -894,7 +896,7 @@ public final class TestFixtures {
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .endpointProvider((S3ControlEndpointProvider) params ->
-                        java.util.concurrent.CompletableFuture.completedFuture(
+                        CompletableFuture.completedFuture(
                                 Endpoint.builder().url(endpoint).build()))
                 .build();
     }

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudwatch.logs;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -159,7 +160,7 @@ class CloudWatchLogsMetricFilterIntegrationTest {
                 .body("nextToken", nullValue());
         logs("DescribeMetricFilters", "{\"metricName\":\"Latency\",\"metricNamespace\":\"App\"}").then()
                 .statusCode(200)
-                .body("metricFilters.logGroupName", org.hamcrest.Matchers.hasItem(group));
+                .body("metricFilters.logGroupName", Matchers.hasItem(group));
         logs("DescribeLogGroups", "{\"logGroupNamePrefix\":\"" + group + "\"}").then()
                 .statusCode(200)
                 .body("logGroups[0].metricFilterCount", equalTo(1));

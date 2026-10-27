@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -543,7 +544,7 @@ class AppSyncUtilTest {
 
     @Test
     void appendError_withErrorInfo() {
-        List<Map<String, Object>> errorList = new java.util.ArrayList<>();
+        List<Map<String, Object>> errorList = new ArrayList<>();
         util.setErrorList(errorList);
         Object data = Map.of("k", "v");
         Object info = Map.of("info", "detail");

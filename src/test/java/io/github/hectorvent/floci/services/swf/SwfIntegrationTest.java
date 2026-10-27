@@ -3,11 +3,16 @@ package io.github.hectorvent.floci.services.swf;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
@@ -60,7 +65,7 @@ class SwfIntegrationTest {
                 .body("domainInfo.status", equalTo("REGISTERED"))
                 .body("domainInfo.description", equalTo("floci test domain"))
                 .body("domainInfo.arn", startsWith("arn:aws:swf:us-east-1:"))
-                .body("domainInfo.arn", org.hamcrest.Matchers.endsWith(":/domain/" + domain))
+                .body("domainInfo.arn", Matchers.endsWith(":/domain/" + domain))
                 .body("configuration.workflowExecutionRetentionPeriodInDays", equalTo("7"));
     }
 
@@ -98,7 +103,7 @@ class SwfIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("__type", equalTo("com.amazon.coral.validate#ValidationException"))
-                .body("message", org.hamcrest.Matchers.containsString(
+                .body("message", Matchers.containsString(
                         "Member must satisfy enum value set: [REGISTERED, DEPRECATED]"));
     }
 
@@ -123,7 +128,7 @@ class SwfIntegrationTest {
                 """)
                 .then()
                 .statusCode(200)
-                .body("domainInfos.name", org.hamcrest.Matchers.not(hasItem(domain)));
+                .body("domainInfos.name", Matchers.not(hasItem(domain)));
 
         // Deprecating twice is an error; undeprecating restores REGISTERED.
         call("DeprecateDomain", """
@@ -520,7 +525,7 @@ class SwfIntegrationTest {
                 """.formatted(domain));
         deferred.then()
                 .statusCode(200)
-                .body("taskToken", org.hamcrest.Matchers.not(equalTo("")))
+                .body("taskToken", Matchers.not(equalTo("")))
                 .body("events.eventType", hasItem("WorkflowExecutionSignaled"));
 
         call("RespondDecisionTaskCompleted", """
@@ -761,7 +766,7 @@ class SwfIntegrationTest {
                 {"domain": "%s", "taskList": {"name": "floci-tl"}, "identity": "d"}
                 """.formatted(domain))
                 .then()
-                .body("taskToken", org.hamcrest.Matchers.not(equalTo("")));
+                .body("taskToken", Matchers.not(equalTo("")));
     }
 
     @Test
@@ -1208,7 +1213,7 @@ class SwfIntegrationTest {
         // Page 2 must not repeat page 1.
         List<String> firstNames = first.path("typeInfos.workflowType.name");
         List<String> secondNames = second.path("typeInfos.workflowType.name");
-        assertTrue(java.util.Collections.disjoint(firstNames, secondNames),
+        assertTrue(Collections.disjoint(firstNames, secondNames),
                 "page 2 repeated page 1: " + firstNames + " / " + secondNames);
 
         // The final page carries no token, even when it is exactly full.
@@ -1469,8 +1474,8 @@ class SwfIntegrationTest {
 
     /** A page-1 continuation token for a task, so a poll resolves that task without claiming. */
     private static String encodedFirstPage(String taskToken) {
-        return java.util.Base64.getEncoder().encodeToString(
-                ("offset=0\ntask=" + taskToken).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return Base64.getEncoder().encodeToString(
+                ("offset=0\ntask=" + taskToken).getBytes(StandardCharsets.UTF_8));
     }
 
     @Test
@@ -1629,7 +1634,7 @@ class SwfIntegrationTest {
                 """.formatted(arn))
                 .then()
                 .statusCode(200)
-                .body("tags.key", org.hamcrest.Matchers.not(hasItem("env")))
+                .body("tags.key", Matchers.not(hasItem("env")))
                 .body("tags.key", hasItem("team"));
     }
 
@@ -1773,8 +1778,8 @@ class SwfIntegrationTest {
                 """.formatted(domain));
         response.then().statusCode(200);
         String token = response.path("taskToken");
-        org.junit.jupiter.api.Assertions.assertNotNull(token, "expected a decision task");
-        org.junit.jupiter.api.Assertions.assertFalse(token.isEmpty(), "expected a decision task");
+        Assertions.assertNotNull(token, "expected a decision task");
+        Assertions.assertFalse(token.isEmpty(), "expected a decision task");
         return token;
     }
 
@@ -1800,7 +1805,7 @@ class SwfIntegrationTest {
                     {"taskToken": "%s", "decisions": []}
                     """.formatted(token)).then().statusCode(200);
         }
-        return org.junit.jupiter.api.Assertions.fail("no decision task for " + workflowId);
+        return Assertions.fail("no decision task for " + workflowId);
     }
 
     private static void drainDecisionTasks(String domain) {

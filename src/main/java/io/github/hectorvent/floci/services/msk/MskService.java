@@ -40,6 +40,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -127,7 +128,7 @@ public class MskService implements ResourceProvider {
 
         String accountId = regionResolver.getAccountId();
         String clusterArn = AwsArnUtils.Arn.of("kafka", regionResolver.getRegion(), accountId,
-                "cluster/" + clusterName + "/" + java.util.UUID.randomUUID()).toString();
+                "cluster/" + clusterName + "/" + UUID.randomUUID()).toString();
 
         String kafkaVersion = request.getKafkaVersion();
         String resolvedKafkaVersion = (kafkaVersion == null || kafkaVersion.isBlank()) ? DEFAULT_KAFKA_VERSION : kafkaVersion;
@@ -291,7 +292,7 @@ public class MskService implements ResourceProvider {
     private void validateEnum(String field, String value, Set<String> allowed) {
         if (value != null && !allowed.contains(value)) {
             throw badRequest(field,
-                    field + " must be one of " + String.join(", ", new java.util.TreeSet<>(allowed)) + ".");
+                    field + " must be one of " + String.join(", ", new TreeSet<>(allowed)) + ".");
         }
     }
 

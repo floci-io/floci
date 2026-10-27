@@ -21,6 +21,8 @@ import software.amazon.awssdk.services.datasync.model.TaskMode;
 import software.amazon.awssdk.services.datasync.model.TaskStatus;
 import software.amazon.awssdk.services.datasync.model.VerifyMode;
 
+import java.util.function.Consumer;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -55,7 +57,7 @@ class DataSyncTest {
         datasync.close();
     }
 
-    private static void deleteQuietly(String kind, String arn, java.util.function.Consumer<String> delete) {
+    private static void deleteQuietly(String kind, String arn, Consumer<String> delete) {
         if (arn == null) {
             return;
         }

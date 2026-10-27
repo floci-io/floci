@@ -33,11 +33,13 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -287,8 +289,8 @@ public class CloudHsmV2Service {
         // Verify TrustAnchor is self-signed and SignedCert is issued by TrustAnchor
         try {
             JcaX509CertificateConverter converter = new JcaX509CertificateConverter();
-            java.security.cert.X509Certificate trustAnchorCert = converter.getCertificate(trustAnchorHolder);
-            java.security.cert.X509Certificate signedCertObj = converter.getCertificate(signedCertHolder);
+            X509Certificate trustAnchorCert = converter.getCertificate(trustAnchorHolder);
+            X509Certificate signedCertObj = converter.getCertificate(signedCertHolder);
 
             if (!trustAnchorHolder.getIssuer().equals(trustAnchorHolder.getSubject())) {
                 throw new AwsException("CloudHsmInvalidRequestException",
@@ -657,9 +659,9 @@ public class CloudHsmV2Service {
         }
 
         if (Boolean.TRUE.equals(sortAscending)) {
-            filtered.sort(java.util.Comparator.comparing(Backup::getCreateTimestamp));
+            filtered.sort(Comparator.comparing(Backup::getCreateTimestamp));
         } else {
-            filtered.sort(java.util.Comparator.comparing(Backup::getCreateTimestamp).reversed());
+            filtered.sort(Comparator.comparing(Backup::getCreateTimestamp).reversed());
         }
 
         return filtered;
@@ -679,7 +681,7 @@ public class CloudHsmV2Service {
             throw new AwsException("CloudHsmInvalidRequestException", "Backup must be in PENDING_DELETION state", 400);
         }
         if (backup.getDeleteTimestamp() != null) {
-            long daysSinceDeletion = java.time.Duration.between(backup.getDeleteTimestamp(), Instant.now()).toDays();
+            long daysSinceDeletion = Duration.between(backup.getDeleteTimestamp(), Instant.now()).toDays();
             if (daysSinceDeletion > 7) {
                 throw new AwsException("CloudHsmInvalidRequestException", "Backup is past the 7-day deletion window", 400);
             }

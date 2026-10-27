@@ -41,6 +41,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class SageMakerTrainingRunner implements ContainerTeardown, Resettable {
@@ -398,7 +399,7 @@ public class SageMakerTrainingRunner implements ContainerTeardown, Resettable {
                         public void onNext(Frame item) {
                             sb.append(new String(item.getPayload(), StandardCharsets.UTF_8));
                         }
-                    }).awaitCompletion(Duration.ofSeconds(2).toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+                    }).awaitCompletion(Duration.ofSeconds(2).toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             LOG.warnv("Interrupted while reading SageMaker training failure log for container {0}: {1}", containerId, e.getMessage());
             Thread.currentThread().interrupt();

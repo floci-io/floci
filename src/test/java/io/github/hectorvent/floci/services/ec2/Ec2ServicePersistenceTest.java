@@ -522,7 +522,7 @@ class Ec2ServicePersistenceTest {
      * versions map at all, i.e. one only ever read via {@code getData()} pre-migration).
      */
     @Test
-    void legacyIamProfileAndInstanceTagsSurviveRestart(@TempDir Path dir) throws java.io.IOException {
+    void legacyIamProfileAndInstanceTagsSurviveRestart(@TempDir Path dir) throws IOException {
         String legacyJson = """
                 {
                   "us-east-1::lt-legacy-versioned": {

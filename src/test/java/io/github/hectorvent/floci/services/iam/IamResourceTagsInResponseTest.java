@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -31,7 +32,7 @@ class IamResourceTagsInResponseTest {
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
 
-    private static io.restassured.specification.RequestSpecification iam(String action) {
+    private static RequestSpecification iam(String action) {
         return given().header("Authorization", IAM_AUTH).formParam("Action", action);
     }
 

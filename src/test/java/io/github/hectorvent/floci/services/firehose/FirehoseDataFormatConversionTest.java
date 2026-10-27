@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.firehose;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -21,6 +23,7 @@ import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescript
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.SchemaConfiguration;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Serializer;
+import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.MutableClock;
@@ -29,6 +32,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -375,11 +379,10 @@ class FirehoseDataFormatConversionTest {
         DeliveryStreamDescription.Destination destination =
                 service.describeDeliveryStream("stream").getDestinations().get(0);
 
-        com.fasterxml.jackson.databind.ObjectMapper mapper =
-                new com.fasterxml.jackson.databind.ObjectMapper();
+        ObjectMapper mapper = new ObjectMapper();
         for (Object rendered : List.of(destination.getExtendedS3DestinationDescription(),
                 destination.getS3DestinationDescription())) {
-            com.fasterxml.jackson.databind.JsonNode json = mapper.valueToTree(rendered);
+            JsonNode json = mapper.valueToTree(rendered);
             json.fieldNames().forEachRemaining(name -> assertTrue(Character.isUpperCase(name.charAt(0)),
                     "unexpected non-AWS member rendered: " + name + " in " + json));
         }
@@ -559,7 +562,7 @@ class FirehoseDataFormatConversionTest {
     void conversionOfATransformingStreamConvertsWhatTheTransformReturned() {
         Mockito.when(lambdaTransformer.transform(any(), anyString(), any(), any()))
                 .thenReturn(new FirehoseLambdaTransformer.Outcome(
-                        List.of("{\"ticker\": \"BBB\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                        List.of("{\"ticker\": \"BBB\"}".getBytes(StandardCharsets.UTF_8)),
                         0, 0, null));
         Mockito.when(parquetConverter.deliver(any(), anyString(), any(), any()))
                 .thenReturn(new FirehoseParquetConverter.Outcome(1, 0, "data/key.parquet", null));
@@ -573,7 +576,7 @@ class FirehoseDataFormatConversionTest {
         Mockito.verify(parquetConverter).deliver(any(), Mockito.eq("results"), converted.capture(), any());
         assertEquals(1, converted.getValue().size());
         assertEquals("{\"ticker\": \"BBB\"}",
-                new String(converted.getValue().get(0), java.nio.charset.StandardCharsets.UTF_8));
+                new String(converted.getValue().get(0), StandardCharsets.UTF_8));
     }
 
     @Test
@@ -601,10 +604,9 @@ class FirehoseDataFormatConversionTest {
         return processing;
     }
 
-    private static io.github.hectorvent.floci.services.firehose.model.Record record(String json) {
-        io.github.hectorvent.floci.services.firehose.model.Record record =
-                new io.github.hectorvent.floci.services.firehose.model.Record();
-        record.setData(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    private static Record record(String json) {
+        Record record = new Record();
+        record.setData(json.getBytes(StandardCharsets.UTF_8));
         return record;
     }
 

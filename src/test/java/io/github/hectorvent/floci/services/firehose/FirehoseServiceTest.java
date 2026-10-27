@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.firehose;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -17,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
@@ -776,6 +779,83 @@ class FirehoseServiceTest {
         kinesisService.createStream(sourceStream, 1, "us-east-1");
         firehoseService.createDeliveryStream(deliveryStream, destination("arn:aws:s3:::sink", null),
                 java.util.List.of(), "KinesisStreamAsSource", kinesisSource(sourceStream));
+    }
+
+    private void closeSourceParent() {
+        kinesisService.splitShard("src-stream", "shardId-000000000000", "100", "us-east-1");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 501})
+    void terminalSourceBatchDoesNotReplayBeforeOrAfterFlushAndRecreation(int count) {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        for (int i = 0; i < count; i++) {
+            kinesisService.putRecord("src-stream", "terminal".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        }
+        closeSourceParent();
+        firehoseService.pollKinesisSources();
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        firehoseService = newService(0);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        assertEquals("terminal\n".repeat(count), delivered("sink").text());
+    }
+
+    @Test
+    void terminalSourceBatchIsRereadWhenServiceIsRecreatedBeforeFlush() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "terminal".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        closeSourceParent();
+        firehoseService.pollKinesisSources();
+        verifyNothingDelivered();
+        firehoseService = newService(0);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        assertEquals("terminal\n", delivered("sink").text());
+    }
+
+    @Test
+    void failedTerminalFlushKeepsPendingBatchWithoutCommittingOrDuplicating() {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "terminal".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        closeSourceParent();
+        when(s3Service.putObject(anyString(), anyString(), any(byte[].class), anyString(),
+                anyMap(), any(PutObjectOptions.class))).thenThrow(new RuntimeException("s3 unavailable"));
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        assertTrue(backends.get("firehose/source-iterators.json").scan(key -> true).isEmpty());
+        Mockito.reset(s3Service);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        assertEquals("terminal\n", delivered("sink").text());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void committedTerminalCursorSurvivesSerializationRoundTrip() throws Exception {
+        createSourcedDeliveryStream("sourced-stream", "src-stream");
+        kinesisService.putRecord("src-stream", "terminal".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
+        closeSourceParent();
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        AccountAwareStorageBackend<Map<String, String>> cursors =
+                (AccountAwareStorageBackend<Map<String, String>>) backends.get("firehose/source-iterators.json");
+        ObjectMapper mapper = new ObjectMapper();
+        for (String key : cursors.keys()) {
+            Map<String, String> restored = mapper.readValue(mapper.writeValueAsBytes(cursors.get(key).orElseThrow()),
+                    new TypeReference<Map<String, String>>() {});
+            cursors.put(key, restored);
+        }
+        assertFalse(cursors.keys().isEmpty());
+        firehoseService = newService(0);
+        firehoseService.pollKinesisSources();
+        firehoseService.flush("sourced-stream");
+        assertEquals("terminal\n", delivered("sink").text());
     }
 
     @Test

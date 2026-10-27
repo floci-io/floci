@@ -879,7 +879,8 @@ public class CloudWatchMetricsQueryHandler {
         xml.elem("StateValue", a.getStateValue())
                 .elem("StateReason", a.getStateReason())
                 .elem("StateReasonData", a.getStateReasonData())
-                .elem("StateUpdatedTimestamp", Instant.ofEpochSecond(a.getStateUpdatedTimestamp()).toString());
+                .elem("StateUpdatedTimestamp", Instant.ofEpochSecond(a.getStateUpdatedTimestamp()).toString())
+                .elem("StateTransitionedTimestamp", Instant.ofEpochSecond(a.lastTransitionTimestamp()).toString());
     }
 
     private void toAlarmMetricsXml(XmlBuilder xml, List<AlarmMetricDataQuery> metrics) {

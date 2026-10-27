@@ -12,6 +12,7 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 
 import java.util.Optional;
+import java.util.UUID;
 
 @Provider
 public class ServiceEnabledFilter implements ContainerRequestFilter {
@@ -112,7 +113,7 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
                     .elem("Code", "ServiceNotAvailableException")
                     .elem("Message", message)
                   .end("Error")
-                  .elem("RequestId", java.util.UUID.randomUUID().toString())
+                  .elem("RequestId", UUID.randomUUID().toString())
                 .end("ErrorResponse")
                 .build();
         return Response.status(400).entity(xml).type(MediaType.APPLICATION_XML).build();

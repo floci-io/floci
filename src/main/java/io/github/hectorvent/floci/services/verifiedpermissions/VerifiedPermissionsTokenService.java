@@ -9,10 +9,12 @@ import io.github.hectorvent.floci.services.verifiedpermissions.model.IdentitySou
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -152,7 +154,7 @@ public class VerifiedPermissionsTokenService {
     }
 
     private List<EntityIdentifier> mergeParents(TokenInfo identity, TokenInfo access) {
-        java.util.LinkedHashSet<EntityIdentifier> parents = new java.util.LinkedHashSet<>();
+        LinkedHashSet<EntityIdentifier> parents = new LinkedHashSet<>();
         if (identity != null) {
             parents.addAll(identity.parents());
         }
@@ -178,7 +180,7 @@ public class VerifiedPermissionsTokenService {
             } else {
                 throw VerifiedPermissionsService.validation("context must contain cedarJson or contextMap.");
             }
-        } catch (java.io.IOException e) {
+        } catch (IOException e) {
             throw VerifiedPermissionsService.validation("context.cedarJson isn't valid JSON.");
         }
         ObjectNode token = root.putObject("token");
@@ -227,7 +229,7 @@ public class VerifiedPermissionsTokenService {
                 throw VerifiedPermissionsService.validation("Token claims aren't a JSON object.");
             }
             return claims;
-        } catch (IllegalArgumentException | java.io.IOException e) {
+        } catch (IllegalArgumentException | IOException e) {
             throw VerifiedPermissionsService.validation("Token payload isn't valid base64url JSON.");
         }
     }

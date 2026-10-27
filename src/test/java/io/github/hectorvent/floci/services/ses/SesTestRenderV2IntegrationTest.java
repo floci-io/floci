@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -59,10 +60,10 @@ class SesTestRenderV2IntegrationTest {
             .statusCode(200)
             .extract().path("RenderedTemplate");
 
-        org.junit.jupiter.api.Assertions.assertNotNull(rendered);
-        org.junit.jupiter.api.Assertions.assertTrue(rendered.contains("Subject: Hello Alice"));
-        org.junit.jupiter.api.Assertions.assertTrue(rendered.contains("Hi Alice, team floci!"));
-        org.junit.jupiter.api.Assertions.assertTrue(rendered.contains("multipart/alternative"));
+        Assertions.assertNotNull(rendered);
+        Assertions.assertTrue(rendered.contains("Subject: Hello Alice"));
+        Assertions.assertTrue(rendered.contains("Hi Alice, team floci!"));
+        Assertions.assertTrue(rendered.contains("multipart/alternative"));
     }
 
     @Test
@@ -169,7 +170,7 @@ class SesTestRenderV2IntegrationTest {
             .extract().path("RenderedTemplate");
 
         // RFC 1123 with UTC ends with "GMT"; non-UTC zones would render numeric offsets
-        org.junit.jupiter.api.Assertions.assertTrue(
+        Assertions.assertTrue(
                 rendered.contains("Date: ") && rendered.split("\r\n", 2)[0].endsWith("GMT"),
                 "expected Date header in UTC/GMT form, got: " + rendered.split("\r\n", 2)[0]);
     }
@@ -206,8 +207,8 @@ class SesTestRenderV2IntegrationTest {
             .statusCode(200)
             .extract().path("RenderedTemplate");
 
-        org.junit.jupiter.api.Assertions.assertTrue(rendered.contains("Subject: 件名 太郎"));
-        org.junit.jupiter.api.Assertions.assertTrue(rendered.contains("Content-Transfer-Encoding: 8bit"));
-        org.junit.jupiter.api.Assertions.assertTrue(rendered.contains("こんにちは 太郎 さん"));
+        Assertions.assertTrue(rendered.contains("Subject: 件名 太郎"));
+        Assertions.assertTrue(rendered.contains("Content-Transfer-Encoding: 8bit"));
+        Assertions.assertTrue(rendered.contains("こんにちは 太郎 さん"));
     }
 }

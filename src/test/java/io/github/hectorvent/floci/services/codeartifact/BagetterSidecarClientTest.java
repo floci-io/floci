@@ -15,6 +15,7 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -332,7 +333,7 @@ class BagetterSidecarClientTest {
 
     private void respondWithVersions(String packageName, String... versions) {
         String json = "{\"versions\":[" + String.join(",",
-                java.util.Arrays.stream(versions).map(v -> "\"" + v + "\"").toArray(String[]::new)) + "]}";
+                Arrays.stream(versions).map(v -> "\"" + v + "\"").toArray(String[]::new)) + "]}";
         backend.createContext("/v3/package/" + packageName + "/index.json", exchange -> {
             byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");

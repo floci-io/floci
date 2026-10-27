@@ -213,12 +213,12 @@ class ApiGatewayV2CfnProvisionerTest {
         previous.setLogicalId("Subnet");
         previous.setResourceType("AWS::EC2::Subnet");
         previous.setPhysicalId("subnet-prior");
-        previous.setAttributes(new java.util.HashMap<>());
+        previous.setAttributes(new HashMap<>());
         StackResource attempted = new StackResource();
         attempted.setLogicalId("Subnet");
         attempted.setResourceType("AWS::EC2::Subnet");
         attempted.setPhysicalId("subnet-replacement");
-        attempted.setAttributes(new java.util.HashMap<>(Map.of(
+        attempted.setAttributes(new HashMap<>(Map.of(
                 "__FlociReplacementCleanup",
                 "{\"region\":\"us-east-1\",\"displaced\":[{\"physicalId\":\"subnet-replacement\",\"resourceType\":\"AWS::EC2::Subnet\",\"region\":\"us-east-1\",\"retainable\":false,\"cleanupAttempts\":1}]}")));
 

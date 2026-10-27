@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -17,12 +18,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatcher;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -59,9 +63,9 @@ class Route53CfnProvisionerTest {
         JsonNode props = mapper.createObjectNode()
                 .put("Name", "ssm.us-east-1.amazonaws.com")
                 .set("HostedZoneConfig", mapper.createObjectNode().put("Comment", "central endpoint zone"));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1")));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
+        ((ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("Key", "Accelerator").put("Value", "AWSAccelerator")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -81,7 +85,7 @@ class Route53CfnProvisionerTest {
                 eq("central endpoint zone"), argThat(sameVpc(vpc)));
         verify(service, never()).associateVpcWithHostedZone(any(), any(), any());
         verify(service).changeTagsForResource("hostedzone", "Z123456789",
-                List.of(java.util.Map.of("Key", "Accelerator", "Value", "AWSAccelerator")), List.of());
+                List.of(Map.of("Key", "Accelerator", "Value", "AWSAccelerator")), List.of());
     }
 
     @Test
@@ -98,7 +102,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1"))
                 .add(mapper.createObjectNode().put("VPCId", "vpc-456").put("VPCRegion", "us-west-2")));
 
@@ -132,7 +136,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1"))
                 .add(mapper.createObjectNode().put("VPCId", "vpc-456").put("VPCRegion", "us-west-2")));
 
@@ -153,9 +157,9 @@ class Route53CfnProvisionerTest {
                         + "follow-up VPC association fails, so CREATE_FAILED cleanup still deletes it");
     }
 
-    private static org.mockito.ArgumentMatcher<VpcAssociation> sameVpc(VpcAssociation expected) {
+    private static ArgumentMatcher<VpcAssociation> sameVpc(VpcAssociation expected) {
         if (expected == null) {
-            return java.util.Objects::isNull;
+            return Objects::isNull;
         }
         return actual -> actual != null
                 && expected.getVpcId().equals(actual.getVpcId())
@@ -205,7 +209,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -229,7 +233,7 @@ class Route53CfnProvisionerTest {
         Route53Service service = mock(Route53Service.class);
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -250,7 +254,7 @@ class Route53CfnProvisionerTest {
         Route53Service service = mock(Route53Service.class);
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "   ")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -278,9 +282,9 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1")));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
+        ((ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("Key", "").put("Value", "blank-key-should-be-skipped"))
                 .add(mapper.createObjectNode().put("Key", "Accelerator").put("Value", "AWSAccelerator")));
 
@@ -295,7 +299,7 @@ class Route53CfnProvisionerTest {
         new Route53CfnProvisioner(service).provision(resource, props, context);
 
         verify(service).changeTagsForResource("hostedzone", "Z123456789",
-                List.of(java.util.Map.of("Key", "Accelerator", "Value", "AWSAccelerator")), List.of());
+                List.of(Map.of("Key", "Accelerator", "Value", "AWSAccelerator")), List.of());
     }
 
     @Test
@@ -323,7 +327,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1"))
                 .add(mapper.createObjectNode().put("VPCId", "vpc-456").put("VPCRegion", "us-west-2")));
 
@@ -358,12 +362,12 @@ class Route53CfnProvisionerTest {
                 eq(null), eq(null))).thenReturn(new Route53Service.CreateZoneResult(zone, null));
         when(service.getNameServers()).thenReturn(List.of("ns-1.example", "ns-2.example"));
         RuntimeException tagFailure = new AwsException("ServiceUnavailable", "throttled", 503);
-        org.mockito.Mockito.doThrow(tagFailure).when(service)
+        Mockito.doThrow(tagFailure).when(service)
                 .changeTagsForResource(eq("hostedzone"), eq("Z987654321"), any(), any());
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
+        ((ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("Key", "Accelerator").put("Value", "AWSAccelerator")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -395,7 +399,7 @@ class Route53CfnProvisionerTest {
                 .put("Name", "www.example.com")
                 .put("Type", "A")
                 .put("TTL", "300");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("ResourceRecords",
+        ((ObjectNode) props).set("ResourceRecords",
                 mapper.createArrayNode().add("10.0.0.1"));
         CloudFormationTemplateEngine engine = recordEngine();
         ProvisionContext context = new ProvisionContext(engine, "us-east-1", "623666680275", "dns-stack");
@@ -1451,7 +1455,7 @@ class Route53CfnProvisionerTest {
         when(service.getHealthCheck("hc-1")).thenReturn(prior);
         when(service.updateHealthCheck(eq("hc-1"), any())).thenReturn(prior);
         when(service.listTagsForResource("healthcheck", "hc-1")).thenReturn(Map.of());
-        org.mockito.Mockito.doThrow(new AwsException("Throttling", "slow down", 400)).doNothing()
+        Mockito.doThrow(new AwsException("Throttling", "slow down", 400)).doNothing()
                 .when(service).changeTagsForResource(eq("healthcheck"), eq("hc-1"), any(), any());
         StackResource resource = existingCheck();
         JsonNode props = new ObjectMapper().readTree("""
@@ -1470,7 +1474,7 @@ class Route53CfnProvisionerTest {
         Route53Service service = mock(Route53Service.class);
         when(service.createHealthCheck(any(), any(), any()))
                 .thenAnswer(inv -> new HealthCheck("hc-1", inv.getArgument(0), inv.getArgument(1), inv.getArgument(2)));
-        org.mockito.Mockito.doThrow(new AwsException("Throttling", "slow down", 400))
+        Mockito.doThrow(new AwsException("Throttling", "slow down", 400))
                 .when(service).changeTagsForResource(any(), any(), any(), any());
         JsonNode props = new ObjectMapper().readTree("""
                 {"HealthCheckConfig": {"Type": "TCP", "IPAddress": "10.0.0.5", "Port": 22},
@@ -1559,7 +1563,7 @@ class Route53CfnProvisionerTest {
     @Test
     void deletingAHealthCheckAlreadyGoneIsTolerated() {
         Route53Service service = mock(Route53Service.class);
-        org.mockito.Mockito.doThrow(new AwsException("NoSuchHealthCheck", "gone", 404))
+        Mockito.doThrow(new AwsException("NoSuchHealthCheck", "gone", 404))
                 .when(service).deleteHealthCheck("hc-1");
         StackResource resource = new StackResource();
         resource.setLogicalId("Check");

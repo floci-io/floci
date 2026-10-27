@@ -6,6 +6,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -261,7 +262,7 @@ class ElbV2LambdaTargetDataPlaneIntegrationTest {
                 .get("/response-at-limit")
             .then()
                 .statusCode(200)
-                .body(org.hamcrest.Matchers.hasLength(1024 * 1024));
+                .body(Matchers.hasLength(1024 * 1024));
     }
 
     @Test

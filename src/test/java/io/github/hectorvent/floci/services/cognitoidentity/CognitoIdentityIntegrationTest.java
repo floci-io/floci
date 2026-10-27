@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cognitoidentity;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -39,7 +40,7 @@ class CognitoIdentityIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    private static io.restassured.specification.RequestSpecification action(String name) {
+    private static RequestSpecification action(String name) {
         return given()
                 .header("X-Amz-Target", TARGET + "." + name)
                 .contentType(CONTENT_TYPE);

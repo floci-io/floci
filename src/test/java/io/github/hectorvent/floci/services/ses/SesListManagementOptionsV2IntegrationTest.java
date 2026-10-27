@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ses;
 
 import io.github.hectorvent.floci.testutil.SesMailbox;
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -189,12 +190,12 @@ class SesListManagementOptionsV2IntegrationTest {
                 .queryParam("region", "us-west-2").queryParam("contactList", LIST)
                 .queryParam("topic", "Sports").queryParam("address", recipient)
         .when().get("/_aws/ses/unsubscribe").then().statusCode(200)
-                .body(org.hamcrest.Matchers.containsString("<form method=\"post\""))
-                .body(org.hamcrest.Matchers.containsString("Unsubscribe"))
+                .body(Matchers.containsString("<form method=\"post\""))
+                .body(Matchers.containsString("Unsubscribe"))
                 // The form action escapes '&' as '&amp;' for valid HTML, and carries the RFC 8058
                 // one-click parameter so its POST body matches the advertised header.
-                .body(org.hamcrest.Matchers.containsString("&amp;contactList="))
-                .body(org.hamcrest.Matchers.containsString(
+                .body(Matchers.containsString("&amp;contactList="))
+                .body(Matchers.containsString(
                         "<input type=\"hidden\" name=\"List-Unsubscribe\" value=\"One-Click\">"));
 
         given().header("Authorization", AUTH)
@@ -247,9 +248,9 @@ class SesListManagementOptionsV2IntegrationTest {
                     """.formatted(FROM))
         .when().post("/v2/email/outbound-emails").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
-                .body("message", org.hamcrest.Matchers.containsString(
+                .body("message", Matchers.containsString(
                         "content.simple.headers.1.member.value"))
-                .body("message", org.hamcrest.Matchers.containsString("Member must not be null"));
+                .body("message", Matchers.containsString("Member must not be null"));
     }
 
     @Test
@@ -266,9 +267,9 @@ class SesListManagementOptionsV2IntegrationTest {
                     """.formatted(FROM))
         .when().post("/v2/email/outbound-emails").then().statusCode(400)
                 .body("__type", equalTo("BadRequestException"))
-                .body("message", org.hamcrest.Matchers.containsString(
+                .body("message", Matchers.containsString(
                         "content.simple.headers.1.member.name"))
-                .body("message", org.hamcrest.Matchers.containsString("Member must not be null"));
+                .body("message", Matchers.containsString("Member must not be null"));
     }
 
     @Test

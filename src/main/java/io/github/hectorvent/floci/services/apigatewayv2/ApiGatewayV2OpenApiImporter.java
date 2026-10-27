@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
+import io.swagger.parser.OpenAPIParser;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
@@ -20,10 +21,13 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.BiConsumer;
+import java.util.stream.Collectors;
 
 /**
  * OpenAPI import for HTTP APIs (ImportApi / ReimportApi).
@@ -161,7 +165,7 @@ public class ApiGatewayV2OpenApiImporter {
                     "Invalid basepath '" + basePathMode + "'; valid values are ignore, prepend and split", 400);
         }
 
-        SwaggerParseResult result = new io.swagger.parser.OpenAPIParser().readContents(specBody, null, null);
+        SwaggerParseResult result = new OpenAPIParser().readContents(specBody, null, null);
         if (result.getOpenAPI() == null) {
             String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
             throw new AwsException("BadRequestException", "Failed to parse OpenAPI spec: " + errors, 400);
@@ -201,7 +205,7 @@ public class ApiGatewayV2OpenApiImporter {
         Map<String, String> bindable = new LinkedHashMap<>();
         specs.forEach(spec -> bindable.put(spec.schemeName(), spec.authorizationType()));
 
-        java.util.Set<String> reported = new java.util.LinkedHashSet<>();
+        Set<String> reported = new LinkedHashSet<>();
         BiConsumer<String, List<SecurityRequirement>> check = (routeKey, security) -> {
             if (security == null || security.isEmpty()) {
                 return;
@@ -213,7 +217,7 @@ public class ApiGatewayV2OpenApiImporter {
                 String names = security.stream()
                         .flatMap(requirement -> requirement.keySet().stream())
                         .distinct()
-                        .collect(java.util.stream.Collectors.joining(", "));
+                        .collect(Collectors.joining(", "));
                 reported.add("Security requirement (" + names + ") on " + routeKey
                         + " does not resolve to a supported authorizer; the route is imported as NONE"
                         + " and will accept unauthenticated requests");

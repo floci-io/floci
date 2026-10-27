@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.eks;
 import com.github.dockerjava.api.DockerClient;
 import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -123,8 +125,8 @@ class EksIrsaDockerIntegrationTest {
         cluster.setRoleArn("arn:aws:iam::" + ACCOUNT + ":role/eks-service-role");
 
         String issuer = oidcService.newIssuerUrl("us-east-1");
-        cluster.setIdentity(new io.github.hectorvent.floci.services.eks.model.ClusterIdentity(
-                new io.github.hectorvent.floci.services.eks.model.OidcIdentity(issuer)));
+        cluster.setIdentity(new ClusterIdentity(
+                new OidcIdentity(issuer)));
         oidcService.ensureKeyForAccount(ACCOUNT, clusterName, issuer);
 
         eksClusterManager.startCluster(cluster);

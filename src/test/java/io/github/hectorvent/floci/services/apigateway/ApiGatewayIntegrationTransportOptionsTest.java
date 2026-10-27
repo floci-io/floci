@@ -21,6 +21,7 @@ import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -39,6 +40,7 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
@@ -302,7 +304,7 @@ class ApiGatewayIntegrationTransportOptionsTest {
     }
 
     /** A CA certificate, self-signed when {@code issuerDn} is its own subject. */
-    private static X509Certificate buildCa(X500Name subjectDn, java.security.PublicKey subjectKey,
+    private static X509Certificate buildCa(X500Name subjectDn, PublicKey subjectKey,
                                            X500Name issuerDn, PrivateKey issuerKey, Integer keyUsageBits,
                                            NameConstraints nameConstraints, Instant now) throws Exception {
         JcaX509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
@@ -545,7 +547,7 @@ class ApiGatewayIntegrationTransportOptionsTest {
 
         given().when().get("/execute-api/" + apiId + "/test/thing")
                 .then().statusCode(200)
-                .body("tls", org.hamcrest.Matchers.equalTo("ok"));
+                .body("tls", Matchers.equalTo("ok"));
     }
 
     @Test
@@ -586,7 +588,7 @@ class ApiGatewayIntegrationTransportOptionsTest {
         // correct, so it has to be accepted.
         given().when().get("/execute-api/" + apiId + "/test/thing")
                 .then().statusCode(200)
-                .body("tls", org.hamcrest.Matchers.equalTo("ok"));
+                .body("tls", Matchers.equalTo("ok"));
     }
 
     @Test
@@ -643,7 +645,7 @@ class ApiGatewayIntegrationTransportOptionsTest {
         // than by the constraint it names.
         given().when().get("/execute-api/" + apiId + "/test/thing")
                 .then().statusCode(200)
-                .body("tls", org.hamcrest.Matchers.equalTo("ok"));
+                .body("tls", Matchers.equalTo("ok"));
     }
 
     @Test

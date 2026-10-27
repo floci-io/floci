@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.iam;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -16,6 +19,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * End-to-end proof of the scenario in issue #2926: one session scoped by
@@ -30,6 +34,83 @@ class DynamoDbFgacEnforcementIntegrationTest {
     private static final String CALLER_ACCOUNT_ID = "111122223333";
     private static final String ROLE_ACCOUNT_ID = "222233334444";
     private static final String REGION = "us-east-1";
+
+    @ParameterizedTest
+    @CsvSource({"Query,false", "Scan,false", "Query,true", "Scan,true"})
+    void defaultSelectionCannotBypassSpecificAttributesPolicy(String action, boolean index) {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String tableName = "fgac-select-" + suffix;
+        String roleName = "FgacSelect" + suffix;
+        createTableWithGsi(tableName, "by-value");
+        putItemWithGsiKey(tableName, "USER_alice", "group");
+        createRole(roleName);
+        putBroadDynamoDbRolePolicy(roleName);
+        String accessKey = assumeRoleWithSessionPolicy(roleName, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["dynamodb:Query","dynamodb:Scan"],"Resource":"*",
+                   "Condition":{"StringEqualsIfExists":{"dynamodb:Select":"SPECIFIC_ATTRIBUTES"}}}]}
+                """);
+        String key = index ? "GSI_PK" : "PK";
+        String value = index ? "group" : "USER_alice";
+        String indexMember = index ? ",\"IndexName\":\"by-value\"" : "";
+        String keyMember = "Query".equals(action) ? """
+                ,"KeyConditions":{"%s":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"%s"}]}}
+                """.formatted(key, value) : "";
+        String body = "{\"TableName\":\"" + tableName + "\"" + indexMember + keyMember;
+        given().header("Authorization", auth(accessKey, "dynamodb"))
+                .header("X-Amz-Target", "DynamoDB_20120810." + action).contentType(DYNAMODB_CONTENT_TYPE)
+                .body(body + "}").post("/").then().statusCode(400).body(containsString("AccessDeniedException"));
+        given().header("Authorization", auth(accessKey, "dynamodb"))
+                .header("X-Amz-Target", "DynamoDB_20120810." + action).contentType(DYNAMODB_CONTENT_TYPE)
+                .body(body + ",\"ProjectionExpression\":\"PK\"}").post("/").then().statusCode(200)
+                .body("Count", equalTo(1));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"json", "cbor", "legacy"})
+    void defaultSelectionIsAvailableToExplicitAllowPoliciesAcrossProtocols(String protocol) throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String tableName = "fgac-select-wire-" + suffix;
+        String roleName = "FgacSelectWire" + suffix;
+        given().header("Authorization", auth(ROLE_ACCOUNT_ID, "dynamodb"))
+                .header("X-Amz-Target", "DynamoDB_20120810.CreateTable").contentType(DYNAMODB_CONTENT_TYPE)
+                .body("""
+                        {"TableName":"%s","KeySchema":[{"AttributeName":"PK","KeyType":"HASH"},
+                          {"AttributeName":"SK","KeyType":"RANGE"}],
+                         "AttributeDefinitions":[{"AttributeName":"PK","AttributeType":"S"},
+                          {"AttributeName":"SK","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+                        """.formatted(tableName)).post("/").then().statusCode(200);
+        createRole(roleName);
+        putBroadDynamoDbRolePolicy(roleName);
+        String accessKey = assumeRoleWithSessionPolicy(roleName, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"dynamodb:Query","Resource":"*",
+                   "Condition":{"StringEquals":{"dynamodb:Select":"ALL_ATTRIBUTES"}}}]}
+                """);
+        String body = "legacy".equals(protocol)
+                ? """
+                  {"TableName":"%s","HashKeyValue":{"S":"USER_alice"}}
+                  """.formatted(tableName)
+                : """
+                  {"TableName":"%s","KeyConditions":{"PK":{
+                    "ComparisonOperator":"EQ","AttributeValueList":[{"S":"USER_alice"}]}}}
+                  """.formatted(tableName);
+        if ("cbor".equals(protocol)) {
+            ObjectMapper cbor = new ObjectMapper(new CBORFactory());
+            JsonNode request = new ObjectMapper().readTree(body);
+            byte[] result = given().header("Authorization", auth(accessKey, "dynamodb"))
+                    .contentType("application/cbor").accept("application/cbor")
+                    .body(cbor.writeValueAsBytes(request)).post("/service/DynamoDB_20120810/operation/Query")
+                    .then().statusCode(200).extract().asByteArray();
+            assertEquals(0, cbor.readTree(result).path("Count").asInt());
+        } else {
+            given().header("Authorization", auth(accessKey, "dynamodb"))
+                    .header("X-Amz-Target", "legacy".equals(protocol)
+                            ? "DynamoDB_20111205.Query" : "DynamoDB_20120810.Query")
+                    .contentType(DYNAMODB_CONTENT_TYPE).body(body).post("/").then().statusCode(200)
+                    .body("Count", equalTo(0));
+        }
+    }
 
     @BeforeAll
     static void configureRestAssured() {

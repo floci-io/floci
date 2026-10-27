@@ -33,6 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -740,7 +741,7 @@ public class VerifiedPermissionsService implements Resettable {
     private String requestFingerprint(JsonNode request) {
         JsonNode copy = request.deepCopy();
         if (copy.isObject()) {
-            ((com.fasterxml.jackson.databind.node.ObjectNode) copy).remove("clientToken");
+            ((ObjectNode) copy).remove("clientToken");
         }
         try {
             return canonical(copy);
@@ -751,7 +752,7 @@ public class VerifiedPermissionsService implements Resettable {
 
     private String canonical(JsonNode node) throws JsonProcessingException {
         if (node.isObject()) {
-            java.util.TreeMap<String, JsonNode> sorted = new java.util.TreeMap<>();
+            TreeMap<String, JsonNode> sorted = new TreeMap<>();
             node.fields().forEachRemaining(e -> sorted.put(e.getKey(), e.getValue()));
             StringBuilder b = new StringBuilder("{");
             boolean first = true;
@@ -1077,7 +1078,7 @@ public class VerifiedPermissionsService implements Resettable {
             if (node == null || !node.isObject()) {
                 throw validation("The Cedar schema must be a JSON object.");
             }
-        } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+        } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
             throw validation("The Cedar schema is invalid: " + safeMessage(e));

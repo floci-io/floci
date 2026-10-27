@@ -166,7 +166,7 @@ public class ApiGatewayController {
         // Headers
         ObjectNode headersNode = event.putObject("headers");
         MultivaluedMap<String, String> reqHeaders = headers.getRequestHeaders();
-        for (Map.Entry<String, java.util.List<String>> entry : reqHeaders.entrySet()) {
+        for (Map.Entry<String, List<String>> entry : reqHeaders.entrySet()) {
             if (!entry.getValue().isEmpty()) {
                 headersNode.put(entry.getKey(), entry.getValue().get(0));
             }
@@ -176,7 +176,7 @@ public class ApiGatewayController {
         MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
         if (!queryParams.isEmpty()) {
             ObjectNode qspNode = event.putObject("queryStringParameters");
-            for (Map.Entry<String, java.util.List<String>> entry : queryParams.entrySet()) {
+            for (Map.Entry<String, List<String>> entry : queryParams.entrySet()) {
                 if (!entry.getValue().isEmpty()) {
                     qspNode.put(entry.getKey(), entry.getValue().get(0));
                 }

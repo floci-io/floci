@@ -2076,7 +2076,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    private void validatePrefixListEntry(PrefixListEntry entry, String addressFamily) {
+    /** Validates an entry before a consumer computes or applies a prefix-list update. */
+    public void validatePrefixListEntry(PrefixListEntry entry, String addressFamily) {
         if (entry.getCidr() == null || entry.getCidr().isBlank()) {
             throw new AwsException("MissingParameter", "Every prefix list entry must specify a Cidr.", 400);
         }

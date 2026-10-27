@@ -7,9 +7,11 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.redshift.model.EventSubscription;
 import io.github.hectorvent.floci.services.redshift.model.RedshiftEvent;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -61,6 +63,7 @@ class RedshiftEventServiceTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private SnsService sns;
+    private ServiceCallAuthorizer authorizer;
     private MutableClock clock;
     private RedshiftEventService service;
     private StorageFactory factory;
@@ -200,7 +203,7 @@ class RedshiftEventServiceTest {
         AtomicReference<String> region = new AtomicReference<>("us-east-1");
         RegionResolver resolver = mock(RegionResolver.class);
         when(resolver.getRegion()).thenAnswer(invocation -> region.get());
-        RedshiftEventService alternating = new RedshiftEventService(factory, sns, resolver, objectMapper, clock);
+        RedshiftEventService alternating = new RedshiftEventService(factory, sns, authorizer, resolver, objectMapper, clock);
         for (int index = 0; index < 200; index++) {
             region.set(index % 2 == 0 ? "us-east-1" : "us-west-2");
             alternating.record(RedshiftEventCatalog.CLUSTER_CREATED, "warehouse", "created");
@@ -222,7 +225,11 @@ class RedshiftEventServiceTest {
         factory = new StorageFactory(config, access);
         sns = mock(SnsService.class);
         clock = new MutableClock(Instant.parse("2026-10-26T12:00:00Z"));
-        service = new RedshiftEventService(factory, sns, new RegionResolver("us-east-1", "000000000000"),
+        when(sns.topicExists(anyString(), anyString())).thenReturn(true);
+        authorizer = mock(ServiceCallAuthorizer.class);
+        when(authorizer.authorize(anyString(), anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(Decision.ALLOW);
+        service = new RedshiftEventService(factory, sns, authorizer, new RegionResolver("us-east-1", "000000000000"),
                 objectMapper, clock);
     }
 
@@ -440,6 +447,77 @@ class RedshiftEventServiceTest {
     }
 
     @Test
+    void anEventIsPublishedToTheTopicItWasMatchedAgainstWhenTheSubscriptionChangesMidDelivery() throws Exception {
+        create("watcher", "cluster", List.of(), List.of(), null);
+        String replacementTopic = "arn:aws:sns:us-east-1:000000000000:replacement";
+        CountDownLatch delivering = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(sns.topicExists(anyString(), anyString())).thenAnswer(invocation -> {
+            delivering.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS), "Delivery was not released");
+            return true;
+        });
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<?> recording = executor.submit(() ->
+                    service.record(RedshiftEventCatalog.CLUSTER_CREATED, "warehouse", "created"));
+            try {
+                assertTrue(delivering.await(5, TimeUnit.SECONDS), "Delivery did not start");
+                service.modifySubscription("watcher", replacementTopic, "cluster-snapshot", null, null, null, null,
+                        ALL_SOURCES_EXIST);
+            } finally {
+                release.countDown();
+            }
+            recording.get(5, TimeUnit.SECONDS);
+        }
+
+        verify(sns).publish(eq(TOPIC), any(), anyString(), anyString(), anyString());
+        verify(sns, never()).publish(eq(replacementTopic), any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void theTopicPolicyIsCheckedForRedshiftBeforeEachPublish() {
+        create("watcher", null, List.of(), List.of(), null);
+
+        service.record(RedshiftEventCatalog.CLUSTER_CREATED, "warehouse", "created");
+
+        verify(authorizer).authorize("redshift", "sns:Publish", TOPIC,
+                "arn:aws:redshift:us-east-1:000000000000:eventsubscription:watcher", "000000000000");
+        verify(sns).publish(eq(TOPIC), any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void aMissingTopicIsReportedAsMissingRatherThanDenied() {
+        create("watcher", null, List.of(), List.of(), null);
+        when(sns.topicExists(anyString(), anyString())).thenReturn(false);
+
+        service.record(RedshiftEventCatalog.CLUSTER_CREATED, "warehouse", "created");
+
+        assertEquals("topic-not-exist",
+                service.describeSubscriptions("watcher", null, null, null, null).items().getFirst().getStatus());
+        verify(sns, never()).publish(anyString(), any(), anyString(), anyString(), anyString());
+        verify(authorizer, never()).authorize(anyString(), anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void aTopicPolicyThatDeniesRedshiftBlocksDeliveryAndMarksTheSubscription() {
+        create("watcher", null, List.of(), List.of(), null);
+        when(authorizer.authorize(anyString(), anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(Decision.DENY);
+
+        service.record(RedshiftEventCatalog.CLUSTER_CREATED, "warehouse", "created");
+
+        verify(sns, never()).publish(anyString(), any(), anyString(), anyString(), anyString());
+        assertEquals("no-permission",
+                service.describeSubscriptions("watcher", null, null, null, null).items().getFirst().getStatus());
+        assertEquals(1, service.describeEvents(null, null, null, null, null, null, null).items().size());
+
+        service.record(RedshiftEventCatalog.CLUSTER_DELETED, "warehouse", "deleted");
+
+        verify(authorizer, times(1)).authorize(anyString(), anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
     void disabledSubscriptionsPublishNothing() {
         service.createSubscription("quiet", TOPIC, null, List.of(), List.of(), null, false, Map.of(), ALL_SOURCES_EXIST);
 
@@ -520,7 +598,7 @@ class RedshiftEventServiceTest {
     void eventHistoryAndSubscriptionNamesAreRegional() {
         create("watcher", null, List.of(), List.of(), null);
         service.record(RedshiftEventCatalog.CLUSTER_CREATED, "warehouse", "created");
-        RedshiftEventService west = new RedshiftEventService(factory, sns,
+        RedshiftEventService west = new RedshiftEventService(factory, sns, authorizer,
                 new RegionResolver("us-west-2", "000000000000"), objectMapper, clock);
         assertTrue(west.describeEvents(null, null, null, null, null, null, null).items().isEmpty());
         assertTrue(west.describeSubscriptions(null, null, null, null, null).items().isEmpty());

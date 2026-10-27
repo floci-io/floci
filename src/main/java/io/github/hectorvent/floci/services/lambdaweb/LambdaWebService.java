@@ -20,6 +20,8 @@ import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.PublicAccessConditions;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
@@ -1630,9 +1632,8 @@ public class LambdaWebService implements Resettable {
         String callerAccount = regionResolver.getAccountId();
         if (!callerAccount.equals(arn.group(2))) {
             String user = regionResolver.buildGlobalArn("iam", callerAccount, "user/" + accessKeyId());
-            throw new AwsException("AccessDeniedException", "User: " + user + " is not authorized to perform: lambda:"
-                    + action + " on resource: " + givenArn + " because no resource-based policy allows the lambda:"
-                    + action + " action", 403);
+            throw new AwsException("AccessDeniedException", AccessDeniedMessages.notAuthorized(user, "lambda:" + action,
+                    givenArn, PolicyType.RESOURCE_BASED_POLICY.noAllow("lambda:" + action)), 403);
         }
     }
 

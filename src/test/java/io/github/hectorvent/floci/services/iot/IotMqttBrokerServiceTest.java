@@ -72,6 +72,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -2107,7 +2108,7 @@ class IotMqttBrokerServiceTest {
                 .addKeyValue(Buffer.buffer(leaf.privateKeyPem()));
     }
 
-    private static java.math.BigInteger serial(CertificateGenerator.GeneratedCertificate leaf) {
+    private static BigInteger serial(CertificateGenerator.GeneratedCertificate leaf) {
         return Pem.parseCertificate(leaf.certificatePem()).getSerialNumber();
     }
 

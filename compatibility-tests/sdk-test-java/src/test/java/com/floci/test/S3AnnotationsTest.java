@@ -7,6 +7,7 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.AnnotationDirective;
 import software.amazon.awssdk.services.s3.model.AnnotationEntry;
 import software.amazon.awssdk.services.s3.model.BucketVersioningStatus;
+import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
 import software.amazon.awssdk.services.s3.model.ChecksumMode;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectAnnotationResponse;
@@ -117,7 +118,7 @@ class S3AnnotationsTest {
     void putObjectAnnotationWithChecksum() {
         PutObjectAnnotationResponse response = s3.putObjectAnnotation(PutObjectAnnotationRequest.builder()
                         .bucket(BUCKET).key(KEY).annotationName("hashed")
-                        .checksumAlgorithm(software.amazon.awssdk.services.s3.model.ChecksumAlgorithm.SHA256)
+                        .checksumAlgorithm(ChecksumAlgorithm.SHA256)
                         .build(),
                 RequestBody.fromString("checksummed payload"));
 

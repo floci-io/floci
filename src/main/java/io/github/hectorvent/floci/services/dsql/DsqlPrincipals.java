@@ -22,9 +22,6 @@ import java.util.Map;
 @ApplicationScoped
 public class DsqlPrincipals {
 
-    /** How IAM ends a refusal that an explicit Deny in the cluster's policy decided. */
-    public static final String EXPLICIT_RESOURCE_DENY = "with an explicit deny in a resource-based policy";
-
     private final IamService iamService;
     private final RegionResolver regionResolver;
     private final Instance<RequestContext> requestContext;
@@ -60,12 +57,6 @@ public class DsqlPrincipals {
         caller.putPrincipalKeys(context);
         String accountId = regionResolver.getAccountId();
         return IamConditionContextResolver.withGlobalContext(context, clusterArn, region, accountId, accountId);
-    }
-
-    /** IAM's refusal of {@code callerArn} for {@code action} on {@code resource}, as DSQL words it. */
-    public static String notAuthorized(String callerArn, String action, String resource, String reason) {
-        return "User: " + callerArn + " is not authorized to perform: " + action + " on resource: " + resource + " "
-                + reason;
     }
 
     /**

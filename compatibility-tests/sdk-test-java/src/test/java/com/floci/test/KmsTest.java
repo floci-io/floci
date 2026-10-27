@@ -6,6 +6,7 @@ import software.amazon.awssdk.services.kms.KmsClient;
 import software.amazon.awssdk.services.kms.model.*;
 
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -216,7 +217,7 @@ class KmsTest {
         String asymmetricKeyId = createResponse.keyMetadata().keyId();
 
         // SHA-256 hash of "hello"
-        byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+        byte[] digest = MessageDigest.getInstance("SHA-256")
                 .digest("hello".getBytes(StandardCharsets.UTF_8));
         SdkBytes msg = SdkBytes.fromByteArray(digest);
 

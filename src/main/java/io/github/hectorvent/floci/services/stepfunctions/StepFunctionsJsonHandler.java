@@ -37,11 +37,13 @@ import java.util.Set;
 public class StepFunctionsJsonHandler {
 
     private static final Duration HISTORY_TOKEN_LIFETIME = Duration.ofHours(24);
+    private static final Duration LIST_TOKEN_LIFETIME = Duration.ofHours(24);
 
     private final StepFunctionsService service;
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final SignedMarkers historyTokens = new SignedMarkers();
+    private final SignedMarkers listTokens = new SignedMarkers();
 
     @Inject
     public StepFunctionsJsonHandler(StepFunctionsService service, ObjectMapper objectMapper, Clock clock) {
@@ -289,17 +291,45 @@ public class StepFunctionsJsonHandler {
     }
 
     private Response handleListStateMachines(JsonNode request, String region) {
-        List<StateMachine> list = service.listStateMachines(region);
+        Integer maxResults = parseOptionalInt(request, "maxResults");
+        String nextToken = optionalText(request, "nextToken");
+        StepFunctionsPaging.pageSize(maxResults, nextToken);
+        PaginatedResult<StateMachine> page = service.listStateMachines(region, maxResults,
+                nextToken == null ? null : listTokenPosition(nextToken, region));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("stateMachines");
-        for (StateMachine sm : list) {
+        for (StateMachine sm : page.items()) {
             ObjectNode item = array.addObject();
             item.put("stateMachineArn", sm.getStateMachineArn());
             item.put("name", sm.getName());
             item.put("type", sm.getType());
             item.put("creationDate", sm.getCreationDate());
         }
+        if (page.nextToken() != null) {
+            response.put("nextToken", listTokens.issue(
+                    clock.millis() + ":" + Digests.sha256Hex(region) + ":" + page.nextToken()));
+        }
         return Response.ok(response).build();
+    }
+
+    private String listTokenPosition(String nextToken, String region) {
+        String issued = listTokens.cursorOf(nextToken);
+        if (issued == null) {
+            throw new AwsException("InvalidToken", "The provided token is not valid.", 400);
+        }
+        String[] fields = issued.split(":", 3);
+        long now = clock.millis();
+        long issuedAt;
+        try {
+            issuedAt = Long.parseLong(fields[0]);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidToken", "The provided token is not valid.", 400);
+        }
+        if (fields.length != 3 || !fields[1].equals(Digests.sha256Hex(region))
+                || issuedAt > now || now - issuedAt > LIST_TOKEN_LIFETIME.toMillis()) {
+            throw new AwsException("InvalidToken", "The provided token is not valid.", 400);
+        }
+        return fields[2];
     }
 
     private Response handleDeleteStateMachine(JsonNode request) {

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -79,8 +80,8 @@ class Ec2NetworkInterfaceIntegrationTest {
             .statusCode(200)
             .extract().path("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupId");
 
-        org.junit.jupiter.api.Assertions.assertTrue(subnetId.startsWith("subnet-"));
-        org.junit.jupiter.api.Assertions.assertTrue(securityGroupId.startsWith("sg-"));
+        Assertions.assertTrue(subnetId.startsWith("subnet-"));
+        Assertions.assertTrue(securityGroupId.startsWith("sg-"));
     }
 
     @Test
@@ -128,7 +129,7 @@ class Ec2NetworkInterfaceIntegrationTest {
             .body("CreateNetworkInterfaceResponse.networkInterface.tagSet.item.value", equalTo("example"))
             .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
 
-        org.junit.jupiter.api.Assertions.assertTrue(eniId.startsWith("eni-"));
+        Assertions.assertTrue(eniId.startsWith("eni-"));
     }
 
     @Test
@@ -180,7 +181,7 @@ class Ec2NetworkInterfaceIntegrationTest {
             .statusCode(200)
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
 
-        org.junit.jupiter.api.Assertions.assertTrue(instanceId.startsWith("i-"));
+        Assertions.assertTrue(instanceId.startsWith("i-"));
 
         // Mock mode settles a pending instance to "running" on the next describe (see
         // Ec2Service#describeInstances), AttachNetworkInterface requires running/stopped.
@@ -352,7 +353,7 @@ class Ec2NetworkInterfaceIntegrationTest {
                     equalTo(overrideEniId))
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
 
-        org.junit.jupiter.api.Assertions.assertTrue(overrideInstanceId.startsWith("i-"));
+        Assertions.assertTrue(overrideInstanceId.startsWith("i-"));
 
         // The interface keeps its own standalone record, that is the side that knows its real
         // attach time and its deleteOnTermination, while the instance carries a copy. Describe
@@ -575,6 +576,6 @@ class Ec2NetworkInterfaceIntegrationTest {
             .statusCode(200)
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
 
-        org.junit.jupiter.api.Assertions.assertTrue(replacement.startsWith("i-"));
+        Assertions.assertTrue(replacement.startsWith("i-"));
     }
 }

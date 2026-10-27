@@ -691,7 +691,7 @@ class IotTest {
         assertThat(described.certificateDescription().status()).isEqualTo(CertificateStatus.ACTIVE);
         assertThat(described.certificateDescription().certificateMode()).isEqualTo(CertificateMode.DEFAULT);
         assertThat(described.certificateDescription().validity().notAfter())
-                .isEqualTo(java.time.Instant.parse("2049-12-31T23:59:59Z"));
+                .isEqualTo(Instant.parse("2049-12-31T23:59:59Z"));
         assertThat(cert.certificateId()).matches("[0-9a-f]{64}");
         assertThat(cert.keyPair().privateKey()).startsWith("-----BEGIN RSA PRIVATE KEY-----");
 

@@ -158,7 +158,7 @@ class CodeDeployEcsTest {
                 .loadBalancerArn(lbArn)
                 .protocol(ProtocolEnum.HTTP)
                 .port(18090)
-                .defaultActions(software.amazon.awssdk.services.elasticloadbalancingv2.model.Action.builder()
+                .defaultActions(Action.builder()
                         .type(ActionTypeEnum.FORWARD)
                         .targetGroupArn(blueTgArn)
                         .build()));

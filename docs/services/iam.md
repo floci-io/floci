@@ -2354,6 +2354,9 @@ and requested attributes. `dynamodb:EnclosingOperation` identifies `TransactWrit
 `TransactGetItems`; write items expose `ReturnValuesOnConditionCheckFailure` as
 `dynamodb:ReturnValues` only when the request supplies a non-null value. An omitted value leaves
 the condition key absent. Transaction API names alone do not grant item access.
+Transaction reads derive selection and requested attributes from the transaction `Get` shape:
+`ProjectionExpression`, its attribute-name aliases, and the key. Ignored `GetItem` fields such as
+`AttributesToGet` cannot satisfy a projected-read policy on `TransactGetItems`.
 Transaction item authorization uses the effective local table ARN, matching execution.
 A permission on a foreign account table cannot grant access to a same-named local table.
 

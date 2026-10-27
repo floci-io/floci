@@ -9,8 +9,10 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.redshift.RedshiftEventCatalog.EventInfo;
 import io.github.hectorvent.floci.services.redshift.model.EventSubscription;
 import io.github.hectorvent.floci.services.redshift.model.RedshiftEvent;
@@ -64,6 +66,7 @@ public class RedshiftEventService {
     private final AccountAwareStorageBackend<RedshiftEvent> events;
     private final AccountAwareStorageBackend<EventSubscription> subscriptions;
     private final SnsService snsService;
+    private final ServiceCallAuthorizer serviceCallAuthorizer;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -71,17 +74,20 @@ public class RedshiftEventService {
 
     @Inject
     public RedshiftEventService(StorageFactory storageFactory, SnsService snsService,
-                                RegionResolver regionResolver, ObjectMapper objectMapper) {
-        this(storageFactory, snsService, regionResolver, objectMapper, Clock.systemUTC());
+                                ServiceCallAuthorizer serviceCallAuthorizer, RegionResolver regionResolver,
+                                ObjectMapper objectMapper) {
+        this(storageFactory, snsService, serviceCallAuthorizer, regionResolver, objectMapper, Clock.systemUTC());
     }
 
-    RedshiftEventService(StorageFactory storageFactory, SnsService snsService, RegionResolver regionResolver,
+    RedshiftEventService(StorageFactory storageFactory, SnsService snsService,
+                         ServiceCallAuthorizer serviceCallAuthorizer, RegionResolver regionResolver,
                          ObjectMapper objectMapper, Clock clock) {
         this.events = storageFactory.create("redshift", "redshift-events.json",
                 new TypeReference<Map<String, RedshiftEvent>>() { });
         this.subscriptions = storageFactory.create("redshift", "redshift-event-subscriptions.json",
                 new TypeReference<Map<String, EventSubscription>>() { });
         this.snsService = snsService;
+        this.serviceCallAuthorizer = serviceCallAuthorizer;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.clock = clock;
@@ -128,12 +134,42 @@ public class RedshiftEventService {
     }
 
     private void deliver(RedshiftEvent event, String accountId, String region) {
-        for (EventSubscription subscription : subscriptions.scanForAccount(accountId, key -> key.startsWith(region + "/"))) {
-            if (!matches(subscription, event)) {
-                continue;
-            }
-            publish(subscription, event, accountId, region);
+        for (Delivery delivery : matchingDeliveries(event, accountId, region)) {
+            publish(delivery, event, accountId, region);
         }
+    }
+
+    /**
+     * Filters and topic are read under the lock {@link #modifySubscription} holds, so an event is never matched
+     * against one version of a subscription and published to the topic of another.
+     */
+    private synchronized List<Delivery> matchingDeliveries(RedshiftEvent event, String accountId, String region) {
+        List<Delivery> matching = new ArrayList<>();
+        for (EventSubscription subscription : subscriptions.scanForAccount(accountId, key -> key.startsWith(region + "/"))) {
+            EventSubscription snapshot = snapshot(subscription);
+            if (matches(snapshot, event)) {
+                matching.add(new Delivery(subscription, snapshot));
+            }
+        }
+        return matching;
+    }
+
+    /** {@code stored} identifies the subscription a failure is recorded against; {@code snapshot} is what matched. */
+    private record Delivery(EventSubscription stored, EventSubscription snapshot) { }
+
+    private static EventSubscription snapshot(EventSubscription subscription) {
+        EventSubscription copy = new EventSubscription();
+        copy.setCustomerAwsId(subscription.getCustomerAwsId());
+        copy.setCustSubscriptionId(subscription.getCustSubscriptionId());
+        copy.setSnsTopicArn(subscription.getSnsTopicArn());
+        copy.setStatus(subscription.getStatus());
+        copy.setSubscriptionCreationTime(subscription.getSubscriptionCreationTime());
+        copy.setSourceType(subscription.getSourceType());
+        copy.setSourceIdsList(new ArrayList<>(subscription.getSourceIdsList()));
+        copy.setEventCategoriesList(new ArrayList<>(subscription.getEventCategoriesList()));
+        copy.setSeverity(subscription.getSeverity());
+        copy.setEnabled(subscription.isEnabled());
+        return copy;
     }
 
     private static boolean matches(EventSubscription subscription, RedshiftEvent event) {
@@ -155,17 +191,34 @@ public class RedshiftEventService {
         return subscription.getSeverity() == null || subscription.getSeverity().equals(event.getSeverity());
     }
 
-    private void publish(EventSubscription subscription, RedshiftEvent event, String accountId, String region) {
+    private void publish(Delivery delivery, RedshiftEvent event, String accountId, String region) {
+        EventSubscription subscription = delivery.snapshot();
         String topicArn = subscription.getSnsTopicArn();
+        // A missing topic has no policy to consult, so it would read as a denial; name it for what it is.
+        if (!snsService.topicExists(topicArn, AwsArnUtils.parse(topicArn).region())) {
+            updateFailureStatus(delivery.stored(), topicArn, "topic-not-exist", accountId, region);
+            LOG.warnv("The topic {0} of the subscription does not exist; event {1} was not published",
+                    topicArn, event.getEventId());
+            return;
+        }
+        String subscriptionArn = regionResolver.buildArn("redshift", region, accountId,
+                "eventsubscription:" + subscription.getCustSubscriptionId());
+        // The topic's policy decides alone, as for any service publishing on its own behalf.
+        if (serviceCallAuthorizer.authorize("redshift", "sns:Publish", topicArn, subscriptionArn, accountId)
+                != Decision.ALLOW) {
+            updateFailureStatus(delivery.stored(), topicArn, "no-permission", accountId, region);
+            LOG.warnv("The policy of {0} does not let Redshift publish event {1}", topicArn, event.getEventId());
+            return;
+        }
         try {
             String topicRegion = AwsArnUtils.parse(topicArn).region();
             RequestScopes.runAs(accountId, topicRegion,
                     () -> snsService.publish(topicArn, null, notification(event), SNS_SUBJECT, topicRegion));
         } catch (AwsException e) {
             if ("NotFound".equals(e.getErrorCode())) {
-                updateFailureStatus(subscription, topicArn, "topic-not-exist", accountId, region);
+                updateFailureStatus(delivery.stored(), topicArn, "topic-not-exist", accountId, region);
             } else if (isAuthorizationFailure(e)) {
-                updateFailureStatus(subscription, topicArn, "no-permission", accountId, region);
+                updateFailureStatus(delivery.stored(), topicArn, "no-permission", accountId, region);
             }
             LOG.warnv(e, "Could not publish Redshift event {0} to {1}", event.getEventId(), topicArn);
         } catch (RuntimeException e) {

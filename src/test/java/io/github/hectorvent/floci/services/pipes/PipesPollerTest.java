@@ -226,9 +226,9 @@ class PipesPollerTest {
     @Test
     void pollKafka_filtersUsingDecodedPayloadButDeliversOriginalRecord() throws Exception {
         Pipe pipe = selfManagedKafkaPipe();
-        byte[] key = "customer-123".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] value = "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] traceId = "abc123".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] key = "customer-123".getBytes(StandardCharsets.UTF_8);
+        byte[] value = "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8);
+        byte[] traceId = "abc123".getBytes(StandardCharsets.UTF_8);
         KafkaRecordDto record = kafkaRecord("orders", 0, 42L, key, value, new KafkaHeaderDto("traceId", traceId));
 
         when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(record));

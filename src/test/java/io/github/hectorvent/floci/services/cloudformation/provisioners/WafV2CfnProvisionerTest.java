@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -137,7 +138,7 @@ class WafV2CfnProvisionerTest {
         props.set("DefaultAction", mapper.createObjectNode());
         ObjectNode resolved = requiredProps("portal");
         resolved.set("DefaultAction",
-                com.fasterxml.jackson.databind.node.TextNode.valueOf("{\"Allow\":{}}"));
+                TextNode.valueOf("{\"Allow\":{}}"));
         WebAcl created = acl("portal", "acl-1", "REGIONAL", "lock-1");
         when(wafV2.createWebAcl(any(), eq("REGIONAL"), eq("portal"), eq("us-east-1"))).thenReturn(created);
         StackResource resource = resource();

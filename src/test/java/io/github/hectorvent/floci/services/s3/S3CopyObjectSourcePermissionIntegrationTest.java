@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
+import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -674,7 +675,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
         .then()
                 .statusCode(200);
 
-        io.restassured.path.xml.XmlPath key = given()
+        XmlPath key = given()
                 .formParam("Action", "CreateAccessKey")
                 .formParam("UserName", userName)
                 .header("Authorization", auth(accountId, "iam"))

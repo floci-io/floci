@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -110,7 +111,7 @@ public class SecretsManagerRotationIntegrationTest {
         boolean hasFinish = false;
 
         for (byte[] payloadBytes : payloadCaptor.getAllValues()) {
-            String payloadStr = new String(payloadBytes, java.nio.charset.StandardCharsets.UTF_8);
+            String payloadStr = new String(payloadBytes, StandardCharsets.UTF_8);
             if (payloadStr.contains("\"Step\":\"createSecret\"")) hasCreate = true;
             if (payloadStr.contains("\"Step\":\"setSecret\"")) hasSet = true;
             if (payloadStr.contains("\"Step\":\"testSecret\"")) hasTest = true;

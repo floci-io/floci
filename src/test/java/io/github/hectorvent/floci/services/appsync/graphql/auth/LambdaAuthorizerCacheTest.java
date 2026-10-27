@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
@@ -144,7 +145,7 @@ class LambdaAuthorizerCacheTest {
             instant = instant.plus(duration);
         }
         @Override public ZoneOffset getZone() { return ZoneOffset.UTC; }
-        @Override public Clock withZone(java.time.ZoneId zone) { return this; }
+        @Override public Clock withZone(ZoneId zone) { return this; }
         @Override public Instant instant() { return instant; }
     }
 }

@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.bedrockagentcore;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -29,7 +31,7 @@ class BedrockAgentCoreInvokeIntegrationTest {
     @Test
     void invokeAcceptsLargeUnparsedPayload() {
         byte[] big = new byte[1_000_000];
-        java.util.Arrays.fill(big, (byte) 'x');
+        Arrays.fill(big, (byte) 'x');
         given()
                 .contentType("application/octet-stream")
                 .body(big)

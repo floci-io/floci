@@ -12,18 +12,29 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Stage;
+import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.ServerWebSocket;
+import io.vertx.core.net.HostAndPort;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.Cookie;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
@@ -51,7 +62,7 @@ public class WebSocketHandler {
     private final RegionResolver regionResolver;
     private final String baseHostname;
     private final ObjectMapper objectMapper;
-    private final io.vertx.core.Vertx vertx;
+    private final Vertx vertx;
 
     @Inject
     public WebSocketHandler(ApiGatewayV2Service apiGatewayV2Service,
@@ -63,7 +74,7 @@ public class WebSocketHandler {
                             RegionResolver regionResolver,
                             EmulatorConfig config,
                             ObjectMapper objectMapper,
-                            io.vertx.core.Vertx vertx) {
+                            Vertx vertx) {
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.connectionManager = connectionManager;
         this.routeSelectionEvaluator = routeSelectionEvaluator;
@@ -141,7 +152,7 @@ public class WebSocketHandler {
         if (host != null) {
             return host;
         }
-        io.vertx.core.net.HostAndPort authority = ctx.request().authority();
+        HostAndPort authority = ctx.request().authority();
         return authority != null ? authority.host() : null;
     }
 
@@ -462,7 +473,7 @@ public class WebSocketHandler {
         connectionManager.updateLastActiveAt(connectionId);
 
         // Base64-encode the binary data for the proxy event body
-        String base64Body = java.util.Base64.getEncoder().encodeToString(data);
+        String base64Body = Base64.getEncoder().encodeToString(data);
 
         // Route using the base64 body (route selection won't match JSON fields in binary messages,
         // so it will fall through to $default)
@@ -733,7 +744,7 @@ public class WebSocketHandler {
     private Map<String, List<String>> extractHeaders(RoutingContext ctx) {
         Map<String, List<String>> headers = new HashMap<>();
         ctx.request().headers().forEach(entry ->
-                headers.computeIfAbsent(entry.getKey(), k -> new java.util.ArrayList<>())
+                headers.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
                         .add(entry.getValue()));
         return headers;
     }
@@ -744,7 +755,7 @@ public class WebSocketHandler {
     private Map<String, List<String>> extractQueryParams(RoutingContext ctx) {
         Map<String, List<String>> params = new HashMap<>();
         ctx.request().params().forEach(entry ->
-                params.computeIfAbsent(entry.getKey(), k -> new java.util.ArrayList<>())
+                params.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
                         .add(entry.getValue()));
         return params;
     }
@@ -758,7 +769,7 @@ public class WebSocketHandler {
         String authHeader = ctx.request().getHeader("Authorization");
         if (authHeader != null && !authHeader.isEmpty()) {
             // Use a simple JAX-RS HttpHeaders adapter to delegate to RegionResolver
-            jakarta.ws.rs.core.HttpHeaders headers = new SimpleHttpHeaders(authHeader);
+            HttpHeaders headers = new SimpleHttpHeaders(authHeader);
             return regionResolver.resolveRegion(headers);
         }
         // A WebSocket handshake carries no SigV4 Authorization header, so fall back to the
@@ -771,7 +782,7 @@ public class WebSocketHandler {
      * Minimal HttpHeaders implementation that provides only the Authorization header.
      * Used to bridge Vert.x request headers to the RegionResolver API.
      */
-    private static class SimpleHttpHeaders implements jakarta.ws.rs.core.HttpHeaders {
+    private static class SimpleHttpHeaders implements HttpHeaders {
         private final String authorizationHeader;
 
         SimpleHttpHeaders(String authorizationHeader) {
@@ -787,45 +798,45 @@ public class WebSocketHandler {
         }
 
         @Override
-        public java.util.List<String> getRequestHeader(String name) {
+        public List<String> getRequestHeader(String name) {
             if ("Authorization".equalsIgnoreCase(name) && authorizationHeader != null) {
-                return java.util.List.of(authorizationHeader);
+                return List.of(authorizationHeader);
             }
-            return java.util.Collections.emptyList();
+            return Collections.emptyList();
         }
 
         @Override
-        public jakarta.ws.rs.core.MultivaluedMap<String, String> getRequestHeaders() {
-            return new jakarta.ws.rs.core.MultivaluedHashMap<>();
+        public MultivaluedMap<String, String> getRequestHeaders() {
+            return new MultivaluedHashMap<>();
         }
 
         @Override
-        public java.util.List<jakarta.ws.rs.core.MediaType> getAcceptableMediaTypes() {
-            return java.util.Collections.emptyList();
+        public List<MediaType> getAcceptableMediaTypes() {
+            return Collections.emptyList();
         }
 
         @Override
-        public java.util.List<java.util.Locale> getAcceptableLanguages() {
-            return java.util.Collections.emptyList();
+        public List<Locale> getAcceptableLanguages() {
+            return Collections.emptyList();
         }
 
         @Override
-        public jakarta.ws.rs.core.MediaType getMediaType() {
+        public MediaType getMediaType() {
             return null;
         }
 
         @Override
-        public java.util.Locale getLanguage() {
+        public Locale getLanguage() {
             return null;
         }
 
         @Override
-        public java.util.Map<String, jakarta.ws.rs.core.Cookie> getCookies() {
-            return java.util.Collections.emptyMap();
+        public Map<String, Cookie> getCookies() {
+            return Collections.emptyMap();
         }
 
         @Override
-        public java.util.Date getDate() {
+        public Date getDate() {
             return null;
         }
 

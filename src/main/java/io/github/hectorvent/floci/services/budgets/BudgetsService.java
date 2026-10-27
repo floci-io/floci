@@ -22,6 +22,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -264,7 +265,7 @@ public class BudgetsService implements Resettable {
         JsonNode incoming = request.get("ResourceTags");
         validateTags(incoming);
         ArrayNode merged = objectMapper.createArrayNode();
-        Map<String, String> tags = new java.util.LinkedHashMap<>();
+        Map<String, String> tags = new LinkedHashMap<>();
         JsonNode current = tagsFor(ref);
         if (current != null && current.isArray()) {
             current.forEach(tag -> tags.put(text(tag, "Key"), text(tag, "Value")));

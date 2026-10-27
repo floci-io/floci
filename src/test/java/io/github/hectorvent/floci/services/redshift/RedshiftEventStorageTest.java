@@ -3,8 +3,10 @@ package io.github.hectorvent.floci.services.redshift;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.redshift.model.EventSubscription;
 import io.github.hectorvent.floci.services.redshift.model.RedshiftEvent;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -159,13 +161,21 @@ class RedshiftEventStorageTest {
         StorageFactory factory = new StorageFactory(config, access);
         ObjectMapper mapper = new ObjectMapper();
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        RedshiftEventService east = new RedshiftEventService(factory, sns, new RegionResolver(EAST, account), mapper, clock);
-        RedshiftEventService west = new RedshiftEventService(factory, sns, new RegionResolver(WEST, account), mapper, clock);
+        RedshiftEventService east = new RedshiftEventService(factory, sns, allowAll(), new RegionResolver(EAST, account), mapper, clock);
+        RedshiftEventService west = new RedshiftEventService(factory, sns, allowAll(), new RegionResolver(WEST, account), mapper, clock);
         return new Fixture(factory, east, west);
+    }
+
+    private static ServiceCallAuthorizer allowAll() {
+        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
+        when(authorizer.authorize(anyString(), anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(Decision.ALLOW);
+        return authorizer;
     }
 
     private static SnsService sns() {
         SnsService sns = mock(SnsService.class);
+        when(sns.topicExists(anyString(), anyString())).thenReturn(true);
         when(sns.getTopicAttributes(anyString(), anyString())).thenReturn(Map.of());
         return sns;
     }

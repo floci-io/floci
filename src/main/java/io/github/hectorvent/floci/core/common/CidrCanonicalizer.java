@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.Optional;
@@ -143,7 +144,7 @@ public final class CidrCanonicalizer {
         InetAddress maskedAddress;
         try {
             maskedAddress = InetAddress.getByAddress(masked);
-        } catch (java.net.UnknownHostException e) {
+        } catch (UnknownHostException e) {
             // Only thrown for an address of the wrong byte length, which cannot
             // happen here: `masked` is always copied from a real InetAddress.
             throw new AssertionError("unreachable: masked address has invalid length", e);

@@ -24,6 +24,8 @@ import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -123,8 +125,8 @@ class EcsContainerManagerSecretsTest {
      * partition a Secrets Manager ARN fell through to the SSM branch, so the task died at launch
      * with ParameterNotFound rather than reading its own configuration.
      */
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({
+    @ParameterizedTest
+    @CsvSource({
             "us-gov-west-1, aws-us-gov",
             "cn-north-1,    aws-cn",
             "us-isob-east-1, aws-iso-b"})

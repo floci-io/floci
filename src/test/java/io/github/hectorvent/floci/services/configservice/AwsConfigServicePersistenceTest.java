@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -74,7 +75,7 @@ class AwsConfigServicePersistenceTest {
         assertEquals(List.of("keep"),
                 reloaded.describeConfigRules(REGION, null).stream().map(ConfigRule::configRuleName).toList());
         Map<String, String> tags = reloaded.listTagsForResource(REGION, rule.configRuleArn()).stream()
-                .collect(java.util.stream.Collectors.toMap(t -> t.get("Key"), t -> t.get("Value")));
+                .collect(Collectors.toMap(t -> t.get("Key"), t -> t.get("Value")));
         assertEquals("prod", tags.get("env"));
         assertTrue(!tags.containsKey("team"), "untagged key must not reappear after restart");
     }

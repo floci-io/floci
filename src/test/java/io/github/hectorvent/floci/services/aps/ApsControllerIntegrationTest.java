@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.aps;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -225,7 +226,7 @@ class ApsControllerIntegrationTest {
         .then()
             .statusCode(200)
             .body("tags.env", equalTo("test"))
-            .body("tags", not(org.hamcrest.Matchers.hasKey("team")));
+            .body("tags", not(Matchers.hasKey("team")));
     }
 
     private static final String RULES = Base64.getEncoder().encodeToString(

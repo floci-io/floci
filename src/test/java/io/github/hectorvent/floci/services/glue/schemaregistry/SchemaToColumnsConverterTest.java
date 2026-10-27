@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -110,7 +111,7 @@ class SchemaToColumnsConverterTest {
         List<Column> cols = SchemaToColumnsConverter.toColumns("AVRO", def);
 
         Map<String, String> byName = cols.stream()
-                .collect(java.util.stream.Collectors.toMap(Column::getName, Column::getType));
+                .collect(Collectors.toMap(Column::getName, Column::getType));
         assertEquals("timestamp", byName.get("created"));
         assertEquals("timestamp", byName.get("created_micros"));
         assertEquals("timestamp", byName.get("local_created"));
@@ -168,7 +169,7 @@ class SchemaToColumnsConverterTest {
         List<Column> cols = SchemaToColumnsConverter.toColumns("JSON", def);
 
         Map<String, String> byName = cols.stream()
-                .collect(java.util.stream.Collectors.toMap(Column::getName, Column::getType));
+                .collect(Collectors.toMap(Column::getName, Column::getType));
         assertEquals("bigint", byName.get("id"));
         assertEquals("string", byName.get("name"));
         assertEquals("boolean", byName.get("flag"));
@@ -220,8 +221,8 @@ class SchemaToColumnsConverterTest {
 
         List<Column> cols = SchemaToColumnsConverter.toColumns("PROTOBUF", def);
 
-        java.util.Map<String, String> byName = cols.stream()
-                .collect(java.util.stream.Collectors.toMap(Column::getName, Column::getType));
+        Map<String, String> byName = cols.stream()
+                .collect(Collectors.toMap(Column::getName, Column::getType));
         assertEquals(3, cols.size(), () -> "got cols: " + cols.stream().map(c -> c.getName() + ":" + c.getType()).toList());
         assertEquals("bigint", byName.get("id"));
         assertEquals("string", byName.get("name"));

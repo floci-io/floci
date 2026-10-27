@@ -12,6 +12,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -114,7 +115,7 @@ class AuthMiddlewareTest {
                 "sub", "s",
                 "iss", "https://cognito-idp.us-east-1.amazonaws.com/pool",
                 "exp", 9999999999L);
-        String jwt = JwtClaimsDecoder.encode(new java.util.HashMap<>(claims), new ObjectMapper());
+        String jwt = JwtClaimsDecoder.encode(new HashMap<>(claims), new ObjectMapper());
         when(cognitoAuthValidator.matchesProvider(any(), any())).thenReturn(true);
         when(cognitoAuthValidator.validate(any(), any(), any())).thenReturn(Map.of("sub", "s"));
 

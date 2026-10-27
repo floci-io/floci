@@ -10,6 +10,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -105,7 +108,7 @@ class BedrockIntegrationTest {
     @Test
     @Order(3)
     void getGuardrailByArnResolvesTheSameResource() {
-        String encodedArn = java.net.URLEncoder.encode(guardrailArn, java.nio.charset.StandardCharsets.UTF_8);
+        String encodedArn = URLEncoder.encode(guardrailArn, StandardCharsets.UTF_8);
         given()
             .urlEncodingEnabled(false)
         .when()

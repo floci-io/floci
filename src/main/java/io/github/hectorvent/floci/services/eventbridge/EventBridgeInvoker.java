@@ -376,7 +376,7 @@ public class EventBridgeInvoker {
             return eventJson;
         }
         Map<String, JsonNode> resolved = new LinkedHashMap<>();
-        for (var e : transformer.getInputPathsMap().entrySet()) {
+        for (Map.Entry<String, String> e : transformer.getInputPathsMap().entrySet()) {
             resolved.put(e.getKey(), extractNode(e.getValue(), eventJson));
         }
         StringBuilder out = new StringBuilder(template.length() + 32);

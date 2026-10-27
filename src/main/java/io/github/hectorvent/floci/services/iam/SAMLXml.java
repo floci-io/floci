@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
 import org.w3c.dom.Document;
+import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 
@@ -22,7 +23,7 @@ final class SAMLXml {
     }
 
     static String text(Node parent, String namespace, String localName) {
-        NodeList nodes = ((org.w3c.dom.Element) parent).getElementsByTagNameNS(namespace, localName);
+        NodeList nodes = ((Element) parent).getElementsByTagNameNS(namespace, localName);
         return nodes.getLength() == 0 ? null : nodes.item(0).getTextContent().trim();
     }
 }

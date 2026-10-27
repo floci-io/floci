@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -28,7 +29,7 @@ class SesIdentityPolicyV1IntegrationTest {
     private static final String DOC_A = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"AAA\"}]}";
     private static final String DOC_B = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"BBB\"}]}";
 
-    private static io.restassured.specification.RequestSpecification query(String action) {
+    private static RequestSpecification query(String action) {
         return given().contentType("application/x-www-form-urlencoded").header("Authorization", AUTH)
                 .formParam("Action", action);
     }

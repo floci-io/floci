@@ -37,5 +37,45 @@
         <module name="UnnecessaryFullyQualifiedType">
             <property name="id" value="NoFqcn"/>
         </module>
+        <!-- UnnecessaryFullyQualifiedType misses a qualified name before a static member, a nested type or .class,
+             and on an annotation. This finds those with the same exemption, and also leaves a name alone in a file
+             with a wildcard import that may bring in another type of that name. A chain that starts with a
+             variable is a field access, not a package.
+             Checkstyle's descendant axis is not in source order, so qualified names are joined in that same order on
+             both sides of each comparison. concat(@text, '') turns an attribute into a string, which a comparison
+             with a variable needs. -->
+        <module name="MatchXpath">
+            <property name="id" value="NoFqcn"/>
+            <property name="query" value="
+                //DOT[not(ancestor::IMPORT or ancestor::STATIC_IMPORT or ancestor::PACKAGE_DEF)]
+                     [*[2][self::IDENT][matches(@text, '^[A-Z]')]]
+                     [*[1][self::DOT][not(descendant::*[not(self::DOT or self::IDENT)])]
+                                     [not(descendant::IDENT[not(matches(@text, '^[a-z]'))])]]
+                     [not(*[1]/descendant-or-self::DOT[*[1][self::IDENT]]/*[1]
+                          [some $v in //*[self::VARIABLE_DEF or self::PARAMETER_DEF or self::PATTERN_VARIABLE_DEF
+                                          or self::RESOURCE or self::LAMBDA]/IDENT
+                           satisfies concat($v/@text, '') = concat(@text, '')])]
+                     [let $n := concat(*[2]/@text, ''),
+                          $pkg := string-join(for $i in *[1]/descendant::IDENT return concat($i/@text, ''), '.'),
+                          $own := string-join(for $i in //PACKAGE_DEF/*[self::DOT or self::IDENT]/descendant-or-self::IDENT
+                                              return concat($i/@text, ''), '.')
+                      return not(
+                          //IMPORT/DOT[*[2][concat(@text, '') = $n]]
+                              [string-join(for $i in *[1]/descendant::IDENT return concat($i/@text, ''), '.') != $pkg]
+                          or //*[self::CLASS_DEF or self::INTERFACE_DEF or self::ENUM_DEF or self::RECORD_DEF
+                                 or self::ANNOTATION_DEF][IDENT[concat(@text, '') = $n]]
+                          or //DOT[not(ancestor::IMPORT or ancestor::STATIC_IMPORT or ancestor::PACKAGE_DEF)]
+                                  [*[2][self::IDENT][concat(@text, '') = $n]][*[1][self::DOT]]
+                                  [string-join(for $i in *[1]/descendant::IDENT return concat($i/@text, ''), '.') != $pkg]
+                          or (//IMPORT[DOT/STAR]
+                              and not(//IMPORT/DOT[*[2][concat(@text, '') = $n]]
+                                          [string-join(for $i in *[1]/descendant::IDENT return concat($i/@text, ''), '.') = $pkg]))
+                          or (//IDENT[concat(@text, '') = $n][not(parent::DOT and preceding-sibling::*)]
+                                     [not(ancestor::IMPORT or ancestor::STATIC_IMPORT or ancestor::PACKAGE_DEF)]
+                              and not(//IMPORT/DOT[*[2][concat(@text, '') = $n]]
+                                          [string-join(for $i in *[1]/descendant::IDENT return concat($i/@text, ''), '.') = $pkg])
+                              and $own != $pkg))]"/>
+            <message key="matchxpath.match" value="Import this type instead of qualifying it."/>
+        </module>
     </module>
 </module>

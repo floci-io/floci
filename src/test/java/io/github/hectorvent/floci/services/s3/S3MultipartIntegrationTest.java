@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -1335,7 +1336,7 @@ class S3MultipartIntegrationTest {
             .statusCode(200);
     }
 
-    private static io.restassured.response.ValidatableResponse completeMultipart(String uploadId, String key,
+    private static ValidatableResponse completeMultipart(String uploadId, String key,
                                                                                    String body) {
         return given().contentType("application/xml").body(body)
                 .when().post("/" + BUCKET + "/" + key + "?uploadId=" + uploadId).then();

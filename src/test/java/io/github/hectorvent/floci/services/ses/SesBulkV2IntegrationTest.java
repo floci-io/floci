@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -329,7 +330,7 @@ class SesBulkV2IntegrationTest {
         .then()
             .statusCode(200)
             .body("BulkEmailEntryResults[0].Status", equalTo("INVALID_PARAMETER"))
-            .body("BulkEmailEntryResults[0].Error", org.hamcrest.Matchers.containsString("name"));
+            .body("BulkEmailEntryResults[0].Error", Matchers.containsString("name"));
     }
 
     @ParameterizedTest(name = "{0}")

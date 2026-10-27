@@ -30,6 +30,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -123,6 +124,25 @@ class KinesisEventSourcePollerTest {
                 new LambdaTargetResolver(functionStore, aliasStore), esmStore, config, MAPPER,
                 new PipesFilterMatcher(MAPPER), new StreamBatchFailures(sqsService, snsService, s3Service, MAPPER, config),
                 clock::get);
+    }
+
+    @Test
+    void finalNonemptyPageWithNullIteratorStillInvokesAndCheckpoints() throws Exception {
+        stubFunction();
+        stubStreamWith(List.of(record("123", "pk", "terminal")));
+        Map<String, Object> terminal = new HashMap<>();
+        terminal.put("Records", List.of(record("123", "pk", "terminal")));
+        terminal.put("NextShardIterator", null);
+        terminal.put("ChildShards", List.of());
+        when(kinesisService.getRecordsForAccount(eq(ACCOUNT), eq("iter-0"), anyInt(), eq(REGION)))
+                .thenReturn(terminal);
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        EventSourceMapping mapping = esm();
+        pollOnce(mapping);
+        verify(executorService).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        assertEquals("123", mapping.getShardSequenceNumbers().get(SHARD));
+        verify(esmStore).saveForAccount(eq(ACCOUNT), eq(mapping));
     }
 
     private EventSourceMapping esm(String... patterns) {

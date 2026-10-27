@@ -2436,6 +2436,14 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void describeTagsRejectsEventSubscriptionArnWithoutName() {
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.describeTags("arn:aws:redshift:us-east-1:111111111111:eventsubscription:", null, null));
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+    }
+
+    @Test
     void describeTagsForSpecificResource() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
