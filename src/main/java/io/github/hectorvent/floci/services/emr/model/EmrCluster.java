@@ -11,7 +11,7 @@ import java.util.Map;
 /**
  * An EMR cluster (job flow). State machine:
  * STARTING → BOOTSTRAPPING → RUNNING → WAITING (and back to RUNNING for added steps), then
- * → TERMINATING → TERMINATED, or TERMINATED_WITH_ERRORS when a failed step ended it.
+ * → TERMINATING → TERMINATED, or TERMINATED_WITH_ERRORS when a failed step or bootstrap action ended it.
  * Steps, instance groups and fleets are stored as nested lists. Complex sub-structures
  * (ec2 attributes, applications, configurations) are stored as raw JSON strings.
  */
@@ -47,6 +47,10 @@ public class EmrCluster {
     private String configurations;
     // The cluster's BootstrapActions (BootstrapActionConfig list) as given, raw JSON; null when none.
     private String bootstrapActions;
+    // Whether the docker runner mode is running the cluster's bootstrap actions, and the image they left, which
+    // its steps run in; Floci's own, as the API has neither.
+    private boolean bootstrapInContainer;
+    private String bootstrapImage;
     // The cluster's ManagedScalingPolicy and AutoTerminationPolicy as given, raw JSON; null when none.
     private String managedScalingPolicy;
     private String autoTerminationPolicy;
@@ -164,6 +168,14 @@ public class EmrCluster {
 
     public String getBootstrapActions() { return bootstrapActions; }
     public void setBootstrapActions(String bootstrapActions) { this.bootstrapActions = bootstrapActions; }
+
+    public boolean isBootstrapInContainer() { return bootstrapInContainer; }
+    public void setBootstrapInContainer(boolean bootstrapInContainer) {
+        this.bootstrapInContainer = bootstrapInContainer;
+    }
+
+    public String getBootstrapImage() { return bootstrapImage; }
+    public void setBootstrapImage(String bootstrapImage) { this.bootstrapImage = bootstrapImage; }
 
     public String getManagedScalingPolicy() { return managedScalingPolicy; }
     public void setManagedScalingPolicy(String managedScalingPolicy) { this.managedScalingPolicy = managedScalingPolicy; }

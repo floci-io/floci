@@ -4,7 +4,7 @@
 **Endpoint:** `http://localhost:4566/`
 **Target prefix:** `X-Amz-Target: ElasticMapReduce.*`
 
-Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps, commands and scripts run for real, each in a container of its own (see [Running steps](#running-steps)).
+Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps, commands and scripts run for real, each in a container of its own, after the cluster's bootstrap actions (see [Running steps](#running-steps)).
 
 ## Supported Actions
 
@@ -111,7 +111,8 @@ With `runner-mode` set to `docker` (`FLOCI_SERVICES_EMR_RUNNER_MODE=docker`), a 
 one container per step from the cluster's release image, the one EMR Serverless's `docker` mode uses
 (`public.ecr.aws/emr-serverless/spark/<release>`), and runs the step in it: a Spark step's
 `spark-submit` in local mode, the container holding the driver and its executors, or a command or a
-script. The cluster itself gets no container, and goes through its lifecycle as in the `immediate` mode.
+script. The cluster itself gets no container, and goes through its lifecycle as in the `immediate` mode,
+but for its bootstrap actions.
 
 * **Which steps run**: a `command-runner.jar` step whose first argument is `spark-submit`, the way the
   Management Guide writes Spark steps, runs the arguments after it, without its `--master` and
@@ -130,6 +131,27 @@ script. The cluster itself gets no container, and goes through its lifecycle as 
   its own. A `spark-submit` they start runs in local mode on Floci's S3 with the cluster's
   `spark-defaults`, which Floci puts in a Spark configuration of its own, ahead of the image's EMR
   Serverless master; its own `--master yarn` or `--deploy-mode cluster` fails, as there is no YARN.
+* **Bootstrap actions**: a cluster with `BootstrapActions` is `BOOTSTRAPPING` until they have run, one
+  after the other, in one container of the release's image, whatever the second half of
+  `cluster-startup-delay-seconds`. Each action's script is read from Floci's S3 (an `s3n://` or `s3a://`
+  path names the same bucket, and another path is the image's own) and runs with its `Args` in
+  `/home/hadoop`, with the credentials of the cluster's `JobFlowRole` instance profile, as a step would.
+  "Bootstrap actions execute as the Hadoop user by default", and `sudo` gives them root, but the image
+  has no `sudo`: an action runs as root, with a `sudo` that runs its command as it is, and what it leaves
+  in `/home/hadoop` is the `hadoop` user's. Once every action has succeeded, the container is kept as an
+  image named after the cluster, which its steps run in, so that what the actions installed or wrote is
+  there for each of them; the image goes once the cluster has ended and its last step is done. An action
+  that exits with another code than 0 ends the cluster: it cancels its steps and goes `TERMINATING`, then
+  `TERMINATED_WITH_ERRORS`, with the reason `BOOTSTRAP_FAILURE` and AWS's message "On the master instance
+  (i-00000000000000001), bootstrap action 1 returned a non-zero return code", the instance as
+  `ListInstances` gives the master. A script that cannot be read ends it the same way, in Floci's own
+  words, and a bootstrap that cannot run at all, an image that cannot be pulled say, with
+  `INTERNAL_ERROR`. `TerminateJobFlows` stops the actions at once, and a cluster Floci was bootstrapping
+  when it stopped ends with `INTERNAL_ERROR` once Floci is back. With a `LogUri`, each action's output
+  goes to `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/node/<instance-id>/bootstrap-actions/<n>/`,
+  as the Management Guide's bootstrap failure pages give the folder. The actions run once, as on the
+  master: there are no core or task nodes to run them on. Shutdown actions do not run, and
+  `Status.ErrorDetails` is not given.
 * **States**: a step is `RUNNING` from when it starts until its driver or command exits; `step-duration-seconds`
   does not apply. The first step of a release also waits while its image is pulled (3.5 to 4.3 GB
   unpacked; see [`floci.docker.image-pull-timeout-seconds`](../configuration/docker.md)). It is then
@@ -218,10 +240,10 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_CLUSTER_STARTUP_DELAY_SECONDS` | `0` | Seconds a new cluster takes to be ready to run steps, the first half `STARTING` and the second `BOOTSTRAPPING`; `0` makes it ready as soon as it is created |
 | `FLOCI_SERVICES_EMR_STEP_DURATION_SECONDS` | `0` | Seconds a step stays `RUNNING` before it completes; `0` completes it as soon as it starts |
 | `FLOCI_SERVICES_EMR_CLUSTER_TERMINATION_DELAY_SECONDS` | `0` | Seconds a cluster stays `TERMINATING` before it is `TERMINATED`; `0` ends it at once |
-| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step in a container (see [Running steps](#running-steps)) |
+| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps)) |
 | `FLOCI_SERVICES_EMR_DOCKER_NETWORK` | the global default | Docker network for step containers |
 | `FLOCI_SERVICES_EMR_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release | Image for a `docker` step, `%s` standing for the cluster's release label |
-| `FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Remove the step drivers a previous run of this Floci left on the Docker daemon when the EMR service starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace |
+| `FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Remove the step drivers and bootstrap containers a previous run of this Floci left on the Docker daemon, and the images bootstrap actions left for clusters that are gone or have ended, when the EMR service starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace |
 
 ## Release catalogue
 

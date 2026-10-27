@@ -14,6 +14,7 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -109,13 +110,11 @@ public class ContainerLogStreamer {
             String region, String logPrefix, Instant since) {
         ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
 
-        // Trim trailing whitespace and drop blank lines, then fan each reassembled line out to the
-        // console logger and CloudWatch Logs.
+        // Fan each reassembled line that is not blank out to the console logger and CloudWatch Logs.
         Consumer<String> emitter = line -> {
-            String trimmed = line.stripTrailing();
-            if (!trimmed.isEmpty()) {
-                LOG.infov("[{0}] {1}", logPrefix, trimmed);
-                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, trimmed);
+            String logged = logToConsole(logPrefix, line);
+            if (logged != null) {
+                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
             }
         };
         return follow(containerId, since, emitter);
@@ -136,13 +135,10 @@ public class ContainerLogStreamer {
             }
         }
         BiConsumer<StreamType, String> emitter = (stream, line) -> {
-            String trimmed = line.stripTrailing();
-            if (!trimmed.isEmpty()) {
-                LOG.infov("[{0}] {1}", logPrefix, trimmed);
-                String logStream = stream == StreamType.STDERR ? stderrStream : stdoutStream;
-                if (logStream != null) {
-                    forwardToCloudWatchLogs(accountId, logGroup, logStream, region, trimmed);
-                }
+            String logged = logToConsole(logPrefix, line);
+            String logStream = stream == StreamType.STDERR ? stderrStream : stdoutStream;
+            if (logged != null && logStream != null) {
+                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
             }
         };
         return follow(containerId, null,
@@ -155,13 +151,46 @@ public class ContainerLogStreamer {
      * destination, such as an ECS container without an {@code awslogs} log configuration.
      */
     public Closeable attachConsoleOnly(String containerId, String logPrefix) {
-        Consumer<String> emitter = line -> {
-            String trimmed = line.stripTrailing();
-            if (!trimmed.isEmpty()) {
-                LOG.infov("[{0}] {1}", logPrefix, trimmed);
+        return follow(containerId, null, line -> logToConsole(logPrefix, line));
+    }
+
+    /**
+     * A stream that logs each line written to it to the console logger as it arrives, as the attach methods
+     * log a container's: for the output of a command run in a container. A line is held only until its
+     * newline, or split at {@link LogLineBuffer}'s cap, so output without a newline holds no more than that.
+     * Closing it logs a last line that has no newline.
+     */
+    public static OutputStream consoleLines(String logPrefix) {
+        LogLineBuffer buffer = new LogLineBuffer();
+        return new OutputStream() {
+            @Override
+            public synchronized void write(int b) {
+                write(new byte[] {(byte) b}, 0, 1);
+            }
+
+            @Override
+            public synchronized void write(byte[] bytes, int offset, int length) {
+                byte[] payload = offset == 0 && length == bytes.length
+                        ? bytes : Arrays.copyOfRange(bytes, offset, offset + length);
+                buffer.append(payload).forEach(line -> logToConsole(logPrefix, line));
+            }
+
+            @Override
+            public synchronized void close() {
+                buffer.flush().ifPresent(line -> logToConsole(logPrefix, line));
             }
         };
-        return follow(containerId, null, emitter);
+    }
+
+    // Logs a line of a container's output, prefixed, without its trailing whitespace; returns what it logged,
+    // or null for a blank line, which it drops.
+    private static String logToConsole(String logPrefix, String line) {
+        String trimmed = line.stripTrailing();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        LOG.infov("[{0}] {1}", logPrefix, trimmed);
+        return trimmed;
     }
 
     private Closeable follow(String containerId, Instant since, Consumer<String> emitter) {

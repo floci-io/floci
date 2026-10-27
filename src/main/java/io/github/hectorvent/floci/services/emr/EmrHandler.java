@@ -742,7 +742,7 @@ public class EmrHandler {
                                              boolean terminated) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", "ci-" + index + cluster.getId());
-        node.put("Ec2InstanceId", "i-" + String.format("%017d", index));
+        node.put("Ec2InstanceId", EmrService.ec2InstanceId(index));
         node.put("PublicDnsName", AwsEndpoints.ec2PublicDns("203.0.113." + index, cluster.getRegion()));
         String privateIp = "10.0.0." + index;
         node.put("PrivateDnsName", AwsRegions.ec2PrivateIpDnsName(privateIp, cluster.getRegion()));
