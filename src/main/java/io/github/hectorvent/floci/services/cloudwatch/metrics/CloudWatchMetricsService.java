@@ -58,6 +58,8 @@ public class CloudWatchMetricsService {
     private static final Logger LOG = Logger.getLogger(CloudWatchMetricsService.class);
 
     private static final List<String> ALARM_TYPES = List.of("CompositeAlarm", "MetricAlarm", "LogAlarm");
+    /** DescribeAlarms' StateValue enum, in the order AWS lists it when it refuses another value. */
+    private static final List<String> STATE_VALUES = List.of("INSUFFICIENT_DATA", "ALARM", "OK");
     private static final List<String> HISTORY_ALARM_TYPES = List.of("MetricAlarm", "CompositeAlarm");
     private static final List<String> HISTORY_ITEM_TYPES = List.of("AlarmContributorAction",
             "AlarmContributorStateUpdate", "Action", "StateUpdate", "ConfigurationUpdate");
@@ -488,11 +490,97 @@ public class CloudWatchMetricsService {
                 .map(MetricAlarm.class::cast).toList();
     }
 
-    public void validateAlarmTypes(List<String> types) {
-        if (!ALARM_TYPES.containsAll(types)) {
-            throw SmithyValidationErrors.validationError(
-                    SmithyValidationErrors.notAllInEnum(types, "alarmTypes", ALARM_TYPES));
+    /** The DescribeAlarms members that choose the alarms it lists: a null string or an empty list when left out. */
+    public record AlarmFilter(List<String> alarmNames, String alarmNamePrefix, List<String> alarmTypes,
+                              String stateValue, String actionPrefix, String childrenOfAlarmName,
+                              String parentsOfAlarmName) {}
+
+    /** The metric and composite alarms a DescribeAlarms request lists. */
+    public record DescribedAlarms(List<MetricAlarm> metricAlarms, List<CompositeAlarm> compositeAlarms) {}
+
+    /**
+     * The alarms a DescribeAlarms request lists: the kinds {@code AlarmTypes} names, metric alarms when it
+     * names none, narrowed by name, by {@code StateValue} and by {@code ActionPrefix}, which an alarm, OK or
+     * insufficient-data action may start with. {@code ChildrenOfAlarmName} lists instead the alarms a
+     * composite alarm's rule names, and {@code ParentsOfAlarmName} the composite alarms whose rules name the
+     * alarm; neither lists the alarm it names, and either one is refused with any other member except
+     * {@code MaxRecords} and {@code NextToken}.
+     */
+    public DescribedAlarms describeAlarms(AlarmFilter filter, String region) {
+        validate(filter);
+        if (filter.childrenOfAlarmName() != null) {
+            return childrenOf(filter.childrenOfAlarmName(), region);
         }
+        if (filter.parentsOfAlarmName() != null) {
+            return parentsOf(filter.parentsOfAlarmName(), region);
+        }
+        List<String> types = filter.alarmTypes().isEmpty() ? List.of("MetricAlarm") : filter.alarmTypes();
+        String actionPrefix = filter.actionPrefix();
+        return byKind(matchingAlarms(filter.alarmNames(), filter.alarmNamePrefix(), region).stream()
+                .filter(alarm -> types.contains(alarm.getAlarmType()))
+                .filter(alarm -> filter.stateValue() == null || filter.stateValue().equals(alarm.getStateValue()))
+                .filter(alarm -> actionPrefix == null || Stream.of(alarm.getAlarmActions(), alarm.getOkActions(),
+                        alarm.getInsufficientDataActions()).flatMap(List::stream)
+                        .anyMatch(action -> action.startsWith(actionPrefix)))
+                .toList());
+    }
+
+    /**
+     * Refuses an {@code AlarmTypes}, {@code ChildrenOfAlarmName}, {@code ParentsOfAlarmName}, {@code StateValue}
+     * or {@code ActionPrefix} outside its modeled shape, all reported together as Smithy does, and then
+     * ChildrenOfAlarmName or ParentsOfAlarmName given with another filter.
+     */
+    private static void validate(AlarmFilter filter) {
+        List<String> violations = Stream.of(
+                ALARM_TYPES.containsAll(filter.alarmTypes()) ? null
+                        : SmithyValidationErrors.notAllInEnum(filter.alarmTypes(), "alarmTypes", ALARM_TYPES),
+                filter.childrenOfAlarmName() == null ? null : SmithyValidationErrors.lengthOutOfRange(
+                        "childrenOfAlarmName", filter.childrenOfAlarmName(), 1, 255),
+                filter.parentsOfAlarmName() == null ? null : SmithyValidationErrors.lengthOutOfRange(
+                        "parentsOfAlarmName", filter.parentsOfAlarmName(), 1, 255),
+                filter.stateValue() == null || STATE_VALUES.contains(filter.stateValue()) ? null
+                        : SmithyValidationErrors.notInEnum(filter.stateValue(), "stateValue", STATE_VALUES),
+                filter.actionPrefix() == null ? null
+                        : SmithyValidationErrors.lengthOutOfRange("actionPrefix", filter.actionPrefix(), 1, 1024))
+                .filter(Objects::nonNull).toList();
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
+        String related = filter.childrenOfAlarmName() != null ? "ChildrenOfAlarmName"
+                : filter.parentsOfAlarmName() != null ? "ParentsOfAlarmName" : null;
+        boolean combined = filter.childrenOfAlarmName() != null && filter.parentsOfAlarmName() != null
+                || !filter.alarmNames().isEmpty() || filter.alarmNamePrefix() != null
+                || !filter.alarmTypes().isEmpty() || filter.stateValue() != null || filter.actionPrefix() != null;
+        if (related != null && combined) {
+            throw new AwsException("ValidationError", "If you specify " + related + ", you cannot specify any other "
+                    + "parameters in the request except for MaxRecords and NextToken.", 400);
+        }
+    }
+
+    /** The alarms a composite alarm's rule names, by name or ARN; none for a metric alarm or a missing one. */
+    private DescribedAlarms childrenOf(String name, String region) {
+        if (!(alarmStore.get(region + "::" + name).orElse(null) instanceof CompositeAlarm parent)) {
+            return new DescribedAlarms(List.of(), List.of());
+        }
+        Set<String> children = alarmReferences(parent, region);
+        return byKind(alarmStore.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(alarm -> !alarm.getAlarmName().equals(name) && children.contains(alarm.getAlarmArn()))
+                .toList());
+    }
+
+    /** The composite alarms whose rules name the alarm, by name or ARN, whether or not it still exists. */
+    private DescribedAlarms parentsOf(String name, String region) {
+        String arn = regionResolver.buildArn("cloudwatch", region, "alarm:" + name);
+        return byKind(alarmStore.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(alarm -> alarm instanceof CompositeAlarm composite && !composite.getAlarmName().equals(name)
+                        && alarmReferences(composite, region).contains(arn))
+                .toList());
+    }
+
+    private static DescribedAlarms byKind(List<Alarm> alarms) {
+        return new DescribedAlarms(
+                alarms.stream().filter(MetricAlarm.class::isInstance).map(MetricAlarm.class::cast).toList(),
+                alarms.stream().filter(CompositeAlarm.class::isInstance).map(CompositeAlarm.class::cast).toList());
     }
 
     public List<CompositeAlarm> describeCompositeAlarms(List<String> names, String prefix, String region) {

@@ -465,6 +465,21 @@ metric does not retain the previous definition.
 This is management-plane support: the alarm evaluator currently evaluates only single-metric
 alarms, not metric-math expressions. `SetAlarmState` remains available for manual transitions.
 
+### DescribeAlarms filters {#describealarms-filters}
+
+`DescribeAlarms` applies every filter a request gives: `AlarmNames` or `AlarmNamePrefix`,
+`AlarmTypes`, `StateValue` and `ActionPrefix`. `StateValue` and `ActionPrefix` narrow metric and
+composite alarms alike. The API reference calls `ActionPrefix` a prefix for any action, so an alarm
+matches when one of its `AlarmActions`, `OKActions` or `InsufficientDataActions` starts with it.
+
+`ChildrenOfAlarmName` lists the metric and composite alarms a composite alarm's rule names, by name
+or ARN, with only their name, ARN, `StateValue` and `StateUpdatedTimestamp`. `ParentsOfAlarmName`
+lists the composite alarms whose rules name an alarm, with only their name and ARN. Neither lists
+the alarm it names. Either one with any other member except `MaxRecords` and `NextToken` is refused
+with `ValidationError`, as is a `StateValue` outside `OK`, `ALARM` and `INSUFFICIENT_DATA`, an
+empty or over-long `ActionPrefix`, and an empty or over-long alarm name in either member.
+`MaxRecords` and `NextToken` are accepted, but every match comes back in one response.
+
 ### Alarm history {#alarm-history}
 
 `DescribeAlarmHistory` lists two kinds of items, newest first unless `ScanBy` is
