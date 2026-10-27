@@ -332,6 +332,29 @@ class ApiGatewayV2AlbIntegrationTest {
 
     @Test
     @Order(12)
+    void albListenerIgnoresUnknownVpcLinkConnectionId() {
+        patchConnectionId("vpclink-missing");
+        try {
+            given().when().get("/execute-api/" + apiId + "/$default/health")
+                    .then().statusCode(200).body("path", equalTo("/health"));
+        } finally {
+            patchConnectionId(vpcLinkId);
+        }
+    }
+
+    private static void patchConnectionId(String connectionId) {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"connectionId":"%s"}
+                        """.formatted(connectionId))
+                .when().patch("/v2/apis/" + apiId + "/integrations/" + integrationId)
+                .then()
+                .statusCode(200);
+    }
+
+    @Test
+    @Order(13)
     void unresolvableListenerArnReturns502() {
         // Replace the integrationUri with a listener ARN that doesn't exist.
         // The ALB resolver must return a clean 502, not crash.
