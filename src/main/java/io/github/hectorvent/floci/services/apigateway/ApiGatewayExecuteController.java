@@ -108,6 +108,7 @@ public class ApiGatewayExecuteController {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayExecuteController.class);
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+    private static final int EXECUTE_API_PREFIX_SEGMENTS = 3;
     private static final Set<String> V2_TEXT_CONTENT_TYPES = Set.of(
             MediaType.TEXT_PLAIN,
             MediaType.TEXT_HTML,
@@ -795,27 +796,46 @@ public class ApiGatewayExecuteController {
                 connectionId = scope.stage().getVariables().get(stageVariable.group(1));
             }
         }
-        if (connectionId == null || connectionId.isBlank()) {
-            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
-                    "VPC_LINK integration is missing a connectionId");
+        VpcLinkFailure failure = checkVpcLink(region, connectionId, true);
+        if (failure == null) {
+            return null;
         }
-        String status;
-        try {
-            status = apiGatewayService.getVpcLink(region, connectionId).getStatus();
-        } catch (AwsException e) {
+        if (failure.status() == 500) {
+            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500, failure.message());
+        }
+        return httpApiError(failure.status(), failure.message());
+    }
+
+    private record VpcLinkFailure(int status, String message) {
+    }
+
+    /**
+     * The checks shared by the REST and HTTP API paths: the connection id is present, names an
+     * existing link ({@code includeRestLinks} also searches the REST API VPC links), and the link is
+     * {@code AVAILABLE}. Returns {@code null} when the request may proceed.
+     */
+    private VpcLinkFailure checkVpcLink(String region, String connectionId, boolean includeRestLinks) {
+        if (connectionId == null || connectionId.isBlank()) {
+            return new VpcLinkFailure(500, "VPC_LINK integration is missing a connectionId");
+        }
+        String status = null;
+        if (includeRestLinks) {
+            try {
+                status = apiGatewayService.getVpcLink(region, connectionId).getStatus();
+            } catch (AwsException ignored) {
+                // not a REST API VPC link: fall through to the HTTP API links
+            }
+        }
+        if (status == null) {
             try {
                 status = apiGatewayV2Service.getVpcLink(region, connectionId).getVpcLinkStatus();
-            } catch (AwsException ignored) {
+            } catch (AwsException e) {
                 LOG.warnv("VPC_LINK integration references unknown link {0} in {1}", connectionId, region);
-                return Response.status(502)
-                        .entity(jsonMessage("Invalid VPC link identifier specified: " + connectionId))
-                        .type(MediaType.APPLICATION_JSON).build();
+                return new VpcLinkFailure(502, "Invalid VPC link identifier specified: " + connectionId);
             }
         }
         if (!"AVAILABLE".equalsIgnoreCase(status)) {
-            return Response.status(502)
-                    .entity(jsonMessage("VPC link is not available: " + status))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return new VpcLinkFailure(502, "VPC link is not available: " + status);
         }
         return null;
     }
@@ -2912,7 +2932,7 @@ public class ApiGatewayExecuteController {
                             .entity(jsonMessage("Bad Gateway: cannot resolve ALB listener: " + integrationUri))
                             .type(MediaType.APPLICATION_JSON).build();
                 }
-                String resolvedUrl = "http://127.0.0.1:" + listenerEndpoint.port() + path;
+                String resolvedUrl = "http://127.0.0.1:" + listenerEndpoint.port() + proxyTargetPath(path, uriInfo);
                 effective = withResolvedUriAndHost(integration, resolvedUrl, listenerEndpoint.host());
                 LOG.debugv("ALB integration: listener {0} → {1}", integrationUri, resolvedUrl);
             } else if (isCloudMapIntegration(integration)) {
@@ -2934,7 +2954,7 @@ public class ApiGatewayExecuteController {
                     LOG.debugv("Cloud Map service {0} has no healthy instance to route to", integrationUri);
                     return httpApiError(503, "Service Unavailable");
                 }
-                String resolvedUrl = "http://" + instance.address() + ":" + instance.port() + path;
+                String resolvedUrl = "http://" + instance.address() + ":" + instance.port() + proxyTargetPath(path, uriInfo);
                 effective = withResolvedUri(integration, resolvedUrl);
                 LOG.debugv("Cloud Map integration: {0} → {1}:{2}", integrationUri, instance.address(), instance.port());
             }
@@ -3012,21 +3032,8 @@ public class ApiGatewayExecuteController {
      */
     private Response validateVpcLinkV2(String region,
             io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration) {
-        String connectionId = integration.getConnectionId();
-        if (connectionId == null || connectionId.isBlank()) {
-            return httpApiError(500, "VPC_LINK integration is missing a connectionId");
-        }
-        String status;
-        try {
-            status = apiGatewayV2Service.getVpcLink(region, connectionId).getVpcLinkStatus();
-        } catch (AwsException e) {
-            LOG.warnv("VPC_LINK integration references unknown link {0} in {1}", connectionId, region);
-            return httpApiError(502, "Invalid VPC link identifier specified: " + connectionId);
-        }
-        if (!"AVAILABLE".equalsIgnoreCase(status)) {
-            return httpApiError(502, "VPC link is not available: " + status);
-        }
-        return null;
+        VpcLinkFailure failure = checkVpcLink(region, integration.getConnectionId(), false);
+        return failure == null ? null : httpApiError(failure.status(), failure.message());
     }
 
     /** Returns listener endpoint details, or null if the ARN is unknown or lookups fail. */
@@ -4325,6 +4332,27 @@ public class ApiGatewayExecuteController {
     }
 
     // ──────────────────────────── Path matching ────────────────────────────
+
+    /** The request path after the {@code /execute-api/{apiId}/{stage}} prefix, as the caller encoded it. */
+    static String rawTargetPath(String normalizedPath, String rawRequestPath) {
+        if (rawRequestPath != null) {
+            int start = 0;
+            for (int segment = 0; segment < EXECUTE_API_PREFIX_SEGMENTS && start >= 0; segment++) {
+                start = rawRequestPath.indexOf('/', start + 1);
+            }
+            if (start >= 0) {
+                return rawRequestPath.substring(start);
+            }
+            if (rawRequestPath.startsWith("/execute-api/")) {
+                return "/";
+            }
+        }
+        return preserveTrailingSlash(normalizedPath, rawRequestPath);
+    }
+
+    private static String proxyTargetPath(String normalizedPath, UriInfo uriInfo) {
+        return rawTargetPath(normalizedPath, uriInfo.getRequestUri().getRawPath());
+    }
 
     /**
      * Re-appends a trailing slash that the JAX-RS {@code {proxy}} path-param binding strips.

@@ -20,9 +20,11 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 
 /** End-to-end: HTTP API HTTP_PROXY over a VPC link, integrationUri = Cloud Map service ARN. */
@@ -51,12 +53,14 @@ class ApiGatewayV2CloudMapIntegrationTest {
         final String name;
         final HttpServer server;
         final List<Received> received = new CopyOnWriteArrayList<>();
+        final List<String> rawRequestTargets = new CopyOnWriteArrayList<>();
 
         Stub(String name) throws IOException {
             this.name = name;
             this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             server.createContext("/", exchange -> {
                 String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                rawRequestTargets.add(exchange.getRequestURI().getRawPath());
                 received.add(new Received(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
                         exchange.getRequestURI().getRawQuery(), body,
                         exchange.getRequestHeaders().getFirst("X-Probe")));
@@ -113,6 +117,25 @@ class ApiGatewayV2CloudMapIntegrationTest {
         assertThat(stub.received, hasSize(1));
         assertThat(stub.received.get(0), equalTo(
                 new Received("POST", "/orders", "tag=a&tag=b", "hello", "probe-value")));
+    }
+
+    @Test
+    void encodedPathAndTrailingSlashReachTheInstanceAsTheCallerSentThem() throws IOException {
+        Stub stub = startStub("raw");
+        String serviceId = createService(null);
+        register(serviceId, "i-1", stub, "");
+        String apiId = createApi(serviceArn(serviceId), "VPC_LINK", createVpcLink());
+
+        given().urlEncodingEnabled(false).when().get("/execute-api/" + apiId + "/$default/a%3Fb")
+                .then().statusCode(200);
+        given().urlEncodingEnabled(false).when().get("/execute-api/" + apiId + "/$default/x/")
+                .then().statusCode(200);
+        given().urlEncodingEnabled(false).when().get("/execute-api/" + apiId + "/$default/a%20b?k=v")
+                .then().statusCode(200);
+
+        assertThat(stub.rawRequestTargets, contains("/a%3Fb", "/x/", "/a%20b"));
+        assertThat(stub.received.get(0).query(), nullValue());
+        assertThat(stub.received.get(2).query(), equalTo("k=v"));
     }
 
     @Test

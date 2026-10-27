@@ -32,7 +32,7 @@ public class CloudMapInstanceResolver {
     private static final String ATTRIBUTE_IPV4 = "AWS_INSTANCE_IPV4";
     private static final String ATTRIBUTE_PORT = "AWS_INSTANCE_PORT";
     private static final String HEALTHY = "HEALTHY";
-    private static final Pattern IPV4 = Pattern.compile("^(?:\\d{1,3}\\.){3}\\d{1,3}$");
+    private static final Pattern IPV4 = Pattern.compile("^(?:(?:25[0-5]|2[0-4]\\d|[01]?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|[01]?\\d?\\d)$");
     private static final int MAX_PORT = 65_535;
 
     public record Endpoint(String address, int port) {}

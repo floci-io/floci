@@ -56,7 +56,8 @@ class ApiGatewayV2AlbIntegrationTest {
         stub = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         stub.createContext("/", exchange -> {
             String reqPath = exchange.getRequestURI().getPath();
-            byte[] body = ("{\"status\":\"ok\",\"path\":\"" + reqPath + "\"}").getBytes(StandardCharsets.UTF_8);
+            String rawPath = exchange.getRequestURI().getRawPath();
+            byte[] body = ("{\"status\":\"ok\",\"path\":\"" + reqPath + "\",\"rawPath\":\"" + rawPath + "\"}").getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().add("Content-Type", "application/json");
             exchange.sendResponseHeaders(200, body.length);
             try (OutputStream os = exchange.getResponseBody()) {
@@ -372,6 +373,23 @@ class ApiGatewayV2AlbIntegrationTest {
                 .when().get("/execute-api/" + apiId + "/$default/health")
                 .then()
                 .statusCode(502);
+    }
+
+    @Test
+    @Order(14)
+    void albTargetReceivesEncodedPathAndTrailingSlashAsTheCallerSentThem() {
+        given().contentType(ContentType.JSON)
+                .body("{\"integrationUri\":\"" + listenerArn + "\"}")
+                .when().patch("/v2/apis/" + apiId + "/integrations/" + integrationId)
+                .then().statusCode(200);
+        given().contentType(ContentType.JSON)
+                .body("{\"routeKey\":\"GET /{proxy+}\",\"target\":\"integrations/" + integrationId + "\"}")
+                .when().post("/v2/apis/" + apiId + "/routes").then().statusCode(201);
+
+        given().urlEncodingEnabled(false).when().get("/execute-api/" + apiId + "/$default/a%3Fb")
+                .then().statusCode(200).body("rawPath", equalTo("/a%3Fb"));
+        given().urlEncodingEnabled(false).when().get("/execute-api/" + apiId + "/$default/x/")
+                .then().statusCode(200).body("rawPath", equalTo("/x/"));
     }
 
     @Test

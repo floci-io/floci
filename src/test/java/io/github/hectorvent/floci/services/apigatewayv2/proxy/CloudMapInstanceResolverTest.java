@@ -113,6 +113,19 @@ class CloudMapInstanceResolverTest {
     }
 
     @Test
+    void addressWithAnOctetAboveTheIpv4RangeIsNotACandidate() {
+        givenService(null,
+                instance("big-first", "HEALTHY", address("999.1.1.1", "8080")),
+                instance("big-last", "HEALTHY", address("10.0.0.256", "8080")),
+                instance("big-middle", "HEALTHY", address("10.300.0.1", "8080")),
+                instance("edge", "HEALTHY", address("255.255.255.255", "9090")));
+
+        for (int i = 0; i < 50; i++) {
+            assertEquals(new Endpoint("255.255.255.255", 9090), resolver.pickInstance(SERVICE_ARN).orElseThrow());
+        }
+    }
+
+    @Test
     void arnQueryStringFiltersInstancesByAttribute() {
         givenService(null,
                 instance("prod", "HEALTHY", Map.of("AWS_INSTANCE_IPV4", "10.0.0.1",
