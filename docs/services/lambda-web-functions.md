@@ -46,7 +46,7 @@ The `Lambda Web` service model (apiVersion 2025-03-07, `aws lambda-web` in the A
 - **ARNs** given as identifiers must name the request's region and the caller's account, as on AWS. A revision or endpoint ARN resolves by its id or name only.
 - **Page tokens** are base64 cursors that carry the request and the position of the page, not the UUIDs AWS issues. A token reused with other parameters gets the AWS "does not match the request" error, and any other token the "invalid or has expired" error.
 - **Domain names** take the form `<id>.001.lambda-web.<region>.<floci host>` and `<id>.lambda-web.global.<floci host>`, with the host and port of `floci.base-url`. A `PerRegion` endpoint gets one domain per region in `regionalEndpoints`, all with the same id, as on AWS.
-- **Not implemented yet:** SigV4a on `MultiRegion` endpoints and the check that a policy's principal exists.
+- **Not implemented yet:** SigV4a on `MultiRegion` endpoints.
 
 ### `aws lambda-web deploy`
 
