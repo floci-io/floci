@@ -52,6 +52,10 @@ for create, and `eu-west-1` for update, using zero desired capacity.
 Rejected updates preserve the group's existing configuration. This does not
 enable preview support for multiple reservation targets.
 
+When `AvailabilityZones` is omitted, group creation and subnet updates derive the
+distinct zones from `VPCZoneIdentifier`. Updates without placement fields retain
+the group's current subnet and zone selection.
+
 Scale-out follows the [AWS placement rules](https://docs.aws.amazon.com/autoscaling/ec2/userguide/auto-scaling-benefits.html):
 choose the zone with the fewest active instances, then its subnet with the most
 free IPv4 addresses. Declared subnets and actual EC2 placement take precedence
