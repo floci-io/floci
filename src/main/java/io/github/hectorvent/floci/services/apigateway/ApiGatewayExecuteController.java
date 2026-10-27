@@ -3864,6 +3864,7 @@ public class ApiGatewayExecuteController {
         // buildProxyEvent already does for REST (V1).
         String preservedPath = preserveTrailingSlash(path, uriInfo.getRequestUri().getRawPath());
 
+
         ObjectNode event = objectMapper.createObjectNode();
         event.put("version", "2.0");
         event.put("routeKey", routeKey != null ? routeKey : "$default");
@@ -4015,6 +4016,7 @@ public class ApiGatewayExecuteController {
             return false;
         }
     }
+
 
     // ──────────────────────────── Gateway responses ────────────────────────────
 
