@@ -49,19 +49,17 @@ class RedshiftMetricsTest {
 
     private static List<Datapoint> awaitDatapoints(CloudWatchClient cloudWatch, String metricName,
                                                    Dimension dimension) throws InterruptedException {
-        Instant deadline = Instant.now().plus(PUBLISH_TIMEOUT);
-        List<Datapoint> datapoints = List.of();
-        while (Instant.now().isBefore(deadline)) {
-            datapoints = cloudWatch.getMetricStatistics(request -> request.namespace("AWS/Redshift")
-                    .metricName(metricName).dimensions(dimension)
-                    .startTime(Instant.now().minus(Duration.ofMinutes(10)))
-                    .endTime(Instant.now().plus(Duration.ofMinutes(2)))
-                    .period(60).statistics(Statistic.SUM)).datapoints();
-            if (!datapoints.isEmpty()) {
-                return datapoints;
-            }
-            Thread.sleep(5_000);
-        }
-        return datapoints;
+        TestFixtures.await(() -> !datapoints(cloudWatch, metricName, dimension).isEmpty(),
+                dimension.value(), "AWS/Redshift " + metricName + " datapoints",
+                PUBLISH_TIMEOUT.toNanos(), 1_000);
+        return datapoints(cloudWatch, metricName, dimension);
+    }
+
+    private static List<Datapoint> datapoints(CloudWatchClient cloudWatch, String metricName, Dimension dimension) {
+        return cloudWatch.getMetricStatistics(request -> request.namespace("AWS/Redshift")
+                .metricName(metricName).dimensions(dimension)
+                .startTime(Instant.now().minus(Duration.ofMinutes(10)))
+                .endTime(Instant.now().plus(Duration.ofMinutes(2)))
+                .period(60).statistics(Statistic.SUM)).datapoints();
     }
 }

@@ -49,7 +49,7 @@ class RedshiftMetricsPublisherTest {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier(identifier);
         cluster.setClusterStatus("available");
-        return new RedshiftMetricTarget(accountId, REGION, cluster);
+        return new RedshiftMetricTarget(accountId, REGION, cluster, "proxy-for-" + identifier);
     }
 
     private static MetricDatum sample(String identifier, long timestamp) {

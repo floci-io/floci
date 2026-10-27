@@ -21,7 +21,7 @@ import static org.mockito.Mockito.when;
 
 class RedshiftClusterStateMetricCollectorTest {
 
-    private static final String KEY = "111111111111:warehouse";
+    private static final String KEY = "proxy-key-supplied-by-redshift-service";
     private static final long TIMESTAMP = 1_793_102_340L;
 
     private final RedshiftProxyManager proxies = mock(RedshiftProxyManager.class);
@@ -31,7 +31,7 @@ class RedshiftClusterStateMetricCollectorTest {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("warehouse");
         cluster.setClusterStatus(status);
-        return new RedshiftMetricTarget("111111111111", "us-east-1", cluster);
+        return new RedshiftMetricTarget("111111111111", "us-east-1", cluster, KEY);
     }
 
     private static Map<String, MetricDatum> byName(List<MetricDatum> datums) {

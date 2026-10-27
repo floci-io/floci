@@ -2426,8 +2426,10 @@ class RedshiftServiceTest {
         assertEquals(2, targets.size());
         assertEquals("111111111111", targets.get(0).accountId());
         assertEquals("eu-west-1", targets.get(0).region());
+        assertEquals("111111111111:warehouse", targets.get(0).proxyKey());
         assertSame(available, targets.get(0).cluster());
         assertEquals("222222222222", targets.get(1).accountId());
+        assertEquals("222222222222:warehouse", targets.get(1).proxyKey());
         assertSame(otherAccount, targets.get(1).cluster());
     }
 

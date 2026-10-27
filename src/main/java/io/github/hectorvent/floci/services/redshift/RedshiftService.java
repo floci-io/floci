@@ -793,7 +793,7 @@ public class RedshiftService implements ManagedSecretRotator {
         return clusters.scanAllAccountEntries(k -> true).stream()
                 .filter(entry -> "available".equals(entry.value().getClusterStatus()))
                 .map(entry -> new RedshiftMetricTarget(entry.accountId(), snapshotRegion(entry.value()),
-                        entry.value()))
+                        entry.value(), relayKey(entry.accountId(), entry.value().getClusterIdentifier())))
                 .toList();
     }
 

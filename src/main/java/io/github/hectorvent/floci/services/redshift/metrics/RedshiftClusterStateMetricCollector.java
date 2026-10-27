@@ -37,7 +37,7 @@ public class RedshiftClusterStateMetricCollector implements RedshiftMetricCollec
         List<MetricDatum> datums = new ArrayList<>(List.of(
                 MetricDatum.of("HealthStatus", COUNT, 1, dimensions, timestampSeconds),
                 MetricDatum.of("MaintenanceMode", COUNT, 0, dimensions, timestampSeconds)));
-        OptionalInt connections = proxyManager.activeConnections(target.accountId() + ":" + identifier);
+        OptionalInt connections = proxyManager.activeConnections(target.proxyKey());
         if (connections.isPresent()) {
             datums.add(MetricDatum.of("DatabaseConnections", COUNT, connections.getAsInt(), dimensions,
                     timestampSeconds));
