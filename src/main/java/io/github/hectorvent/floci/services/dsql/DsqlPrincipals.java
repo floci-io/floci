@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.dsql;
 
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -64,16 +63,7 @@ public class DsqlPrincipals {
      * account's root always does; a role or a user is looked up in its account by its name.
      */
     public boolean exists(String arn) {
-        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-        String resource = parsed.resource();
-        String name = resource.substring(resource.lastIndexOf('/') + 1);
-        if (resource.startsWith("role/")) {
-            return iamService.findRole(parsed.accountId(), name).isPresent();
-        }
-        if (resource.startsWith("user/")) {
-            return iamService.findUser(parsed.accountId(), name).isPresent();
-        }
-        return "root".equals(resource);
+        return iamService.heldPrincipalArn(arn).isPresent();
     }
 
     private String accessKeyId() {

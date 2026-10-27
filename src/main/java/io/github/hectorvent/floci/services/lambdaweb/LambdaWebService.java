@@ -1413,7 +1413,7 @@ public class LambdaWebService implements Resettable {
             validateStatement(statement, functionArn);
         }
         for (JsonNode statement : each) {
-            policyPrincipals.requireExisting(region, statement.get("Principal"));
+            policyPrincipals.requireExisting(regionResolver.partitionForRegion(region), statement.get("Principal"));
         }
         for (JsonNode statement : each) {
             requireNotPublic(statement);

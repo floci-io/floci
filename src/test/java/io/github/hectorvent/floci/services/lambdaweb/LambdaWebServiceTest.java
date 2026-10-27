@@ -33,12 +33,12 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -52,6 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.startsWith;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -67,7 +68,8 @@ class LambdaWebServiceTest {
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
     private final ServiceCallAuthorizer serviceCalls = mock(ServiceCallAuthorizer.class);
     private final LambdaMicrovmsService microvms = new LambdaMicrovmsService(new RegionResolver(REGION, ACCOUNT_ID), null);
-    private final IamService iamService = mock(IamService.class);
+    private final IamService iamService = new IamService(new MemoryStorageFactory(),
+            mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), new RegionResolver(REGION, ACCOUNT_ID), Clock.systemUTC());
 
     @TempDir
     Path storageDir;
@@ -715,8 +717,7 @@ class LambdaWebServiceTest {
         assertEquals("The provided input'foo/bar'was invalid. Member must satisfy expression: [\\w+=,.@\\:-]*"
                 + " Please check your input and try again.", message(() -> service.putResourcePolicy(REGION, missing,
                 policy(members.formatted("{\"AWS\":\"foo/bar\"}", invoke, "\"" + resource + "\"")))));
-        when(iamService.findUser(ACCOUNT_ID, "alice")).thenReturn(Optional.of(
-                new IamUser("AIDAALICE", "alice", "/path/", "arn:aws:iam::000000000000:user/path/alice")));
+        iamService.createUser("alice", "/path/");
         assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
                 policy(members.formatted("{\"AWS\":\"arn:aws:iam::000000000000:user/path/alice\"}", invoke,
                         "\"" + resource + "\"")))).getErrorCode());
@@ -767,15 +768,13 @@ class LambdaWebServiceTest {
         String invalid = "The provided principal was invalid. Please check the principal and try again.";
         String otherArn = "The principal arn provided does not match the actual principal arn."
                 + " Please check your input and try again.";
-        IamRole role = new IamRole("AROAREADER", "reader", "/team/", "arn:aws:iam::000000000000:role/team/reader", "{}");
-        when(iamService.findRole(ACCOUNT_ID, "reader")).thenReturn(Optional.of(role));
-        when(iamService.listRoles("/")).thenReturn(List.of(role));
-        IamUser user = new IamUser("AIDAWRITER", "writer", "/team/", "arn:aws:iam::000000000000:user/team/writer");
-        when(iamService.findUser(ACCOUNT_ID, "writer")).thenReturn(Optional.of(user));
-        when(iamService.listUsers("/")).thenReturn(List.of(user));
+        IamRole role = iamService.createRole("reader", "/team/", "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},"
+                + "\"Action\":\"sts:AssumeRole\"}]}", null, 3600, null);
+        IamUser user = iamService.createUser("writer", "/team/");
 
         for (String exists : List.of("arn:aws:iam::000000000000:role/team/reader",
-                "arn:aws:iam::000000000000:user/team/writer", "AROAREADER", "AIDAWRITER", "111122223333",
+                "arn:aws:iam::000000000000:user/team/writer", role.getRoleId(), user.getUserId(), "111122223333",
                 "arn:aws:iam::111122223333:root", "arn:aws:sts::000000000000:federated-user/bob")) {
             assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
                     policy(principalPolicy("Allow", "{\"AWS\":\"" + exists + "\"}", missing)))).getErrorCode(), exists);

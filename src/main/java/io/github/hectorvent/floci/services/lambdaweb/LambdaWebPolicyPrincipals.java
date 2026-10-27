@@ -3,10 +3,7 @@ package io.github.hectorvent.floci.services.lambdaweb;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.iam.IamService;
-import io.github.hectorvent.floci.services.iam.model.IamRole;
-import io.github.hectorvent.floci.services.iam.model.IamUser;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -34,8 +31,8 @@ public class LambdaWebPolicyPrincipals {
         this.iamService = iamService;
     }
 
-    /** Refuses the statement's {@code principal} when one it names does not exist. */
-    void requireExisting(String region, JsonNode principal) {
+    /** Refuses the statement's {@code principal} when one it names does not exist in {@code partition}. */
+    void requireExisting(String partition, JsonNode principal) {
         if (!principal.isObject()) {
             return;
         }
@@ -53,7 +50,7 @@ public class LambdaWebPolicyPrincipals {
             aws.forEach(value -> values.add(value.textValue()));
         }
         for (String value : values) {
-            requireExisting(AwsRegions.partitionFor(region), value);
+            requireExisting(partition, value);
         }
     }
 
@@ -72,26 +69,14 @@ public class LambdaWebPolicyPrincipals {
                 || !ACCOUNT_ID.matcher(arn.accountId()).matches()) {
             throw invalid();
         }
-        String resource = arn.resource();
-        String name = resource.substring(resource.lastIndexOf('/') + 1);
-        if ("iam".equals(arn.service()) && "root".equals(resource)) {
-            return;
-        }
-        if ("iam".equals(arn.service()) && resource.startsWith("role/")) {
-            IamRole role = iamService.findRole(arn.accountId(), name).orElseThrow(LambdaWebPolicyPrincipals::invalid);
-            if (!IamService.roleArnMatches(value, role)) {
+        if ("iam".equals(arn.service())) {
+            String held = iamService.heldPrincipalArn(value).orElseThrow(LambdaWebPolicyPrincipals::invalid);
+            if (!AwsArnUtils.parse(held).resource().equals(arn.resource())) {
                 throw new AwsException("ValidationException", OTHER_ARN, 400);
             }
             return;
         }
-        if ("iam".equals(arn.service()) && resource.startsWith("user/")) {
-            IamUser user = iamService.findUser(arn.accountId(), name).orElseThrow(LambdaWebPolicyPrincipals::invalid);
-            if (!resource.equals(AwsArnUtils.parse(user.getArn()).resource())) {
-                throw new AwsException("ValidationException", OTHER_ARN, 400);
-            }
-            return;
-        }
-        if ("sts".equals(arn.service()) && resource.startsWith("federated-user/")) {
+        if ("sts".equals(arn.service()) && arn.resource().startsWith("federated-user/")) {
             return;
         }
         throw invalid();
