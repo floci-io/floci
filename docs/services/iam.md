@@ -2221,6 +2221,9 @@ floci populates:
 - `iam:PolicyARN`: the managed policy ARN in the form body for `AttachRolePolicy`,
   `DetachRolePolicy`, `AttachUserPolicy`, `DetachUserPolicy`, `AttachGroupPolicy` and
   `DetachGroupPolicy`. The target role, user or group remains the authorized resource.
+- `iam:PermissionsBoundary`: the boundary policy ARN in the `PermissionsBoundary` parameter of
+  `CreateRole`, `CreateUser`, `PutRolePermissionsBoundary` and `PutUserPermissionsBoundary`.
+  A request without the parameter carries no value for the key.
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
 - `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
   `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and

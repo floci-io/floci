@@ -215,6 +215,11 @@ public class IamConditionContextResolver {
                 String policyArn = formParameters(ctx).get("PolicyArn");
                 yield policyArn == null ? null : Map.of("iam:PolicyARN", List.of(policyArn));
             }
+            case "iam:CreateRole", "iam:CreateUser", "iam:PutRolePermissionsBoundary",
+                    "iam:PutUserPermissionsBoundary" -> {
+                String boundary = formParameters(ctx).get("PermissionsBoundary");
+                yield boundary == null ? null : Map.of("iam:PermissionsBoundary", List.of(boundary));
+            }
             default -> null;
         };
     }

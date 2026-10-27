@@ -202,6 +202,36 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void iamPermissionsBoundaryComesFromTheBoundaryParameterOfEachActionThatTakesIt() {
+        for (String action : List.of("iam:CreateRole", "iam:CreateUser", "iam:PutRolePermissionsBoundary",
+                "iam:PutUserPermissionsBoundary")) {
+            assertEquals(Map.of("iam:PermissionsBoundary", List.of("arn:aws:iam::123456789012:policy/Boundary")),
+                    resolver.resolve("iam", action,
+                            formRequest("PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FBoundary")),
+                    action);
+            assertNull(resolver.resolve("iam", action, formRequest("RoleName=r&UserName=u")), action);
+        }
+        assertNull(resolver.resolve("iam", "iam:GetRole", formRequest("PermissionsBoundary=example")));
+    }
+
+    @Test
+    void aPermissionsBoundaryConditionAllowsOnlyACreateRoleThatSetsThatBoundary() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"iam:CreateRole",
+                  "Resource":"*","Condition":{"StringEquals":
+                  {"iam:PermissionsBoundary":"arn:aws:iam::123456789012:policy/Boundary"}}}]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy), "iam:CreateRole", "*",
+                resolver.resolve("iam", "iam:CreateRole", formRequest(
+                        "RoleName=r&PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FBoundary"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), "iam:CreateRole", "*",
+                resolver.resolve("iam", "iam:CreateRole", formRequest(
+                        "RoleName=r&PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FOther"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), "iam:CreateRole", "*",
+                resolver.resolve("iam", "iam:CreateRole", formRequest("RoleName=r"))));
+    }
+
+    @Test
     void queryGetConditionsUseTheFirstDecodedUrlValue() {
         MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
         query.add("Action", "CreateTags");
