@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -38,6 +39,8 @@ class CloudFrontExecuteApiOriginServingTest {
     private static final String CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";
     private static final String REGION = "us-east-1";
     private static final String STAGE = "dev";
+    private static final String OTHER_ACCOUNT_AUTHORIZATION =
+            "AWS4-HMAC-SHA256 Credential=111122223333/20261027/" + REGION + "/apigateway/aws4_request";
 
     @Inject
     CloudFrontService cloudFrontService;
@@ -189,6 +192,30 @@ class CloudFrontExecuteApiOriginServingTest {
     }
 
     @Test
+    void anHttpApiOfAnotherAccountThanTheViewerIsServed() throws IOException {
+        String apiId = createHttpApi(OTHER_ACCOUNT_AUTHORIZATION);
+        Distribution created = createDistribution(executeApiDomain(apiId), "/" + STAGE,
+                CloudFrontService.MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID);
+
+        given().header("Host", created.getDomainName())
+                .when().get("/accounts")
+                .then().statusCode(200)
+                .body("path", equalTo("/backend"));
+    }
+
+    @Test
+    void aRestApiWithAnotherRegionLabelThanTheApiIsNotServed() {
+        String apiId = createRestApi();
+        Distribution created = createDistribution(apiId + ".execute-api.eu-west-1.amazonaws.com", "/" + STAGE,
+                CloudFrontService.MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID);
+
+        given().header("Host", created.getDomainName())
+                .when().get("/")
+                .then().statusCode(404)
+                .body("message", equalTo("Not Found"));
+    }
+
+    @Test
     void dotSegmentsInTheViewerPathCannotLeaveTheApiStage() throws IOException {
         String apiId = createHttpApi();
         Distribution created = createDistribution(executeApiDomain(apiId), "",
@@ -228,33 +255,41 @@ class CloudFrontExecuteApiOriginServingTest {
     }
 
     private String createHttpApi() throws IOException {
+        return createHttpApi(null);
+    }
+
+    private String createHttpApi(String authorization) throws IOException {
         startBackend();
-        String apiId = given().contentType(ContentType.JSON)
+        String apiId = asOwner(authorization).contentType(ContentType.JSON)
                 .body(Map.of("name", "cf-execute-api", "protocolType", "HTTP"))
                 .when().post("/v2/apis")
                 .then().statusCode(201).extract().path("apiId");
-        cleanup.register(() -> given().when().delete("/v2/apis/" + apiId));
-        given().contentType(ContentType.JSON).body(Map.of("stageName", STAGE))
+        cleanup.register(() -> asOwner(authorization).when().delete("/v2/apis/" + apiId));
+        asOwner(authorization).contentType(ContentType.JSON).body(Map.of("stageName", STAGE))
                 .when().post("/v2/apis/" + apiId + "/stages").then().statusCode(201);
-        String integrationId = given().contentType(ContentType.JSON)
+        String integrationId = asOwner(authorization).contentType(ContentType.JSON)
                 .body(Map.of("integrationType", "HTTP_PROXY", "integrationMethod", "GET",
                         "integrationUri", "http://127.0.0.1:" + backend.getAddress().getPort() + "/backend",
                         "payloadFormatVersion", "1.0"))
                 .when().post("/v2/apis/" + apiId + "/integrations")
                 .then().statusCode(201).extract().path("integrationId");
-        given().contentType(ContentType.JSON)
+        asOwner(authorization).contentType(ContentType.JSON)
                 .body(Map.of("routeKey", "GET /accounts", "target", "integrations/" + integrationId))
                 .when().post("/v2/apis/" + apiId + "/routes").then().statusCode(201);
-        String postIntegrationId = given().contentType(ContentType.JSON)
+        String postIntegrationId = asOwner(authorization).contentType(ContentType.JSON)
                 .body(Map.of("integrationType", "HTTP_PROXY", "integrationMethod", "POST",
                         "integrationUri", "http://127.0.0.1:" + backend.getAddress().getPort() + "/backend",
                         "payloadFormatVersion", "1.0"))
                 .when().post("/v2/apis/" + apiId + "/integrations")
                 .then().statusCode(201).extract().path("integrationId");
-        given().contentType(ContentType.JSON)
+        asOwner(authorization).contentType(ContentType.JSON)
                 .body(Map.of("routeKey", "POST /accounts", "target", "integrations/" + postIntegrationId))
                 .when().post("/v2/apis/" + apiId + "/routes").then().statusCode(201);
         return apiId;
+    }
+
+    private static RequestSpecification asOwner(String authorization) {
+        return authorization == null ? given() : given().header("Authorization", authorization);
     }
 
     private String createRestApi() {

@@ -798,8 +798,8 @@ public class CloudFrontServingController {
             String originPath = executeApiHost != null
                     ? CloudFrontRequestRouter.normalizePath(rawPath(forwardUri)) : forwardUri;
             if (executeApiHost != null && !executeApiHostFilter.routes(executeApiHost, originPath)) {
-                return new OriginResponse(404, MediaType.APPLICATION_JSON,
-                        "{\"message\":\"Not Found\"}".getBytes(StandardCharsets.UTF_8), 23, Map.of());
+                byte[] notFound = ApiGatewayExecuteApiHostFilter.NOT_FOUND_BODY.getBytes(StandardCharsets.UTF_8);
+                return new OriginResponse(404, MediaType.APPLICATION_JSON, notFound, notFound.length, Map.of());
             }
             URI target = inProcess
                     ? flociListenerUri(originPath, originRequest.rawQuery())
