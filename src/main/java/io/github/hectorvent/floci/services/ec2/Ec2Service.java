@@ -9664,26 +9664,37 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion) {
+        return modifyLaunchTemplate(region, id, name, defaultVersion, false);
+    }
+
+    public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion, boolean dryRun) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
-        ensureLaunchTemplateVersions(launchTemplate);
-        if (defaultVersion != null && !defaultVersion.isBlank()) {
-            String resolved = switch (defaultVersion) {
-                case "$Latest" -> launchTemplate.getLatestVersionNumber();
-                case "$Default" -> launchTemplate.getDefaultVersionNumber();
-                default -> defaultVersion;
-            };
-            int requested = parseLaunchTemplateVersion(resolved);
-            int latest = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber());
-            if (requested < 1 || requested > latest
-                    || !launchTemplate.getVersions().containsKey(String.valueOf(requested))) {
-                throw new AwsException("InvalidLaunchTemplateVersion.NotFound",
-                        "The specified launch template version does not exist.", 400);
+        synchronized (launchTemplate) {
+            ensureLaunchTemplateVersions(launchTemplate);
+            String nextDefault = launchTemplate.getDefaultVersionNumber();
+            if (defaultVersion != null && !defaultVersion.isBlank()) {
+                String resolved = switch (defaultVersion) {
+                    case "$Latest" -> launchTemplate.getLatestVersionNumber();
+                    case "$Default" -> launchTemplate.getDefaultVersionNumber();
+                    default -> defaultVersion;
+                };
+                int requested = parseLaunchTemplateVersion(resolved);
+                int latest = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber());
+                if (requested < 1 || requested > latest
+                        || !launchTemplate.getVersions().containsKey(String.valueOf(requested))) {
+                    throw new AwsException("InvalidLaunchTemplateVersion.NotFound",
+                            "The specified launch template version does not exist.", 400);
+                }
+                nextDefault = String.valueOf(requested);
             }
-            launchTemplate.setDefaultVersionNumber(String.valueOf(requested));
+            if (dryRun) {
+                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+            }
+            launchTemplate.setDefaultVersionNumber(nextDefault);
+            launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
+            return launchTemplate;
         }
-        launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
-        return launchTemplate;
     }
 
     /**
