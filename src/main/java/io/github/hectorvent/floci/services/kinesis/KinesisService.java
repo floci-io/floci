@@ -36,6 +36,7 @@ import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class KinesisService implements ResourceProvider {
@@ -464,12 +465,12 @@ public class KinesisService implements ResourceProvider {
             shard2.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard2.getSequenceNumberRange().startingSequenceNumber(), seq));
 
             // Combine hash ranges (assuming they are adjacent)
-            java.math.BigInteger s1Start = new java.math.BigInteger(shard1.getHashKeyRange().startingHashKey());
-            java.math.BigInteger s2Start = new java.math.BigInteger(shard2.getHashKeyRange().startingHashKey());
+            BigInteger s1Start = new BigInteger(shard1.getHashKeyRange().startingHashKey());
+            BigInteger s2Start = new BigInteger(shard2.getHashKeyRange().startingHashKey());
 
             String start = s1Start.min(s2Start).toString();
-            java.math.BigInteger s1End = new java.math.BigInteger(shard1.getHashKeyRange().endingHashKey());
-            java.math.BigInteger s2End = new java.math.BigInteger(shard2.getHashKeyRange().endingHashKey());
+            BigInteger s1End = new BigInteger(shard1.getHashKeyRange().endingHashKey());
+            BigInteger s2End = new BigInteger(shard2.getHashKeyRange().endingHashKey());
             String end = s1End.max(s2End).toString();
 
             KinesisShard child = new KinesisShard(nextShardId(stream), start, end, seq);
@@ -836,7 +837,7 @@ public class KinesisService implements ResourceProvider {
             throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
         }
         // Use limit=-1 so trailing empty slots round-trip and old 5-part iterators still work.
-        String[] parts = new String(decoded, StandardCharsets.UTF_8).split(java.util.regex.Pattern.quote("|"), -1);
+        String[] parts = new String(decoded, StandardCharsets.UTF_8).split(Pattern.quote("|"), -1);
         if (parts.length < 5) {
             throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
         }

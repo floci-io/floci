@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudmap;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -9,8 +10,13 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -137,10 +143,19 @@ class CloudMapIntegrationTest {
     @Test
     @Order(8)
     void listOperationsFilteredByNamespace() {
-        call("ListOperations",
-                "{\"Filters\":[{\"Name\":\"NAMESPACE_ID\",\"Condition\":\"EQ\",\"Values\":[\"" + namespaceId + "\"]}]}")
-                .then().statusCode(200)
-                .body("Operations.find { it.Status == 'SUCCESS' }", notNullValue());
+        // AWS pages before it filters, so a match can sit behind an empty page when other tests made operations.
+        String filters = "\"Filters\":[{\"Name\":\"NAMESPACE_ID\",\"Condition\":\"EQ\",\"Values\":[\"" + namespaceId + "\"]}]";
+        List<String> statuses = new ArrayList<>();
+        String nextToken = null;
+        do {
+            String token = nextToken == null ? "" : ",\"NextToken\":\"" + nextToken + "\"";
+            JsonPath page = call("ListOperations", "{" + filters + token + "}")
+                    .then().statusCode(200).extract().jsonPath();
+            statuses.addAll(page.getList("Operations.Status", String.class));
+            nextToken = page.getString("NextToken");
+        } while (nextToken != null);
+
+        assertThat(statuses, hasItem("SUCCESS"));
     }
 
     @Test

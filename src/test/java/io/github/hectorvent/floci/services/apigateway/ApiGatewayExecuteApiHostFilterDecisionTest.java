@@ -12,12 +12,15 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ApiGatewayExecuteApiHostFilterDecisionTest {
 
     private static final String API_ID = "abc123";
     private static final String REGION = "us-east-1";
+    private static final String OWNER_REGION = "eu-west-1";
     private static final String VIEWER_ACCOUNT = "000000000000";
     private static final String OWNER_ACCOUNT = "111122223333";
     private static final String HOST = API_ID + ".execute-api." + REGION + ".amazonaws.com";
@@ -31,7 +34,7 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
 
     @Test
     void httpApiOfAnotherAccountIsLookedUpUnderTheOwnerAndTheViewerContextIsRestored() {
-        lookup.owner = Optional.of(new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION));
+        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, OWNER_REGION);
         lookup.httpApi = true;
 
         ApiGatewayExecuteApiHostFilter.RouteDecision decision = filter.decide(HOST, "/dev/accounts", null);
@@ -46,17 +49,104 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
 
     @Test
     void viewerContextIsRestoredWhenALookupFails() {
-        lookup.owner = Optional.of(new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION));
+        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, OWNER_REGION);
 
         ApiGatewayExecuteApiHostFilter.RouteDecision decision = filter.decide(HOST, "/dev/accounts", null);
 
         assertEquals(ApiGatewayExecuteApiHostFilter.RouteKind.NONE, decision.kind());
         assertEquals(VIEWER_ACCOUNT, viewer.getAccountId());
+        assertEquals(REGION, viewer.getRegion());
+    }
+
+    @Test
+    void restApiIsDecidedWithoutAnOwner() {
+        ApiGatewayExecuteApiHostFilter.RouteDecision decision = filter.decide(HOST, "/dev/", null);
+
+        assertEquals(ApiGatewayExecuteApiHostFilter.RouteKind.REST_API, decision.kind());
+        assertEquals(API_ID, decision.apiId());
+        assertNull(decision.owner());
+    }
+
+    @Test
+    void httpApiWithoutOwnerIsDecidedInTheResolvedRegion() {
+        lookup.httpApi = true;
+
+        ApiGatewayExecuteApiHostFilter.RouteDecision decision = filter.decide(HOST, "/dev/accounts", null);
+
+        assertEquals(ApiGatewayExecuteApiHostFilter.RouteKind.HTTP_API, decision.kind());
+        assertEquals(REGION, decision.region());
+        assertNull(decision.owner());
+        assertEquals(List.of(VIEWER_ACCOUNT, VIEWER_ACCOUNT), lookup.accountsSeen);
+    }
+
+    @Test
+    void stagelessPathFallsBackToTheDefaultStage() {
+        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION);
+        lookup.httpApi = true;
+        lookup.stage = "$default";
+
+        ApiGatewayExecuteApiHostFilter.RouteDecision decision = filter.decide(HOST, "/accounts", null);
+
+        assertEquals(ApiGatewayExecuteApiHostFilter.RouteKind.HTTP_API, decision.kind());
+        assertEquals("$default", decision.stage());
+        assertEquals("accounts", decision.remainingPath());
+    }
+
+    @Test
+    void disabledEndpointIsDecidedAsDisabledWithTheOwner() {
+        ApiGatewayV2Service.ApiOwner owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION);
+        lookup.owner = owner;
+        lookup.httpApi = true;
+        lookup.disabled = true;
+
+        ApiGatewayExecuteApiHostFilter.RouteDecision decision = filter.decide(HOST, "/dev/accounts", null);
+
+        assertEquals(ApiGatewayExecuteApiHostFilter.RouteKind.DISABLED, decision.kind());
+        assertEquals(owner, decision.owner());
+    }
+
+    @Test
+    void internalExecuteApiPathIsDecidedAsNoneWithoutLookingUpTheApi() {
+        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION);
+        lookup.httpApi = true;
+
+        ApiGatewayExecuteApiHostFilter.RouteDecision decision =
+                filter.decide(HOST, "/execute-api/" + API_ID + "/dev/", null);
+
+        assertEquals(ApiGatewayExecuteApiHostFilter.RouteKind.NONE, decision.kind());
+        assertTrue(lookup.accountsSeen.isEmpty());
+    }
+
+    @Test
+    void nonExecuteApiHostIsDecidedAsNone() {
+        ApiGatewayExecuteApiHostFilter.RouteDecision decision = filter.decide("example.com", "/dev/", null);
+
+        assertEquals(ApiGatewayExecuteApiHostFilter.RouteKind.NONE, decision.kind());
+        assertNull(decision.apiId());
+    }
+
+    @Test
+    void ambiguousApiIdFailsAndLeavesTheViewerContextUntouched() {
+        lookup.ambiguous = true;
+
+        assertThrows(AwsException.class, () -> filter.decide(HOST, "/dev/accounts", null));
+        assertEquals(VIEWER_ACCOUNT, viewer.getAccountId());
+        assertEquals(REGION, viewer.getRegion());
+    }
+
+    @Test
+    void viewerContextIsRestoredWhenALookupThrowsUnexpectedly() {
+        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, OWNER_REGION);
+        lookup.crash = true;
+
+        assertThrows(IllegalStateException.class, () -> filter.decide(HOST, "/dev/accounts", null));
+        assertEquals(VIEWER_ACCOUNT, viewer.getAccountId());
+        assertEquals(REGION, viewer.getRegion());
     }
 
     @Test
     void httpApiOfAnotherAccountRoutes() {
-        lookup.owner = Optional.of(new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION));
+        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION);
         lookup.httpApi = true;
 
         assertTrue(filter.routes(HOST, "/dev/accounts"));
@@ -64,7 +154,7 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
 
     @Test
     void httpApiWithAnotherRegionLabelDoesNotRoute() {
-        lookup.owner = Optional.of(new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION));
+        lookup.owner = new ApiGatewayV2Service.ApiOwner(OWNER_ACCOUNT, REGION);
         lookup.httpApi = true;
 
         assertFalse(filter.routes(WRONG_REGION_HOST, "/dev/accounts"));
@@ -113,8 +203,11 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
     private static final class StubLookup implements ApiGatewayExecuteApiHostFilter.ApiGatewayLookup {
         private final RequestContext viewer;
         private final List<String> accountsSeen = new ArrayList<>();
-        private Optional<ApiGatewayV2Service.ApiOwner> owner = Optional.empty();
+        private ApiGatewayV2Service.ApiOwner owner;
         private Optional<String> restRegion = Optional.empty();
+        private String stage = "dev";
+        private boolean disabled;
+        private boolean crash;
         private boolean httpApi;
         private boolean ambiguous;
 
@@ -127,7 +220,7 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
             if (ambiguous) {
                 throw new AwsException("ConflictException", "ambiguous", 409);
             }
-            return owner;
+            return Optional.ofNullable(owner);
         }
 
         @Override
@@ -143,6 +236,9 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
         @Override
         public String protocolType(String region, String apiId) {
             accountsSeen.add(viewer.getAccountId());
+            if (crash) {
+                throw new IllegalStateException("storage failure");
+            }
             if (!httpApi) {
                 throw new AwsException("NotFoundException", "Invalid API id specified", 404);
             }
@@ -151,13 +247,13 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
 
         @Override
         public boolean executeApiEndpointDisabled(String region, String apiId) {
-            return false;
+            return disabled;
         }
 
         @Override
         public void requireStage(String region, String apiId, String stageName) {
             accountsSeen.add(viewer.getAccountId());
-            if (!"dev".equals(stageName)) {
+            if (!stage.equals(stageName)) {
                 throw new AwsException("NotFoundException", "Stage not found", 404);
             }
         }

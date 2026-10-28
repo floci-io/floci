@@ -796,6 +796,34 @@ Conditions can test `aws:SourceIp` (IPv4 and IPv6 CIDR ranges), `aws:SecureTrans
 caller-supplied `X-Forwarded-For` header does not override it. An empty `Condition`
 object places no condition on its statement, as in IAM.
 
+### HTTP API private integrations
+
+An `HTTP_PROXY` integration with `connectionType: VPC_LINK` reaches a private backend through a v2
+VPC link. Floci has no real VPC, so the link only has to exist and be `AVAILABLE`. An unknown link
+answers `502` with `Invalid VPC link identifier specified: <id>`, a link that is not `AVAILABLE`
+answers `502`, and a missing `connectionId` answers `500`, the same as a REST (v1) VPC link
+integration.
+
+API Gateway includes the stage in the path it sends to the backend, so a request to the `prod`
+stage arrives as `/prod/<route-path>`. The `$default` stage has no stage segment, so its requests
+arrive as `/<route-path>`.
+
+The `integrationUri` names the backend:
+
+- An ALB or NLB listener ARN forwards through that listener.
+- An AWS Cloud Map service ARN (`arn:aws:servicediscovery:<region>:<account>:service/srv-...`)
+  forwards to one registered instance of the service. The instance must have the
+  `AWS_INSTANCE_IPV4` and `AWS_INSTANCE_PORT` attributes, which ECS service discovery sets for each
+  task. Floci picks one at random for each request, because `DiscoverInstances` returns a randomized
+  list and API Gateway distributes requests across it. A service with a health check (`HealthCheckConfig`
+  or `HealthCheckCustomConfig`) offers only `HEALTHY` instances. A service without one offers all
+  instances. A query string on the ARN, such as `?stage=prod`, keeps only the instances that have
+  those attribute values. A service with no usable instance answers `503` with
+  `{"message":"Service Unavailable"}`, and a Cloud Map service that does not exist answers `502`.
+
+The request path is forwarded as received. The stage name is not added to it, and `tlsConfig` is not
+applied: the call to a Cloud Map instance uses plain HTTP.
+
 ### Supported Operations
 
 | Category | Operations |

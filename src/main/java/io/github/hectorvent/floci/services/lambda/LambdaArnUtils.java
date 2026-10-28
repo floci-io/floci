@@ -135,6 +135,19 @@ public final class LambdaArnUtils {
         return new ResolvedFunctionRef(ref.name(), effective, ref.region(), ref.account());
     }
 
+    /** Resolves the qualifier and requires a full ARN to name the request region. */
+    public static ResolvedFunctionRef resolveWithRegion(String region, String input, String queryQualifier) {
+        ResolvedFunctionRef ref = resolveWithQualifier(input, queryQualifier);
+        enforceRegion(region, ref);
+        return ref;
+    }
+
+    static void enforceRegion(String region, ResolvedFunctionRef ref) {
+        if (ref.region() != null && !ref.region().equals(region)) {
+            throw invalid("Region '" + ref.region() + "' in ARN does not match request region '" + region + "'");
+        }
+    }
+
     private static ResolvedFunctionRef parseFullArn(String input) {
         // arn:aws:lambda:REGION:ACCT:function:NAME[:QUALIFIER]
         AwsArnUtils.Arn base;

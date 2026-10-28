@@ -23,12 +23,14 @@ import org.mockito.InOrder;
 import java.io.ByteArrayInputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.GZIPInputStream;
 
@@ -130,10 +132,69 @@ class EmrServerlessSparkRunnerTest {
         runner(builder).run(job(Duration.ZERO), progress);
 
         verify(builder).newContainer("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest");
+        verify(spec).withEntrypoint(List.of("/usr/lib/spark/bin/spark-submit"));
         verify(spec).withName(ContainerStorageHelper.dockerName(config, "emr-serverless-00f0000000000001"));
         verify(spec).withDockerNetwork(Optional.of("floci-network"));
         verify(spec).withLabels(argThat(labels ->
                 "emr-serverless".equals(labels.get(ContainerStorageHelper.SERVICE_LABEL))));
+    }
+
+    @Test
+    void aCommandRunsThroughFlocisWrapperWithTheJobsSparkSettingsInItsEnvironment() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        List<String> command = List.of("bash", "-c", "aws s3 ls s3://bucket/");
+
+        runner(builder).run(commandJob(command, Map.of("spark.executor.cores", "4")), progress);
+
+        // bash -c runs Floci's wrapper with "floci" as its $0 and the command as "$@".
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.size() == 4
+                && entrypoint.subList(0, 2).equals(List.of("/bin/bash", "-c"))
+                && entrypoint.get(2).contains("export SPARK_CONF_DIR=") && entrypoint.get(2).endsWith("exec \"$@\"")
+                && "floci".equals(entrypoint.get(3))));
+        verify(spec).withCmd(command);
+        verify(spec).withEnv(eq("FLOCI_SPARK_DEFAULTS"),
+                argThat(file -> file.startsWith("spark.master local[*]\n")
+                        && file.endsWith("\nspark.executor.cores 4")));
+        verify(spec, never()).withEntrypoint(List.of("/usr/lib/spark/bin/spark-submit"));
+    }
+
+    @Test
+    void aCommandsOwnSparkSubmitRunsLocallyOnFlocisS3WithTheJobsSparkDefaults() {
+        assertEquals(String.join("\n",
+                "spark.master local[*]",
+                "spark.hadoop.fs.s3a.endpoint http://floci:4566",
+                "spark.hadoop.fs.s3a.endpoint.region eu-west-1",
+                "spark.hadoop.fs.s3a.path.style.access true",
+                "spark.hadoop.fs.s3a.committer.magic.track.commits.in.memory.enabled true",
+                "spark.hadoop.fs.s3.impl org.apache.hadoop.fs.s3a.S3AFileSystem",
+                "spark.hadoop.fs.AbstractFileSystem.s3.impl org.apache.hadoop.fs.s3a.S3A",
+                "spark.hadoop.aws.glue.endpoint http://floci:4566",
+                "spark.hadoop.aws.region eu-west-1",
+                "spark.sql.shuffle.partitions 8"),
+                EmrServerlessSparkRunner.sparkDefaultsFile(
+                        commandJob(List.of("bash", "-c", "spark-submit s3://bucket/jobs/app.py"),
+                                Map.of("spark.sql.shuffle.partitions", "8")), ENDPOINT));
+    }
+
+    @Test
+    void aCommandsSparkDefaultsReachSparkAsTheJobGaveThem() throws IOException {
+        Map<String, String> sparkDefaults = new LinkedHashMap<>();
+        sparkDefaults.put("spark.driver.extraJavaOptions", "-Dpattern=\\d+ -Dpath=C:\\tmp");
+        sparkDefaults.put("spark.odd key=with:separators", "#not a comment\nnor a second line\t!");
+        sparkDefaults.put("!spark.leading", "kept");
+
+        // Spark's Utils.getPropertiesFromFile loads spark-defaults.conf with Properties.load.
+        Properties loaded = new Properties();
+        loaded.load(new StringReader(EmrServerlessSparkRunner.sparkDefaultsFile(
+                commandJob(List.of("bash", "-c", "spark-submit s3://bucket/jobs/app.py"), sparkDefaults), ENDPOINT)));
+
+        assertEquals("local[*]", loaded.getProperty("spark.master"));
+        assertEquals("-Dpattern=\\d+ -Dpath=C:\\tmp", loaded.getProperty("spark.driver.extraJavaOptions"));
+        assertEquals("#not a comment\nnor a second line\t!", loaded.getProperty("spark.odd key=with:separators"));
+        assertEquals("kept", loaded.getProperty("!spark.leading"));
+        assertEquals(ENDPOINT, loaded.getProperty("spark.hadoop.fs.s3a.endpoint"));
     }
 
     @Test
@@ -488,6 +549,12 @@ class EmrServerlessSparkRunnerTest {
                                           SparkJobRunner.CloudWatchLogs cloudWatchLogs) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 imageTemplate, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, application,
-                timeout, logFolder, cloudWatchLogs);
+                null, timeout, logFolder, cloudWatchLogs);
+    }
+
+    private static SparkJobRunner.Job commandJob(List<String> command, Map<String, String> sparkDefaults) {
+        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
+                "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, List.of(), command,
+                Duration.ZERO, null, null);
     }
 }

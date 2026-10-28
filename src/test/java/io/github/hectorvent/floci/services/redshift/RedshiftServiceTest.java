@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
+import io.github.hectorvent.floci.services.redshift.metrics.RedshiftMetricTarget;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
@@ -63,6 +64,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
@@ -2396,6 +2398,39 @@ class RedshiftServiceTest {
 
         assertEquals("engine-default", reloaded.getParameters().getFirst().getSource());
         assertEquals("0", reloaded.getParameters().getFirst().getParameterValue());
+    }
+
+    @Test
+    void availableMetricTargetsListsOnlyAvailableClustersOfEveryAccountWithTheirRegion() {
+        Cluster available = new Cluster();
+        available.setClusterIdentifier("warehouse");
+        available.setClusterStatus("available");
+        available.setSnapshotRegion("eu-west-1");
+        Cluster otherAccount = new Cluster();
+        otherAccount.setClusterIdentifier("warehouse");
+        otherAccount.setClusterStatus("available");
+        Cluster creating = new Cluster();
+        creating.setClusterIdentifier("new");
+        creating.setClusterStatus("creating");
+        Cluster deleting = new Cluster();
+        deleting.setClusterIdentifier("old");
+        deleting.setClusterStatus("deleting");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "warehouse", available),
+                new AccountAwareStorageBackend.AccountEntry<>("222222222222", "warehouse", otherAccount),
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "new", creating),
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "old", deleting)));
+
+        List<RedshiftMetricTarget> targets = service.availableMetricTargets();
+
+        assertEquals(2, targets.size());
+        assertEquals("111111111111", targets.get(0).accountId());
+        assertEquals("eu-west-1", targets.get(0).region());
+        assertEquals("111111111111:warehouse", targets.get(0).proxyKey());
+        assertSame(available, targets.get(0).cluster());
+        assertEquals("222222222222", targets.get(1).accountId());
+        assertEquals("222222222222:warehouse", targets.get(1).proxyKey());
+        assertSame(otherAccount, targets.get(1).cluster());
     }
 
     @Test

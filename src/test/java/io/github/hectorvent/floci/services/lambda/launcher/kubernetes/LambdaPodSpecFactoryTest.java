@@ -171,26 +171,29 @@ class LambdaPodSpecFactoryTest {
     }
 
     @Test
-    void providedRuntimeCopiesBootstrapIntoVarRuntime() {
+    void providedRuntimeInstallsDelegateIntoVarRuntime() {
         // The provided.* entrypoint execs /var/runtime/bootstrap with no /var/task
-        // fallback, so the init container must copy it there and restore the exec bit.
+        // fallback, so the init container installs a delegate and restores exec bits.
         ObjectNode pod = factory.buildPod("floci-lambda-custom-abc12345", "custom",
                 "public.ecr.aws/lambda/provided:al2023",
                 List.of(),
                 "http://10.0.0.5:4566/awslambda-us-east-1-tasks/snapshots/000000000000/custom",
-                List.of(), true, "bootstrap", null, 128, Optional.empty());
+                List.of("http://10.0.0.5:4566/b/layers/1"), true, "bootstrap", null, 128, Optional.empty());
 
         JsonNode spec = spec(pod);
         assertThat(elements(spec.path("volumes"))).extracting(n -> n.path("name").asText()).contains("runtime");
         assertThat(elements(elements(spec.path("containers")).getFirst().path("volumeMounts")))
                 .extracting(n -> n.path("name").asText(), n -> n.path("mountPath").asText())
-                .contains(tuple("runtime", "/var/runtime"));
+                .containsExactly(tuple("task", "/var/task"), tuple("opt", "/opt"), tuple("runtime", "/var/runtime"));
         JsonNode init = elements(spec.path("initContainers")).getFirst();
         assertThat(elements(init.path("volumeMounts")))
-                .extracting(n -> n.path("name").asText())
-                .contains("runtime");
+                .extracting(n -> n.path("name").asText(), n -> n.path("mountPath").asText())
+                .containsExactly(tuple("task", "/var/task"), tuple("opt", "/opt"), tuple("runtime", "/var/runtime"));
         assertThat(texts(init.path("command")).get(2))
-                .contains("cp /var/task/bootstrap /var/runtime/bootstrap")
+                .contains("exec /var/task/bootstrap \"$@\"")
+                .contains("exec /opt/bootstrap \"$@\"")
+                .contains("chmod +x /var/task/bootstrap")
+                .contains("chmod +x /opt/bootstrap")
                 .contains("chmod +x /var/runtime/bootstrap");
     }
 

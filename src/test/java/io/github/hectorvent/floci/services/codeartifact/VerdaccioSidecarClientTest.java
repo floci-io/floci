@@ -275,6 +275,38 @@ class VerdaccioSidecarClientTest {
         assertTrue(packages.isEmpty());
     }
 
+    /**
+     * Raised by Greptile's review: a real npm {@code dist.tarball} filename is not required to
+     * embed its version at all, so resolving a download's archived-status check by guessing a
+     * {@code <packageName>-<version>.tgz} shape out of the filename's own text can both miss a
+     * real tarball named something else entirely and misread an unrelated version out of one
+     * that happens to coincidentally fit that shape. This resolves against the packument's own
+     * {@code dist.tarball} instead, confirmed here with a tarball named nothing like its version.
+     */
+    @Test
+    void versionForTarballFilenameResolvesAFilenameThatDoesNotEmbedItsVersion() throws Exception {
+        VerdaccioSidecarManager manager = manager();
+        seedPooledContainer(manager, "npm-repo-1", "tracked-verdaccio-1", backendUrl);
+        respondWithMetadata("/demo-pkg", "1.0.0", "/demo-pkg/-/bundle.tgz");
+
+        Optional<String> version = client(manager).versionForTarballFilename("npm-repo-1", "dom", "repo", null,
+                "demo-pkg", "bundle.tgz");
+
+        assertEquals(Optional.of("1.0.0"), version);
+    }
+
+    @Test
+    void versionForTarballFilenameIsEmptyWhenNoVersionsTarballMatches() throws Exception {
+        VerdaccioSidecarManager manager = manager();
+        seedPooledContainer(manager, "npm-repo-1", "tracked-verdaccio-1", backendUrl);
+        respondWithMetadata("/demo-pkg", "1.0.0", "/demo-pkg/-/demo-pkg-1.0.0.tgz");
+
+        Optional<String> version = client(manager).versionForTarballFilename("npm-repo-1", "dom", "repo", null,
+                "demo-pkg", "never-published.tgz");
+
+        assertEquals(Optional.empty(), version);
+    }
+
     private VerdaccioSidecarManager manager() {
         return new VerdaccioSidecarManager(containerBuilder, lifecycleManager, config);
     }

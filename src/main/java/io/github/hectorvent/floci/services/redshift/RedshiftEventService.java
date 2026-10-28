@@ -353,12 +353,7 @@ public class RedshiftEventService {
         subscription.setSnsTopicArn(snsTopicArn);
         subscription.setStatus("active");
         subscription.setSubscriptionCreationTime(clock.instant().truncatedTo(ChronoUnit.MILLIS));
-        subscription.setSourceType(blankToNull(sourceType));
-        subscription.setSourceIdsList(sourceIds == null ? new ArrayList<>() : new ArrayList<>(sourceIds));
-        subscription.setEventCategoriesList(categories == null ? new ArrayList<>() : new ArrayList<>(categories));
-        subscription.setSeverity(blankToNull(severity) == null ? null : severity.toUpperCase(Locale.ROOT));
-        subscription.setEnabled(enabled == null || enabled);
-        subscription.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
+        applyConfiguration(subscription, sourceType, sourceIds, categories, severity, enabled, tags);
         subscriptions.put(key(name), subscription);
         subscriptions.flush();
         return subscription;
@@ -555,6 +550,23 @@ public class RedshiftEventService {
         replaceSubscriptionTags(name, updated);
     }
 
+    public synchronized EventSubscription reconcileSubscription(String name, String snsTopicArn, String sourceType,
+                                                                List<String> sourceIds, List<String> categories,
+                                                                String severity, Boolean enabled, Map<String, String> tags,
+                                                                BiPredicate<String, String> sourceExists) {
+        return replaceSubscription(name, snsTopicArn, sourceType, sourceIds, categories, severity,
+                enabled, tags, sourceExists, null);
+    }
+
+    /** Restores trusted CloudFormation state even when its topic or source has since been deleted. */
+    public synchronized EventSubscription restoreSubscription(String name, String snsTopicArn, String sourceType,
+                                                              List<String> sourceIds, List<String> categories,
+                                                              String severity, Boolean enabled, Map<String, String> tags,
+                                                              String status) {
+        return replaceSubscription(name, snsTopicArn, sourceType, sourceIds, categories, severity,
+                enabled, tags, (type, id) -> true, status);
+    }
+
     public synchronized void replaceSubscriptionTags(String name, Map<String, String> tags) {
         EventSubscription subscription = requireSubscription(name);
         validateTags(tags);
@@ -563,5 +575,39 @@ public class RedshiftEventService {
         subscriptions.flush();
     }
 
+    private EventSubscription replaceSubscription(String name, String snsTopicArn, String sourceType,
+                                                   List<String> sourceIds, List<String> categories, String severity,
+                                                   Boolean enabled, Map<String, String> tags,
+                                                   BiPredicate<String, String> sourceExists, String restoredStatus) {
+        EventSubscription prior = requireSubscription(name);
+        validateTags(tags);
+        validateFilters(sourceType, sourceIds, categories, severity, (type, id) ->
+                Objects.equals(type, prior.getSourceType()) && prior.getSourceIdsList().contains(id)
+                        || sourceExists.test(type, id));
+        boolean changedTopic = !Objects.equals(snsTopicArn, prior.getSnsTopicArn());
+        if (restoredStatus == null && changedTopic) {
+            requireTopic(snsTopicArn);
+        }
+        EventSubscription updated = new EventSubscription();
+        updated.setCustomerAwsId(prior.getCustomerAwsId());
+        updated.setCustSubscriptionId(name);
+        updated.setSubscriptionCreationTime(prior.getSubscriptionCreationTime());
+        updated.setSnsTopicArn(snsTopicArn);
+        updated.setStatus(restoredStatus != null ? restoredStatus : changedTopic ? "active" : prior.getStatus());
+        applyConfiguration(updated, sourceType, sourceIds, categories, severity, enabled, tags);
+        subscriptions.put(key(name), updated);
+        subscriptions.flush();
+        return updated;
+    }
 
+    private static void applyConfiguration(EventSubscription subscription, String sourceType,
+                                           List<String> sourceIds, List<String> categories, String severity,
+                                           Boolean enabled, Map<String, String> tags) {
+        subscription.setSourceType(blankToNull(sourceType));
+        subscription.setSourceIdsList(sourceIds == null ? new ArrayList<>() : new ArrayList<>(sourceIds));
+        subscription.setEventCategoriesList(categories == null ? new ArrayList<>() : new ArrayList<>(categories));
+        subscription.setSeverity(blankToNull(severity) == null ? null : severity.toUpperCase(Locale.ROOT));
+        subscription.setEnabled(enabled == null || enabled);
+        subscription.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
+    }
 }

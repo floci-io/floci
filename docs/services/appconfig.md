@@ -35,7 +35,12 @@ The management plane allows you to create and manage applications, environments,
 `GetConfiguration` accepts application, environment and configuration profile names or IDs, and requires
 `client_id`. It returns the deployed version's content with its `Content-Type` and `Configuration-Version`;
 feature flags are resolved as on the [data plane](#data-plane), including Ion for a caller that accepts it.
-A `client_configuration_version` equal to the deployed version returns HTTP 200 with an empty body.
+An exact resource ID takes precedence over another resource's name. If multiple resources in the
+selected scope share a name, name lookup returns `BadRequestException`; use the intended resource's ID.
+This also applies to the management operations and `StartConfigurationSession` that use these lookups.
+A `client_configuration_version` equal to the deployed version returns HTTP 204 with an empty body
+and `Configuration-Version`, without `Content-Type` or `Content-Length`. An empty configuration
+that the caller has not received still returns HTTP 200 and its stored content type.
 A missing or undeployed environment returns `BadRequestException`; an unknown application or configuration profile
 returns `ResourceNotFoundException`.
 Only hosted configurations are served: a deployed version with no hosted configuration version behind it,
@@ -48,6 +53,11 @@ that is not an IAM role ARN, returns `BadRequestException`.
 `StartDeployment` and `GetDeployment` return the deployed profile's name and location URI as
 `ConfigurationName` and `ConfigurationLocationUri`. Deployments stored by earlier Floci versions did not
 record them, so on those neither is set.
+They also return the deployment strategy's `DeploymentDurationInMinutes`, `FinalBakeTimeInMinutes`,
+`GrowthFactor` and `GrowthType` as the deployment started with them, and `ListDeployments` reports each
+deployment with the profile name and strategy settings it recorded, also once its strategy is deleted.
+A deployment stored by an earlier Floci version returns no strategy settings from `GetDeployment`, and
+`ListDeployments` reports the strategy's current settings while the strategy exists.
 A configuration profile created without `Type` reports no type, as AWS documents no default.
 
 ## Data Plane (AppConfigData) {#data-plane}

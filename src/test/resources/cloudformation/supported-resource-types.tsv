@@ -160,6 +160,7 @@ AWS::Redshift::Cluster	RedshiftClusterCfnProvisioner
 AWS::Redshift::ClusterParameterGroup	RedshiftClusterCfnProvisioner
 AWS::Redshift::ClusterSecurityGroup	RedshiftClusterCfnProvisioner
 AWS::Redshift::ClusterSubnetGroup	RedshiftClusterCfnProvisioner
+AWS::Redshift::EventSubscription	RedshiftEventSubscriptionCfnProvisioner
 AWS::RedshiftServerless::Namespace	RedshiftServerlessCfnProvisioner
 AWS::RedshiftServerless::Workgroup	RedshiftServerlessCfnProvisioner
 AWS::Route53::HealthCheck	Route53CfnProvisioner

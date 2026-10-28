@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -74,7 +75,8 @@ public class AppConfigService {
     /** The application whose ID or name is {@code idOrName}. */
     public Application resolveApplication(String idOrName) {
         return applicationStore.get(idOrName)
-                .or(() -> listApplications().stream().filter(a -> idOrName.equals(a.getName())).findFirst())
+                .or(() -> uniqueNamed(listApplications().stream()
+                        .filter(a -> idOrName.equals(a.getName())).toList(), "Application"))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application not found", 404));
     }
 
@@ -128,7 +130,8 @@ public class AppConfigService {
         // An exact ID always wins over another environment's name, and a direct lookup skips the scan.
         return environmentStore.get(idOrName)
                 .filter(e -> appId.equals(e.getApplicationId()))
-                .or(() -> listEnvironments(appId).stream().filter(e -> idOrName.equals(e.getName())).findFirst())
+                .or(() -> uniqueNamed(listEnvironments(appId).stream()
+                        .filter(e -> idOrName.equals(e.getName())).toList(), "Environment"))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Environment not found", 404));
     }
 
@@ -189,8 +192,17 @@ public class AppConfigService {
     public ConfigurationProfile resolveConfigurationProfile(String appId, String idOrName) {
         return profileStore.get(idOrName)
                 .filter(p -> appId.equals(p.getApplicationId()))
-                .or(() -> listConfigurationProfiles(appId).stream().filter(p -> idOrName.equals(p.getName())).findFirst())
+                .or(() -> uniqueNamed(listConfigurationProfiles(appId).stream()
+                        .filter(p -> idOrName.equals(p.getName())).toList(), "Configuration profile"))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Configuration profile not found", 404));
+    }
+
+    private static <T> Optional<T> uniqueNamed(List<T> matches, String resourceType) {
+        if (matches.size() > 1) {
+            throw new AwsException("BadRequestException",
+                    resourceType + " name is ambiguous; use its ID.", 400);
+        }
+        return matches.stream().findFirst();
     }
 
     public List<ConfigurationProfile> listConfigurationProfiles(String applicationIdentifier) {
@@ -308,10 +320,14 @@ public class AppConfigService {
     }
 
     public DeploymentStrategy getDeploymentStrategy(String id) {
-        // AWS predefined built-in strategies
+        return findDeploymentStrategy(id)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Deployment strategy not found", 404));
+    }
+
+    /** The predefined or stored deployment strategy whose ID is {@code id}. */
+    private Optional<DeploymentStrategy> findDeploymentStrategy(String id) {
         DeploymentStrategy builtin = builtinStrategy(id);
-        if (builtin != null) return builtin;
-        return strategyStore.get(id).orElseThrow(() -> new AwsException("ResourceNotFoundException", "Deployment strategy not found", 404));
+        return builtin != null ? Optional.of(builtin) : strategyStore.get(id);
     }
 
     public List<DeploymentStrategy> listDeploymentStrategies() {
@@ -384,7 +400,7 @@ public class AppConfigService {
         String version = (String) request.get("ConfigurationVersion");
         String strategyId = (String) request.get("DeploymentStrategyId");
 
-        getDeploymentStrategy(strategyId);
+        DeploymentStrategy strategy = getDeploymentStrategy(strategyId);
 
         Deployment deployment = new Deployment();
         deployment.setApplicationId(appId);
@@ -394,6 +410,10 @@ public class AppConfigService {
         deployment.setConfigurationLocationUri(profile.getLocationUri());
         deployment.setConfigurationVersion(version);
         deployment.setDeploymentStrategyId(strategyId);
+        deployment.setDeploymentDurationInMinutes(strategy.getDeploymentDurationInMinutes());
+        deployment.setFinalBakeTimeInMinutes(strategy.getFinalBakeTimeInMinutes());
+        deployment.setGrowthFactor(strategy.getGrowthFactor());
+        deployment.setGrowthType(strategy.getGrowthType());
         int nextDeploymentNumber = deploymentStore.scan(key -> true).stream()
                 .mapToInt(Deployment::getDeploymentNumber)
                 .max()
@@ -469,6 +489,12 @@ public class AppConfigService {
         return new DeploymentPage(items, resultToken);
     }
 
+    /**
+     * The deployment with the profile name and strategy settings it recorded when it started, so changing
+     * the profile or the strategy, or deleting the strategy, leaves them as they were. A deployment stored
+     * before Floci recorded them reads them from the profile and the strategy while those exist. The type
+     * is read from the profile.
+     */
     private DeploymentSummary toDeploymentSummary(Deployment deployment) {
         DeploymentSummary summary = new DeploymentSummary();
         summary.setConfigurationProfileId(deployment.getConfigurationProfileId());
@@ -478,14 +504,24 @@ public class AppConfigService {
         summary.setConfigurationName(deployment.getConfigurationName());
         ConfigurationProfile profile = profileStore.get(deployment.getConfigurationProfileId()).orElse(null);
         if (profile != null) {
-            summary.setConfigurationName(profile.getName());
+            if (deployment.getConfigurationName() == null) {
+                summary.setConfigurationName(profile.getName());
+            }
             summary.setType(profile.getType());
         }
-        DeploymentStrategy strategy = getDeploymentStrategy(deployment.getDeploymentStrategyId());
-        summary.setDeploymentDurationInMinutes(strategy.getDeploymentDurationInMinutes());
-        summary.setFinalBakeTimeInMinutes(strategy.getFinalBakeTimeInMinutes());
-        summary.setGrowthFactor(strategy.getGrowthFactor());
-        summary.setGrowthType(strategy.getGrowthType());
+        if (deployment.getDeploymentDurationInMinutes() != null) {
+            summary.setDeploymentDurationInMinutes(deployment.getDeploymentDurationInMinutes());
+            summary.setFinalBakeTimeInMinutes(deployment.getFinalBakeTimeInMinutes());
+            summary.setGrowthFactor(deployment.getGrowthFactor());
+            summary.setGrowthType(deployment.getGrowthType());
+        } else {
+            findDeploymentStrategy(deployment.getDeploymentStrategyId()).ifPresent(strategy -> {
+                summary.setDeploymentDurationInMinutes(strategy.getDeploymentDurationInMinutes());
+                summary.setFinalBakeTimeInMinutes(strategy.getFinalBakeTimeInMinutes());
+                summary.setGrowthFactor(strategy.getGrowthFactor());
+                summary.setGrowthType(strategy.getGrowthType());
+            });
+        }
         summary.setPercentageComplete("COMPLETE".equals(deployment.getState()) ? 100.0f : 0.0f);
         return summary;
     }

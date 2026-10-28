@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -15,6 +16,8 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -30,16 +33,23 @@ class StepFunctionsListExecutionsFilterTest {
     void setUp() {
         service = mock(StepFunctionsService.class);
         handler = new StepFunctionsJsonHandler(service, mapper, Clock.systemUTC());
-        when(service.listExecutions(ARN)).thenReturn(
-                List.of("RUNNING", "SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED").stream()
-                        .map(status -> {
-                            Execution execution = new Execution();
-                            execution.setExecutionArn(ARN + ":" + status);
-                            execution.setStateMachineArn(ARN);
-                            execution.setName(status);
-                            execution.setStatus(status);
-                            return execution;
-                        }).toList());
+        List<StepFunctionsService.ExecutionSnapshot> executions = List.of(
+                        "RUNNING", "SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED").stream()
+                .map(status -> {
+                    Execution execution = new Execution();
+                    execution.setExecutionArn(ARN + ":" + status);
+                    execution.setStateMachineArn(ARN);
+                    execution.setName(status);
+                    execution.setStatus(status);
+                    return new StepFunctionsService.ExecutionSnapshot(execution, status);
+                }).toList();
+        when(service.listExecutions(eq(ARN), nullable(String.class), nullable(Integer.class), nullable(String.class)))
+                .thenAnswer(invocation -> {
+                    String status = invocation.getArgument(1);
+                    List<StepFunctionsService.ExecutionSnapshot> page = status == null ? executions : executions.stream()
+                            .filter(snapshot -> status.equals(snapshot.status())).toList();
+                    return new PaginatedResult<>(page, null);
+                });
     }
 
     @ParameterizedTest
@@ -59,17 +69,17 @@ class StepFunctionsListExecutionsFilterTest {
 
     @Test
     void absentMatchesReturnAnEmptyArray() {
-        Execution succeeded = new Execution();
-        succeeded.setStatus("SUCCEEDED");
-        when(service.listExecutions(ARN)).thenReturn(List.of(succeeded));
+        when(service.listExecutions(ARN, "RUNNING", null, null)).thenReturn(
+                new PaginatedResult<>(List.of(), null));
         assertEquals(0, list(request().put("statusFilter", "RUNNING")).size());
     }
 
     @Test
     void emittedStatusIsTheSameSnapshotThatMatchedTheFilter() {
         Execution execution = mock(Execution.class);
-        when(execution.getStatus()).thenReturn("RUNNING", "SUCCEEDED");
-        when(service.listExecutions(ARN)).thenReturn(List.of(execution));
+        when(service.listExecutions(ARN, "RUNNING", null, null)).thenReturn(
+                new PaginatedResult<>(List.of(
+                        new StepFunctionsService.ExecutionSnapshot(execution, "RUNNING")), null));
         JsonNode executions = list(request().put("statusFilter", "RUNNING"));
         assertEquals(1, executions.size());
         assertEquals("RUNNING", executions.get(0).path("status").asText());

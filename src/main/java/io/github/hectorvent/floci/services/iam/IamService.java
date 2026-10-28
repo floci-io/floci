@@ -1338,6 +1338,38 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * The ARN IAM holds what an IAM principal ARN names under: the account root as given, or the role or user
+     * of the name the ARN ends with in the ARN's account, at its own path. Empty for any other ARN, and for a
+     * role or user IAM does not hold.
+     */
+    public Optional<String> heldPrincipalArn(String principalArn) {
+        if (!AwsArnUtils.isArn(principalArn)) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(principalArn);
+        String resource = arn.resource();
+        if (!"iam".equals(arn.service())) {
+            return Optional.empty();
+        }
+        if ("root".equals(resource)) {
+            return Optional.of(principalArn);
+        }
+        String name = resource.substring(resource.lastIndexOf('/') + 1);
+        if (resource.startsWith("role/")) {
+            return findRole(arn.accountId(), name).map(role -> heldArn(arn, "role", role.getPath(), role.getRoleName()));
+        }
+        if (resource.startsWith("user/")) {
+            return findUser(arn.accountId(), name).map(user -> heldArn(arn, "user", user.getPath(), user.getUserName()));
+        }
+        return Optional.empty();
+    }
+
+    private static String heldArn(AwsArnUtils.Arn named, String type, String path, String name) {
+        return AwsArnUtils.Arn.global(named.partition(), "iam", named.accountId(), type + normalizePath(path) + name)
+                .toString();
+    }
+
+    /**
      * AWS publishes UnmodifiableEntity on twelve role actions, and its message names the linked
      * service the caller has to go through instead. This guards the ten of them that refuse a
      * service-linked role whatever the request asks for. UpdateRole and UpdateRoleDescription are

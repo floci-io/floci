@@ -4,6 +4,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
+import org.hamcrest.MatcherAssert;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -4124,7 +4126,7 @@ class Ec2IntegrationTest {
             .statusCode(200)
         .extract().body().asString();
 
-        org.hamcrest.MatcherAssert.assertThat(body, not(containsString("<nextToken>")));
+        MatcherAssert.assertThat(body, not(containsString("<nextToken>")));
     }
 
     // =========================================================================
@@ -4202,14 +4204,14 @@ class Ec2IntegrationTest {
         int pageCount = 0;
         String nextToken = null;
         do {
-            io.restassured.specification.RequestSpecification req = given()
+            RequestSpecification req = given()
                     .formParam("Action", "DescribeNetworkInterfaces")
                     .formParam("MaxResults", "5")
                     .header("Authorization", AUTH_HEADER);
             if (nextToken != null) {
                 req = req.formParam("NextToken", nextToken);
             }
-            io.restassured.response.Response resp = req.when().post("/");
+            Response resp = req.when().post("/");
             resp.then().statusCode(200);
             pageCount++;
 
@@ -4221,16 +4223,16 @@ class Ec2IntegrationTest {
 
             // Every page but the last must be a full page of 5.
             if (nextToken != null && !nextToken.isEmpty()) {
-                org.hamcrest.MatcherAssert.assertThat(ids.size(), equalTo(5));
+                MatcherAssert.assertThat(ids.size(), equalTo(5));
             }
         } while (nextToken != null && !nextToken.isEmpty());
 
-        org.hamcrest.MatcherAssert.assertThat(
+        MatcherAssert.assertThat(
                 "Expected " + expectedTotal + " ENIs across " + pageCount + " page(s)",
                 collected, equalTo(expectedTotal));
         // With 5 new ENIs and MaxResults=5, at least one truncated page
         // must have occurred (i.e. more than a single page was fetched).
-        org.hamcrest.MatcherAssert.assertThat(pageCount, greaterThanOrEqualTo(2));
+        MatcherAssert.assertThat(pageCount, greaterThanOrEqualTo(2));
 
         // ── Cleanup: terminate the 5 extra instances ──
         for (String id : batchIds) {
@@ -4254,14 +4256,14 @@ class Ec2IntegrationTest {
         int total = 0;
         String nextToken = null;
         do {
-            io.restassured.specification.RequestSpecification req = given()
+            RequestSpecification req = given()
                     .formParam("Action", "DescribeNetworkInterfaces")
                     .formParam("MaxResults", "1000")
                     .header("Authorization", AUTH_HEADER);
             if (nextToken != null) {
                 req = req.formParam("NextToken", nextToken);
             }
-            io.restassured.response.Response resp = req.when().post("/");
+            Response resp = req.when().post("/");
             resp.then().statusCode(200);
 
             List<String> ids = resp.xmlPath().getList(
@@ -6029,6 +6031,7 @@ class Ec2IntegrationTest {
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
     }
 
+    /** The type of the instance's root volume, ami-0abcdef1234567890's /dev/xvda; data devices also get volumes. */
     private String rootVolumeType(String instanceId) {
         return given()
             .formParam("Action", "DescribeVolumes")
@@ -6039,6 +6042,7 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .extract().path("DescribeVolumesResponse.volumeSet.item.volumeType");
+            .extract().path("DescribeVolumesResponse.volumeSet.item.find { it.attachmentSet.item.device == '/dev/xvda' }"
+                    + ".volumeType");
     }
 }

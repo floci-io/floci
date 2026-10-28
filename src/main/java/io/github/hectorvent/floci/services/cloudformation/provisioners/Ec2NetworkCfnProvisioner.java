@@ -32,6 +32,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * CloudFormation provisioning for the EC2 networking types: {@code AWS::EC2::Subnet},
@@ -527,7 +528,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         String egressOnlyInternetGatewayId = ctx.resolveOptional(props, "EgressOnlyInternetGatewayId");
         String vpcPeeringConnectionId = ctx.resolveOptional(props, "VpcPeeringConnectionId");
         require(ROUTE, "RouteTableId", routeTableId);
-        long destinations = java.util.stream.Stream.of(destinationCidr, destinationIpv6Cidr, destinationPrefixListId)
+        long destinations = Stream.of(destinationCidr, destinationIpv6Cidr, destinationPrefixListId)
                 .filter(value -> value != null && !value.isBlank()).count();
         if (destinations != 1) {
             throw new AwsException("ValidationError", ROUTE + " requires exactly one of DestinationCidrBlock,"

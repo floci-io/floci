@@ -62,14 +62,7 @@ class Ec2PrefixListCidrIntegrationTest {
                 boolean hostBits = cidr.equals("192.0.2.19/24");
                 String name = hostBits ? "cfn-host-bit-cidr" : "cfn-canonical-cidr";
                 try {
-                    given().header("Authorization", CFN_AUTH)
-                            .formParam("Action", "CreateStack").formParam("StackName", name)
-                            .formParam("TemplateBody", """
-                                    {"Resources":{"List":{"Type":"AWS::EC2::PrefixList","Properties":{
-                                      "PrefixListName":"%s","AddressFamily":"IPv4","MaxEntries":1,
-                                      "Entries":[{"Cidr":"%s"}]}}}}
-                                    """.formatted(name, cidr))
-                            .post("/").then().statusCode(200);
+                    stackRequest("CreateStack", name, cidr, 1);
                     CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(name, CFN_AUTH);
                     assertEquals(hostBits ? "ROLLBACK_COMPLETE" : "CREATE_COMPLETE", state.status());
                     if (hostBits) {
@@ -83,9 +76,7 @@ class Ec2PrefixListCidrIntegrationTest {
                                 .entries().getFirst().cidr());
                     }
                 } finally {
-                    given().header("Authorization", CFN_AUTH).formParam("Action", "DeleteStack")
-                            .formParam("StackName", name).post("/").then().statusCode(200);
-                    CfnStackWaits.awaitStackDeleted(name);
+                    deleteStack(name);
                 }
                 assertTrue(ids(client, name).isEmpty());
             }
@@ -105,10 +96,10 @@ class Ec2PrefixListCidrIntegrationTest {
     private static void verifyUpdate(String name, String desired, String status, String expected, long version) {
         try (Ec2Client client = client()) {
             try {
-                stackRequest("CreateStack", name, "192.0.2.0/24");
+                stackRequest("CreateStack", name, "192.0.2.0/24", 2);
                 assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(name, CFN_AUTH).status());
                 String id = ids(client, name).getFirst();
-                stackRequest("UpdateStack", name, desired);
+                stackRequest("UpdateStack", name, desired, 2);
                 assertEquals(status, CfnStackWaits.awaitTerminal(name, CFN_AUTH).status());
                 if (status.equals("UPDATE_ROLLBACK_COMPLETE")) {
                     assertTrue(CfnStackWaits.failedResourceReason(name, CFN_AUTH)
@@ -120,22 +111,26 @@ class Ec2PrefixListCidrIntegrationTest {
                 assertEquals(version, client.describeManagedPrefixLists(r -> r.prefixListIds(id))
                         .prefixLists().getFirst().version());
             } finally {
-                given().header("Authorization", CFN_AUTH).formParam("Action", "DeleteStack")
-                        .formParam("StackName", name).post("/").then().statusCode(200);
-                CfnStackWaits.awaitStackDeleted(name);
+                deleteStack(name);
             }
             assertTrue(ids(client, name).isEmpty());
         }
     }
 
-    private static void stackRequest(String action, String name, String cidr) {
+    private static void stackRequest(String action, String name, String cidr, int maxEntries) {
         given().header("Authorization", CFN_AUTH).formParam("Action", action).formParam("StackName", name)
                 .formParam("TemplateBody", """
                         {"Resources":{"List":{"Type":"AWS::EC2::PrefixList","Properties":{
-                          "PrefixListName":"%s","AddressFamily":"IPv4","MaxEntries":2,
+                          "PrefixListName":"%s","AddressFamily":"IPv4","MaxEntries":%d,
                           "Entries":[{"Cidr":"%s"}]}}}}
-                        """.formatted(name, cidr))
+                        """.formatted(name, maxEntries, cidr))
                 .post("/").then().statusCode(200);
+    }
+
+    private static void deleteStack(String name) {
+        given().header("Authorization", CFN_AUTH).formParam("Action", "DeleteStack")
+                .formParam("StackName", name).post("/").then().statusCode(200);
+        CfnStackWaits.awaitStackDeleted(name);
     }
 
     private static List<String> ids(Ec2Client client, String name) {

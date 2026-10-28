@@ -14,6 +14,7 @@ import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 
@@ -83,6 +84,19 @@ class RedshiftProxyManagerTest {
             permitsField.setAccessible(true);
             Semaphore permits = (Semaphore) permitsField.get(proxy);
             assertEquals(2000, permits.availablePermits());
+        } finally {
+            manager.stopAll();
+        }
+    }
+
+    @Test
+    void activeConnectionsIsEmptyWithoutAProxyAndZeroForAnIdleOne() throws Exception {
+        RedshiftProxyManager manager = newManager();
+        int port = FreePorts.anyInterfacePort();
+        try {
+            assertEquals(OptionalInt.empty(), manager.activeConnections(KEY));
+            start(manager, KEY, port);
+            assertEquals(OptionalInt.of(0), manager.activeConnections(KEY));
         } finally {
             manager.stopAll();
         }

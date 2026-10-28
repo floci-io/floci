@@ -103,7 +103,7 @@ public class LambdaWebService implements Resettable {
             "Sid", "Effect", "Principal", "NotPrincipal", "Action", "NotAction", "Resource", "NotResource", "Condition");
     private static final Set<String> PRINCIPAL_KEYS = Set.of("AWS", "Service", "Federated", "CanonicalUser");
     private static final String POLICY_SYNTAX = "Policy has syntax errors.";
-    private static final String INVALID_PRINCIPAL = "The provided principal was invalid. Please check the principal and try again.";
+    static final String INVALID_PRINCIPAL = "The provided principal was invalid. Please check the principal and try again.";
     private static final String NOT_A_ZIP = "Failed to read zip file: zip: not a valid zip file";
     private static final String INVALID_TAGS = "One or more of your tags are invalid. Please ensure none of your tag keys"
             + " start with \"aws:\", none are empty, and there are no duplicate tag keys.";
@@ -153,6 +153,7 @@ public class LambdaWebService implements Resettable {
     private final LambdaWebExecutionRole executionRole;
     private final ServiceCallAuthorizer serviceCalls;
     private final LambdaMicrovmsService microvmsService;
+    private final LambdaWebPolicyPrincipals policyPrincipals;
 
     /** Keyed {@code region/functionName}. The backend adds the caller's account to every key. */
     private StorageBackend<String, WebFunction> functions;
@@ -166,7 +167,8 @@ public class LambdaWebService implements Resettable {
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
                             S3Service s3Service, LambdaWebCode code, ObjectMapper objectMapper,
                             Instance<RequestContext> requestContext, LambdaWebExecutionRole executionRole,
-                            ServiceCallAuthorizer serviceCalls, LambdaMicrovmsService microvmsService) {
+                            ServiceCallAuthorizer serviceCalls, LambdaMicrovmsService microvmsService,
+                            LambdaWebPolicyPrincipals policyPrincipals) {
         this.regionResolver = regionResolver;
         this.storageFactory = storageFactory;
         this.config = config;
@@ -177,6 +179,7 @@ public class LambdaWebService implements Resettable {
         this.executionRole = executionRole;
         this.serviceCalls = serviceCalls;
         this.microvmsService = microvmsService;
+        this.policyPrincipals = policyPrincipals;
     }
 
     @PostConstruct
@@ -1332,7 +1335,7 @@ public class LambdaWebService implements Resettable {
                 .length("policy", policy, 1, 20480)
                 .pattern("revisionId", revisionId, POLICY_REVISION_ID)
                 .throwIfAny();
-        validatePolicy(policy, resourceArn);
+        validatePolicy(region, policy, resourceArn);
         String functionName = resolveFunctionName(region, resourceArn, "PutResourcePolicy");
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
@@ -1381,8 +1384,12 @@ public class LambdaWebService implements Resettable {
         return new AwsException("ResourceNotFoundException", "The function does not have a policy.", 404);
     }
 
-    /** The checks AWS runs on a policy document before it looks the function up. */
-    private void validatePolicy(String policy, String functionArn) {
+    /**
+     * The checks AWS runs on a policy document before it looks the function up. Every statement passes its own
+     * checks before any principal is looked up, and every principal exists before any statement is refused as
+     * public.
+     */
+    private void validatePolicy(String region, String policy, String functionArn) {
         JsonNode document;
         try {
             document = objectMapper.readTree(policy);
@@ -1404,6 +1411,12 @@ public class LambdaWebService implements Resettable {
         }
         for (JsonNode statement : each) {
             validateStatement(statement, functionArn);
+        }
+        for (JsonNode statement : each) {
+            policyPrincipals.requireExisting(regionResolver.partitionForRegion(region), statement.get("Principal"));
+        }
+        for (JsonNode statement : each) {
+            requireNotPublic(statement);
         }
     }
 
@@ -1439,7 +1452,10 @@ public class LambdaWebService implements Resettable {
                 throw policySyntax();
             }
         }
-        if (effect.equalsIgnoreCase("Allow") && isWildcardPrincipal(principal)
+    }
+
+    private static void requireNotPublic(JsonNode statement) {
+        if (statement.path("Effect").asText().equalsIgnoreCase("Allow") && isWildcardPrincipal(statement.get("Principal"))
                 && !hasTrustedCondition(statement.path("Condition"))) {
             throw new AwsException("ValidationException", "Lambda blocked the creation of this policy"
                     + " because it would grant public access to your function.", 400);

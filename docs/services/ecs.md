@@ -196,6 +196,12 @@ other case, the injected `FLUENT_HOST` (the router's container IP) must be reach
 config is written to `/fluent-bit/etc/fluent-bit.conf`. Fluentd config is
 written to `/fluentd/etc/fluent.conf` and uses `@type` (not `Name`) for output plugins; Floci
 does not inject an `endpoint` into Fluentd outputs.
+FireLens uses a bounded socket-volume name derived from the complete deployment and task identity,
+while its Docker labels retain the full configured resource namespace. The inspected host socket
+path must fit Linux's 107-byte Unix socket pathname limit. An unusually long Docker data root can
+still exceed that limit; launch then fails before creating containers and retains any failed volume
+cleanup for retry. Operator-named volumes are unaffected.
+
 FireLens configuration archive uploads retry transient Docker connection failures up to six
 attempts, with exponential backoff starting at 500 ms. Each attempt sends the complete prebuilt
 archive through a fresh byte-backed stream, without a streaming pipe or writer thread.

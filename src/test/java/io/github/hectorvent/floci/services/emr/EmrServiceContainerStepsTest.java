@@ -79,6 +79,7 @@ class EmrServiceContainerStepsTest {
         assertNull(job.imageTemplate());
         assertNull(job.dockerNetwork());
         assertEquals(List.of(REPORT, "s3://bucket/out/"), job.application());
+        assertNull(job.command());
         assertEquals(Map.of("spark.executor.cores", "2"), job.sparkDefaults());
         assertEquals(Duration.ZERO, job.timeout());
         assertNull(job.logFolder());
@@ -213,6 +214,38 @@ class EmrServiceContainerStepsTest {
 
         assertEquals("RUNNING", service.describeCluster(cluster.getId()).getState());
         assertEquals("RUNNING", service.describeStep(cluster.getId(), cluster.getSteps().get(1).getId()).getState());
+    }
+
+    @Test
+    void aCommandStepRunsItsCommandAndFailsWithItsExitCode() {
+        EmrStep copy = sparkStep("copy", "CONTINUE");
+        copy.setArgs(List.of("bash", "-c", "aws s3 cp s3://bucket/in/ s3://bucket/out/ --recursive"));
+        EmrCluster cluster = service.runJobFlow(cluster("commands", true, copy), REGION);
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+
+        fixture.runStepThread();
+
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(copy.getArgs(), job.command());
+        assertEquals(List.of(), job.application());
+        EmrStep failed = service.describeStep(cluster.getId(), cluster.getSteps().get(0).getId());
+        assertEquals("FAILED", failed.getState());
+        assertEquals("The step's command exited with code 1.", failed.getFailureMessage());
+    }
+
+    @Test
+    void aScriptRunnerStepRunsItsScriptAsACommand() {
+        EmrStep script = sparkStep("script", "CONTINUE");
+        script.setJar("s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar");
+        script.setArgs(List.of("s3://bucket/scripts/load.sh", "2026-10-26"));
+        EmrCluster cluster = service.runJobFlow(cluster("scripts", true, script), REGION);
+
+        fixture.runStepThread();
+
+        List<String> command = runner.jobs.get(0).command();
+        assertEquals(List.of("script-runner", "s3://bucket/scripts/load.sh", "2026-10-26"),
+                command.subList(3, command.size()));
+        assertEquals("COMPLETED", service.describeStep(cluster.getId(), cluster.getSteps().get(0).getId()).getState());
     }
 
     @Test

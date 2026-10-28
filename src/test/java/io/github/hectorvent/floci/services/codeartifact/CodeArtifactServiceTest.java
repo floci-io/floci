@@ -4769,6 +4769,52 @@ class CodeArtifactServiceTest {
     }
 
     /**
+     * The download-side counterpart: every native per-format proxy controller (Maven, npm, nuget,
+     * pypi) calls this before serving bytes straight from its own sidecar, the mechanism that
+     * closes 10-NATIVE-STATUS. Must block only {@code Archived} (the status whose real sidecar
+     * bytes are deliberately left in place, unlike {@code Disposed}, which already deletes them)
+     * and let every other status, including a version never touched at all, through unchanged,
+     * the exact same four-way split {@link #requireContainerBackedVersionNotArchivedOrDisposedBlocksOnlyThoseTwoStatuses}
+     * already proves for the upload side, with {@code Disposed} included here too even though a
+     * real native download of a disposed version would already 404 against the sidecar itself for
+     * an unrelated reason (its bytes are gone), since this method's own contract blocks both
+     * statuses regardless of whether the sidecar would have caught it anyway.
+     */
+    @Test
+    void requireContainerBackedVersionDownloadableBlocksOnlyArchivedAndDisposed() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000)),
+                        new RepositorySidecarManager.PackageVersionTimestamp("2.0", Instant.ofEpochSecond(1000)),
+                        new RepositorySidecarManager.PackageVersionTimestamp("3.0", Instant.ofEpochSecond(1000))));
+
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "maven", "com.example", "a",
+                List.of("1.0"), null, null, "Archived");
+        AwsException archivedError = assertThrows(AwsException.class,
+                () -> service.requireContainerBackedVersionDownloadable(ACCOUNT_ID, REGION, "dom", "repo", "maven",
+                        "com.example", "a", "1.0", repoId));
+        assertEquals("ResourceNotFoundException", archivedError.getErrorCode());
+
+        service.disposePackageVersions(REGION, "dom", null, "repo", "maven", "com.example", "a", List.of("2.0"),
+                null, null);
+        AwsException disposedError = assertThrows(AwsException.class,
+                () -> service.requireContainerBackedVersionDownloadable(ACCOUNT_ID, REGION, "dom", "repo", "maven",
+                        "com.example", "a", "2.0", repoId));
+        assertEquals("ResourceNotFoundException", disposedError.getErrorCode());
+
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "maven", "com.example", "a",
+                List.of("3.0"), null, null, "Unlisted");
+        assertDoesNotThrow(() -> service.requireContainerBackedVersionDownloadable(ACCOUNT_ID, REGION, "dom", "repo",
+                "maven", "com.example", "a", "3.0", repoId));
+
+        assertDoesNotThrow(() -> service.requireContainerBackedVersionDownloadable(ACCOUNT_ID, REGION, "dom", "repo",
+                "maven", "com.example", "a", "4.0-never-touched", repoId));
+    }
+
+    /**
      * Raised by Greptile's review: {@code requireContainerBackedVersionNotArchivedOrDisposed}'s
      * guard, the real sidecar write, and this call are necessarily three separate steps (the
      * write sits in between, with no lock held across it), so a concurrent

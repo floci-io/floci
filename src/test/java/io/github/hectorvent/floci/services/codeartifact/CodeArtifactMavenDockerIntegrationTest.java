@@ -696,6 +696,60 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     /**
+     * Closes 10-NATIVE-STATUS for Maven: a plain {@code mvn dependency:get} fetch of an Archived
+     * version's real GAV path must 404 against the real Reposilite sidecar, even though the jar's
+     * own bytes are still sitting there untouched (unlike {@link
+     * #disposePackageVersionsDeletesTheRealReposiliteAssetsAndKeepsListingTheVersionAsDisposed}'s
+     * own 404, which comes from Reposilite genuinely no longer having the file).
+     */
+    @Test
+    @Order(24)
+    void deployThenArchiveBlocksBothGetAndHeadAgainstTheRealReposiliteSidecarWhileLeavingTheBytesInPlace() {
+        byte[] content = "archive-me-bytes".getBytes(StandardCharsets.UTF_8);
+        String gav = "com/example/archiveme/1.0.0/archiveme-1.0.0.jar";
+        given().header("Authorization", "Bearer " + bearerToken).body(content)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/" + gav)
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"targetStatus\":\"Archived\"}")
+                .post("/v1/package/versions/update_status?domain=" + DOMAIN + "&repository=" + REPO
+                        + "&format=maven&namespace=com.example&package=archiveme")
+                .then().statusCode(200)
+                .body("successfulVersions['1.0.0'].status", equalTo("Archived"));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/" + gav)
+                .then().statusCode(404);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .head("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/" + gav)
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .post("/v1/package/versions?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=archiveme&status=Archived")
+                .then().statusCode(200)
+                .body("versions[0].version", equalTo("1.0.0"))
+                .body("versions[0].status", equalTo("Archived"));
+
+        // Proves the block above is this check's own override, not Reposilite having genuinely
+        // lost the file the way the dispose test's 404 does: un-archiving must make the exact
+        // same bytes fetchable again, with nothing re-deployed in between.
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"targetStatus\":\"Published\"}")
+                .post("/v1/package/versions/update_status?domain=" + DOMAIN + "&repository=" + REPO
+                        + "&format=maven&namespace=com.example&package=archiveme")
+                .then().statusCode(200)
+                .body("successfulVersions['1.0.0'].status", equalTo("Published"));
+        byte[] fetchedAfterUnarchive = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/" + gav)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals(new String(content, StandardCharsets.UTF_8),
+                new String(fetchedAfterUnarchive, StandardCharsets.UTF_8));
+    }
+
+    /**
      * A throwaway groupId/artifactId, not {@link #GAV}: deleting it exercises Reposilite's real
      * directory delete (confirmed live before this was built: a single {@code DELETE} on the
      * group/artifact path removes everything beneath it), and must not disturb the artifact every

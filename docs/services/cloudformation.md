@@ -187,7 +187,7 @@ cross-resource references.
 | RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
 | Aurora DSQL | `Cluster` |
 | ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored), `ServerlessCache` (GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form) |
-| Redshift | `Cluster` (single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported), `ClusterParameterGroup`, `ClusterSubnetGroup`, `ClusterSecurityGroup` (accepted; no EC2-Classic security group model) |
+| Redshift | `Cluster` (single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported), `ClusterParameterGroup`, `ClusterSubnetGroup`, `ClusterSecurityGroup` (accepted; no EC2-Classic security group model), `EventSubscription` |
 | Redshift Serverless | `Namespace` (Managed admin credentials use Secrets Manager; GetAtt uses the dotted Namespace.* form), `Workgroup` (starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form) |
 | EC2 | `VPC` (deleted on stack teardown; a VPC with dependents outside the stack, including anything still holding a network interface in its subnets (an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone interface, an interface endpoint), fails the delete with `DependencyViolation`, as on AWS), `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog`, `PrefixList` (updated in place; an update that changes `AddressFamily`, or `MaxEntries` together with `Entries`, fails) |
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
@@ -458,15 +458,16 @@ references are resolved first, one that is another intrinsic function is joined 
 parameter holding an empty value still appends it: a description then ends in a space, and a
 function without one gets an empty `Description`. `Globals` can set
 `AutoPublishAliasAllProperties` and `VersionDeletionPolicy`, but as in SAM not
-`AutoPublishCodeSha256`, which fails the transform there. floci does not honour a resource's
-`IgnoreGlobals`, so no function can opt out of a `VersionDeletionPolicy` in `Globals` with it: one
-without `AutoPublishAlias` fails the transform with
+`AutoPublishCodeSha256` or `VersionDescription`, which fail the transform there. floci does not
+honour a resource's `IgnoreGlobals`, so no function can opt out of a `VersionDeletionPolicy` in
+`Globals` with it: one without `AutoPublishAlias` fails the transform with
 `'VersionDeletionPolicy' requires 'AutoPublishAlias'.`, as it does in SAM when it does not ignore
 that global.
 
 A new id publishes a version, and moves the alias to it, only when the function's code or
-configuration changed since its last version. Otherwise the new version resource takes the last
-version and the alias stays where it is, as when an update changes only one of these:
+configuration changed since its last version, or, in floci, also when its `VersionDescription`
+differs from that version's description (see below). Otherwise the new version resource takes the
+last version and the alias stays where it is, as when an update changes only one of these:
 
 - A change to `SnapStart`: floci does not give the function `SnapStart`.
 - Under `AutoPublishAliasAllProperties`, a change to `Tags` or `ReservedConcurrentExecutions`
@@ -486,6 +487,19 @@ intrinsic functions only in resource properties, outputs, metadata attributes an
 attributes, unless a transform such as `AWS::LanguageExtensions` resolves them first, and floci
 implements no such transform: it reads any `DeletionPolicy` that is not a plain string as `Delete`
 (see [Deletion Policies](#deletion-policies)).
+
+As in SAM, a function's `VersionDescription` becomes its version's `Description`, copied as
+written, so an intrinsic function in it is resolved when the version is published. It is not part
+of the hash, so a new `VersionDescription` alone keeps the version's id, and CloudFormation can
+change a version's `Description` only by replacing the version. AWS fails that update: in 2021,
+[SAM issue #2786](https://github.com/aws/serverless-application-model/issues/2786) showed a change
+set that modified the version in place, then `Internal Failure` and a rollback. floci completes it
+and keeps the version, with the description it was published with, although its change set
+reports the version replaced when the description is changed or removed. The next new id then
+publishes, with the new description, even if the function has not changed since. On AWS that
+update is expected to fail like the `Tags` change above, since
+[PublishVersion](https://docs.aws.amazon.com/lambda/latest/api/API_PublishVersion.html) publishes
+nothing for a function whose code and configuration have not changed; this is not measured.
 
 Changes made to `$LATEST` outside the stack, including Lambda's reactive S3 sync, do not reach the
 alias until an update publishes a new version. Event sources and API integrations still invoke the

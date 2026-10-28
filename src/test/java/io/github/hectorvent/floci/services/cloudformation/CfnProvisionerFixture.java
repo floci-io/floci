@@ -97,6 +97,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.Organizat
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RdsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftClusterCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftEventSubscriptionCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftServerlessCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
@@ -505,6 +506,7 @@ final class CfnProvisionerFixture {
             }
             if (redshiftService != null) {
                 discovered.add(new RedshiftClusterCfnProvisioner(redshiftService));
+                discovered.add(new RedshiftEventSubscriptionCfnProvisioner(redshiftService));
             }
             if (redshiftServerlessService != null) {
                 discovered.add(new RedshiftServerlessCfnProvisioner(redshiftServerlessService));

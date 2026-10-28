@@ -95,7 +95,7 @@ type_order:
   AWS::ElastiCache:
     [CacheCluster, SubnetGroup, User, UserGroup, ServerlessCache]
   AWS::Redshift:
-    [Cluster, ClusterParameterGroup, ClusterSubnetGroup, ClusterSecurityGroup]
+    [Cluster, ClusterParameterGroup, ClusterSubnetGroup, ClusterSecurityGroup, EventSubscription]
   AWS::RedshiftServerless:
     [Namespace, Workgroup]
   AWS::EC2:

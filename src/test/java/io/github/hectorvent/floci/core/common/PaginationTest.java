@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.function.Function;
@@ -93,6 +95,22 @@ class PaginationTest {
                 () -> signedPage(markers, 1, "", "")));
         assertSame(INVALID, assertThrows(AwsException.class,
                 () -> signedPage(markers, 1, "!!!", "")));
+    }
+
+    @Test
+    void expiringPaging_validatesTheTokenBeforeLoadingItems() {
+        SignedMarkers markers = new SignedMarkers();
+        Clock clock = Clock.systemUTC();
+        Duration lifetime = Duration.ofDays(1);
+
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> Pagination.paginateExpiring(() -> {
+                    throw new AssertionError("items loaded before token validation");
+                }, Function.identity(), 1, "not-a-token", "scope", clock, lifetime, markers, INVALID_TOKEN)));
+
+        PaginatedResult<String> first = Pagination.paginateExpiring(() -> ITEMS, Function.identity(),
+                1, null, "scope", clock, lifetime, markers, INVALID_TOKEN);
+        assertThat(first.items(), contains("a"));
     }
 
     @Test

@@ -214,11 +214,11 @@ class SageMakerServiceTest {
                 new RegionResolver("us-east-1", "000000000000"), mapper,
                 mock(SageMakerEndpointManager.class), mock(SageMakerTrainingRunner.class));
 
-        JsonNode firstPage = service.listEndpointConfigs(mapper.readTree("{\"MaxResults\":1}"), "us-east-1");
+        JsonNode firstPage = service.listEndpointConfigs(mapper.readTree("{\"MaxResults\":1,\"SortBy\":\"Name\",\"SortOrder\":\"Ascending\"}"), "us-east-1");
         assertEquals("a", firstPage.path("EndpointConfigs").get(0).path("EndpointConfigName").asText());
         assertEquals("a", firstPage.path("NextToken").asText());
         configs.delete("us-east-1::a");
-        JsonNode secondPage = service.listEndpointConfigs(mapper.readTree("{\"MaxResults\":1,\"NextToken\":\"a\"}"), "us-east-1");
+        JsonNode secondPage = service.listEndpointConfigs(mapper.readTree("{\"MaxResults\":1,\"SortBy\":\"Name\",\"SortOrder\":\"Ascending\",\"NextToken\":\"a\"}"), "us-east-1");
         assertEquals("b", secondPage.path("EndpointConfigs").get(0).path("EndpointConfigName").asText());
         assertTrue(secondPage.path("NextToken").isMissingNode());
     }

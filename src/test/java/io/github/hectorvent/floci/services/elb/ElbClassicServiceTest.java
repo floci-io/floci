@@ -96,6 +96,31 @@ class ElbClassicServiceTest {
     }
 
     @Test
+    void omittedInstanceProtocolMatchesExplicitDefaultOnListenerRetry() {
+        ClassicListener listener = httpListener();
+        listener.setInstanceProtocol(null);
+        ClassicLoadBalancer lb = service.createLoadBalancer(REGION, "default-listener",
+                List.of(listener), List.of(), List.of("subnet-a"), List.of(), null, Map.of());
+        assertEquals("HTTP", lb.getListeners().getFirst().getInstanceProtocol());
+        service.createLoadBalancerListeners(REGION, "default-listener", List.of(httpListener()));
+        assertEquals(1, lb.getListeners().size());
+
+        ClassicListener tcp = new ClassicListener();
+        tcp.setProtocol("TCP");
+        tcp.setLoadBalancerPort(443);
+        tcp.setInstancePort(9090);
+        service.createLoadBalancerListeners(REGION, "default-listener", List.of(tcp));
+        assertEquals("TCP", lb.getListeners().getLast().getInstanceProtocol());
+        ClassicListener explicit = new ClassicListener();
+        explicit.setProtocol("TCP");
+        explicit.setLoadBalancerPort(443);
+        explicit.setInstancePort(9090);
+        explicit.setInstanceProtocol("TCP");
+        service.createLoadBalancerListeners(REGION, "default-listener", List.of(explicit));
+        assertEquals(2, lb.getListeners().size());
+    }
+
+    @Test
     void createGivesADnsNameAndTheAwsDefaultHealthCheck() {
         ClassicLoadBalancer lb = create("my-elb");
 

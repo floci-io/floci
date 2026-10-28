@@ -212,6 +212,7 @@ floci:
     redshift:
       enabled: true
       automated-snapshots-enabled: false
+      cloudwatch-metrics-enabled: true
       snapshot-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine

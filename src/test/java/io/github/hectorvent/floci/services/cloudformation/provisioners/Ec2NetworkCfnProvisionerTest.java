@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 import org.mockito.invocation.Invocation;
 import org.mockito.stubbing.OngoingStubbing;
 
@@ -692,11 +693,11 @@ class Ec2NetworkCfnProvisionerTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> removed = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).deleteTags(eq(REGION), eq(List.of(RTB_ID)), removed.capture());
+        verify(ec2, Mockito.times(2)).deleteTags(eq(REGION), eq(List.of(RTB_ID)), removed.capture());
         assertEquals(List.of("env=null"), pairs(removed.getAllValues().get(1)), "the key the update added is removed");
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> written = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).createTags(eq(REGION), eq(List.of(RTB_ID)), written.capture());
+        verify(ec2, Mockito.times(2)).createTags(eq(REGION), eq(List.of(RTB_ID)), written.capture());
         assertEquals(List.of("Name=old", "team=net"), pairs(written.getAllValues().get(1)), "the prior tags are written back");
         assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
     }
@@ -788,7 +789,7 @@ class Ec2NetworkCfnProvisionerTest {
         provisioner.provision(updated, mapper.createObjectNode().put("RouteTableId", RTB_ID)
                 .put("DestinationCidrBlock", "10.40.0.18/24").put("GatewayId", IGW_ID), ctx(RTB_ID + "|10.40.0.0/24"));
         verify(ec2).replaceRoute(REGION, RTB_ID, "10.40.0.18/24", null, null, IGW_ID, null, null);
-        verify(ec2, org.mockito.Mockito.times(1)).createRoute(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(ec2, Mockito.times(1)).createRoute(any(), any(), any(), any(), any(), any(), any(), any(), any());
         assertEquals(RTB_ID + "|10.40.0.0/24", updated.getPhysicalId());
     }
 
@@ -872,7 +873,7 @@ class Ec2NetworkCfnProvisionerTest {
         ReplacementCleanup.mergeDisplaced(previous, r);
         assertEquals("subnet-replacement", provisioner.updateCleanupPhysicalId(previous), "the replacement stays owed a delete");
         provisioner.completeUpdate(previous);
-        verify(ec2, org.mockito.Mockito.times(2)).deleteSubnet(REGION, "subnet-replacement");
+        verify(ec2, Mockito.times(2)).deleteSubnet(REGION, "subnet-replacement");
     }
 
     @Test
@@ -930,11 +931,11 @@ class Ec2NetworkCfnProvisionerTest {
         assertEquals("TagLimitExceeded", e.getErrorCode());
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> written = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).createTags(eq(REGION), eq(List.of(RTB_ID)), written.capture());
+        verify(ec2, Mockito.times(2)).createTags(eq(REGION), eq(List.of(RTB_ID)), written.capture());
         assertEquals(List.of("Name=old", "team=net"), pairs(written.getAllValues().get(1)), "the prior tags are put back");
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> removed = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).deleteTags(eq(REGION), eq(List.of(RTB_ID)), removed.capture());
+        verify(ec2, Mockito.times(2)).deleteTags(eq(REGION), eq(List.of(RTB_ID)), removed.capture());
         assertEquals(List.of("env=null"), pairs(removed.getAllValues().get(1)), "the key the failed update added is removed again");
         assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
         assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR), "a successful restore reports nothing");
@@ -956,11 +957,11 @@ class Ec2NetworkCfnProvisionerTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> written = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).createTags(eq(REGION), eq(List.of(SUBNET_ID)), written.capture());
+        verify(ec2, Mockito.times(2)).createTags(eq(REGION), eq(List.of(SUBNET_ID)), written.capture());
         assertEquals(List.of("Name=old"), pairs(written.getAllValues().get(1)));
         // the snapshot recorded the prior value before the flip was attempted, so the restore writes it back
         verify(ec2).modifySubnetAttribute(REGION, SUBNET_ID, "mapPublicIpOnLaunch", "false");
-        verify(ec2, org.mockito.Mockito.times(2)).modifySubnetAttribute(any(), any(), any(), any());
+        verify(ec2, Mockito.times(2)).modifySubnetAttribute(any(), any(), any(), any());
         verify(ec2, never()).deleteSubnet(any(), any());
     }
 
@@ -1002,7 +1003,7 @@ class Ec2NetworkCfnProvisionerTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> written = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).createTags(eq(REGION), eq(List.of(NAT_ID)), written.capture());
+        verify(ec2, Mockito.times(2)).createTags(eq(REGION), eq(List.of(NAT_ID)), written.capture());
         assertEquals(List.of("Name=old"), pairs(written.getAllValues().get(1)));
         verify(ec2, never()).deleteNatGateway(any(), any());
     }

@@ -51,6 +51,7 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
 | `PutProvisionedConcurrencyConfig` | Initialize Docker environments for a published version or simple alias |
 | `GetProvisionedConcurrencyConfig` | Read the allocation's actual initialization status and capacity |
+| `ListProvisionedConcurrencyConfigs` | List configured versions and aliases with their current capacity |
 | `DeleteProvisionedConcurrencyConfig` | Remove an allocation and stop its environments |
 | `GetAccountSettings` | Account limits plus usage derived from the caller's stored functions |
 | `PutFunctionEventInvokeConfig` | Set the asynchronous invocation settings of a function, version or alias (retries, event age, destinations) |
@@ -108,6 +109,14 @@ part in authorizing calls to the function:
 - A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
 - `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
   admits no caller.
+
+### Qualified reads
+
+`GetFunction` and `GetFunctionConfiguration` preserve an alias in the returned
+`FunctionArn`, while `Version` identifies that alias's primary published version.
+This applies to a `Qualifier` parameter and aliases embedded in a name, full ARN
+or partial ARN. Reading an alias does not change the stored version or the
+identities returned by subsequent unqualified and numeric-version reads.
 
 ### Reserved Concurrency
 
@@ -492,6 +501,12 @@ with a required `Qualifier` query parameter. Put accepts a positive integer
 function without a configuration returns `ProvisionedConcurrencyConfigNotFoundException`
 from Get.
 
+List uses the same route with `List=ALL` and no qualifier. It returns the function's
+configured versions and aliases, their qualified `FunctionArn` and current allocation status.
+An existing function without configurations returns an empty list. `MaxItems` accepts 1
+through 50; `NextMarker` resumes with `Marker`. Markers are scoped to the function, account
+and region. Name, full ARN and partial ARN references use the same configuration inventory.
+
 An alias and its resolved published version cannot both have configurations. Different
 aliases of the same provisioned version also conflict; other versions remain independent.
 `LastModified` uses Lambda's UTC `+0000` form.
@@ -563,7 +578,6 @@ For a longer drain, explicitly stop with the larger timeout and then start Floci
 These AWS Lambda operations have no handler in Floci. Calls will return `404` or an error:
 
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
-- Listing provisioned concurrency (`ListProvisionedConcurrencyConfigs`)
 - `InvokeWithResponseStream`
 - Code signing enforcement. A configuration is created, read, updated, deleted and listed, and
   nothing verifies a signature against it, so it never gates a deployment. Attaching one to a
@@ -1319,10 +1333,13 @@ of `{}` or with an empty `Filters` array clears any existing filters.
 
 Any runtime that has an official AWS Lambda container image works with Floci (e.g. `nodejs22.x`, `python3.13`, `java21`, `go1.x`, `provided.al2023`).
 
-With the Docker executor, ZIP-based `provided.*` runtimes execute the package's
+With the Docker and Kubernetes executors, ZIP-based `provided.*` runtimes execute the package's
 `/var/task/bootstrap`, falling back to `/opt/bootstrap` only when the package has
 no bootstrap. The supplied executable stays in place, so scripts that locate
-companion files relative to their own path continue to work.
+companion files relative to their own path continue to work. The Kubernetes init
+container restores executable permission on package and layer bootstrap files
+after extraction and installs the shared delegate in `/var/runtime`. Managed
+runtimes keep their image-provided `/var/runtime` unchanged.
 
 By default, Floci builds each runtime image reference from `floci.services.lambda.ecr-base-uri`
 and the runtime tag. To pin one runtime to a full image reference, set
@@ -1339,3 +1356,16 @@ floci:
 Replace `<digest>` with the image's full SHA-256 digest. The override applies to
 zip-based functions using that runtime; other runtimes retain their default images.
 Custom image URI passthrough and image-package functions are unaffected.
+
+For Docker functions that share a runtime but use different CPU architectures,
+add platform-specific keys such as `"java17.linux.amd64"` and
+`"java17.linux.arm64"`, each pointing to its platform manifest digest.
+The Docker launcher's effective platform selects that entry before the
+runtime-wide fallback. Enable `floci.services.lambda.honour-architectures` to
+use the function's architecture; an explicit Docker `--platform` takes precedence.
+The code-copy helper uses the same platform. With no selected Docker platform,
+or for the Kubernetes launcher, the runtime-wide entry and default resolution
+remain in effect.
+
+Environment variables use the quoted map-key form, for example
+`FLOCI_SERVICES_LAMBDA_RUNTIME_IMAGES__JAVA17_LINUX_ARM64__`.

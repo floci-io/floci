@@ -656,7 +656,7 @@ public class LambdaService implements ResourceProvider {
      */
     public LambdaFunction getFunction(String region, String functionName, String qualifier) {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionName);
-        enforceRegion(region, ref);
+        LambdaArnUtils.enforceRegion(region, ref);
         String effective = resolveQualifier(ref.qualifier(), qualifier);
         if (effective == null) {
             return getFunction(region, functionName);
@@ -691,7 +691,7 @@ public class LambdaService implements ResourceProvider {
      */
     String canonicalFunctionName(String region, String functionName) {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionName);
-        enforceRegion(region, ref);
+        LambdaArnUtils.enforceRegion(region, ref);
         return ref.name();
     }
 
@@ -701,16 +701,7 @@ public class LambdaService implements ResourceProvider {
      * value, enforcing region match when the input is a full ARN.
      */
     LambdaArnUtils.ResolvedFunctionRef resolveWithRegion(String region, String functionName, String queryQualifier) {
-        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolveWithQualifier(functionName, queryQualifier);
-        enforceRegion(region, ref);
-        return ref;
-    }
-
-    private void enforceRegion(String region, LambdaArnUtils.ResolvedFunctionRef ref) {
-        if (ref.region() != null && !ref.region().equals(region)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Region '" + ref.region() + "' in ARN does not match request region '" + region + "'", 400);
-        }
+        return LambdaArnUtils.resolveWithRegion(region, functionName, queryQualifier);
     }
 
     private record ResolvedFunctionTarget(String functionArn, String functionName) {}
@@ -1448,7 +1439,7 @@ public class LambdaService implements ResourceProvider {
             }
             eventSourceArn = null;
 
-            enforceRegion(region, fnRef);
+            LambdaArnUtils.enforceRegion(region, fnRef);
             resolvedRegion = region;
 
             Object rawSource = request.get("SelfManagedEventSource");

@@ -50,9 +50,12 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -83,6 +86,7 @@ class EcsContainerManagerFirelensTest {
     private InputStream uploadStream;
     private byte[] uploadedArchive;
     private EcsContainerManager manager;
+    private EmulatorConfig config;
 
     @BeforeEach
     void setUp() {
@@ -95,6 +99,7 @@ class EcsContainerManagerFirelensTest {
         lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
+        when(lifecycleManager.removeVolume(anyString())).thenReturn(true);
         when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("app-id", Map.of()));
         when(lifecycleManager.create(any())).thenReturn("router-id");
         when(lifecycleManager.startCreated(anyString(), any())).thenReturn(new ContainerInfo("router-id", Map.of()));
@@ -120,7 +125,7 @@ class EcsContainerManagerFirelensTest {
         logStreamer = mock(ContainerLogStreamer.class);
         when(logStreamer.generateLogStreamName(anyString())).thenReturn("stream");
         ContainerDetector containerDetector = mock(ContainerDetector.class);
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         RegionResolver regionResolver = mock(RegionResolver.class);
         LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
@@ -514,6 +519,88 @@ class EcsContainerManagerFirelensTest {
         verifyFirelensVolumeRemoved();
     }
 
+    @Test
+    void socketIdentityIncludesTheCompleteOwnerAndTask() {
+        String longNamespace = "firelens-" + "namespace".repeat(20);
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of(longNamespace));
+        String name = EcsContainerManager.firelensVolumeName(config, task().getTaskArn());
+        assertEquals(name, EcsContainerManager.firelensVolumeName(config, task().getTaskArn()));
+        assertTrue(name.length() <= 55);
+        assertNotEquals(name, EcsContainerManager.firelensVolumeName(config, task().getTaskArn() + "other"));
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of(longNamespace + "other"));
+        assertNotEquals(name, EcsContainerManager.firelensVolumeName(config, task().getTaskArn()));
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of(longNamespace));
+        when(config.port()).thenReturn(4567);
+        assertNotEquals(name, EcsContainerManager.firelensVolumeName(config, task().getTaskArn()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "long", "multibyte"})
+    void invalidSocketMountpointIsCompensatedBeforeCreatingContainers(String mountpoint) {
+        String path = switch (mountpoint) {
+            case "long" -> "/" + "x".repeat(108);
+            case "multibyte" -> "/" + "é".repeat(54);
+            default -> mountpoint;
+        };
+        when(dockerClient.inspectVolumeCmd(anyString()).exec().getMountpoint()).thenReturn(path);
+        assertThrows(AwsException.class, () -> manager.startTask(
+                task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1"));
+        verify(lifecycleManager, never()).create(any());
+        verify(lifecycleManager, never()).createAndStart(any());
+        verifyFirelensVolumeRemoved();
+    }
+
+    @Test
+    void failedPreparationCleanupRetainsTheVolumeForRetry() {
+        when(dockerClient.inspectVolumeCmd(anyString()).exec().getMountpoint()).thenReturn(null);
+        when(lifecycleManager.removeVolume(anyString())).thenReturn(false, true);
+        EcsTaskLaunchException failure = assertThrows(EcsTaskLaunchException.class, () -> manager.startTask(
+                task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1"));
+        assertTrue(failure.getHandle().hasTaskVolumes());
+        manager.cleanupStoppedTask(failure.getHandle());
+        assertFalse(failure.getHandle().hasTaskVolumes());
+    }
+
+    @Test
+    void socketVolumeKeepsFullOwnershipLabels() {
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of("long-owner-namespace"));
+        when(config.port()).thenReturn(4566);
+        manager.startTask(task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1");
+        ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.captor();
+        verify(lifecycleManager).ensureVolume(anyString(), labels.capture());
+        assertEquals("long-owner-namespace/4566", labels.getValue().get("io.floci.owner"));
+        assertEquals("ecs", labels.getValue().get("io.floci.service"));
+        assertTrue(labels.getValue().containsKey("io.floci.ecs.run"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"floci-aws-long-namespace-ecs-firelens-abc123",
+            "floci-aws-ecs-firelens-043ba6e4a0fd36cf98016b7b4e985125"})
+    void handleCleanupRetriesBothLegacyAndBoundedVolumeNames(String volumeName) {
+        EcsTaskHandle handle = new EcsTaskHandle(task().getTaskArn(), Map.of(), Map.of(),
+                volumeName, null, "us-east-1");
+        when(lifecycleManager.removeVolume(volumeName)).thenReturn(false, true);
+        manager.cleanupStoppedTask(handle);
+        assertTrue(handle.hasTaskVolumes());
+        manager.cleanupStoppedTask(handle);
+        assertFalse(handle.hasTaskVolumes());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"107,true", "108,false"})
+    void socketLengthChecksTheCompleteHostPath(int bytes, boolean accepted) {
+        String mountpoint = "/" + "x".repeat(bytes - 13);
+        when(dockerClient.inspectVolumeCmd(anyString()).exec().getMountpoint()).thenReturn(mountpoint);
+        if (accepted) {
+            manager.startTask(task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1");
+        } else {
+            assertThrows(AwsException.class, () -> manager.startTask(
+                    task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1"));
+            verify(lifecycleManager, never()).create(any());
+            verifyFirelensVolumeRemoved();
+        }
+    }
+
     private DockerArchiveUploadFixture failingUploads() {
         DockerArchiveUploadFixture uploads = new DockerArchiveUploadFixture(dockerClient, "router-id");
         uploads.failures = Integer.MAX_VALUE;
@@ -532,7 +619,7 @@ class EcsContainerManagerFirelensTest {
 
     private void verifyFirelensVolumeRemoved() {
         ArgumentCaptor<String> volumeName = ArgumentCaptor.forClass(String.class);
-        verify(lifecycleManager).ensureVolume(volumeName.capture());
+        verify(lifecycleManager).ensureVolume(volumeName.capture(), any());
         verify(lifecycleManager).removeVolume(volumeName.getValue());
     }
 

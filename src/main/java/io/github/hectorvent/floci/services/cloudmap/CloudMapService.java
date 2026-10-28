@@ -394,18 +394,27 @@ public class CloudMapService {
                                             String healthFilter, Map<String, String> queryParameters,
                                             Integer maxResults, String region) {
         Service service = resolveService(namespaceName, serviceName, region);
-        List<Instance> all = scanInstances(service.getId());
-        List<Instance> filtered = applyHealthFilter(all, healthFilter);
-        if (queryParameters != null && !queryParameters.isEmpty()) {
-            filtered = filtered.stream()
-                    .filter(i -> queryParameters.entrySet().stream()
-                            .allMatch(e -> e.getValue().equals(i.getAttributes().get(e.getKey()))))
-                    .toList();
-        }
+        List<Instance> filtered = filterInstances(service.getId(), healthFilter, queryParameters);
         if (maxResults != null && maxResults > 0 && filtered.size() > maxResults) {
             filtered = filtered.subList(0, maxResults);
         }
         return new DiscoverResult(filtered, service.getRevision());
+    }
+
+    public List<Instance> filterInstances(String serviceId, String healthFilter,
+                                          Map<String, String> queryParameters) {
+        List<Instance> filtered = applyHealthFilter(listInstances(serviceId), healthFilter);
+        if (queryParameters != null && !queryParameters.isEmpty()) {
+            filtered = filtered.stream()
+                    .filter(i -> queryParameters.entrySet().stream()
+                            .allMatch(e -> e.getValue().equals(attributesOf(i).get(e.getKey()))))
+                    .toList();
+        }
+        return filtered;
+    }
+
+    private static Map<String, String> attributesOf(Instance instance) {
+        return instance.getAttributes() != null ? instance.getAttributes() : Map.of();
     }
 
     public long discoverInstancesRevision(String namespaceName, String serviceName, String region) {

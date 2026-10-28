@@ -698,13 +698,13 @@ public class KinesisJsonHandler {
         if (request.has("Timestamp") && !request.path("Timestamp").isNull()) {
             JsonNode tsNode = request.path("Timestamp");
             if (!tsNode.isNumber()) {
-                throw new io.github.hectorvent.floci.core.common.AwsException("InvalidArgumentException",
+                throw new AwsException("InvalidArgumentException",
                         "Timestamp must be a number (epoch seconds)", 400);
             }
             timestampMillis = Math.round(tsNode.asDouble() * 1000);
         }
         if ("AT_TIMESTAMP".equals(type) && timestampMillis == null) {
-            throw new io.github.hectorvent.floci.core.common.AwsException("InvalidArgumentException",
+            throw new AwsException("InvalidArgumentException",
                     "ShardIteratorType AT_TIMESTAMP requires a Timestamp", 400);
         }
 

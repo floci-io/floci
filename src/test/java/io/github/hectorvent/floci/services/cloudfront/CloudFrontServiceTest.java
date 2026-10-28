@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolic
 import io.github.hectorvent.floci.services.cloudfront.model.StreamingDistribution;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.mockito.Mockito;
 
 import java.security.KeyPairGenerator;
@@ -1740,7 +1741,7 @@ class CloudFrontServiceTest {
     }
 
     private static AwsException assertAws(
-            String code, org.junit.jupiter.api.function.Executable action) {
+            String code, Executable action) {
         AwsException error = assertThrows(AwsException.class, action);
         assertEquals(code, error.getErrorCode());
         return error;

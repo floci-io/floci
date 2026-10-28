@@ -39,6 +39,8 @@ final class DynamoDbPointInTimeRecovery {
         private final List<PointInTimeChange> list = new ArrayList<>();
         private long nextSequence;
         private boolean dropped;
+        // itemsAt leaves out a change recorded after it read the list, so that change must fall after its time.
+        private Instant notBefore = Instant.MIN;
     }
 
     private final StorageBackend<String, PointInTimeChange> store;
@@ -97,7 +99,7 @@ final class DynamoDbPointInTimeRecovery {
             if (changes.dropped || !table.isPointInTimeRecoveryEnabled()) {
                 return;
             }
-            Instant now = clock.instant().truncatedTo(ChronoUnit.MILLIS);
+            Instant now = later(clock.instant().truncatedTo(ChronoUnit.MILLIS), changes.notBefore);
             PointInTimeChange change = new PointInTimeChange(changes.nextSequence++, now, itemKey,
                     oldItem != null ? oldItem.deepCopy() : null);
             changes.list.add(change);
@@ -121,25 +123,44 @@ final class DynamoDbPointInTimeRecovery {
 
     /**
      * An item changed after {@code time} takes the value that its first change after it replaced.
-     * Writers record a change before they write the item, so the live items are copied first.
+     * Writers record a change before they write the item. So the live items are copied first, and an
+     * item with no change after {@code time} is read again under {@code underItemLock}, as in
+     * {@link #changesBetween}.
      */
-    List<JsonNode> itemsAt(String accountId, String storageKey, Map<String, JsonNode> liveItems, Instant time) {
+    List<JsonNode> itemsAt(String accountId, String storageKey, Map<String, JsonNode> liveItems, Instant time,
+                           BiFunction<String, Supplier<JsonNode>, JsonNode> underItemLock) {
         Map<String, JsonNode> items = new HashMap<>(liveItems);
-        Changes changes = changesByTable.get(key(accountId, storageKey));
-        if (changes != null) {
-            Set<String> undone = new HashSet<>();
-            synchronized (changes) {
-                for (PointInTimeChange change : changes.list) {
-                    String itemKey = change.getItemKey();
-                    if (!change.getTime().isAfter(time) || !undone.add(itemKey)) {
-                        continue;
-                    }
-                    if (change.getOldItem() == null) {
-                        items.remove(itemKey);
-                    } else {
-                        items.put(itemKey, change.getOldItem());
-                    }
+        Changes changes = changesByTable.computeIfAbsent(key(accountId, storageKey), ignored -> new Changes());
+        Set<String> undone = new HashSet<>();
+        Set<String> written = new HashSet<>();
+        long seen;
+        synchronized (changes) {
+            seen = changes.nextSequence;
+            changes.notBefore = later(changes.notBefore, time.truncatedTo(ChronoUnit.MILLIS).plusMillis(1));
+            for (PointInTimeChange change : changes.list) {
+                String itemKey = change.getItemKey();
+                if (!change.getTime().isAfter(time)) {
+                    written.add(itemKey);
+                    continue;
                 }
+                if (!undone.add(itemKey)) {
+                    continue;
+                }
+                if (change.getOldItem() == null) {
+                    items.remove(itemKey);
+                } else {
+                    items.put(itemKey, change.getOldItem());
+                }
+            }
+        }
+        written.removeAll(undone);
+        ValuesBefore valuesBefore = new ValuesBefore(changes, seen, liveItems);
+        for (String itemKey : written) {
+            JsonNode item = underItemLock.apply(itemKey, () -> valuesBefore.of(itemKey));
+            if (item == null) {
+                items.remove(itemKey);
+            } else {
+                items.put(itemKey, item);
             }
         }
         return new ArrayList<>(items.values());
@@ -179,24 +200,42 @@ final class DynamoDbPointInTimeRecovery {
             }
         }
         List<ItemChange> result = new ArrayList<>();
+        ValuesBefore valuesBefore = new ValuesBefore(changes, seen, liveItems);
         before.forEach((itemKey, oldItem) -> {
             JsonNode newItem = after.containsKey(itemKey) ? after.get(itemKey)
-                    : underItemLock.apply(itemKey, () -> valueBefore(changes, itemKey, seen, liveItems));
+                    : underItemLock.apply(itemKey, () -> valuesBefore.of(itemKey));
             result.add(new ItemChange(oldItem, newItem, lastWrites.get(itemKey)));
         });
         return result;
     }
 
-    /** The value that the first change of the item from sequence {@code since} replaced, or the live item. */
-    private static JsonNode valueBefore(Changes changes, String itemKey, long since, Map<String, JsonNode> liveItems) {
-        synchronized (changes) {
-            JsonNode value = liveItems.get(itemKey);
-            for (int i = changes.list.size() - 1; 0 <= i && since <= changes.list.get(i).getSequence(); i--) {
-                if (changes.list.get(i).getItemKey().equals(itemKey)) {
-                    value = changes.list.get(i).getOldItem();
+    /** The value that the first change of each item from sequence {@code since} replaced, or the live item. */
+    private static final class ValuesBefore {
+        private final Changes changes;
+        private final Map<String, JsonNode> liveItems;
+        private final Map<String, JsonNode> replaced = new HashMap<>();
+        private long read;
+
+        ValuesBefore(Changes changes, long since, Map<String, JsonNode> liveItems) {
+            this.changes = changes;
+            this.liveItems = liveItems;
+            this.read = since;
+        }
+
+        JsonNode of(String itemKey) {
+            synchronized (changes) {
+                int i = changes.list.size();
+                while (0 < i && read <= changes.list.get(i - 1).getSequence()) {
+                    i--;
                 }
+                for (PointInTimeChange change : changes.list.subList(i, changes.list.size())) {
+                    if (!replaced.containsKey(change.getItemKey())) {
+                        replaced.put(change.getItemKey(), change.getOldItem());
+                    }
+                }
+                read = changes.nextSequence;
+                return replaced.containsKey(itemKey) ? replaced.get(itemKey) : liveItems.get(itemKey);
             }
-            return value;
         }
     }
 

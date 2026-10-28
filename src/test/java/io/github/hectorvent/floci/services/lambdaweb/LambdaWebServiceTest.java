@@ -15,6 +15,9 @@ import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
@@ -30,6 +33,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -48,6 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.startsWith;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -63,6 +68,8 @@ class LambdaWebServiceTest {
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
     private final ServiceCallAuthorizer serviceCalls = mock(ServiceCallAuthorizer.class);
     private final LambdaMicrovmsService microvms = new LambdaMicrovmsService(new RegionResolver(REGION, ACCOUNT_ID), null);
+    private final IamService iamService = new IamService(new MemoryStorageFactory(),
+            mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), new RegionResolver(REGION, ACCOUNT_ID), Clock.systemUTC());
 
     @TempDir
     Path storageDir;
@@ -89,7 +96,7 @@ class LambdaWebServiceTest {
         when(config.effectiveBaseUrl()).thenReturn(baseUrl);
         LambdaWebService service = new LambdaWebService(new RegionResolver(REGION, ACCOUNT_ID), storage, config,
                 s3Service, new LambdaWebCode(storageDir.resolve("code")), mapper, null, executionRole, serviceCalls,
-                microvms);
+                microvms, new LambdaWebPolicyPrincipals(iamService));
         service.initializeStorage();
         return service;
     }
@@ -710,6 +717,7 @@ class LambdaWebServiceTest {
         assertEquals("The provided input'foo/bar'was invalid. Member must satisfy expression: [\\w+=,.@\\:-]*"
                 + " Please check your input and try again.", message(() -> service.putResourcePolicy(REGION, missing,
                 policy(members.formatted("{\"AWS\":\"foo/bar\"}", invoke, "\"" + resource + "\"")))));
+        iamService.createUser("alice", "/path/");
         assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
                 policy(members.formatted("{\"AWS\":\"arn:aws:iam::000000000000:user/path/alice\"}", invoke,
                         "\"" + resource + "\"")))).getErrorCode());
@@ -751,6 +759,71 @@ class LambdaWebServiceTest {
             assertEquals("ResourceNotFoundException",
                     error(() -> service.putResourcePolicy(REGION, missing, policy(accepted))).getErrorCode(), accepted);
         }
+    }
+
+    @Test
+    void theRolesAndUsersAPolicyNamesHaveToExist() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        String invalid = "The provided principal was invalid. Please check the principal and try again.";
+        String otherArn = "The principal arn provided does not match the actual principal arn."
+                + " Please check your input and try again.";
+        IamRole role = iamService.createRole("reader", "/team/", "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},"
+                + "\"Action\":\"sts:AssumeRole\"}]}", null, 3600, null);
+        IamUser user = iamService.createUser("writer", "/team/");
+
+        for (String exists : List.of("arn:aws:iam::000000000000:role/team/reader",
+                "arn:aws:iam::000000000000:user/team/writer", role.getRoleId(), user.getUserId(), "111122223333",
+                "arn:aws:iam::111122223333:root", "arn:aws:sts::000000000000:federated-user/bob")) {
+            assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
+                    policy(principalPolicy("Allow", "{\"AWS\":\"" + exists + "\"}", missing)))).getErrorCode(), exists);
+        }
+        for (String other : List.of("arn:aws:iam::000000000000:role/reader", "arn:aws:iam::000000000000:role/x/reader",
+                "arn:aws:iam::000000000000:user/writer")) {
+            assertEquals(otherArn, message(() -> service.putResourcePolicy(REGION, missing,
+                    policy(principalPolicy("Allow", "{\"AWS\":\"" + other + "\"}", missing)))), other);
+        }
+        for (String absent : List.of("{\"AWS\":\"arn:aws:iam::000000000000:role/gone\"}",
+                "{\"AWS\":\"arn:aws:iam::111122223333:role/reader\"}", "{\"AWS\":\"AROAGONE\"}",
+                "{\"AWS\":\"arn:aws-cn:iam::000000000000:root\"}",
+                "{\"AWS\":\"arn:aws:sts::000000000000:assumed-role/reader/s\"}",
+                "{\"AWS\":[\"arn:aws:iam::000000000000:role/team/reader\",\"arn:aws:iam::000000000000:role/gone\"]}",
+                "{\"CanonicalUser\":\"79a59df900b949e55d96a1e698fbacedfd6e09d98eacf8f8d5218e7cd47ef2be\"}")) {
+            assertEquals(invalid, message(() -> service.putResourcePolicy(REGION, missing,
+                    policy(principalPolicy("Allow", absent, missing)))), absent);
+        }
+        String gone = principalPolicy("Deny", "{\"AWS\":\"arn:aws:iam::000000000000:role/gone\"}", missing);
+        assertEquals(invalid, message(() -> service.putResourcePolicy(REGION, missing, policy(gone))));
+    }
+
+    @Test
+    void everyStatementPassesItsOwnChecksBeforeAnyPrincipalIsLookedUp() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        String gone = statement("Allow", "{\"AWS\":\"arn:aws:iam::000000000000:role/gone\"}", missing);
+        String badAction = "{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"000000000000\"},"
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"" + missing + "\"}";
+        String badPattern = statement("Allow", "{\"AWS\":\"bad!value\"}", missing);
+        String open = statement("Allow", "\"*\"", missing);
+
+        assertEquals("Policy has syntax errors.", message(() -> service.putResourcePolicy(REGION, missing,
+                policy("{\"Statement\":[" + gone + "," + badAction + "]}"))));
+        assertEquals("The provided input'bad!value'was invalid. Member must satisfy expression: [\\w+=,.@\\:-]*"
+                + " Please check your input and try again.", message(() -> service.putResourcePolicy(REGION, missing,
+                policy("{\"Statement\":[" + gone + "," + badPattern + "]}"))));
+        assertEquals("The provided principal was invalid. Please check the principal and try again.",
+                message(() -> service.putResourcePolicy(REGION, missing,
+                        policy("{\"Statement\":[" + open + "," + gone + "]}"))));
+    }
+
+    private static String principalPolicy(String effect, String principal, String functionArn) {
+        return "{\"Statement\":[" + statement(effect, principal, functionArn) + "]}";
+    }
+
+    private static String statement(String effect, String principal, String functionArn) {
+        return "{\"Effect\":\"" + effect + "\",\"Principal\":" + principal
+                + ",\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + functionArn + "/endpoint/*\"}";
     }
 
     private ObjectNode policy(String document) {

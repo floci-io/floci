@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
@@ -15,6 +16,7 @@ import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 class LambdaProvisionedConcurrencyNotFoundIntegrationTest {
@@ -67,6 +69,33 @@ class LambdaProvisionedConcurrencyNotFoundIntegrationTest {
     }
 
     @Test
+    void listRejectsAnotherRegionWithTheSharedLambdaError() {
+        String arn = AwsArnUtils.Arn.of("lambda", "us-west-2", resolver.getAccountId(),
+                "function:" + NAME).toString();
+        given().queryParam("List", "ALL").pathParam("function", arn)
+                .get("/2019-09-30/functions/{function}/provisioned-concurrency")
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"))
+                .body("message", equalTo("Region 'us-west-2' in ARN does not match request region '"
+                        + resolver.getRegion() + "'"));
+    }
+
+    @Test
+    void targetOperationsRejectAnotherRegionWithTheSharedLambdaError() {
+        String arn = AwsArnUtils.Arn.of("lambda", "us-west-2", resolver.getAccountId(),
+                "function:" + NAME + ":live").toString();
+        for (String method : List.of("GET", "PUT", "DELETE")) {
+            given().contentType("application/json").queryParam("Qualifier", "live")
+                    .pathParam("function", arn).body("{\"ProvisionedConcurrentExecutions\":1}")
+                    .request(method, "/2019-09-30/functions/{function}/provisioned-concurrency")
+                    .then().statusCode(400)
+                    .body("__type", equalTo("InvalidParameterValueException"))
+                    .body("message", equalTo("Region 'us-west-2' in ARN does not match request region '"
+                            + resolver.getRegion() + "'"));
+        }
+    }
+
+    @Test
     void existingAliasAndVersionRetainTheirConfigurationBehavior() {
         for (String qualifier : List.of("live", "1")) {
             String path = "/2019-09-30/functions/" + NAME + "/provisioned-concurrency";
@@ -75,6 +104,32 @@ class LambdaProvisionedConcurrencyNotFoundIntegrationTest {
                     .body("message", equalTo("No Provisioned Concurrency Config found for this function"));
             given().queryParam("Qualifier", qualifier).delete(path).then().statusCode(204).body(equalTo(""));
         }
+    }
+
+    @Test
+    void listWithoutQualifierReturnsAnEmptyConfigurationPage() {
+        for (String reference : List.of(NAME, functionArn(NAME), resolver.getAccountId() + ":function:" + NAME)) {
+            given().queryParam("List", "ALL").pathParam("function", reference)
+                    .get("/2019-09-30/functions/{function}/provisioned-concurrency")
+                    .then().statusCode(200)
+                    .body("ProvisionedConcurrencyConfigs", equalTo(List.of()))
+                    .body("NextMarker", nullValue());
+        }
+    }
+
+    @Test
+    void listMissingFunctionUsesTheFunctionNotFoundError() {
+        given().queryParam("List", "ALL")
+                .get("/2019-09-30/functions/pc-absent-function-control/provisioned-concurrency")
+                .then().statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void getWithoutQualifierStillRejectsTheRequest() {
+        given().get("/2019-09-30/functions/" + NAME + "/provisioned-concurrency")
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
     }
 
     private String functionArn(String name) {

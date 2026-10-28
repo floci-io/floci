@@ -293,6 +293,11 @@ public class AppConfigController {
         String clientVersion = uriInfo.getQueryParameters().getFirst("client_configuration_version");
         LegacyConfiguration data = dataService.getConfiguration(
                 appId, envId, configuration, clientId, clientVersion, accept);
+        if (data.configurationVersion().equals(clientVersion)) {
+            return Response.noContent()
+                    .header("Configuration-Version", data.configurationVersion())
+                    .build();
+        }
         // A version stored without a content type would otherwise go out as the */* of @Produces.
         String contentType = data.contentType() != null ? data.contentType() : MediaType.APPLICATION_OCTET_STREAM;
         return Response.ok(data.content())

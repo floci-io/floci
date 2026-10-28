@@ -545,6 +545,32 @@ class LambdaWebIntegrationTest {
         given().when().delete(policyPath)
                 .then().statusCode(404)
                 .body("message", equalTo("The function does not have a policy."));
+
+        // The roles a policy names have to exist, under the path IAM holds them.
+        String reader = "web-it-reader-" + Long.toString(System.nanoTime(), 36);
+        iamService.createRole(reader, "/team/", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}", null, 3600, null);
+        String named = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":"
+                + "{\"AWS\":\"%s\"},\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + ARN
+                + "/endpoint/*\"}]}";
+        given().contentType("application/json")
+                .body(Map.of("Policy", named.formatted("arn:aws:iam::000000000000:role/" + reader)))
+                .when().put(policyPath)
+                .then().statusCode(400)
+                .body("message", equalTo("The principal arn provided does not match the actual principal arn."
+                        + " Please check your input and try again."));
+        given().contentType("application/json")
+                .body(Map.of("Policy", named.formatted("arn:aws:iam::000000000000:role/web-it-missing")))
+                .when().put(policyPath)
+                .then().statusCode(400)
+                .body("message", equalTo("The provided principal was invalid. Please check the principal and try again."));
+        given().contentType("application/json")
+                .body(Map.of("Policy", named.formatted("arn:aws:iam::000000000000:role/team/" + reader)))
+                .when().put(policyPath)
+                .then().statusCode(200);
+        given().when().delete(policyPath)
+                .then().statusCode(204);
+        iamService.deleteRole(reader);
     }
 
     @Test

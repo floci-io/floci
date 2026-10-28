@@ -9,6 +9,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -292,5 +293,30 @@ class EventBridgeIntegrationTest {
                     .then().statusCode(400)
                     .body("__type", equalTo("ResourceNotFoundException"));
         }
+    }
+
+    @Test
+    @Order(10)
+    void putEventsToAnEventBusThatDoesNotExistIsAnsweredAsPublished() {
+        given()
+                .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+                .header("X-Amz-Target", "AWSEvents.PutEvents")
+                .body("""
+                {
+                  "Entries": [
+                      {"Source": "com.mycompany.myapp", "DetailType": "t", "Detail": "{}",
+                       "EventBusName": "eb-integration-missing-bus"},
+                      {"Source": "com.mycompany.myapp", "DetailType": "t", "Detail": "{",
+                       "EventBusName": "eb-integration-missing-bus"}
+                  ]
+                }
+                """)
+                .when().post("/")
+                .then().statusCode(200)
+                .body("FailedEntryCount", equalTo(1))
+                .body("Entries", hasSize(2))
+                .body("Entries[0].EventId", notNullValue())
+                .body("Entries[0].ErrorCode", nullValue())
+                .body("Entries[1].ErrorCode", equalTo("MalformedDetail"));
     }
 }

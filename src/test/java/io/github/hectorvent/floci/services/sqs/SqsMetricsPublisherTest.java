@@ -39,6 +39,52 @@ class SqsMetricsPublisherTest {
     private CloudWatchMetricsService cloudWatch;
     private SqsMetricsPublisher publisher;
 
+    @Test
+    void overdueTicksDoNotDuplicateSamplesOrDrainTheNextMinutesActivity() {
+        String url = sqs.createQueue("overdue", null, REGION).getQueueUrl();
+        sqs.sendMessage(url, "first", null, REGION);
+        Instant tick = Instant.now().truncatedTo(ChronoUnit.MINUTES).plusSeconds(1);
+        publisher.publish(tick);
+        sqs.sendMessage(url, "next", null, REGION);
+
+        publisher.publish(tick.plusSeconds(1));
+        publisher.publish(tick.plusSeconds(60));
+
+        assertSamples(datapoint("overdue", "NumberOfMessagesSent", tick), 2, 1, 0, 1, "Count");
+        assertSamples(datapoint("overdue", "NumberOfMessagesSent", tick.plusSeconds(60)), 2, 1, 0, 1, "Count");
+    }
+
+    @Test
+    void clockRollbackDoesNotRepublishAnEarlierMinute() {
+        sqs.createQueue("rollback", null, REGION);
+        Instant tick = Instant.now().truncatedTo(ChronoUnit.MINUTES).plusSeconds(1);
+        publisher.publish(tick);
+
+        publisher.publish(tick.minusSeconds(60));
+        publisher.publish(tick);
+
+        assertSamples(datapoint("rollback", "NumberOfMessagesSent", tick), 1, 0, 0, 0, "Count");
+        assertNull(datapoint("rollback", "NumberOfMessagesSent", tick.minusSeconds(60)));
+    }
+
+    @Test
+    void aPartiallyFailedWriteIsNotRetriedWithinTheMinute() {
+        sqs.createQueue("partial", null, REGION);
+        CloudWatchMetricsService failing = spy(cloudWatch);
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw new IllegalStateException("failed after writing samples");
+        }).when(failing).putMetricDataForAccount(any(), any(), any(), any());
+        SqsMetricsPublisher partial = new SqsMetricsPublisher(sqs, failing,
+                mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS));
+        Instant tick = Instant.now().truncatedTo(ChronoUnit.MINUTES).plusSeconds(1);
+
+        partial.publish(tick);
+        partial.publish(tick.plusSeconds(1));
+
+        assertSamples(datapoint("partial", "NumberOfMessagesSent", tick), 1, 0, 0, 0, "Count");
+    }
+
     @BeforeEach
     void setUp() {
         RegionResolver resolver = new RegionResolver(REGION, ACCOUNT);
