@@ -30,6 +30,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Email and domain identities, extracted from {@link SesService} as the last store of the
@@ -774,21 +776,11 @@ public class SesIdentityService implements SesTaggable {
     private boolean hasExpectedDkimRecord(String domain, String token) {
         String expectedName = normalizeDnsName(token + "._domainkey." + domain);
         String expectedValue = normalizeDnsName(token + "." + DKIM_SIGNING_HOSTED_ZONE);
-        for (ResourceRecordSet recordSet : recordSets("CNAME")) {
-            if (!expectedName.equals(normalizeDnsName(recordSet.getName()))) {
-                continue;
-            }
-            List<ResourceRecord> records = recordSet.getRecords();
-            if (records == null) {
-                continue;
-            }
-            for (ResourceRecord record : records) {
-                if (record != null && expectedValue.equals(normalizeDnsName(record.getValue()))) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        return recordSets("CNAME")
+                .filter(recordSet -> expectedName.equals(normalizeDnsName(recordSet.getName())))
+                .anyMatch(recordSet -> recordSet.getRecords() != null && recordSet.getRecords().stream()
+                        .anyMatch(record -> record != null
+                                && expectedValue.equals(normalizeDnsName(record.getValue()))));
     }
 
     /**
@@ -800,24 +792,28 @@ public class SesIdentityService implements SesTaggable {
         if (route53Service == null) {
             return Set.of();
         }
-        Set<String> names = new HashSet<>();
-        for (ResourceRecordSet recordSet : recordSets("TXT")) {
-            names.add(normalizeDnsName(recordSet.getName()));
-        }
-        return names;
+        return recordSets("TXT").map(recordSet -> normalizeDnsName(recordSet.getName()))
+                .collect(Collectors.toSet());
     }
 
-    private List<ResourceRecordSet> recordSets(String type) {
-        List<ResourceRecordSet> matching = new ArrayList<>();
-        for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
-            for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
-                    Integer.MAX_VALUE)) {
-                if (type.equalsIgnoreCase(recordSet.getType())) {
-                    matching.add(recordSet);
-                }
+    /** Zone by zone, so a lookup that finds its record reads no further zones. */
+    private Stream<ResourceRecordSet> recordSets(String type) {
+        return route53Service.listHostedZones(null, Integer.MAX_VALUE).stream()
+                .flatMap(zone -> zoneRecordSets(zone.getId()).stream())
+                .filter(recordSet -> type.equalsIgnoreCase(recordSet.getType()));
+    }
+
+    /** A zone deleted after the zones were listed holds no records rather than failing the SES call. */
+    private List<ResourceRecordSet> zoneRecordSets(String zoneId) {
+        try {
+            return route53Service.listResourceRecordSets(zoneId, null, null, Integer.MAX_VALUE);
+        } catch (AwsException e) {
+            if (!"NoSuchHostedZone".equals(e.getErrorCode())) {
+                throw e;
             }
+            LOG.debugv("Hosted zone {0} was deleted during an SES DNS lookup; skipping it", zoneId);
+            return List.of();
         }
-        return matching;
     }
 
     static String normalizeDnsName(String value) {

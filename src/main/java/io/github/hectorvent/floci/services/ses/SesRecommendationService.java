@@ -80,13 +80,16 @@ public class SesRecommendationService {
     private List<Recommendation> derive(String region) {
         Instant now = Instant.now(clock);
         String accountId = regionResolver.getAccountId();
+        List<Identity> advised = identityService.listIdentities("Domain", region).stream()
+                .map(identity -> identityService.withCurrentStatus(identity, region))
+                .filter(SesRecommendations::isAdvised)
+                .toList();
+        if (advised.isEmpty()) {
+            return List.of();
+        }
         Set<String> txtRecordNames = identityService.txtRecordNames();
         List<Recommendation> recommendations = new ArrayList<>();
-        for (Identity listed : identityService.listIdentities("Domain", region)) {
-            Identity identity = identityService.withCurrentStatus(listed, region);
-            if (!SesRecommendations.isAdvised(identity)) {
-                continue;
-            }
+        for (Identity identity : advised) {
             String domain = identity.getIdentity();
             String arn = AwsArnUtils.Arn.of("ses", region, accountId, "identity/" + domain).toString();
             List<Finding> findings = SesRecommendations.findings(identity,
