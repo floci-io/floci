@@ -105,11 +105,12 @@ AWS's `Terminating EC2 instance` activity, and the group launches a replacement.
 
 Each move's activity carries the description and cause AWS writes and completes as `Successful` in
 `DescribeScalingActivities` when the instance reaches `Standby` or `InService`. It completes as
-`Cancelled` when the instance is terminated first, detached while it returns to service, fails that
-health check, or when the group is deleted. `DetachInstances` refuses an instance still in
-`EnteringStandby` with `The instance <id> is not in InService or Standby.`, which AWS answers for
-every state but those two; Floci does not refuse the other states yet. Floci does not wait for
-connection draining and does not write the activity's `Details` member.
+`Cancelled` when the instance is terminated first, fails that health check, is replaced by an
+instance refresh on its way back to service, or when the group is deleted. `DetachInstances` refuses
+an instance whose move is still in progress, such as one in `EnteringStandby` or `Pending` on its way
+back, with `The instance <id> is not in InService or Standby.`, AWS's answer for a state it does not
+detach; Floci does not refuse the other such states yet. Floci does not wait for connection draining and
+does not write the activity's `Details` member.
 
 ### Instance Refresh
 

@@ -29,6 +29,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -51,20 +52,14 @@ class AutoScalingStandbyStorageTest {
     @ValueSource(strings = {"persistent", "hybrid", "wal"})
     void movesInterruptedByARestartFinishAfterIt(String mode) throws IOException {
         AutoScalingService service = storedService(mode);
-        storeGroup(service, "{\"autoScalingGroupName\":\"" + GROUP + "\",\"region\":\"us-east-1\","
-                + "\"minSize\":0,\"maxSize\":2,\"desiredCapacity\":2,\"availabilityZones\":[\"us-east-1a\"],"
-                + "\"instances\":["
-                + "{\"instanceId\":\"i-a\",\"availabilityZone\":\"us-east-1a\",\"lifecycleState\":\"InService\","
-                + "\"healthStatus\":\"Healthy\"},"
-                + "{\"instanceId\":\"i-b\",\"availabilityZone\":\"us-east-1a\",\"lifecycleState\":\"InService\","
-                + "\"healthStatus\":\"Healthy\"}]}");
+        storeGroup(service);
         String entered = ok(handler(service).handle("EnterStandby", request(true), REGION))
                 .getString("EnterStandbyResponse.EnterStandbyResult.Activities.member.ActivityId");
 
         service = restart(mode);
         assertEquals("EnteringStandby", lifecycle(service, "i-a"));
         assertEquals("InProgress", activity(service, entered, "StatusCode"));
-        reconcile(service);
+        reconcile(service, Set.of());
         assertEquals("Standby", lifecycle(service, "i-a"));
         assertEquals("Successful", activity(service, entered, "StatusCode"));
         assertEquals(1, group(service).getDesiredCapacity());
@@ -73,7 +68,7 @@ class AutoScalingStandbyStorageTest {
                 .getString("ExitStandbyResponse.ExitStandbyResult.Activities.member.ActivityId");
         service = restart(mode);
         assertEquals("Pending", lifecycle(service, "i-a"));
-        reconcile(service);
+        reconcile(service, Set.of());
 
         assertEquals("InService", lifecycle(service, "i-a"));
         assertEquals("Successful", activity(service, exited, "StatusCode"));
@@ -83,6 +78,29 @@ class AutoScalingStandbyStorageTest {
         assertEquals(2, group(service).getDesiredCapacity());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void aReturnThatFailsTheHealthCheckAfterARestartIsStillReplaced(String mode) throws IOException {
+        AutoScalingService service = storedService(mode);
+        storeGroup(service);
+        ok(handler(service).handle("EnterStandby", request(true), REGION));
+        reconcile(service, Set.of());
+        assertEquals("Standby", lifecycle(service, "i-a"));
+        String exited = ok(handler(service).handle("ExitStandby", request(null), REGION))
+                .getString("ExitStandbyResponse.ExitStandbyResult.Activities.member.ActivityId");
+
+        service = restart(mode);
+        Ec2Service ec2 = reconcile(service, Set.of("i-a"));
+
+        verify(ec2).terminateInstances(REGION, List.of("i-a"));
+        assertEquals(List.of("i-b"), memberIds(service));
+        assertEquals("Cancelled", activity(service, exited, "StatusCode"));
+        assertEquals("Successful", activities(service).getString(ACTIVITIES
+                + ".find { it.Description == 'Terminating EC2 instance: i-a' }.StatusCode"));
+        service = restart(mode);
+        assertEquals(List.of("i-b"), memberIds(service));
+    }
+
     private AutoScalingService restart(String mode) {
         factories.removeFirst().shutdownAll();
         String snapshot = mode.equals("wal") ? "autoscaling-groups-snapshot.json" : "autoscaling-groups.json";
@@ -90,15 +108,17 @@ class AutoScalingStandbyStorageTest {
         return storedService(mode);
     }
 
-    private void reconcile(AutoScalingService service) {
+    /** One reconcile pass in which EC2 reports every instance running, except {@code stopped}. */
+    private Ec2Service reconcile(AutoScalingService service, Set<String> stopped) {
         Ec2Service ec2 = mock(Ec2Service.class);
-        when(ec2.isInstanceContainerRunning(anyString())).thenReturn(true);
+        when(ec2.isInstanceContainerRunning(anyString())).thenAnswer(invocation ->
+                !stopped.contains(invocation.<String>getArgument(0)));
         when(ec2.describeInstances(eq(REGION), anyList(), isNull())).thenAnswer(invocation -> {
             List<Instance> found = new ArrayList<>();
             for (String id : invocation.<List<String>>getArgument(1)) {
                 Instance instance = new Instance();
                 instance.setInstanceId(id);
-                instance.setState(InstanceState.running());
+                instance.setState(stopped.contains(id) ? InstanceState.stopped() : InstanceState.running());
                 found.add(instance);
             }
             Reservation reservation = new Reservation();
@@ -109,13 +129,25 @@ class AutoScalingStandbyStorageTest {
         AutoScalingReconciler reconciler = new AutoScalingReconciler(service, ec2, mock(ElbV2Service.class),
                 mock(ElbClassicService.class), null);
         reconciler.reconcile(group(service));
+        return ec2;
     }
 
-    private static void storeGroup(AutoScalingService service, String json) throws IOException {
+    /** A group with two InService members, as stored before standby existed: no standbyActivityId field. */
+    private static void storeGroup(AutoScalingService service) throws IOException {
+        String json = "{\"autoScalingGroupName\":\"" + GROUP + "\",\"region\":\"us-east-1\","
+                + "\"minSize\":0,\"maxSize\":2,\"desiredCapacity\":2,\"availabilityZones\":[\"us-east-1a\"],"
+                + "\"instances\":["
+                + "{\"instanceId\":\"i-a\",\"availabilityZone\":\"us-east-1a\",\"lifecycleState\":\"InService\","
+                + "\"healthStatus\":\"Healthy\"},"
+                + "{\"instanceId\":\"i-b\",\"availabilityZone\":\"us-east-1a\",\"lifecycleState\":\"InService\","
+                + "\"healthStatus\":\"Healthy\"}]}";
         AccountAwareStorageBackend<AutoScalingGroup> store = service.storageFactory.create("autoscaling",
                 "autoscaling-groups.json", new TypeReference<Map<String, AutoScalingGroup>>() {});
-        store.put(REGION + "::" + GROUP,
-                new ObjectMapper().readValue(json, AutoScalingGroup.class));
+        store.put(REGION + "::" + GROUP, new ObjectMapper().readValue(json, AutoScalingGroup.class));
+    }
+
+    private static List<String> memberIds(AutoScalingService service) {
+        return group(service).getInstances().stream().map(AsgInstance::getInstanceId).toList();
     }
 
     private static MultivaluedHashMap<String, String> request(Boolean decrement) {

@@ -943,8 +943,11 @@ public class AutoScalingService implements PassedRoleLookup {
             AutoScalingGroup asg = requireGroup(region, name);
             for (AsgInstance member : asg.getInstances()) {
                 // AWS detaches only InService and Standby instances. Floci does not refuse the other states yet,
-                // except EnteringStandby, which only a standby move in progress produces.
-                if (instanceIds.contains(member.getInstanceId()) && "EnteringStandby".equals(member.getLifecycleState())) {
+                // except for an instance whose standby move is still in progress, whatever its state: it keeps the
+                // move's activity until the reconciler completes or cancels the move.
+                boolean moving = "EnteringStandby".equals(member.getLifecycleState())
+                        || member.getStandbyActivityId() != null;
+                if (moving && instanceIds.contains(member.getInstanceId())) {
                     throw new AwsException("ValidationError",
                             "The instance " + member.getInstanceId() + " is not in InService or Standby.", 400);
                 }
@@ -956,8 +959,6 @@ public class AutoScalingService implements PassedRoleLookup {
                 ec2Service.deleteSystemTag(region, detached, GROUP_NAME_TAG, name);
             }
             releaseRefreshOwnership(asg, detached);
-            cancelStandbyMoves(asg.getInstances().stream()
-                    .filter(i -> instanceIds.contains(i.getInstanceId())).toList());
             asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
             if (decrementDesiredCapacity) {
                 int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - instanceIds.size());
@@ -1105,7 +1106,7 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
-    /** Cancels the standby activity of each member leaving the group while it moves into or out of standby. */
+    /** Cancels the standby activity of each member that leaves the group, or its move, while the move is in progress. */
     void cancelStandbyMoves(List<AsgInstance> leaving) {
         for (AsgInstance member : leaving) {
             if (member.getStandbyActivityId() != null) {

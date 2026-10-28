@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
@@ -365,29 +366,6 @@ class AutoScalingStandbyTest {
     }
 
     @Test
-    void aMoveOutOfStandbyIsCancelledWhenTheInstanceIsDetachedOrNoLongerRunning() {
-        ok(enterStandby(true, "i-a", "i-b"));
-        reconciler.reconcile(group());
-        XmlPath exited = ok(exitStandby("i-a", "i-b"));
-        String detachedActivity = activityFor(exited, EXITED, "i-a");
-        String stoppedActivity = activityFor(exited, EXITED, "i-b");
-
-        MultivaluedHashMap<String, String> detach = params(GROUP);
-        detach.add("InstanceIds.member.1", "i-a");
-        detach.add("ShouldDecrementDesiredCapacity", "true");
-        assertEquals(200, handler.handle("DetachInstances", detach, REGION).getStatus());
-        ec2States.put("i-b", InstanceState.stopped());
-        reconciler.reconcile(group());
-
-        XmlPath activities = describeScalingActivities();
-        assertEquals("Cancelled", activity(activities, detachedActivity, "StatusCode"));
-        assertEquals("Cancelled", activity(activities, stoppedActivity, "StatusCode"));
-        assertFalse(memberIds().contains("i-a"));
-        assertFalse(memberIds().contains("i-b"));
-        verify(ec2).terminateInstances(REGION, List.of("i-b"));
-    }
-
-    @Test
     void anInstanceThatStoppedOrTerminatedInStandbyFailsTheHealthCheckOnItsReturn() {
         ok(enterStandby(true, "i-a", "i-b"));
         reconciler.reconcile(group());
@@ -434,21 +412,76 @@ class AutoScalingStandbyTest {
         assertEquals("Unhealthy", healthOf("i-a"));
     }
 
-    @Test
-    void detachRefusesAnInstanceStillEnteringStandby() {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void detachRefusesAnInstanceWhileItsStandbyMoveIsInProgress(boolean entering) {
         String activityId = ok(enterStandby(true, "i-a")).getString(ENTERED + ".ActivityId");
+        if (!entering) {
+            reconciler.reconcile(group());
+            activityId = ok(exitStandby("i-a")).getString(EXITED + ".ActivityId");
+        }
+        int desired = group().getDesiredCapacity();
 
         MultivaluedHashMap<String, String> detach = params(GROUP);
-        detach.add("InstanceIds.member.1", "i-a");
+        detach.add("InstanceIds.member.1", "i-b");
+        detach.add("InstanceIds.member.2", "i-a");
         detach.add("ShouldDecrementDesiredCapacity", "true");
         assertError(handler.handle("DetachInstances", detach, REGION), "The instance i-a is not in InService or Standby.");
 
-        assertEquals("EnteringStandby", lifecycle("i-a"));
-        assertEquals(1, group().getDesiredCapacity());
-        assertEquals("InProgress", activity(describeScalingActivities(), activityId, "StatusCode"));
+        assertEquals(entering ? "EnteringStandby" : "Pending", lifecycle("i-a"));
+        assertEquals(List.of("i-a", "i-b"), memberIds());
+        assertEquals(desired, group().getDesiredCapacity());
+        assertEquals(entering ? "InProgress" : "PreInService",
+                activity(describeScalingActivities(), activityId, "StatusCode"));
         verify(ec2, never()).deleteSystemTag(anyString(), anyList(), anyString(), anyString());
         reconciler.reconcile(group());
-        assertEquals("Standby", lifecycle("i-a"));
+        assertEquals(entering ? "Standby" : "InService", lifecycle("i-a"));
+        assertEquals("Successful", activity(describeScalingActivities(), activityId, "StatusCode"));
+    }
+
+    @Test
+    void aRefusedTerminationOfAReturningInstanceIsRetriedOnTheNextPass() {
+        ok(enterStandby(true, "i-a"));
+        reconciler.reconcile(group());
+        ec2States.put("i-a", InstanceState.stopped());
+        String activityId = ok(exitStandby("i-a")).getString(EXITED + ".ActivityId");
+        doThrow(new AwsException("RequestLimitExceeded", "Request limit exceeded.", 400))
+                .doReturn(List.of())
+                .when(ec2).terminateInstances(REGION, List.of("i-a"));
+
+        reconciler.reconcile(group());
+
+        assertEquals(List.of("i-a", "i-b"), memberIds());
+        assertEquals("Pending", lifecycle("i-a"));
+        XmlPath refused = describeScalingActivities();
+        assertEquals("PreInService", activity(refused, activityId, "StatusCode"));
+        assertTrue(refused.getList(ACTIVITIES + ".Description", String.class).stream()
+                .noneMatch(description -> description.startsWith("Terminating EC2 instance")), refused.prettify());
+        assertNoLaunch();
+
+        reconciler.reconcile(group());
+
+        verify(ec2, times(2)).terminateInstances(REGION, List.of("i-a"));
+        assertEquals(List.of("i-b", "i-replacement-1"), memberIds());
+        XmlPath retried = describeScalingActivities();
+        assertEquals("Cancelled", activity(retried, activityId, "StatusCode"));
+        assertEquals("Successful", retried.getString(ACTIVITIES
+                + ".find { it.Description == 'Terminating EC2 instance: i-a' }.StatusCode"));
+    }
+
+    @Test
+    void anInstanceRefreshCancelsTheMoveOfAnInstanceOnItsWayBack() {
+        ok(enterStandby(true, "i-a"));
+        reconciler.reconcile(group());
+        String activityId = ok(exitStandby("i-a")).getString(EXITED + ".ActivityId");
+
+        assertEquals(200, handler.handle("StartInstanceRefresh", params(GROUP), REGION).getStatus());
+        assertEquals("Terminating", lifecycle("i-a"));
+        reconciler.reconcile(group());
+
+        assertEquals("Cancelled", activity(describeScalingActivities(), activityId, "StatusCode"));
+        verify(ec2).terminateInstances(REGION, List.of("i-a", "i-b"));
+        assertFalse(memberIds().contains("i-a"));
     }
 
     @ParameterizedTest
