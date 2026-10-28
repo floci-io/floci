@@ -23,6 +23,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -90,10 +91,25 @@ public class AppConfigService {
         return applicationStore.get(applicationId);
     }
 
+    private Application requireApplicationById(String applicationId) {
+        return applicationStore.get(applicationId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application not found", 404));
+    }
+
     public synchronized void deleteApplication(String idOrName) {
         applicationStore.get(idOrName)
                 .or(() -> listApplications().stream().filter(a -> idOrName.equals(a.getName())).findFirst())
                 .ifPresent(application -> applicationStore.delete(application.getId()));
+    }
+
+    /**
+     * Deletes the application whose ID is exactly {@code applicationId}; nothing happens when there
+     * is no such application. Unlike {@link #deleteApplication}, it never falls back to a name, so a
+     * CloudFormation delete of an application already deleted through the API leaves another
+     * application named like its ID alone.
+     */
+    public synchronized void deleteApplicationById(String applicationId) {
+        applicationStore.get(applicationId).ifPresent(application -> applicationStore.delete(applicationId));
     }
 
     /**
@@ -103,8 +119,7 @@ public class AppConfigService {
      * is the only caller.
      */
     public synchronized Application updateApplication(String applicationId, String name, String description) {
-        Application app = copy(applicationStore.get(applicationId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application not found", 404)));
+        Application app = copy(requireApplicationById(applicationId));
         app.setName(name);
         app.setDescription(description);
         applicationStore.put(app.getId(), app);
@@ -115,7 +130,21 @@ public class AppConfigService {
 
     public Environment createEnvironment(String applicationIdentifier, Map<String, Object> request) {
         List<Monitor> monitors = monitors(request.get("Monitors"));
-        String appId = resolveApplication(applicationIdentifier).getId();
+        return newEnvironment(resolveApplication(applicationIdentifier).getId(), monitors, request);
+    }
+
+    /**
+     * Creates an environment in the application whose ID is exactly {@code applicationId}, as a
+     * CloudFormation {@code ApplicationId} names it; unlike {@link #createEnvironment} it never
+     * falls back to a name, so an application already deleted through the API fails with
+     * ResourceNotFoundException rather than take another application named like its ID.
+     */
+    public synchronized Environment createEnvironmentById(String applicationId, Map<String, Object> request) {
+        List<Monitor> monitors = monitors(request.get("Monitors"));
+        return newEnvironment(requireApplicationById(applicationId).getId(), monitors, request);
+    }
+
+    private Environment newEnvironment(String appId, List<Monitor> monitors, Map<String, Object> request) {
         Environment env = new Environment();
         env.setId(shortId(7));
         env.setApplicationId(appId);
@@ -228,7 +257,19 @@ public class AppConfigService {
     // ──────────────────────────── Configuration Profile ────────────────────────────
 
     public ConfigurationProfile createConfigurationProfile(String applicationIdentifier, Map<String, Object> request) {
-        String appId = resolveApplication(applicationIdentifier).getId();
+        return newConfigurationProfile(resolveApplication(applicationIdentifier).getId(), request);
+    }
+
+    /**
+     * Creates a configuration profile in the application whose ID is exactly {@code applicationId};
+     * like {@link #createEnvironmentById}, it never falls back to a name.
+     */
+    public synchronized ConfigurationProfile createConfigurationProfileById(String applicationId,
+                                                                            Map<String, Object> request) {
+        return newConfigurationProfile(requireApplicationById(applicationId).getId(), request);
+    }
+
+    private ConfigurationProfile newConfigurationProfile(String appId, Map<String, Object> request) {
         ConfigurationProfile profile = new ConfigurationProfile();
         profile.setId(shortId(7));
         profile.setApplicationId(appId);
@@ -666,6 +707,19 @@ public class AppConfigService {
     public synchronized void untagApplication(String appId, List<String> tagKeys) {
         Application app = copy(getApplication(appId));
         tagKeys.forEach(app.getTags()::remove);
+        applicationStore.put(app.getId(), app);
+    }
+
+    /**
+     * Sets the tags of the application whose ID is exactly {@code applicationId} to {@code tags},
+     * removing any other key, as a CloudFormation create or update of {@code Tags} does; {@code tags}
+     * is not null. Unlike {@link #tagApplication} (TagResource) it never falls back to a name, so tags
+     * for an application already deleted through the API fail with ResourceNotFoundException rather
+     * than land on another named like its ID.
+     */
+    public synchronized void setApplicationTags(String applicationId, Map<String, String> tags) {
+        Application app = copy(requireApplicationById(applicationId));
+        app.setTags(new HashMap<>(tags));
         applicationStore.put(app.getId(), app);
     }
 

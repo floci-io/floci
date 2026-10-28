@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
@@ -105,7 +106,7 @@ class AppConfigCfnProvisionerTest {
     @Test
     void aCreateWhoseTaggingFailsDeletesTheApplication() {
         doThrow(new AwsException("InternalServerException", "tagging failed", 500))
-                .when(service).tagApplication(anyString(), any());
+                .when(service).setApplicationTags(anyString(), any());
         StackResource app = resource(APPLICATION);
 
         AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(app,
@@ -121,7 +122,7 @@ class AppConfigCfnProvisionerTest {
         StackResource app = create(APPLICATION, props("Name", "orders", "Tags", List.of(tag("team", "payments"))));
         // Only the update's own tag call fails; the undo's succeeds.
         doThrow(new AwsException("InternalServerException", "tagging failed", 500)).doCallRealMethod()
-                .when(service).tagApplication(anyString(), any());
+                .when(service).setApplicationTags(anyString(), any());
 
         assertThrows(AwsException.class, () -> update(app, props("Name", "orders-v2",
                 "Tags", List.of(tag("team", "billing")))));
@@ -137,7 +138,7 @@ class AppConfigCfnProvisionerTest {
     void anUndoThatFailsTooIsRecordedForTheRollback() {
         StackResource app = create(APPLICATION, props("Name", "orders", "Tags", List.of(tag("team", "payments"))));
         doThrow(new AwsException("InternalServerException", "tagging failed", 500))
-                .when(service).tagApplication(anyString(), any());
+                .when(service).setApplicationTags(anyString(), any());
 
         AwsException failure = assertThrows(AwsException.class, () -> update(app, props("Name", "orders-v2",
                 "Tags", List.of(tag("team", "billing")))));
@@ -159,12 +160,12 @@ class AppConfigCfnProvisionerTest {
         StackResource committed = copy(app);
         StackResource attempt = copy(committed);
         doThrow(new AwsException("InternalServerException", "tagging failed", 500))
-                .when(service).tagApplication(anyString(), any());
+                .when(service).setApplicationTags(anyString(), any());
         assertThrows(AwsException.class, () -> update(attempt, props("Name", "third",
                 "Tags", List.of(tag("stage", "3")))));
 
         provisioner.mergeFailedUpdateResourceTracking(committed, attempt);
-        doCallRealMethod().when(service).tagApplication(anyString(), any());
+        doCallRealMethod().when(service).setApplicationTags(anyString(), any());
         assertTrue(provisioner.rollbackUpdate(committed));
 
         Application restored = service.getApplication(app.getPhysicalId());
@@ -446,6 +447,121 @@ class AppConfigCfnProvisionerTest {
         assertTrue(service.findConfigurationProfile(profile.getPhysicalId()).isEmpty());
         assertThrows(AwsException.class, () -> service.getDeploymentStrategy(strategy.getPhysicalId()));
         assertEquals(List.of(namedLikeAnId.getId()), service.listApplications().stream().map(Application::getId).toList());
+    }
+
+    /**
+     * DeleteApplication takes a name as well as an ID, so a delete that first looks the application
+     * up and then deletes it through that API removes another application named like its ID when
+     * the API deletes the first in between. A stack's delete is one exact-ID call; this pins that
+     * it neither calls DeleteApplication's lookup nor looks the application up first.
+     */
+    @Test
+    void anApplicationDeletedThroughTheApiMidDeleteLeavesOneNamedLikeItsIdAlone() {
+        String appId = create(APPLICATION, props("Name", "orders")).getPhysicalId();
+        Application namedLikeTheId = service.createApplication(Map.of("Name", appId));
+        doAnswer(invocation -> {
+            Object found = invocation.callRealMethod();
+            service.deleteApplication(appId);
+            return found;
+        }).when(service).findApplication(appId);
+
+        provisioner.delete(APPLICATION, appId, REGION);
+
+        verify(service).deleteApplicationById(appId);
+        verify(service, never()).deleteApplication(anyString());
+        assertEquals(List.of(namedLikeTheId.getId()),
+                service.listApplications().stream().map(Application::getId).toList());
+    }
+
+    @Test
+    void aFailedCreateUndoesOnlyItsOwnApplication() {
+        StackResource app = resource(APPLICATION);
+        doAnswer(invocation -> {
+            String appId = invocation.getArgument(0);
+            service.deleteApplication(appId);
+            service.createApplication(Map.of("Name", appId));
+            throw new AwsException("InternalServerException", "tagging failed", 500);
+        }).when(service).setApplicationTags(anyString(), any());
+
+        assertThrows(AwsException.class, () -> provisioner.provision(app,
+                MAPPER.valueToTree(props("Name", "orders", "Tags", List.of(tag("team", "payments")))), context(null)));
+
+        assertEquals(List.of(app.getPhysicalId()),
+                service.listApplications().stream().map(Application::getName).toList(),
+                "the application named like the undone one's ID is not the stack's");
+    }
+
+    /**
+     * Tags, like deletes, go by exact ID: an application the API deletes while the stack writes its
+     * tags fails the stack, and the tags never land on another application named like its ID.
+     */
+    @Test
+    void anUpdateWhoseApplicationTheApiDeletedLeavesOneNamedLikeItsIdUntagged() {
+        StackResource app = create(APPLICATION, props("Name", "orders", "Tags", List.of(tag("team", "payments"))));
+        String appId = app.getPhysicalId();
+        Application namedLikeTheId = service.createApplication(Map.of("Name", appId));
+        service.tagApplication(namedLikeTheId.getId(), Map.of("owner", "billing"));
+        doAnswer(invocation -> {
+            Object updated = invocation.callRealMethod();
+            service.deleteApplication(appId);
+            return updated;
+        }).when(service).updateApplication(anyString(), any(), any());
+
+        AwsException failure = assertThrows(AwsException.class, () -> update(app, props("Name", "orders-v2",
+                "Tags", List.of(tag("team", "checkout")))));
+
+        assertEquals("ResourceNotFoundException", failure.getErrorCode());
+        assertEquals(Map.of("owner", "billing"), service.getApplication(namedLikeTheId.getId()).getTags());
+    }
+
+    @Test
+    void aCreateWhoseApplicationTheApiDeletedLeavesOneNamedLikeItsIdUntagged() {
+        doAnswer(invocation -> {
+            Application created = (Application) invocation.callRealMethod();
+            service.deleteApplication(created.getId());
+            service.createApplication(Map.of("Name", created.getId()));
+            return created;
+        }).doCallRealMethod().when(service).createApplication(any());
+        StackResource app = resource(APPLICATION);
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(app,
+                MAPPER.valueToTree(props("Name", "orders", "Tags", List.of(tag("team", "payments")))), context(null)));
+
+        assertEquals("ResourceNotFoundException", failure.getErrorCode());
+        Application namedLikeTheId = service.getApplication(app.getPhysicalId());
+        assertNotEquals(app.getPhysicalId(), namedLikeTheId.getId());
+        assertTrue(namedLikeTheId.getTags().isEmpty(), "the stack's tags are not written to another application");
+    }
+
+    /**
+     * {@code ApplicationId} is an ID, as on AWS: an environment or profile whose application is gone
+     * fails rather than land under another application named like that ID.
+     */
+    @Test
+    void anEnvironmentOrProfileOfAGoneApplicationIsNotCreatedUnderOneNamedLikeItsId() {
+        String appId = create(APPLICATION, props("Name", "orders")).getPhysicalId();
+        service.deleteApplication(appId);
+        Application namedLikeTheId = service.createApplication(Map.of("Name", appId));
+
+        AwsException environment = assertThrows(AwsException.class, () -> provisioner.provision(resource(ENVIRONMENT),
+                MAPPER.valueToTree(props("ApplicationId", appId, "Name", "beta")), context(null)));
+        AwsException profile = assertThrows(AwsException.class, () -> provisioner.provision(resource(PROFILE),
+                MAPPER.valueToTree(props("ApplicationId", appId, "Name", "settings", "LocationUri", "hosted")),
+                context(null)));
+
+        assertEquals("ResourceNotFoundException", environment.getErrorCode());
+        assertEquals("ResourceNotFoundException", profile.getErrorCode());
+        assertTrue(service.listEnvironments(namedLikeTheId.getId()).isEmpty());
+        assertTrue(service.listConfigurationProfiles(namedLikeTheId.getId()).isEmpty());
+    }
+
+    @Test
+    void anUpdateThatDropsTagsClearsThem() {
+        StackResource app = create(APPLICATION, props("Name", "orders", "Tags", List.of(tag("team", "payments"))));
+
+        update(app, props("Name", "orders"));
+
+        assertTrue(service.getApplication(app.getPhysicalId()).getTags().isEmpty());
     }
 
     /**

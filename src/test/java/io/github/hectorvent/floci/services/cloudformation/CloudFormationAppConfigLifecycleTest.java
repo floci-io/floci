@@ -125,11 +125,11 @@ class CloudFormationAppConfigLifecycleTest {
         assertEquals("UPDATE_COMPLETE", stack("retried").getStatus());
 
         doThrow(new AwsException("InternalServerException", "tag store down", 500))
-                .when(appConfig).tagApplication(anyString(), any());
+                .when(appConfig).setApplicationTags(anyString(), any());
         deploy("retried", "UPDATE", template.formatted("third", "3"));
         assertEquals("UPDATE_ROLLBACK_FAILED", stack("retried").getStatus());
 
-        doCallRealMethod().when(appConfig).tagApplication(anyString(), any());
+        doCallRealMethod().when(appConfig).setApplicationTags(anyString(), any());
         cfn.continueUpdateRollback("retried", List.of(), false, REGION).get(30, TimeUnit.SECONDS);
 
         assertEquals("UPDATE_ROLLBACK_COMPLETE", stack("retried").getStatus(), stack("retried").getStatusReason());

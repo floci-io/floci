@@ -122,7 +122,7 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
             snapshotBeforeUpdate(r, application(id));
             CfnRollback.guarded(r, ctx, false, () -> { }, () -> restoreSnapshot(r), () -> {
                 service.updateApplication(id, name, description);
-                reconcileTags(id, tags);
+                service.setApplicationTags(id, tags);
             });
             return;
         }
@@ -132,9 +132,9 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
         Application app = service.createApplication(request);
         r.setPhysicalId(app.getId());
         r.getAttributes().put("ApplicationId", app.getId());
-        CfnRollback.guarded(r, ctx, true, () -> service.deleteApplication(app.getId()), () -> { }, () -> {
+        CfnRollback.guarded(r, ctx, true, () -> service.deleteApplicationById(app.getId()), () -> { }, () -> {
             if (!tags.isEmpty()) {
-                service.tagApplication(app.getId(), tags);
+                service.setApplicationTags(app.getId(), tags);
             }
         });
     }
@@ -158,7 +158,7 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
         request.put("Name", name);
         request.put("Description", description);
         request.put("Monitors", monitors);
-        Environment env = service.createEnvironment(applicationId, request);
+        Environment env = service.createEnvironmentById(applicationId, request);
         r.setPhysicalId(env.getId());
         r.getAttributes().put("EnvironmentId", env.getId());
         r.getAttributes().put(APPLICATION_ATTR, env.getApplicationId());
@@ -190,7 +190,7 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
         request.put("Description", description);
         request.put("LocationUri", locationUri);
         request.put("Type", type);
-        ConfigurationProfile profile = service.createConfigurationProfile(applicationId, request);
+        ConfigurationProfile profile = service.createConfigurationProfileById(applicationId, request);
         r.setPhysicalId(profile.getId());
         r.getAttributes().put("ConfigurationProfileId", profile.getId());
         r.getAttributes().put(APPLICATION_ATTR, profile.getApplicationId());
@@ -241,17 +241,6 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
     private Application application(String id) {
         return service.findApplication(id)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application not found", 404));
-    }
-
-    /** Drives an application's tags to {@code desired}; TagResource alone never removes one. */
-    private void reconcileTags(String applicationId, Map<String, String> desired) {
-        List<String> stale = ProvisionContext.staleTagKeys(service.getApplicationTags(applicationId), desired);
-        if (!stale.isEmpty()) {
-            service.untagApplication(applicationId, stale);
-        }
-        if (!desired.isEmpty()) {
-            service.tagApplication(applicationId, desired);
-        }
     }
 
     /**
@@ -398,11 +387,7 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         switch (resourceType) {
-            case APPLICATION -> {
-                if (service.findApplication(physicalId).isPresent()) {
-                    service.deleteApplication(physicalId);
-                }
-            }
+            case APPLICATION -> service.deleteApplicationById(physicalId);
             case ENVIRONMENT -> service.deleteEnvironmentById(physicalId);
             case PROFILE -> service.deleteConfigurationProfileById(physicalId);
             case STRATEGY -> service.deleteDeploymentStrategy(physicalId);
@@ -483,7 +468,7 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
             case APPLICATION -> {
                 Application prior = MAPPER.treeToValue(snapshot, Application.class);
                 service.updateApplication(prior.getId(), prior.getName(), prior.getDescription());
-                reconcileTags(prior.getId(), prior.getTags());
+                service.setApplicationTags(prior.getId(), prior.getTags());
             }
             case ENVIRONMENT -> {
                 Environment prior = MAPPER.treeToValue(snapshot, Environment.class);
