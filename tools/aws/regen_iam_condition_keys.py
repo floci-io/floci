@@ -60,7 +60,7 @@ def classify(pairs, types, model):
         if operation is None:
             reason = "no SDK operation of this name"
         elif member is None:
-            reason = STORED.get(key, "no request member carries it")
+            reason = STORED.get(key, "no member named after the key")
         elif not set(types.get(key, [])) <= READ_TYPES:
             reason = "the key's type is " + ", ".join(types.get(key) or ["not given"])
         elif model["shapes"][members[member]["shape"]]["type"] != "string":

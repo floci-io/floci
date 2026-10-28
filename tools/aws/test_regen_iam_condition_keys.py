@@ -49,7 +49,7 @@ def test_unread_pairs_name_their_reason():
     assert {(e["action"], e["key"]): e["reason"] for e in not_read} == {
         ("iam:CreateServiceSpecificCredential", "iam:CredentialAgeDays"): "the key's type is Numeric",
         ("iam:GetRole", "iam:PermissionsBoundary"): "the value is the target's current permissions boundary",
-        ("iam:GetRole", "iam:RoleTemplateARN"): "no request member carries it",
+        ("iam:GetRole", "iam:RoleTemplateARN"): "no member named after the key",
         ("iam:PassRole", "iam:PassedToService"): "no SDK operation of this name"}
 
 
