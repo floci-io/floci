@@ -5,17 +5,22 @@ import subprocess
 import pytest
 
 import regen_iam_condition_keys
-from regen_iam_condition_keys import OUTPUT, action_keys, classify, pairs_of
+from regen_iam_condition_keys import OUTPUT, action_keys, classify, pairs_of, require_by_hand_listed
 
 MODEL = {"operations": {
     "AttachRolePolicy": {"input": {"shape": "AttachInput"}},
     "GetPolicy": {"input": {"shape": "AttachInput"}},
     "GetRole": {"input": {"shape": "GetInput"}},
     "CreateServiceSpecificCredential": {"input": {"shape": "CredentialInput"}},
+    "CreateDelegationRequest": {"input": {"shape": "DelegationInput"}},
 }, "shapes": {
     "AttachInput": {"type": "structure", "members": {"PolicyArn": {"shape": "Arn"}}},
     "GetInput": {"type": "structure", "members": {"RoleName": {"shape": "Name"}}},
-    "CredentialInput": {"type": "structure", "members": {"CredentialAgeDays": {"shape": "Days"}}},
+    "CredentialInput": {"type": "structure", "members": {"CredentialAgeDays": {"shape": "Days"},
+                                                         "ServiceName": {"shape": "Name"}}},
+    "DelegationInput": {"type": "structure", "members": {"Permissions": {"shape": "Permission"},
+                                                         "SessionDuration": {"shape": "Days"}}},
+    "Permission": {"type": "structure", "members": {"PolicyTemplateArn": {"shape": "Arn"}}},
     "Arn": {"type": "string"}, "Name": {"type": "string"}, "Days": {"type": "integer"},
 }}
 
@@ -49,11 +54,42 @@ def test_unread_pairs_name_their_reason():
     assert {(e["action"], e["key"]): e["reason"] for e in not_read} == {
         ("iam:CreateServiceSpecificCredential", "iam:CredentialAgeDays"): "the key's type is Numeric",
         ("iam:GetRole", "iam:PermissionsBoundary"): "the value is the target's current permissions boundary",
-        ("iam:GetRole", "iam:RoleTemplateARN"): "no member named after the key",
+        ("iam:GetRole", "iam:RoleTemplateARN"): "the value is the role template a service acquires the role from",
         ("iam:PassRole", "iam:PassedToService"): "no SDK operation of this name"}
 
 
-def test_vendored_table_reads_the_five_keys_on_thirteen_actions():
+BY_HAND_TYPES = {"iam:DelegationDuration": ["String"], "iam:TemplateArn": ["ARN"],
+                 "iam:ServiceSpecificCredentialAgeDays": ["Numeric"],
+                 "iam:ServiceSpecificCredentialServiceName": ["String"]}
+
+
+def test_by_hand_pairs_read_their_member_including_a_nested_one():
+    read, not_read = classify(sorted(regen_iam_condition_keys.BY_HAND), BY_HAND_TYPES, MODEL)
+    assert not_read == []
+    assert {(e["action"], e["key"]): e["member"] for e in read} == regen_iam_condition_keys.BY_HAND
+
+
+def test_by_hand_member_missing_from_botocore_fails():
+    model = json.loads(json.dumps(MODEL))
+    del model["shapes"]["Permission"]["members"]["PolicyTemplateArn"]
+    with pytest.raises(ValueError, match="Permissions.PolicyTemplateArn for iam:TemplateArn is not in botocore"):
+        classify(sorted(regen_iam_condition_keys.BY_HAND), BY_HAND_TYPES, model)
+
+
+def test_by_hand_member_whose_type_does_not_fit_the_key_fails():
+    types = dict(BY_HAND_TYPES, **{"iam:ServiceSpecificCredentialAgeDays": ["String"],
+                                   "iam:ServiceSpecificCredentialServiceName": ["Numeric"]})
+    with pytest.raises(ValueError, match="ServiceName is string, which does not fit"):
+        classify(sorted(regen_iam_condition_keys.BY_HAND), types, MODEL)
+
+
+def test_by_hand_pair_the_reference_no_longer_lists_fails():
+    pairs = sorted(regen_iam_condition_keys.BY_HAND)[1:]
+    with pytest.raises(ValueError, match="BY_HAND names pairs the reference does not list"):
+        require_by_hand_listed(pairs)
+
+
+def test_vendored_table_reads_nine_keys_on_fourteen_actions():
     document = json.loads(OUTPUT.read_text())
     assert {(e["action"], e["key"]) for e in document["read"]} == {
         *(("iam:" + verb + kind + "Policy", "iam:PolicyARN")
@@ -63,6 +99,10 @@ def test_vendored_table_reads_the_five_keys_on_thirteen_actions():
         ("iam:PutUserPermissionsBoundary", "iam:PermissionsBoundary"),
         ("iam:CreateServiceLinkedRole", "iam:AWSServiceName"),
         ("iam:CreateDelegationRequest", "iam:NotificationChannel"),
+        ("iam:CreateDelegationRequest", "iam:DelegationDuration"),
+        ("iam:CreateDelegationRequest", "iam:TemplateArn"),
+        ("iam:CreateServiceSpecificCredential", "iam:ServiceSpecificCredentialAgeDays"),
+        ("iam:CreateServiceSpecificCredential", "iam:ServiceSpecificCredentialServiceName"),
         ("iam:GenerateOrganizationsAccessReport", "iam:OrganizationsPolicyId")}
     current = [e["action"] for e in document["notRead"] if e["key"] == "iam:PermissionsBoundary"]
     assert len(current) == 15 and "iam:GetRole" in current

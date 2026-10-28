@@ -2221,13 +2221,19 @@ floci populates:
 - The `iam:` keys an IAM request carries in its own parameters, from
   `src/main/resources/aws/iam-condition-keys.json`. `tools/aws/regen_iam_condition_keys.py`
   generates it: for each action and `iam:` key the AWS Service Reference lists, the key is read
-  when the request has a string parameter of the same name, ignoring case. The table reads:
+  when the request has a string parameter of the same name, ignoring case. Its `BY_HAND` list
+  names the parameter for a key whose value sits under another name. The table reads:
   - `iam:PolicyARN` from `PolicyArn` on `AttachRolePolicy`, `DetachRolePolicy`,
     `AttachUserPolicy`, `DetachUserPolicy`, `AttachGroupPolicy` and `DetachGroupPolicy`.
   - `iam:PermissionsBoundary` from `PermissionsBoundary` on `CreateRole`, `CreateUser`,
     `PutRolePermissionsBoundary` and `PutUserPermissionsBoundary`.
   - `iam:AWSServiceName` from `AWSServiceName` on `CreateServiceLinkedRole`.
-  - `iam:NotificationChannel` from `NotificationChannel` on `CreateDelegationRequest`.
+  - `iam:NotificationChannel` from `NotificationChannel`, `iam:DelegationDuration` from
+    `SessionDuration` and `iam:TemplateArn` from `Permissions.PolicyTemplateArn` on
+    `CreateDelegationRequest`.
+  - `iam:ServiceSpecificCredentialServiceName` from `ServiceName` and
+    `iam:ServiceSpecificCredentialAgeDays` from `CredentialAgeDays` on
+    `CreateServiceSpecificCredential`. A numeric key matches the `Numeric` operators.
   - `iam:OrganizationsPolicyId` from `OrganizationsPolicyId` on
     `GenerateOrganizationsAccessReport`.
 

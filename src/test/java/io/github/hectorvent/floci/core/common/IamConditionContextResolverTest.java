@@ -233,6 +233,44 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void iamDelegationDurationAndTemplateArnComeFromCreateDelegationRequest() {
+        assertEquals(Map.of("iam:DelegationDuration", List.of("43200"),
+                        "iam:TemplateArn", List.of("arn:aws:iam::aws:template/partner/t")),
+                resolver.resolve("iam", "iam:CreateDelegationRequest", formRequest(
+                        "SessionDuration=43200&Permissions.PolicyTemplateArn=arn%3Aaws%3Aiam%3A%3Aaws%3Atemplate%2Fpartner%2Ft")));
+    }
+
+    @Test
+    void iamServiceSpecificCredentialKeysComeFromCreateServiceSpecificCredential() {
+        assertEquals(Map.of("iam:ServiceSpecificCredentialServiceName", List.of("bedrock.amazonaws.com"),
+                        "iam:ServiceSpecificCredentialAgeDays", List.of("90")),
+                resolver.resolve("iam", "iam:CreateServiceSpecificCredential",
+                        formRequest("UserName=u&ServiceName=bedrock.amazonaws.com&CredentialAgeDays=90")));
+        assertEquals(Map.of("iam:ServiceSpecificCredentialServiceName", List.of("codecommit.amazonaws.com")),
+                resolver.resolve("iam", "iam:CreateServiceSpecificCredential",
+                        formRequest("UserName=u&ServiceName=codecommit.amazonaws.com")));
+        assertNull(resolver.resolve("iam", "iam:UpdateServiceSpecificCredential",
+                formRequest("ServiceSpecificCredentialId=ACCA1234567890EXAMPLE&Status=Inactive")));
+    }
+
+    @Test
+    void aCredentialAgeConditionMatchesTheNumericOperators() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Action":"iam:CreateServiceSpecificCredential","Resource":"*","Condition":
+                  {"NumericLessThanEquals":{"iam:ServiceSpecificCredentialAgeDays":"90"}}}]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy),
+                "iam:CreateServiceSpecificCredential", "*", resolver.resolve("iam",
+                        "iam:CreateServiceSpecificCredential",
+                        formRequest("ServiceName=bedrock.amazonaws.com&CredentialAgeDays=30"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy),
+                "iam:CreateServiceSpecificCredential", "*", resolver.resolve("iam",
+                        "iam:CreateServiceSpecificCredential",
+                        formRequest("ServiceName=bedrock.amazonaws.com&CredentialAgeDays=365"))));
+    }
+
+    @Test
     void iamOrganizationsPolicyIdComesFromGenerateOrganizationsAccessReport() {
         assertEquals(Map.of("iam:OrganizationsPolicyId", List.of("p-12345678")),
                 resolver.resolve("iam", "iam:GenerateOrganizationsAccessReport",
