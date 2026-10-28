@@ -38,10 +38,12 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -468,6 +470,27 @@ class IamServiceTest {
                 service.resolveCallerArns("ASIALIVESESSION").orElseThrow());
         // An expired session answers for neither, never for one and not the other.
         assertTrue(service.resolveCallerArns("ASIAEXPIREDSESSION").isEmpty());
+    }
+
+    @Test
+    void aSessionsTagsAndSourceIdentityBecomePrincipalConditionKeys() {
+        IamService service = iamService(false, new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.registerSession("ASIATAGGED", "secret", "token",
+                "arn:aws:iam::000000000000:role/TaggedRole", Instant.now().plusSeconds(3600),
+                null, "000000000000", "s", "AROAID:s");
+        service.setSessionTags("ASIATAGGED", Map.of("team", "blue", "env", "qa"), Set.of("team"), "alice");
+
+        IamService.CallerArns arns = service.resolveCallerArns("ASIATAGGED").orElseThrow();
+        assertEquals(Map.of("team", "blue", "env", "qa"), arns.principalTags());
+        assertEquals("alice", arns.sourceIdentity());
+        Map<String, List<String>> context = new HashMap<>();
+        arns.putPrincipalKeys(context);
+        assertEquals(List.of("blue"), context.get("aws:PrincipalTag/team"));
+        assertEquals(List.of("qa"), context.get("aws:PrincipalTag/env"));
+        assertEquals(List.of("alice"), context.get("aws:SourceIdentity"));
+
+        assertEquals(Map.of("team", "blue"), service.transitiveSessionTags("ASIATAGGED"));
+        assertEquals("alice", service.sessionSourceIdentity("ASIATAGGED"));
     }
 
     @Test

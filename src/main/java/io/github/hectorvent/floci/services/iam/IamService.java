@@ -4781,6 +4781,55 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * Records the session tags an AssumeRole issued, after {@link #registerSession} stored the
+     * session. The tags are exposed as {@code aws:PrincipalTag/<key>} on every request the session
+     * makes, and {@code sourceIdentity} as {@code aws:SourceIdentity}.
+     */
+    void setSessionTags(String sessionAccessKeyId, Map<String, String> tags,
+                        Set<String> transitiveTagKeys, String sourceIdentity) {
+        Optional<SessionCredential> stored = sessions.get(sessionAccessKeyId);
+        if (stored.isEmpty()) {
+            return;
+        }
+        SessionCredential session = stored.get();
+        session.setSessionTags(tags);
+        session.setTransitiveTagKeys(transitiveTagKeys);
+        session.setSourceIdentity(sourceIdentity);
+        sessions.put(sessionAccessKeyId, session);
+    }
+
+    /**
+     * The tags of the caller's session that pass to a session the caller assumes, keyed by tag
+     * key. A session tag is transitive only when the AssumeRole that set it named the key in
+     * {@code TransitiveTagKeys}; everything else stays with its own session.
+     */
+    Map<String, String> transitiveSessionTags(String accessKeyId) {
+        return findSessionForCallerContext(accessKeyId)
+                .map(session -> {
+                    Map<String, String> tags = session.getSessionTags();
+                    Set<String> keys = session.getTransitiveTagKeys();
+                    if (tags == null || keys == null) {
+                        return Map.<String, String>of();
+                    }
+                    Map<String, String> transitive = new LinkedHashMap<>();
+                    for (String key : keys) {
+                        if (tags.containsKey(key)) {
+                            transitive.put(key, tags.get(key));
+                        }
+                    }
+                    return transitive;
+                })
+                .orElse(Map.of());
+    }
+
+    /** The source identity of the caller's session, or null when it has none. */
+    String sessionSourceIdentity(String accessKeyId) {
+        return findSessionForCallerContext(accessKeyId)
+                .map(SessionCredential::getSourceIdentity)
+                .orElse(null);
+    }
+
+    /**
      * Stores a session GetSessionToken or GetFederationToken minted, with the identity whose
      * long-term key minted it. An active access key of a user in this account names that user. A
      * key IAM holds nowhere, the legacy {@code test} key or the account id among them, names the
@@ -5484,7 +5533,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      *                      role a session assumed, which a Deny's {@code NotPrincipal} never spares
      */
     public record CallerArns(String callerArn, String principalArn, String principalType,
-                             String userId, String userName, boolean permissionsBoundary) {
+                             String userId, String userName, boolean permissionsBoundary,
+                             Map<String, String> principalTags, String sourceIdentity) {
 
         /**
          * The {@code aws:PrincipalType} values, from the IAM User Guide's principal key values
@@ -5500,7 +5550,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
         /** The two ARNs alone, for a caller whose principal keys the site cannot derive. */
         public CallerArns(String callerArn, String principalArn) {
-            this(callerArn, principalArn, null, null, null);
+            this(callerArn, principalArn, null, null, null, false, Map.of(), null);
         }
 
         /**
@@ -5510,13 +5560,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
          * {@code aws:username}.
          */
         public static CallerArns accountRoot(String rootArn, String accountId) {
-            return new CallerArns(rootArn, rootArn, TYPE_ACCOUNT, accountId, null);
+            return new CallerArns(rootArn, rootArn, TYPE_ACCOUNT, accountId, null, false, Map.of(), null);
         }
 
-        /** A caller with no permissions boundary attached. */
+        /** A caller with no permissions boundary attached and no session tags. */
         public CallerArns(String callerArn, String principalArn, String principalType, String userId,
                           String userName) {
-            this(callerArn, principalArn, principalType, userId, userName, false);
+            this(callerArn, principalArn, principalType, userId, userName, false, Map.of(), null);
+        }
+
+        /** A caller with no session tags. */
+        public CallerArns(String callerArn, String principalArn, String principalType, String userId,
+                          String userName, boolean permissionsBoundary) {
+            this(callerArn, principalArn, principalType, userId, userName, permissionsBoundary, Map.of(), null);
         }
 
         /**
@@ -5544,6 +5600,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             }
             if (userName != null) {
                 context.put("aws:username", List.of(userName));
+            }
+            if (principalTags != null) {
+                principalTags.forEach((key, value) ->
+                        context.put("aws:PrincipalTag/" + key, List.of(value == null ? "" : value)));
+            }
+            if (sourceIdentity != null) {
+                context.put("aws:SourceIdentity", List.of(sourceIdentity));
             }
         }
     }
@@ -5651,9 +5714,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
             String sessionArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
                     "assumed-role/" + roleName + "/" + sessionName).toString();
+            IamRole role = roleFromArnOrName(roleArn).orElse(null);
             return Optional.of(new CallerArns(sessionArn, roleArn, CallerArns.TYPE_ASSUMED_ROLE,
                     sessionUserId(session).orElse(null), null,
-                    roleFromArnOrName(roleArn).map(IamRole::getPermissionsBoundaryArn).isPresent()));
+                    role != null && role.getPermissionsBoundaryArn() != null,
+                    session.getSessionTags(), session.getSourceIdentity()));
         }
 
         return Optional.empty();

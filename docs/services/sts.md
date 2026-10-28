@@ -204,16 +204,41 @@ names its session ARN or its role's ARN, path included.
 `Condition` blocks are evaluated with the same operators as identity and resource policies. The
 request context holds `sts:RoleSessionName`, `sts:ExternalId` when the caller passes `ExternalId`,
 `aws:PrincipalArn` (for a caller using assumed-role credentials, the role's ARN with its path, as on AWS),
-`aws:PrincipalAccount`, `aws:ResourceAccount`, `aws:RequestedRegion` and
-`aws:PrincipalIsAWSService`. A trust policy that requires `sts:ExternalId`, the confused-deputy
+`aws:PrincipalAccount`, `aws:ResourceAccount`, `aws:RequestedRegion`,
+`aws:PrincipalIsAWSService`, and, when the caller's session carries them,
+`aws:PrincipalTag/<key>` and `aws:SourceIdentity`. A trust policy that requires `sts:ExternalId`, the confused-deputy
 guard, refuses a call that omits it or passes another value, and a conditional `Deny` applies only
 when its condition matches.
 
+### Session tags and source identity
+
+`AssumeRole` accepts `Tags`, `TransitiveTagKeys` and `SourceIdentity`. The session's `Tags` are
+exposed to its later requests as `aws:PrincipalTag/<key>`, so a policy can scope access by a tag
+the caller set when assuming the role. `SourceIdentity` is exposed as `aws:SourceIdentity`.
+
+Passing `Tags` requires `sts:TagSession`. Floci checks it on both sides a policy can grant it: the
+caller's own policy, through the tag-on-create table, and the role's trust policy, which must
+allow `sts:TagSession` for the role. A trust policy that grants only `sts:AssumeRole` refuses a
+tagged call. The trust-policy check sees `aws:RequestTag/<key>` and `aws:TagKeys` from the
+request.
+
+A session that assumes another role passes on the tags its own request marked transitive. A
+request that reuses an inherited transitive tag key is refused with `ValidationError`; it cannot
+replace the inherited value. Keys are compared without regard to case, as policy evaluation
+lowercases them, so `TEAM` reuses an inherited `team`. A source identity set on the first session is inherited when the
+chained request omits it, and a chained request that tries to change it is refused with
+`AccessDenied`.
+
+The `Tags.member.N` spelling of the Query protocol is read, as is the unqualified `Tags.N` form.
+An empty key, a duplicate key and more than 50 tags are rejected with `ValidationError`.
+
 ### Known limitations
 
-- **Session tags and source identity are not modelled.** `aws:RequestTag/*`, `aws:TagKeys`,
-  `sts:TransitiveTagKeys` and `sts:SourceIdentity` are not in the request context, so a condition
-  on them does not match, and `sts:TagSession` and `sts:SetSourceIdentity` are not checked.
+- **Source identity authorization is not checked.** `AssumeRole` records `SourceIdentity` and
+  exposes it as `aws:SourceIdentity`, but it does not evaluate `sts:SetSourceIdentity`, so a
+  caller without that permission can still set one. The `sts:AssumeRole` trust-policy context
+  carries no `aws:RequestTag/*` or `aws:TagKeys`; the `sts:TagSession` check does. `aws:PrincipalTag`
+  names only the session's tags, not tags attached to the IAM user or role.
 
 ## Web Identity Validation (IRSA)
 

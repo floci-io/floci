@@ -28,7 +28,9 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -277,6 +279,165 @@ class StsQueryHandlerTest {
 
         assertNotEquals(extract(SECRET_ACCESS_KEY, firstBody), extract(SECRET_ACCESS_KEY, secondBody));
         assertNotEquals(extract(SESSION_TOKEN, firstBody), extract(SESSION_TOKEN, secondBody));
+    }
+
+    @Test
+    void assumeRoleRecordsSessionTagsTransitiveKeysAndSourceIdentity() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        IamService service = mock(IamService.class);
+        when(service.findRole(anyString(), anyString())).thenReturn(Optional.of(role));
+        StsQueryHandler handler = newHandler(service, new RegionResolver(REGION, "000000000000"));
+        setCaller(handler, "AKIACALLER", "-");
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "tagged-session");
+        params.putSingle("Tags.member.1.Key", "team");
+        params.putSingle("Tags.member.1.Value", "blue");
+        params.putSingle("Tags.member.2.Key", "env");
+        params.putSingle("Tags.member.2.Value", "qa");
+        params.putSingle("TransitiveTagKeys.member.1", "team");
+        params.putSingle("SourceIdentity", "alice");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus());
+        verify(service).setSessionTags(anyString(),
+                eq(Map.of("team", "blue", "env", "qa")), eq(Set.of("team")), eq("alice"));
+    }
+
+    @Test
+    void assumeRoleInheritsTransitiveSessionTagsAndSourceIdentityFromTheCaller() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        IamService service = mock(IamService.class);
+        when(service.findRole(anyString(), anyString())).thenReturn(Optional.of(role));
+        when(service.transitiveSessionTags("ASIACALLER")).thenReturn(Map.of("team", "blue"));
+        when(service.sessionSourceIdentity("ASIACALLER")).thenReturn("alice");
+        StsQueryHandler handler = newHandler(service, new RegionResolver(REGION, "000000000000"));
+        setCaller(handler, "ASIACALLER", "-");
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "chained-session");
+        params.putSingle("Tags.member.1.Key", "env");
+        params.putSingle("Tags.member.1.Value", "qa");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(200, response.getStatus());
+        verify(service).setSessionTags(anyString(),
+                eq(Map.of("team", "blue", "env", "qa")), eq(Set.of("team")), eq("alice"));
+    }
+
+    @Test
+    void assumeRoleRejectsDuplicateSessionTagKeys() {
+        StsQueryHandler handler = newHandler();
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("Tags.member.1.Key", "team");
+        params.putSingle("Tags.member.1.Value", "blue");
+        params.putSingle("Tags.member.2.Key", "team");
+        params.putSingle("Tags.member.2.Value", "red");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>ValidationError</Code>"));
+    }
+
+    @Test
+    void assumeRoleRejectsAReusedInheritedTransitiveTagKey() {
+        IamService service = mock(IamService.class);
+        when(service.transitiveSessionTags("ASIACALLER")).thenReturn(Map.of("team", "blue"));
+        StsQueryHandler handler = newHandler(service, new RegionResolver(REGION, "000000000000"));
+        setCaller(handler, "ASIACALLER", "-");
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "chained-session");
+        params.putSingle("Tags.member.1.Key", "team");
+        params.putSingle("Tags.member.1.Value", "red");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>ValidationError</Code>"));
+        assertTrue(((String) response.getEntity()).contains("transitive session tag"));
+    }
+
+    @Test
+    void assumeRoleRejectsACaseOnlyReuseOfAnInheritedTransitiveTagKey() {
+        IamService service = mock(IamService.class);
+        when(service.transitiveSessionTags("ASIACALLER")).thenReturn(Map.of("team", "blue"));
+        StsQueryHandler handler = newHandler(service, new RegionResolver(REGION, "000000000000"));
+        setCaller(handler, "ASIACALLER", "-");
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "chained-session");
+        params.putSingle("Tags.member.1.Key", "TEAM");
+        params.putSingle("Tags.member.1.Value", "red");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>ValidationError</Code>"));
+        assertTrue(((String) response.getEntity()).contains("transitive session tag"));
+    }
+
+    @Test
+    void assumeRoleRejectsCaseOnlyDuplicateSessionTagKeys() {
+        StsQueryHandler handler = newHandler();
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("Tags.member.1.Key", "team");
+        params.putSingle("Tags.member.1.Value", "blue");
+        params.putSingle("Tags.member.2.Key", "TEAM");
+        params.putSingle("Tags.member.2.Value", "red");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>ValidationError</Code>"));
+    }
+
+    @Test
+    void assumeRoleRejectsATransitiveKeyTheRequestDoesNotPass() {
+        StsQueryHandler handler = newHandler();
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "test-session");
+        params.putSingle("Tags.member.1.Key", "team");
+        params.putSingle("Tags.member.1.Value", "blue");
+        params.putSingle("TransitiveTagKeys.member.1", "env");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>ValidationError</Code>"));
+    }
+
+    @Test
+    void assumeRoleCannotChangeAnInheritedSourceIdentity() {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        IamService service = mock(IamService.class);
+        when(service.findRole(anyString(), anyString())).thenReturn(Optional.of(role));
+        when(service.sessionSourceIdentity("ASIACALLER")).thenReturn("alice");
+        StsQueryHandler handler = newHandler(service, new RegionResolver(REGION, "000000000000"));
+        setCaller(handler, "ASIACALLER", "-");
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/TestRole");
+        params.putSingle("RoleSessionName", "chained-session");
+        params.putSingle("SourceIdentity", "bob");
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(403, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>AccessDenied</Code>"));
     }
 
     @Test

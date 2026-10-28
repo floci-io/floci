@@ -34,6 +34,24 @@ class AssumeRolePolicyEvaluatorTest {
     }
 
     @Test
+    void aTrustPolicyCanGrantTagSessionSeparatelyFromAssumeRole() {
+        String tagSessionOnly = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:TagSession"}]}
+            """;
+        assertTrue(evaluator.allowsAction("sts:TagSession", tagSessionOnly,
+                CALLER, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allowsAction("sts:AssumeRole", tagSessionOnly,
+                CALLER, CALLER_ACCOUNT, Map.of()));
+
+        String assumeRoleOnly = trust("\"*\"");
+        assertTrue(evaluator.allowsAction("sts:AssumeRole", assumeRoleOnly,
+                CALLER, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.allowsAction("sts:TagSession", assumeRoleOnly,
+                CALLER, CALLER_ACCOUNT, Map.of()));
+    }
+
+    @Test
     void allowsAServicePrincipalInTheUniversalForm() {
         assertTrue(evaluator.allowsService(
                 trust("{\"Service\":\"redshift.amazonaws.com\"}"), "redshift.amazonaws.com"));

@@ -4,6 +4,10 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -50,6 +54,15 @@ public class SessionCredential {
      * resolve it by name.
      */
     private String delegatedApproverArn;
+    /**
+     * The session tags passed to AssumeRole, inherited through a transitive session and merged
+     * with the tags of this request. They are the session's {@code aws:PrincipalTag} keys.
+     */
+    private Map<String, String> sessionTags = new LinkedHashMap<>();
+    /** The session tags that pass to a subsequent session, by key. */
+    private Set<String> transitiveTagKeys = new LinkedHashSet<>();
+    /** The {@code aws:SourceIdentity} of the session, when one was set. */
+    private String sourceIdentity;
 
     public SessionCredential() {}
 
@@ -150,4 +163,17 @@ public class SessionCredential {
 
     public String getDelegatedApproverArn() { return delegatedApproverArn; }
     public void setDelegatedApproverArn(String arn) { this.delegatedApproverArn = arn; }
+
+    public Map<String, String> getSessionTags() { return sessionTags; }
+    public void setSessionTags(Map<String, String> sessionTags) {
+        this.sessionTags = sessionTags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(sessionTags);
+    }
+
+    public Set<String> getTransitiveTagKeys() { return transitiveTagKeys; }
+    public void setTransitiveTagKeys(Set<String> transitiveTagKeys) {
+        this.transitiveTagKeys = transitiveTagKeys == null ? new LinkedHashSet<>() : new LinkedHashSet<>(transitiveTagKeys);
+    }
+
+    public String getSourceIdentity() { return sourceIdentity; }
+    public void setSourceIdentity(String sourceIdentity) { this.sourceIdentity = sourceIdentity; }
 }

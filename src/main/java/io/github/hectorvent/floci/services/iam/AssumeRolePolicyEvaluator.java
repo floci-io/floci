@@ -82,7 +82,17 @@ public class AssumeRolePolicyEvaluator {
      */
     public boolean allows(String trustPolicyDocument, IamService.CallerArns caller,
                           String callerAccount, Map<String, List<String>> requestContext) {
-        TrustDecision decision = decide(trustPolicyDocument, caller, callerAccount, requestContext);
+        return allowsAction(ASSUME_ROLE_ACTION, trustPolicyDocument, caller, callerAccount, requestContext);
+    }
+
+    /**
+     * Returns true if {@code trustPolicyDocument} allows {@code caller} (in {@code callerAccount})
+     * to perform {@code action}. A trust policy can grant more than {@code sts:AssumeRole}:
+     * {@code sts:TagSession} is granted the same way when the caller passes session tags.
+     */
+    public boolean allowsAction(String action, String trustPolicyDocument, IamService.CallerArns caller,
+                                String callerAccount, Map<String, List<String>> requestContext) {
+        TrustDecision decision = decide(action, trustPolicyDocument, caller, callerAccount, requestContext);
         return decision == TrustDecision.ALLOW || decision == TrustDecision.ALLOW_ACCOUNT;
     }
 
@@ -125,7 +135,7 @@ public class AssumeRolePolicyEvaluator {
         }
         Iterable<JsonNode> statementList = statements.isArray() ? statements : List.of(statements);
         for (JsonNode stmt : statementList) {
-            if (effectOf(stmt) != Match.ALLOW || !actionApplies(stmt)) {
+            if (effectOf(stmt) != Match.ALLOW || !actionApplies(stmt, ASSUME_ROLE_ACTION)) {
                 continue;
             }
             JsonNode aws = stmt.path("Principal").path("AWS");
@@ -170,6 +180,12 @@ public class AssumeRolePolicyEvaluator {
      */
     public TrustDecision decide(String trustPolicyDocument, IamService.CallerArns caller,
                                 String callerAccount, Map<String, List<String>> requestContext) {
+        return decide(ASSUME_ROLE_ACTION, trustPolicyDocument, caller, callerAccount, requestContext);
+    }
+
+    /** {@link #decide(String, IamService.CallerArns, String, Map)} for one action of the trust policy. */
+    private TrustDecision decide(String action, String trustPolicyDocument, IamService.CallerArns caller,
+                                 String callerAccount, Map<String, List<String>> requestContext) {
         if (trustPolicyDocument == null || trustPolicyDocument.isBlank()) {
             return TrustDecision.NEUTRAL;
         }
@@ -195,7 +211,7 @@ public class AssumeRolePolicyEvaluator {
         TrustDecision decision = TrustDecision.NEUTRAL;
         for (JsonNode stmt : statementList) {
             TrustDecision match =
-                    evaluateStatement(stmt, callerArn, principalArn, callerAccount, context, version);
+                    evaluateStatement(action, stmt, callerArn, principalArn, callerAccount, context, version);
             if (match == TrustDecision.EXPLICIT_DENY) {
                 return TrustDecision.EXPLICIT_DENY;
             }
@@ -324,10 +340,10 @@ public class AssumeRolePolicyEvaluator {
         return true;
     }
 
-    private TrustDecision evaluateStatement(JsonNode stmt, String callerArn, String principalArn,
+    private TrustDecision evaluateStatement(String action, JsonNode stmt, String callerArn, String principalArn,
                                             String callerAccount, Map<String, List<String>> context,
                                             String policyVersion) {
-        if (!actionApplies(stmt)) {
+        if (!actionApplies(stmt, action)) {
             return TrustDecision.NEUTRAL;
         }
         PrincipalMatch principal = matchPrincipal(stmt.get("Principal"), callerArn, principalArn, callerAccount);
@@ -345,7 +361,8 @@ public class AssumeRolePolicyEvaluator {
     }
 
     private Match evaluateServiceStatement(JsonNode stmt, String servicePrincipal) {
-        if (!actionApplies(stmt) || !matchesServicePrincipal(stmt.get("Principal"), servicePrincipal)) {
+        if (!actionApplies(stmt, ASSUME_ROLE_ACTION)
+                || !matchesServicePrincipal(stmt.get("Principal"), servicePrincipal)) {
             return Match.NO_MATCH;
         }
         return effectOf(stmt);
@@ -353,7 +370,8 @@ public class AssumeRolePolicyEvaluator {
 
     private Match evaluateServiceStatement(JsonNode stmt, String servicePrincipal,
                                            Map<String, List<String>> context, String policyVersion) {
-        if (!actionApplies(stmt) || !matchesServicePrincipal(stmt.get("Principal"), servicePrincipal)) {
+        if (!actionApplies(stmt, ASSUME_ROLE_ACTION)
+                || !matchesServicePrincipal(stmt.get("Principal"), servicePrincipal)) {
             return Match.NO_MATCH;
         }
         if (!policyEvaluator.conditionMatches(stmt.get("Condition"), context, policyVersion)) {
@@ -408,33 +426,33 @@ public class AssumeRolePolicyEvaluator {
     }
 
     /**
-     * True if the statement's action element applies to {@code sts:AssumeRole}. An {@code Action}
-     * element applies when any of its patterns match; a {@code NotAction} element applies when none
-     * of its patterns match (AWS semantics, mirroring {@link IamPolicyEvaluator}'s action handling).
-     * A statement with neither key expresses no action constraint and does not apply.
+     * True if the statement's action element applies to {@code action}. An {@code Action} element
+     * applies when any of its patterns match; a {@code NotAction} element applies when none of its
+     * patterns match (AWS semantics, mirroring {@link IamPolicyEvaluator}'s action handling). A
+     * statement with neither key expresses no action constraint and does not apply.
      */
-    private boolean actionApplies(JsonNode stmt) {
-        JsonNode action = stmt.get("Action");
-        if (action != null) {
-            return matchesAssumeRoleAction(action);
+    private boolean actionApplies(JsonNode stmt, String action) {
+        JsonNode actionNode = stmt.get("Action");
+        if (actionNode != null) {
+            return matchesAction(actionNode, action);
         }
         JsonNode notAction = stmt.get("NotAction");
         if (notAction != null) {
-            return !matchesAssumeRoleAction(notAction);
+            return !matchesAction(notAction, action);
         }
         return false;
     }
 
-    private boolean matchesAssumeRoleAction(JsonNode actionNode) {
+    private boolean matchesAction(JsonNode actionNode, String action) {
         if (actionNode == null) {
             return false;
         }
         if (actionNode.isTextual()) {
-            return IamPolicyEvaluator.globMatches(actionNode.asText(), ASSUME_ROLE_ACTION);
+            return IamPolicyEvaluator.globMatches(actionNode.asText(), action);
         }
         if (actionNode.isArray()) {
-            for (JsonNode a : actionNode) {
-                if (a.isTextual() && IamPolicyEvaluator.globMatches(a.asText(), ASSUME_ROLE_ACTION)) {
+            for (JsonNode entry : actionNode) {
+                if (entry.isTextual() && IamPolicyEvaluator.globMatches(entry.asText(), action)) {
                     return true;
                 }
             }

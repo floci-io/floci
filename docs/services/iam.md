@@ -2224,8 +2224,9 @@ floci populates:
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
 - `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
   `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and
-  `s3:PutBucketTagging` (the `<Tagging>` body), and for every create in the tag-on-create table
-  whose action takes it, as described under the tag-on-create check above.
+  `s3:PutBucketTagging` (the `<Tagging>` body), for every create in the tag-on-create table
+  whose action takes it, as described under the tag-on-create check above, and for the
+  `sts:TagSession` trust-policy check, where it holds the `Tags` an `AssumeRole` request passes.
 - `aws:ResourceTag/<key>`: the target resource's current tags, for `ec2:CreateTags`,
   `ec2:DeleteTags`, `ec2:TerminateInstances` and `ec2:DescribeInstances` (the first
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucket` and the
@@ -2234,6 +2235,16 @@ floci populates:
   `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`,
   `logs:ListTagsForResource`, `logs:DeleteLogGroup`, `logs:PutRetentionPolicy` and
   `logs:DeleteRetentionPolicy` use the owning log group's tags.
+- `aws:PrincipalTag/<key>`: the session tags an `sts:AssumeRole` set, from the request's `Tags`
+  member. `AssumeRole` requires `sts:TagSession` when `Tags` are passed, checked in the caller's
+  policy and in the role's trust policy. A tag the caller's own session marked transitive is
+  included; a request that reuses an inherited transitive key is refused with `ValidationError`.
+  The key is absent when the session carries no such tag, so a positive condition on it does not
+  match. Tags attached to the IAM user or role itself are not part of this key.
+- `aws:SourceIdentity`: the `SourceIdentity` an `sts:AssumeRole` set, inherited by a chained
+  session when the new request omits it. A chained request that names a different source identity
+  is refused with `AccessDenied`. `sts:SetSourceIdentity` itself is not checked; see
+  [STS](sts.md#known-limitations).
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
   `s3:DeleteObjectTagging`, `s3:PutObjectTagging` and the annotation actions, and for their
