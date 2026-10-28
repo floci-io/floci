@@ -44,17 +44,22 @@ class AutoScalingInstanceDetailsIntegrationTest {
         createGroup(name, name, 2);
         createGroup(other, name, 1);
         try {
-            // The first pass launches the members and the second puts them in service. Promotion
-            // resets health to Healthy, so marking a member unhealthy while it is still Pending
-            // would race the reconciler's own 10-second schedule.
+            // The first pass launches the members and the second puts them in service. Floci's
+            // reconciler overwrites health with Healthy when it promotes a Pending member, so a
+            // member is marked unhealthy only once both are in service.
             reconciler.reconcileAll();
             reconciler.reconcileAll();
-            assertEquals(List.of("InService", "InService"),
-                    groupInstances(name).getList(GROUP_INSTANCES + ".LifecycleState"));
-            List<String> members = groupInstances(name).getList(GROUP_INSTANCES + ".InstanceId");
+            XmlPath launched = groupInstances(name);
+            assertEquals(List.of("InService", "InService"), launched.getList(GROUP_INSTANCES + ".LifecycleState"));
+            List<String> members = launched.getList(GROUP_INSTANCES + ".InstanceId");
             String healthy = members.get(0);
             String unhealthy = members.get(1);
             String otherMember = groupInstances(other).getString(GROUP_INSTANCES + ".InstanceId");
+            // AWS replaces an unhealthy member; the group keeps it here for the assertions.
+            given().header("Authorization", AUTH).formParam("Action", "SuspendProcesses")
+                    .formParam("AutoScalingGroupName", name)
+                    .formParam("ScalingProcesses.member.1", "ReplaceUnhealthy")
+                    .post("/").then().statusCode(200);
             given().header("Authorization", AUTH).formParam("Action", "SetInstanceHealth")
                     .formParam("InstanceId", unhealthy).formParam("HealthStatus", "Unhealthy")
                     .formParam("ShouldRespectGracePeriod", "false")

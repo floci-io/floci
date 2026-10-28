@@ -610,7 +610,7 @@ public class AutoScalingQueryHandler {
                     .start("AutoScalingInstances");
         for (AutoScalingService.AutoScalingInstanceDetails details : instances) {
             AsgInstance inst = details.instance();
-            // This API spells health in capitals: AWS documents HEALTHY, and UNHEALTHY follows suit.
+            // AWS's samples of this API spell health HEALTHY, and UNHEALTHY follows the same rule.
             // DescribeAutoScalingGroups and SetInstanceHealth use the stored Healthy and Unhealthy.
             String healthStatus = inst.getHealthStatus() == null ? null : inst.getHealthStatus().toUpperCase(Locale.ROOT);
             xml.start("member")
