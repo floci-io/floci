@@ -198,6 +198,7 @@ NOT_COVERED: dict[str, str] = {
     "dlm": _REST,
     "dms": _LATER,
     "ec2": _LATER,
+    "ec2-instance-connect": _LATER,
     "ecs": _LATER,
     "elasticache": _LATER,
     "elasticbeanstalk": _LATER,
