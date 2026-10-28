@@ -136,6 +136,7 @@ public class AutoScalingReconciler {
 
     public void reconcile(AutoScalingGroup asg) {
         asgService.reconcileIfPresent(asg, () -> {
+            settleStandbyMoves(asg);
             removeTerminatingInstances(asg);
             removeStaleInstances(asg);
             removeOrphanedTargetRegistrations(asg);
@@ -228,6 +229,42 @@ public class AutoScalingReconciler {
         }
     }
 
+    /**
+     * Finishes each move into standby: the instance leaves the group's target groups and Classic load
+     * balancers, then becomes Standby. A move whose instance left its transient state some other way, such
+     * as being terminated or refreshed, is cancelled. A move out of standby is finished by
+     * {@link #promoteReadyInstances} once the instance is running.
+     */
+    private void settleStandbyMoves(AutoScalingGroup asg) {
+        List<AsgInstance> entering = new ArrayList<>();
+        List<AsgInstance> interrupted = new ArrayList<>();
+        for (AsgInstance instance : asg.getInstances()) {
+            if ("EnteringStandby".equals(instance.getLifecycleState())) {
+                entering.add(instance);
+            } else if (instance.getStandbyActivityId() != null && !"Pending".equals(instance.getLifecycleState())) {
+                interrupted.add(instance);
+            }
+        }
+        if (entering.isEmpty() && interrupted.isEmpty()) {
+            return;
+        }
+        if (!entering.isEmpty()) {
+            List<String> instanceIds = entering.stream().map(AsgInstance::getInstanceId).toList();
+            deregisterFromTargetGroups(asg, instanceIds);
+            deregisterFromClassicLoadBalancers(asg, instanceIds);
+            for (AsgInstance instance : entering) {
+                instance.setLifecycleState("Standby");
+                if (instance.getStandbyActivityId() != null) {
+                    asgService.completeActivity(instance.getStandbyActivityId(), "Successful", null);
+                    instance.setStandbyActivityId(null);
+                }
+            }
+            LOG.infov("ASG {0}: instance(s) {1} are now in Standby", asg.getAutoScalingGroupName(), instanceIds);
+        }
+        asgService.cancelStandbyMoves(interrupted);
+        asgService.saveAutoScalingGroupIfPresent(asg);
+    }
+
     static long activeCapacity(AutoScalingGroup asg) {
         return asg.getInstances().stream()
                 .filter(i -> {
@@ -257,10 +294,17 @@ public class AutoScalingReconciler {
                     registerWithTargetGroups(asg, asgInst);
                     registerWithClassicLoadBalancers(asg, asgInst);
                     changed = true;
-                    asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
-                            "Launching a new EC2 instance: " + asgInst.getInstanceId(),
-                            SCALE_OUT_CAUSE,
-                            "Successful");
+                    String standbyActivityId = asgInst.getStandbyActivityId();
+                    if (standbyActivityId != null) {
+                        // An instance back from standby completes its ExitStandby activity; nothing was launched.
+                        asgInst.setStandbyActivityId(null);
+                        asgService.completeActivity(standbyActivityId, "Successful", null);
+                    } else {
+                        asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
+                                "Launching a new EC2 instance: " + asgInst.getInstanceId(),
+                                SCALE_OUT_CAUSE,
+                                "Successful");
+                    }
                     LOG.infov("ASG {0}: instance {1} is now InService",
                             asg.getAutoScalingGroupName(), asgInst.getInstanceId());
                 }
@@ -288,6 +332,8 @@ public class AutoScalingReconciler {
         failActiveSsmInvocations(asg, instanceIds);
         deregisterFromTargetGroups(asg, instanceIds);
         deregisterFromClassicLoadBalancers(asg, instanceIds);
+        // An instance leaving standby whose EC2 instance stopped or went away never returns to service.
+        asgService.cancelStandbyMoves(staleInstances);
         asg.getInstances().removeIf(instance -> instanceIds.contains(instance.getInstanceId()));
         asgService.saveAutoScalingGroupIfPresent(asg);
         asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),

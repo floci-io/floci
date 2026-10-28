@@ -68,6 +68,8 @@ public class AutoScalingQueryHandler {
                 case "AttachInstances"              -> handleAttachInstances(p, region);
                 case "DetachInstances"              -> handleDetachInstances(p, region);
                 case "TerminateInstanceInAutoScalingGroup" -> handleTerminateInstance(p, region);
+                case "EnterStandby"                 -> handleEnterStandby(p, region);
+                case "ExitStandby"                  -> handleExitStandby(p, region);
                 // Load balancer attachment
                 case "AttachLoadBalancerTargetGroups"    -> handleAttachLoadBalancerTargetGroups(p, region);
                 case "DetachLoadBalancerTargetGroups"    -> handleDetachLoadBalancerTargetGroups(p, region);
@@ -918,6 +920,49 @@ public class AutoScalingQueryHandler {
                 .end("TerminateInstanceInAutoScalingGroupResponse").build());
     }
 
+    private Response handleEnterStandby(MultivaluedMap<String, String> p, String region) {
+        String groupName = p.getFirst("AutoScalingGroupName");
+        String decrement = p.getFirst("ShouldDecrementDesiredCapacity");
+        List<String> missing = new ArrayList<>();
+        if (groupName == null) {
+            missing.add(SmithyValidationErrors.notNull("autoScalingGroupName"));
+        }
+        if (decrement == null || decrement.isBlank()) {
+            missing.add(SmithyValidationErrors.notNull("shouldDecrementDesiredCapacity"));
+        }
+        if (!missing.isEmpty()) {
+            throw SmithyValidationErrors.validationError(missing);
+        }
+        boolean shouldDecrement = requiredBoolParam(p, "ShouldDecrementDesiredCapacity",
+                "shouldDecrementDesiredCapacity");
+        return ok(activitiesResponse("EnterStandby",
+                service.enterStandby(region, groupName, memberList(p, "InstanceIds"), shouldDecrement)));
+    }
+
+    private Response handleExitStandby(MultivaluedMap<String, String> p, String region) {
+        String groupName = p.getFirst("AutoScalingGroupName");
+        if (groupName == null) {
+            throw SmithyValidationErrors.validationError(SmithyValidationErrors.notNull("autoScalingGroupName"));
+        }
+        return ok(activitiesResponse("ExitStandby",
+                service.exitStandby(region, groupName, memberList(p, "InstanceIds"))));
+    }
+
+    private static String activitiesResponse(String action, List<ScalingActivity> activities) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(action + "Response", NS)
+                  .start(action + "Result")
+                    .start("Activities");
+        for (ScalingActivity activity : activities) {
+            appendActivityXml(xml, activity);
+        }
+        xml.end("Activities")
+           .end(action + "Result")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end(action + "Response");
+        return xml.build();
+    }
+
     // ── Load balancer attachment ───────────────────────────────────────────────
 
     private Response handleAttachLoadBalancerTargetGroups(MultivaluedMap<String, String> p, String region) {
@@ -1367,23 +1412,27 @@ public class AutoScalingQueryHandler {
                   .start("DescribeScalingActivitiesResult")
                     .start("Activities");
         for (ScalingActivity a : activities) {
-            xml.start("member")
-               .elem("ActivityId", a.getActivityId())
-               .elem("AutoScalingGroupName", a.getAutoScalingGroupName())
-               .elem("StatusCode", a.getStatusCode())
-               .elem("Progress", String.valueOf(a.getProgress()))
-               .elem("StartTime", ISO_FMT.format(a.getStartTime()));
-            if (a.getDescription() != null) { xml.elem("Description", a.getDescription()); }
-            if (a.getCause() != null) { xml.elem("Cause", a.getCause()); }
-            if (a.getEndTime() != null) { xml.elem("EndTime", ISO_FMT.format(a.getEndTime())); }
-            if (a.getStatusMessage() != null) { xml.elem("StatusMessage", a.getStatusMessage()); }
-            xml.end("member");
+            appendActivityXml(xml, a);
         }
         xml.end("Activities")
            .end("DescribeScalingActivitiesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeScalingActivitiesResponse");
         return ok(xml.build());
+    }
+
+    private static void appendActivityXml(XmlBuilder xml, ScalingActivity a) {
+        xml.start("member")
+           .elem("ActivityId", a.getActivityId())
+           .elem("AutoScalingGroupName", a.getAutoScalingGroupName())
+           .elem("StatusCode", a.getStatusCode())
+           .elem("Progress", String.valueOf(a.getProgress()))
+           .elem("StartTime", ISO_FMT.format(a.getStartTime()));
+        if (a.getDescription() != null) { xml.elem("Description", a.getDescription()); }
+        if (a.getCause() != null) { xml.elem("Cause", a.getCause()); }
+        if (a.getEndTime() != null) { xml.elem("EndTime", ISO_FMT.format(a.getEndTime())); }
+        if (a.getStatusMessage() != null) { xml.elem("StatusMessage", a.getStatusMessage()); }
+        xml.end("member");
     }
 
     // ── Metadata responses ────────────────────────────────────────────────────
@@ -2076,14 +2125,19 @@ public class AutoScalingQueryHandler {
 
     /** A required boolean member must be present and exactly "true"/"false" — never silently coerced to false. */
     private boolean requiredBoolParam(MultivaluedMap<String, String> p, String key) {
+        return requiredBoolParam(p, key, key);
+    }
+
+    /** As {@link #requiredBoolParam(MultivaluedMap, String)}, naming the member {@code path} in the error. */
+    private boolean requiredBoolParam(MultivaluedMap<String, String> p, String key, String path) {
         String val = p.getFirst(key);
         if (val == null || val.isBlank()) {
             throw SmithyValidationErrors.validationError(
-                    SmithyValidationErrors.notNull(key));
+                    SmithyValidationErrors.notNull(path));
         }
         if (!"true".equalsIgnoreCase(val) && !"false".equalsIgnoreCase(val)) {
             throw SmithyValidationErrors.validationError(
-                    "Value '" + val + "' at '" + key
+                    "Value '" + val + "' at '" + path
                             + "' failed to satisfy constraint: Member must be a valid boolean");
         }
         return parseOptionalBoolean(val, key);
