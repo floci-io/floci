@@ -2,163 +2,158 @@ package io.github.hectorvent.floci.services.appconfig;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
 import io.github.hectorvent.floci.services.appconfig.model.DeploymentStrategy;
 import io.github.hectorvent.floci.services.appconfig.model.Environment;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.LockSupport;
-import java.util.function.BooleanSupplier;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The update methods CloudFormation uses read an entity, change it and write it back. A delete the
  * AppConfig API runs on another thread in between must wait for the write and then remove the
- * entity, not finish first and have the update store it again. Each case runs that delete from
- * inside the update's write to the store.
+ * entity, not finish first and have the update store it again. Each case parks the update inside
+ * its write to the store and must see the delete waiting on the service.
  */
 class AppConfigServiceUpdateRaceTest {
 
     private static final String ACCOUNT = "000000000000";
-
-    /** In-memory stores that run a one-shot hook before the next write to a chosen file. */
-    private static final class HookedStorageFactory extends StorageFactory {
-        private final Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
-        private final Map<String, Runnable> beforePut = new ConcurrentHashMap<>();
-
-        HookedStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                                                        TypeReference<Map<String, V>> typeReference) {
-            return create(serviceName, fileName, typeReference, WriteProfile.DEFAULT);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                                                        TypeReference<Map<String, V>> typeReference,
-                                                        WriteProfile profile) {
-            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName, name ->
-                    new AccountAwareStorageBackend<V>(new InMemoryStorage<String, V>() {
-                        @Override
-                        public void put(String key, V value) {
-                            Runnable hook = beforePut.remove(name);
-                            if (hook != null) {
-                                hook.run();
-                            }
-                            super.put(key, value);
-                        }
-                    }, null, ACCOUNT));
-        }
-    }
-
-    private final HookedStorageFactory storage = new HookedStorageFactory();
-    private final AppConfigService service = new AppConfigService(storage, null);
+    private static final String APPLICATIONS = "appconfig-applications.json";
+    private static final String ENVIRONMENTS = "appconfig-environments.json";
+    private static final String PROFILES = "appconfig-profiles.json";
+    private static final String STRATEGIES = "appconfig-strategies.json";
 
     @Test
-    void anApplicationDeletedDuringItsUpdateStaysDeleted() {
+    void anApplicationDeletedDuringItsUpdateStaysDeleted() throws Exception {
+        ParkingStore<Application> store = new ParkingStore<>();
+        AppConfigService service = serviceWithStore(APPLICATIONS, store);
         Application app = service.createApplication(Map.of("Name", "orders"));
-        boolean deleteWaited = deleteDuringNextWrite("appconfig-applications.json",
-                () -> service.deleteApplication(app.getId()),
-                () -> service.updateApplication(app.getId(), "orders-v2", null));
 
-        assertTrue(deleteWaited, "the delete waits for the update's write");
-        assertGone(() -> service.findApplication(app.getId()).isEmpty());
+        deleteWaitsForTheWrite(store,
+                () -> service.updateApplication(app.getId(), "orders-v2", null),
+                () -> service.deleteApplication(app.getId()));
+
+        assertTrue(service.findApplication(app.getId()).isEmpty(), "the entity outlived its delete");
     }
 
     @Test
-    void anApplicationDeletedDuringATagWriteStaysDeleted() {
+    void anApplicationDeletedDuringATagWriteStaysDeleted() throws Exception {
+        ParkingStore<Application> store = new ParkingStore<>();
+        AppConfigService service = serviceWithStore(APPLICATIONS, store);
         Application app = service.createApplication(Map.of("Name", "orders"));
-        boolean deleteWaited = deleteDuringNextWrite("appconfig-applications.json",
-                () -> service.deleteApplication(app.getId()),
-                () -> service.tagApplication(app.getId(), Map.of("team", "payments")));
 
-        assertTrue(deleteWaited, "the delete waits for the tag write");
-        assertGone(() -> service.findApplication(app.getId()).isEmpty());
+        deleteWaitsForTheWrite(store,
+                () -> service.tagApplication(app.getId(), Map.of("team", "payments")),
+                () -> service.deleteApplication(app.getId()));
+
+        assertTrue(service.findApplication(app.getId()).isEmpty(), "the entity outlived its delete");
     }
 
     @Test
-    void aStrategyDeletedDuringItsUpdateStaysDeleted() {
+    void aStrategyDeletedDuringItsUpdateStaysDeleted() throws Exception {
+        ParkingStore<DeploymentStrategy> store = new ParkingStore<>();
+        AppConfigService service = serviceWithStore(STRATEGIES, store);
         DeploymentStrategy strategy = service.createDeploymentStrategy(Map.of("Name", "gradual",
                 "DeploymentDurationInMinutes", 0, "GrowthFactor", 100, "ReplicateTo", "NONE"));
-        boolean deleteWaited = deleteDuringNextWrite("appconfig-strategies.json",
-                () -> service.deleteDeploymentStrategy(strategy.getId()),
-                () -> service.updateDeploymentStrategy(strategy.getId(), "slower", 1, 0, 50f, "LINEAR"));
 
-        assertTrue(deleteWaited, "the delete waits for the update's write");
-        assertGone(() -> service.listDeploymentStrategies().stream()
-                .noneMatch(listed -> listed.getId().equals(strategy.getId())));
+        deleteWaitsForTheWrite(store,
+                () -> service.updateDeploymentStrategy(strategy.getId(), "slower", 1, 0, 50f, "LINEAR"),
+                () -> service.deleteDeploymentStrategy(strategy.getId()));
+
+        assertTrue(service.listDeploymentStrategies().stream()
+                .noneMatch(listed -> listed.getId().equals(strategy.getId())), "the strategy outlived its delete");
     }
 
     @Test
-    void aProfileDeletedDuringItsUpdateStaysDeleted() {
+    void aProfileDeletedDuringItsUpdateStaysDeleted() throws Exception {
+        ParkingStore<ConfigurationProfile> store = new ParkingStore<>();
+        AppConfigService service = serviceWithStore(PROFILES, store);
         Application app = service.createApplication(Map.of("Name", "orders"));
         ConfigurationProfile profile = service.createConfigurationProfile(app.getId(),
                 Map.of("Name", "settings", "LocationUri", "hosted"));
-        boolean deleteWaited = deleteDuringNextWrite("appconfig-profiles.json",
-                () -> service.deleteConfigurationProfile(app.getId(), profile.getId()),
-                () -> service.updateConfigurationProfile(app.getId(), profile.getId(), "renamed", null));
 
-        assertTrue(deleteWaited, "the delete waits for the update's write");
-        assertGone(() -> service.findConfigurationProfile(profile.getId()).isEmpty());
+        deleteWaitsForTheWrite(store,
+                () -> service.updateConfigurationProfile(app.getId(), profile.getId(), "renamed", null),
+                () -> service.deleteConfigurationProfile(app.getId(), profile.getId()));
+
+        assertTrue(service.findConfigurationProfile(profile.getId()).isEmpty(), "the entity outlived its delete");
     }
 
     @Test
-    void anEnvironmentDeletedDuringItsUpdateStaysDeleted() {
+    void anEnvironmentDeletedDuringItsUpdateStaysDeleted() throws Exception {
+        ParkingStore<Environment> store = new ParkingStore<>();
+        AppConfigService service = serviceWithStore(ENVIRONMENTS, store);
         Application app = service.createApplication(Map.of("Name", "orders"));
         Environment env = service.createEnvironment(app.getId(), Map.of("Name", "beta"));
-        boolean deleteWaited = deleteDuringNextWrite("appconfig-environments.json",
-                () -> service.deleteEnvironment(app.getId(), env.getId()),
-                () -> service.updateEnvironment(app.getId(), env.getId(), "gamma", null, List.of()));
 
-        assertTrue(deleteWaited, "the delete waits for the update's write");
-        assertGone(() -> service.findEnvironment(env.getId()).isEmpty());
+        deleteWaitsForTheWrite(store,
+                () -> service.updateEnvironment(app.getId(), env.getId(), "gamma", null, List.of()),
+                () -> service.deleteEnvironment(app.getId(), env.getId()));
+
+        assertTrue(service.findEnvironment(env.getId()).isEmpty(), "the entity outlived its delete");
     }
 
     /**
-     * Runs {@code write}, and from inside its write to {@code fileName} starts {@code delete} on
-     * another thread. Returns whether that delete was still waiting half a second later, as it must
-     * while the write holds the service.
+     * Parks {@code write} in its next write to {@code store}, starts {@code delete}, and requires
+     * the delete to be unfinished and blocked on the service's monitor until the write is released;
+     * then both finish.
      */
-    private boolean deleteDuringNextWrite(String fileName, Runnable delete, Runnable write) {
-        boolean[] waited = new boolean[1];
-        storage.beforePut.put(fileName, () -> {
-            CountDownLatch done = new CountDownLatch(1);
-            Thread thread = new Thread(() -> {
+    private static void deleteWaitsForTheWrite(ParkingStore<?> store, Runnable write, Runnable delete)
+            throws Exception {
+        store.parkNextWrite();
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> writing = pool.submit(write);
+            assertTrue(store.awaitParked(), "the write must reach the store");
+            AtomicReference<Thread> deleteThread = new AtomicReference<>();
+            Future<?> deleting = pool.submit(() -> {
+                deleteThread.set(Thread.currentThread());
                 delete.run();
-                done.countDown();
             });
-            thread.start();
-            try {
-                waited[0] = !done.await(500, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        write.run();
-        return waited[0];
+            awaitBlockedOrDone(deleteThread, deleting);
+            assertFalse(deleting.isDone(), "the delete ran while a write of the same entity was mid-flight");
+            assertEquals(Thread.State.BLOCKED, deleteThread.get().getState(),
+                    "the delete waits on the service's monitor");
+
+            store.release();
+            writing.get(2, TimeUnit.SECONDS);
+            deleting.get(2, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            throw new AssertionError(e.getCause());
+        } finally {
+            store.release();
+            pool.shutdownNow();
+        }
     }
 
-    /** Waits up to two seconds for the delete that waited to finish. */
-    private static void assertGone(BooleanSupplier gone) {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-        while (!gone.getAsBoolean() && System.nanoTime() < deadline) {
-            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
-        }
-        assertTrue(gone.getAsBoolean(), "the delete removes the entity once the write is done");
+    /** An AppConfig service whose {@code fileName} store is {@code store} and every other store in memory. */
+    private static AppConfigService serviceWithStore(String fileName, StorageBackend<String, ?> store) {
+        return new AppConfigService(new StorageFactory(null, null) {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String file,
+                    TypeReference<Map<String, V>> typeReference, WriteProfile profile) {
+                return file.equals(fileName)
+                        ? new AccountAwareStorageBackend<>((StorageBackend<String, V>) (Object) store, null, ACCOUNT)
+                        : AccountAwareStorageBackend.inMemory(ACCOUNT);
+            }
+        }, null);
     }
 }
