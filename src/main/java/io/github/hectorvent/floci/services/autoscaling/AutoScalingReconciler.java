@@ -33,6 +33,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
@@ -290,16 +292,17 @@ public class AutoScalingReconciler {
                 String ec2State = ec2Instances.get(0).getState().getName();
                 if ("running".equals(ec2State)) {
                     asgInst.setLifecycleState("InService");
-                    asgInst.setHealthStatus("Healthy");
                     registerWithTargetGroups(asg, asgInst);
                     registerWithClassicLoadBalancers(asg, asgInst);
                     changed = true;
                     String standbyActivityId = asgInst.getStandbyActivityId();
                     if (standbyActivityId != null) {
-                        // An instance back from standby completes its ExitStandby activity; nothing was launched.
+                        // An instance back from standby keeps the health it had there and completes its
+                        // ExitStandby activity; nothing was launched.
                         asgInst.setStandbyActivityId(null);
                         asgService.completeActivity(standbyActivityId, "Successful", null);
                     } else {
+                        asgInst.setHealthStatus("Healthy");
                         asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
                                 "Launching a new EC2 instance: " + asgInst.getInstanceId(),
                                 SCALE_OUT_CAUSE,
@@ -322,6 +325,13 @@ public class AutoScalingReconciler {
         List<AsgInstance> staleInstances = asg.getInstances().stream()
                 .filter(instance -> isStaleInstance(asg, instance))
                 .collect(Collectors.toList());
+        List<AsgInstance> backFromStandby = staleInstances.stream()
+                .filter(instance -> instance.getStandbyActivityId() != null)
+                .toList();
+        if (!backFromStandby.isEmpty()) {
+            replaceUnhealthyReturns(asg, backFromStandby);
+            staleInstances.removeAll(backFromStandby);
+        }
         if (staleInstances.isEmpty()) {
             return;
         }
@@ -332,8 +342,6 @@ public class AutoScalingReconciler {
         failActiveSsmInvocations(asg, instanceIds);
         deregisterFromTargetGroups(asg, instanceIds);
         deregisterFromClassicLoadBalancers(asg, instanceIds);
-        // An instance leaving standby whose EC2 instance stopped or went away never returns to service.
-        asgService.cancelStandbyMoves(staleInstances);
         asg.getInstances().removeIf(instance -> instanceIds.contains(instance.getInstanceId()));
         asgService.saveAutoScalingGroupIfPresent(asg);
         asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
@@ -341,6 +349,44 @@ public class AutoScalingReconciler {
                 "Persisted Auto Scaling state referenced instance containers that are no longer running.",
                 "Successful");
         LOG.infov("ASG {0}: removed stale instance reference(s) {1}",
+                asg.getAutoScalingGroupName(), instanceIds);
+    }
+
+    /**
+     * Instances back from standby whose EC2 instance stopped or went away fail the health check AWS runs on their
+     * return: each is terminated, if EC2 still has it, and leaves the group with AWS's termination activity, and the
+     * group launches a replacement for the capacity ExitStandby restored. A termination EC2 refuses is retried on
+     * the next pass.
+     */
+    private void replaceUnhealthyReturns(AutoScalingGroup asg, List<AsgInstance> returning) {
+        List<String> instanceIds = returning.stream().map(AsgInstance::getInstanceId).toList();
+        List<String> stillThere = instanceIds.stream()
+                .filter(id -> !isMissingOrTerminalEc2Instance(asg, id, TERMINATED_STATES))
+                .toList();
+        if (!stillThere.isEmpty()) {
+            try {
+                ec2Service.terminateInstances(asg.getRegion(), stillThere);
+            } catch (Exception e) {
+                LOG.warnv("ASG {0}: could not terminate instance(s) {1} back from standby: {2}",
+                        asg.getAutoScalingGroupName(), stillThere, e.getMessage());
+                return;
+            }
+        }
+        failActiveSsmInvocations(asg, instanceIds);
+        deregisterFromTargetGroups(asg, instanceIds);
+        deregisterFromClassicLoadBalancers(asg, instanceIds);
+        asgService.cancelStandbyMoves(returning);
+        asg.getInstances().removeIf(instance -> instanceIds.contains(instance.getInstanceId()));
+        asgService.saveAutoScalingGroupIfPresent(asg);
+        String now = Instant.now().truncatedTo(ChronoUnit.SECONDS).toString();
+        for (String instanceId : instanceIds) {
+            asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
+                    "Terminating EC2 instance: " + instanceId,
+                    "At " + now + " an instance was taken out of service in response to an EC2 health check"
+                            + " indicating it has been terminated or stopped.",
+                    "Successful");
+        }
+        LOG.infov("ASG {0}: instance(s) {1} back from standby were not running and were replaced",
                 asg.getAutoScalingGroupName(), instanceIds);
     }
 

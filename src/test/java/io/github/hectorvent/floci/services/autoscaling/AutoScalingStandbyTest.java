@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.autoscaling.model.ScalingActivity;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
@@ -17,13 +18,23 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -210,11 +221,12 @@ class AutoScalingStandbyTest {
         assertEquals(List.of("i-a", "i-b"), memberIds());
     }
 
-    @Test
-    void standbyMembersAreNotScaledInOrRemovedWhenTheirInstanceStops() {
+    @ParameterizedTest
+    @ValueSource(strings = {"stopped", "terminated", "gone"})
+    void standbyMembersAreNotScaledInOrRemovedWhenTheirInstanceStops(String fate) {
         ok(enterStandby(true, "i-a"));
         reconciler.reconcile(group());
-        ec2States.put("i-a", InstanceState.stopped());
+        setEc2State("i-a", fate);
 
         service.setDesiredCapacity(REGION, GROUP, 0);
         reconciler.reconcile(group());
@@ -372,18 +384,136 @@ class AutoScalingStandbyTest {
         assertEquals("Cancelled", activity(activities, stoppedActivity, "StatusCode"));
         assertFalse(memberIds().contains("i-a"));
         assertFalse(memberIds().contains("i-b"));
+        verify(ec2).terminateInstances(REGION, List.of("i-b"));
     }
 
     @Test
-    void anInstanceRefreshLeavesStandbyMembersAlone() {
+    void anInstanceThatStoppedOrTerminatedInStandbyFailsTheHealthCheckOnItsReturn() {
+        ok(enterStandby(true, "i-a", "i-b"));
+        reconciler.reconcile(group());
+        ec2States.put("i-a", InstanceState.stopped());
+        ec2States.put("i-b", InstanceState.terminated());
+        ok(exitStandby("i-a", "i-b"));
+        assertEquals(2, group().getDesiredCapacity());
+
+        reconciler.reconcile(group());
+
+        verify(ec2).terminateInstances(REGION, List.of("i-a"));
+        verify(ec2, never()).terminateInstances(eq(REGION), argThat(ids -> ids.contains("i-b")));
+        assertEquals(List.of("i-replacement-1", "i-replacement-2"), memberIds());
+        XmlPath activities = describeScalingActivities();
+        for (String id : List.of("i-a", "i-b")) {
+            String path = ACTIVITIES + ".find { it.Description == 'Terminating EC2 instance: " + id + "' }";
+            assertEquals("Successful", activities.getString(path + ".StatusCode"), activities.prettify());
+            assertTrue(activities.getString(path + ".Cause").matches(CAUSE_TIME
+                    + "an instance was taken out of service in response to an EC2 health check indicating it"
+                    + " has been terminated or stopped\\."), activities.getString(path + ".Cause"));
+        }
+        assertTrue(activities.getList(ACTIVITIES + ".Description", String.class).stream()
+                .noneMatch(description -> description.startsWith("Removing stale")), activities.prettify());
+        assertEquals(List.of("Cancelled", "Cancelled"), activities.getList(ACTIVITIES
+                + ".findAll { it.Description.text().startsWith('Moving EC2 instance out of Standby') }.StatusCode"));
+    }
+
+    @Test
+    void returningFromStandbyKeepsTheHealthStatus() {
         ok(enterStandby(true, "i-a"));
         reconciler.reconcile(group());
+        MultivaluedHashMap<String, String> health = new MultivaluedHashMap<>();
+        health.add("InstanceId", "i-a");
+        health.add("HealthStatus", "Unhealthy");
+        health.add("ShouldRespectGracePeriod", "false");
+        assertEquals(200, handler.handle("SetInstanceHealth", health, REGION).getStatus());
+        reconciler.reconcile(group());
+        assertEquals("Unhealthy", healthOf("i-a"));
+
+        ok(exitStandby("i-a"));
+        reconciler.reconcile(group());
+
+        assertEquals("InService", lifecycle("i-a"));
+        assertEquals("Unhealthy", healthOf("i-a"));
+    }
+
+    @Test
+    void detachRefusesAnInstanceStillEnteringStandby() {
+        String activityId = ok(enterStandby(true, "i-a")).getString(ENTERED + ".ActivityId");
+
+        MultivaluedHashMap<String, String> detach = params(GROUP);
+        detach.add("InstanceIds.member.1", "i-a");
+        detach.add("ShouldDecrementDesiredCapacity", "true");
+        assertError(handler.handle("DetachInstances", detach, REGION), "The instance i-a is not in InService or Standby.");
+
+        assertEquals("EnteringStandby", lifecycle("i-a"));
+        assertEquals(1, group().getDesiredCapacity());
+        assertEquals("InProgress", activity(describeScalingActivities(), activityId, "StatusCode"));
+        verify(ec2, never()).deleteSystemTag(anyString(), anyList(), anyString(), anyString());
+        reconciler.reconcile(group());
+        assertEquals("Standby", lifecycle("i-a"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SetDesiredCapacity", "UpdateAutoScalingGroup"})
+    void capacityChangesWaitForTheGroupLock(String action) throws Exception {
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<Thread> changer = new AtomicReference<>();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> holder = workers.submit(() -> service.reconcileIfPresent(group(), () -> {
+                held.countDown();
+                try {
+                    assertTrue(release.await(10, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+            assertTrue(held.await(5, TimeUnit.SECONDS));
+            MultivaluedHashMap<String, String> change = params(GROUP);
+            change.add("SetDesiredCapacity".equals(action) ? "DesiredCapacity" : "MaxSize", "3");
+            Future<Response> changing = workers.submit(() -> {
+                changer.set(Thread.currentThread());
+                return handler.handle(action, change, REGION);
+            });
+            await().atMost(Duration.ofSeconds(5)).until(() -> changing.isDone()
+                    || changer.get() != null && changer.get().getState() == Thread.State.BLOCKED);
+            assertFalse(changing.isDone(), action + " must wait for a standby move or reconcile pass in progress");
+            release.countDown();
+            assertEquals(200, changing.get(5, TimeUnit.SECONDS).getStatus());
+            holder.get(5, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void theResponseShowsEachMoveAsItStarted() {
+        List<ScalingActivity> started = service.enterStandby(REGION, GROUP, List.of("i-a"), true);
+        reconciler.reconcile(group());
+
+        assertEquals("Successful",
+                activity(describeScalingActivities(), started.getFirst().getActivityId(), "StatusCode"));
+        assertEquals("InProgress", started.getFirst().getStatusCode());
+        assertEquals(50, started.getFirst().getProgress());
+        assertNull(started.getFirst().getEndTime());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anInstanceRefreshLeavesStandbyMembersAlone(boolean settled) {
+        ok(enterStandby(true, "i-a"));
+        if (settled) {
+            reconciler.reconcile(group());
+        }
 
         MultivaluedHashMap<String, String> refresh = params(GROUP);
         assertEquals(200, handler.handle("StartInstanceRefresh", refresh, REGION).getStatus());
 
-        assertEquals("Standby", lifecycle("i-a"));
+        assertEquals(settled ? "Standby" : "EnteringStandby", lifecycle("i-a"));
         assertEquals("Terminating", lifecycle("i-b"));
+        reconciler.reconcile(group());
+        assertEquals("Standby", lifecycle("i-a"));
     }
 
     @Test
@@ -456,6 +586,23 @@ class AutoScalingStandbyTest {
 
     private List<String> memberIds() {
         return group().getInstances().stream().map(AsgInstance::getInstanceId).toList();
+    }
+
+    private String healthOf(String instanceId) {
+        return group().getInstances().stream()
+                .filter(member -> instanceId.equals(member.getInstanceId()))
+                .map(AsgInstance::getHealthStatus)
+                .findFirst().orElse(null);
+    }
+
+    /** Sets what EC2 reports for an instance: a state name, or {@code gone} for no instance at all. */
+    private void setEc2State(String instanceId, String fate) {
+        switch (fate) {
+            case "stopped" -> ec2States.put(instanceId, InstanceState.stopped());
+            case "terminated" -> ec2States.put(instanceId, InstanceState.terminated());
+            case "gone" -> ec2States.remove(instanceId);
+            default -> throw new IllegalArgumentException(fate);
+        }
     }
 
     private String lifecycle(String instanceId) {

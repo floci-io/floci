@@ -96,12 +96,19 @@ Standby follows the
 [user guide](https://docs.aws.amazon.com/autoscaling/ec2/userguide/as-enter-exit-standby.html).
 A member in `EnteringStandby` or `Standby` does not count toward desired capacity, including when
 `AttachInstances` raises desired capacity to the group's size, and is never chosen for scale-in or
-instance refresh. It keeps its health status, and stays in the group even when its EC2 instance
-stops or terminates. Each move's activity carries the description and cause AWS writes and
-completes as `Successful` in `DescribeScalingActivities` when the instance reaches `Standby` or
-`InService`. It completes as `Cancelled` when the instance is terminated or detached first, when
-the group is deleted, or when the instance exits standby while its EC2 instance is not running; that
-instance then leaves the group and the group launches a replacement. Floci does not wait for
+instance refresh. `StartInstanceRefresh` leaves such members alone whatever its `StandbyInstances`
+preference says, as AWS does for `Ignore`; AWS's default, `Wait`, and `Terminate` are not
+implemented. A member keeps its health status in standby and when it returns to service, and stays
+in the group even when its EC2 instance stops or terminates. If it did, the member fails the health
+check AWS runs when it exits standby: Floci terminates the instance if EC2 still has it, records
+AWS's `Terminating EC2 instance` activity, and the group launches a replacement.
+
+Each move's activity carries the description and cause AWS writes and completes as `Successful` in
+`DescribeScalingActivities` when the instance reaches `Standby` or `InService`. It completes as
+`Cancelled` when the instance is terminated first, detached while it returns to service, fails that
+health check, or when the group is deleted. `DetachInstances` refuses an instance still in
+`EnteringStandby` with `The instance <id> is not in InService or Standby.`, which AWS answers for
+every state but those two; Floci does not refuse the other states yet. Floci does not wait for
 connection draining and does not write the activity's `Details` member.
 
 ### Instance Refresh
