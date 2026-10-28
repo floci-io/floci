@@ -1,12 +1,12 @@
 name: IAM Data Drift
 
-# Checks the eight vendored files that come from AWS's live service reference rather than from a
+# Checks the nine vendored files that come from AWS's live service reference rather than from a
 # pinned dependency: the IAM service namespace list, the map of which resource each IAM action is
 # authorized against, the map of operations AWS authorizes as an action of another name, the
 # table of the operations that pass a role and the services they pass it to, the table of the
-# operations that pass a Lambda network connector, the table of the
-# tagging actions operations that tag what they create need, and the table of the resources each
-# operation's request names, and the DynamoDB condition key table. That
+# operations that pass a Lambda network connector, the table of the tagging actions operations
+# that tag what they create need, the table of the resources each operation's request names, the
+# DynamoDB condition key table, and the actions whose resource type carries aws:ResourceTag. That
 # needs the live service reference index, so unlike every other check here it can
 # fail without anything in the repository having changed: an AWS outage, or a namespace AWS has
 # retired. It therefore runs on its own, never as part of a job that ordinary changes trigger.
@@ -60,6 +60,9 @@ on:
       - 'tools/aws/test_regen_dynamodb_condition_keys.py'
       - 'tools/aws/regen_partitions.py'
       - 'tools/aws/regen_query_services.py'
+      - 'src/main/resources/aws/iam-resource-tag-actions.json'
+      - 'tools/aws/regen_iam_resource_tag_actions.py'
+      - 'tools/aws/test_regen_iam_resource_tag_actions.py'
       - '.github/workflows/iam-data-drift.yml'
   schedule:
     # Mondays at 06:00 UTC, before the working week rather than during it.

@@ -1186,9 +1186,15 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     }
                 }
             }
+            Map<String, List<String>> tableTags = "dynamodb".equals(credentialScope)
+                    ? conditionContextResolver.dynamoDbResourceTagContext(resource) : null;
             for (Map<String, List<String>> targetContext : resourceContexts) {
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
                         targetContext, resource, region, accountId, resourceOwnerAccountId);
+                if (tableTags != null) {
+                    effectiveContext.keySet().removeIf(key -> key.startsWith("aws:ResourceTag/"));
+                    effectiveContext.putAll(tableTags);
+                }
                 ResourcePolicyDecision resourcePolicyDecision = evaluator.evaluateResourcePolicyFor(
                         effectiveResourcePolicies, principal, action, resource, effectiveContext);
                 Decision decision = evaluator.evaluateResolvedResourcePolicy(

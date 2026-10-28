@@ -75,7 +75,9 @@ PREFIX ?= $(HOME)/.local
         iam-passed-network-connectors-check iam-passed-network-connectors-verify \
         iam-passed-network-connectors-test iam-tag-on-create-sync iam-tag-on-create-check \
         iam-tag-on-create-verify iam-tag-on-create-test iam-request-resources-sync iam-request-resources-check \
-        iam-request-resources-verify iam-request-resources-test iam-data-verify
+        iam-request-resources-verify iam-request-resources-test \
+        iam-resource-tag-actions-sync iam-resource-tag-actions-check iam-resource-tag-actions-verify \
+        iam-resource-tag-actions-test iam-data-verify
 
 help: ## List the targets below
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -425,12 +427,14 @@ DYNAMODB_CONDITION_KEYS_PATHS := src/main/resources/aws/dynamodb-condition-keys.
 IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
 	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_request_resources.py
+IAM_RESOURCE_TAG_ACTIONS_PATHS := src/main/resources/aws/iam-resource-tag-actions.json \
+	tools/aws/regen_iam_resource_tag_actions.py tools/aws/test_regen_iam_resource_tag_actions.py
 
 iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS; CHANGED="<paths>" checks only the ones they cover
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
-	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; \
+	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; tagActions=0; \
 	covers() { \
 		[ -z "$(strip $(CHANGED))" ] && return 0; \
 		for path in $(CHANGED); do case " $$1 " in *" $$path "*) return 0;; esac; done; \
@@ -461,8 +465,12 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	if covers "$(DYNAMODB_CONDITION_KEYS_PATHS)" "the DynamoDB condition key table"; then \
 		$(MAKE) --no-print-directory dynamodb-condition-keys-verify || dynamodb=$$?; \
 	fi; \
+	if covers "$(IAM_RESOURCE_TAG_ACTIONS_PATHS)" "the table of actions carrying aws:ResourceTag"; then \
+		$(MAKE) --no-print-directory iam-resource-tag-actions-verify || tagActions=$$?; \
+	fi; \
 	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || [ $$passed -ne 0 ] \
-			|| [ $$connectors -ne 0 ] || [ $$tagged -ne 0 ] || [ $$requested -ne 0 ] || [ $$dynamodb -ne 0 ]; then \
+			|| [ $$connectors -ne 0 ] || [ $$tagged -ne 0 ] || [ $$requested -ne 0 ] || [ $$dynamodb -ne 0 ] \
+			|| [ $$tagActions -ne 0 ]; then \
 		echo ""; \
 		echo "error: vendored IAM data does not match upstream:"; \
 		if [ $$namespaces -ne 0 ]; then \
@@ -487,6 +495,9 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 			echo "       the table of the resources requests name, see its message above"; \
 		fi; \
 		if [ $$dynamodb -ne 0 ]; then echo "       the DynamoDB condition key table"; fi; \
+		if [ $$tagActions -ne 0 ]; then \
+			echo "       the table of actions carrying aws:ResourceTag, see its message above"; \
+		fi; \
 		exit 1; \
 	fi
 
@@ -519,6 +530,33 @@ iam-authorized-actions-verify: ## CI gate (online): every vendored operation mus
 
 iam-authorized-actions-test: ## Run the IAM authorized-action generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_iam_authorized_actions.py -q
+
+iam-resource-tag-actions-sync: ## Regenerate src/main/resources/aws/iam-resource-tag-actions.json from AWS (commit the result)
+	$(PYTHON) tools/aws/regen_iam_resource_tag_actions.py
+
+iam-resource-tag-actions-check: ## CI gate (offline): the vendored resource-tag action list must be well-formed
+	@$(PYTHON) tools/aws/regen_iam_resource_tag_actions.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-resource-tag-actions.json is malformed."; \
+		echo "       Run 'make iam-resource-tag-actions-sync' and commit the result."; \
+		exit 1; \
+	}
+
+iam-resource-tag-actions-verify: ## CI gate (online): every vendored action must still carry aws:ResourceTag
+	@$(PYTHON) tools/aws/regen_iam_resource_tag_actions.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not reach AWS's service reference, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: the vendored resource-tag actions name an action AWS does not tag."; \
+		echo "       Run 'make iam-resource-tag-actions-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+iam-resource-tag-actions-test: ## Run the IAM resource-tag action generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_iam_resource_tag_actions.py -q
 
 iam-passed-roles-sync: ## Regenerate src/main/resources/aws/iam-passed-roles.json from AWS and botocore (commit the result)
 	$(PYTHON) tools/aws/regen_iam_passed_roles.py

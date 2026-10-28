@@ -1,0 +1,51 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_iam_resource_tag_actions.py",
+    "reference": "https://servicereference.us-east-1.amazonaws.com/v1/sns/sns.json, https://servicereference.us-east-1.amazonaws.com/v1/sqs/sqs.json",
+    "retrieved": "2026-10-26",
+    "note": "make iam-resource-tag-actions-verify checks every entry against AWS."
+  },
+  "namespaces": {
+    "sns": [
+      "sns:AddPermission",
+      "sns:ConfirmSubscription",
+      "sns:CreateTopic",
+      "sns:DeleteTopic",
+      "sns:GetDataProtectionPolicy",
+      "sns:GetSubscriptionAttributes",
+      "sns:GetTopicAttributes",
+      "sns:ListSubscriptionsByTopic",
+      "sns:ListTagsForResource",
+      "sns:Publish",
+      "sns:PutDataProtectionPolicy",
+      "sns:RemovePermission",
+      "sns:SetSubscriptionAttributes",
+      "sns:SetTopicAttributes",
+      "sns:Subscribe",
+      "sns:TagResource",
+      "sns:Unsubscribe",
+      "sns:UntagResource"
+    ],
+    "sqs": [
+      "sqs:AddPermission",
+      "sqs:CancelMessageMoveTask",
+      "sqs:ChangeMessageVisibility",
+      "sqs:CreateQueue",
+      "sqs:DeleteMessage",
+      "sqs:DeleteQueue",
+      "sqs:GetQueueAttributes",
+      "sqs:GetQueueUrl",
+      "sqs:ListDeadLetterSourceQueues",
+      "sqs:ListMessageMoveTasks",
+      "sqs:ListQueueTags",
+      "sqs:PurgeQueue",
+      "sqs:ReceiveMessage",
+      "sqs:RemovePermission",
+      "sqs:SendMessage",
+      "sqs:SetQueueAttributes",
+      "sqs:StartMessageMoveTask",
+      "sqs:TagQueue",
+      "sqs:UntagQueue"
+    ]
+  }
+}
