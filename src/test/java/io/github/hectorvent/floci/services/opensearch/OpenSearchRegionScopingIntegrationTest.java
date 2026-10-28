@@ -260,4 +260,57 @@ class OpenSearchRegionScopingIntegrationTest {
         .then()
             .statusCode(409);
     }
+
+    @Test
+    void tagOperationsRejectAForeignAccountArnAsNotFound() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"DomainName\":\"" + EAST_ONLY_NAME + "\",\"EngineVersion\":\"OpenSearch_2.11\"}")
+        .when()
+            .post("/2021-01-01/opensearch/domain")
+        .then()
+            .statusCode(200);
+
+        String foreignArn = "arn:aws:es:us-east-1:387263792837:domain/" + EAST_ONLY_NAME;
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ARN\":\"" + foreignArn + "\",\"TagList\":[{\"Key\":\"env\",\"Value\":\"test\"}]}")
+        .when()
+            .post("/2021-01-01/tags")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("ResourceNotFoundException"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("arn", foreignArn)
+        .when()
+            .get("/2021-01-01/tags/")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("ResourceNotFoundException"));
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ARN\":\"" + foreignArn + "\",\"TagKeys\":[\"env\"]}")
+        .when()
+            .post("/2021-01-01/tags-removal")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("ResourceNotFoundException"));
+
+        String localArn = "arn:aws:es:us-east-1:000000000000:domain/" + EAST_ONLY_NAME;
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ARN\":\"" + localArn + "\",\"TagList\":[{\"Key\":\"env\",\"Value\":\"test\"}]}")
+        .when()
+            .post("/2021-01-01/tags")
+        .then()
+            .statusCode(200);
+    }
 }

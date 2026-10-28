@@ -342,6 +342,9 @@ public class OpenSearchService implements ResourceProvider {
         if (!"es".equals(parsed.service()) || !parsed.resource().startsWith("domain/")) {
             throw domainNotFoundForArn(arn);
         }
+        if (AwsArnUtils.isForeignAccount(parsed, regionResolver.getAccountId())) {
+            throw domainNotFoundForArn(arn);
+        }
         String domainName = parsed.resource().substring("domain/".length());
         return domainStore.getForAccountMigratingLegacyKeys(
                         parsed.accountId(), storageKey(parsed.region(), domainName),
