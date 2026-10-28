@@ -154,8 +154,9 @@ final class DynamoDbPointInTimeRecovery {
             }
         }
         written.removeAll(undone);
+        ValuesBefore valuesBefore = new ValuesBefore(changes, seen, liveItems);
         for (String itemKey : written) {
-            JsonNode item = underItemLock.apply(itemKey, () -> valueBefore(changes, itemKey, seen, liveItems));
+            JsonNode item = underItemLock.apply(itemKey, () -> valuesBefore.of(itemKey));
             if (item == null) {
                 items.remove(itemKey);
             } else {
@@ -199,24 +200,42 @@ final class DynamoDbPointInTimeRecovery {
             }
         }
         List<ItemChange> result = new ArrayList<>();
+        ValuesBefore valuesBefore = new ValuesBefore(changes, seen, liveItems);
         before.forEach((itemKey, oldItem) -> {
             JsonNode newItem = after.containsKey(itemKey) ? after.get(itemKey)
-                    : underItemLock.apply(itemKey, () -> valueBefore(changes, itemKey, seen, liveItems));
+                    : underItemLock.apply(itemKey, () -> valuesBefore.of(itemKey));
             result.add(new ItemChange(oldItem, newItem, lastWrites.get(itemKey)));
         });
         return result;
     }
 
-    /** The value that the first change of the item from sequence {@code since} replaced, or the live item. */
-    private static JsonNode valueBefore(Changes changes, String itemKey, long since, Map<String, JsonNode> liveItems) {
-        synchronized (changes) {
-            JsonNode value = liveItems.get(itemKey);
-            for (int i = changes.list.size() - 1; 0 <= i && since <= changes.list.get(i).getSequence(); i--) {
-                if (changes.list.get(i).getItemKey().equals(itemKey)) {
-                    value = changes.list.get(i).getOldItem();
+    /** The value that the first change of each item from sequence {@code since} replaced, or the live item. */
+    private static final class ValuesBefore {
+        private final Changes changes;
+        private final Map<String, JsonNode> liveItems;
+        private final Map<String, JsonNode> replaced = new HashMap<>();
+        private long read;
+
+        ValuesBefore(Changes changes, long since, Map<String, JsonNode> liveItems) {
+            this.changes = changes;
+            this.liveItems = liveItems;
+            this.read = since;
+        }
+
+        JsonNode of(String itemKey) {
+            synchronized (changes) {
+                int i = changes.list.size();
+                while (0 < i && read <= changes.list.get(i - 1).getSequence()) {
+                    i--;
                 }
+                for (PointInTimeChange change : changes.list.subList(i, changes.list.size())) {
+                    if (!replaced.containsKey(change.getItemKey())) {
+                        replaced.put(change.getItemKey(), change.getOldItem());
+                    }
+                }
+                read = changes.nextSequence;
+                return replaced.containsKey(itemKey) ? replaced.get(itemKey) : liveItems.get(itemKey);
             }
-            return value;
         }
     }
 

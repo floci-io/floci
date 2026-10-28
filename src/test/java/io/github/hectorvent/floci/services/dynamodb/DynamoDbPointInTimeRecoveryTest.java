@@ -13,8 +13,10 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -115,6 +117,32 @@ class DynamoDbPointInTimeRecoveryTest {
                 });
 
         assertEquals(List.of(item("A")), items);
+    }
+
+    @Test
+    void itemsAtLeavesOutAWriteAfterTheTimeToAnItemThatItReadsLater() {
+        table.setPointInTimeRecoveryEnabled(true);
+        for (String itemKey : List.of("k1", "k2")) {
+            recovery.recordItem(ACCOUNT, TABLE_KEY, table, itemKey, null);
+            live.put(itemKey, item("A" + itemKey));
+        }
+        Instant time = clock.instant();
+        Set<String> reads = new HashSet<>();
+
+        List<JsonNode> items = recovery.itemsAt(ACCOUNT, TABLE_KEY, live, time,
+                (itemKey, read) -> {
+                    if (reads.isEmpty()) {
+                        String other = "k1".equals(itemKey) ? "k2" : "k1";
+                        clock.advance(Duration.ofSeconds(1));
+                        recovery.recordItem(ACCOUNT, TABLE_KEY, table, other, live.get(other));
+                        live.put(other, item("B"));
+                    }
+                    reads.add(itemKey);
+                    return read.get();
+                });
+
+        assertEquals(Set.of("k1", "k2"), reads);
+        assertEquals(Set.of(item("Ak1"), item("Ak2")), Set.copyOf(items));
     }
 
     @Test
