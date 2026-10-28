@@ -851,6 +851,70 @@ class LambdaWebServiceTest {
                 + "\"Condition\":" + condition + "}]}";
     }
 
+    @Test
+    void eachStatementCheckRunsOnEveryStatementBeforeTheNextOne() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        String account = "{\"AWS\":\"000000000000\"}";
+        String grant = "\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + missing + "/endpoint/*\"";
+        String maybe = "{\"Effect\":\"Maybe\",\"Principal\":" + account + "," + grant + "}";
+        String spaced = "{\"Effect\":\" Allow\",\"Principal\":" + account + "," + grant + "}";
+        String unknownKey = "{\"Effect\":\"Allow\",\"Principal\":" + account + "," + grant + ",\"Foo\":1}";
+        String noEffect = "{\"Principal\":" + account + "," + grant + "}";
+        String notPrincipal = "{\"Effect\":\"Allow\",\"Principal\":" + account + ",\"NotPrincipal\":" + account + ","
+                + grant + "}";
+        String badAction = "{\"Effect\":\"Allow\",\"Principal\":" + account + ",\"Action\":\"s3:GetObject\","
+                + "\"Resource\":\"" + missing + "\"}";
+        String textPrincipal = statement("Allow", "\"foo\"", missing);
+        String nullPrincipal = statement("Allow", "null", missing);
+        String badPattern = statement("Allow", "{\"AWS\":\"bad!value\"}", missing);
+        String emptyPrincipal = statement("Allow", "{\"AWS\":[]}", missing);
+        String gone = statement("Allow", "{\"AWS\":\"arn:aws:iam::000000000000:role/gone\"}", missing);
+        String open = statement("Allow", "\"*\"", missing);
+        String syntax = "Policy has syntax errors.";
+        String position = "Syntax error at position (-1,-1)";
+        String noEffectMessage = "Effect must be explicitly available for a statement";
+        String invalid = "The provided principal was invalid. Please check the principal and try again.";
+        String pattern = "The provided input'bad!value'was invalid. Member must satisfy expression: [\\w+=,.@\\:-]*"
+                + " Please check your input and try again.";
+
+        for (List<String> pair : List.of(
+                List.of(maybe, spaced, syntax),
+                List.of(badPattern, nullPrincipal, syntax),
+                List.of(badPattern, maybe, "Invalid effect: Maybe"),
+                List.of(textPrincipal, badPattern, position),
+                List.of(noEffect, unknownKey, position),
+                List.of(noEffect, badPattern, noEffectMessage),
+                List.of(noEffect, badAction, noEffectMessage),
+                List.of(badAction, badPattern, pattern),
+                List.of(emptyPrincipal, badPattern, pattern),
+                List.of(emptyPrincipal, badAction, invalid),
+                List.of(notPrincipal, emptyPrincipal, invalid),
+                List.of("\"x\"", open, syntax))) {
+            for (String statements : List.of(pair.get(0) + "," + pair.get(1), pair.get(1) + "," + pair.get(0))) {
+                assertEquals(pair.get(2), message(() -> service.putResourcePolicy(REGION, missing,
+                        policy("{\"Statement\":[" + statements + "]}"))), statements);
+            }
+        }
+        for (List<String> ordered : List.of(
+                List.of("[" + unknownKey + "," + maybe + "]", position),
+                List.of("[" + maybe + "," + unknownKey + "]", "Invalid effect: Maybe"),
+                List.of("[" + textPrincipal + "," + maybe + "]", position),
+                List.of("[" + maybe + "," + textPrincipal + "]", "Invalid effect: Maybe"),
+                List.of("[{\"Foo\":1,\"Effect\":\"Maybe\",\"Principal\":" + account + "," + grant + "}]",
+                        "Invalid effect: Maybe"),
+                List.of("[\"x\"," + gone + "]", invalid),
+                List.of("[\"x\"," + badPattern + "]", pattern),
+                List.of("[" + statement("", account, missing) + "]", "Invalid effect: "),
+                List.of("[" + statement("Allow", "1", missing) + "]", position),
+                List.of("[" + statement("Allow", "{\"Foo\":\"x\"}", missing) + "]", position),
+                List.of("[{\"Effect\":1,\"Principal\":" + account + "," + grant + "}]", position),
+                List.of("[{\"Effect\":\"Allow\",\"NotPrincipal\":{\"AWS\":\"bad!value\"}," + grant + "}]", pattern))) {
+            assertEquals(ordered.get(1), message(() -> service.putResourcePolicy(REGION, missing,
+                    policy("{\"Statement\":" + ordered.get(0) + "}"))), ordered.get(0));
+        }
+    }
+
     private static String principalPolicy(String effect, String principal, String functionArn) {
         return "{\"Statement\":[" + statement(effect, principal, functionArn) + "]}";
     }

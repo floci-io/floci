@@ -1385,9 +1385,9 @@ public class LambdaWebService implements Resettable {
     }
 
     /**
-     * The checks AWS runs on a policy document before it looks the function up. Every statement passes its own
-     * checks before any principal is looked up, and every principal exists before any statement is refused as
-     * public.
+     * The checks AWS runs on a policy document before it looks the function up. Each check runs on every statement
+     * before the next check starts, in the order AWS reports them. A statement that is not an object fails only
+     * once every principal exists.
      */
     private void validatePolicy(String region, String policy, String functionArn) {
         JsonNode document;
@@ -1409,39 +1409,116 @@ public class LambdaWebService implements Resettable {
         if (each.isEmpty()) {
             throw policySyntax();
         }
-        for (JsonNode statement : each) {
-            validateStatement(statement, functionArn);
+        List<JsonNode> objects = each.stream().filter(JsonNode::isObject).toList();
+        String partition = regionResolver.partitionForRegion(region);
+        List<Consumer<JsonNode>> checks = List.of(
+                LambdaWebService::requireReadable,
+                LambdaWebService::validateStatement,
+                LambdaWebService::requireEffect,
+                LambdaWebService::validatePrincipalValues,
+                LambdaWebService::requirePrincipal,
+                statement -> validateGrant(statement, functionArn),
+                statement -> policyPrincipals.requireExisting(partition, statement.get("Principal")));
+        for (Consumer<JsonNode> check : checks) {
+            objects.forEach(check);
         }
-        for (JsonNode statement : each) {
-            policyPrincipals.requireExisting(regionResolver.partitionForRegion(region), statement.get("Principal"));
+        if (objects.size() < each.size()) {
+            throw policySyntax();
         }
-        for (JsonNode statement : each) {
-            requireNotPublic(statement);
+        objects.forEach(LambdaWebService::requireNotPublic);
+    }
+
+    /** A null Effect or Principal, or an Effect with whitespace, fails before any other statement is checked. */
+    private static void requireReadable(JsonNode statement) {
+        JsonNode effect = statement.path("Effect");
+        boolean spaced = effect.isTextual() && effect.textValue().chars().anyMatch(Character::isWhitespace);
+        if (spaced || effect.isNull() || statement.path("Principal").isNull()) {
+            throw policySyntax();
         }
     }
 
-    private static void validateStatement(JsonNode statement, String functionArn) {
-        if (!statement.isObject()) {
-            throw policySyntax();
+    /** The principal's shape, then the effect, then the statement's keys, whatever order its members come in. */
+    private static void validateStatement(JsonNode statement) {
+        JsonNode principal = statement.path("Principal");
+        if (!principal.isMissingNode() && !principal.isObject() && !"*".equals(principal.textValue())) {
+            throw syntaxPosition();
         }
-        if (!statement.has("Effect")) {
-            throw new AwsException("ValidationException", "Effect must be explicitly available for a statement", 400);
+        Iterator<String> principalKeys = principal.fieldNames();
+        while (principalKeys.hasNext()) {
+            if (!PRINCIPAL_KEYS.contains(principalKeys.next())) {
+                throw syntaxPosition();
+            }
+        }
+        JsonNode effect = statement.path("Effect");
+        if (!effect.isMissingNode() && !effect.isTextual()) {
+            throw syntaxPosition();
+        }
+        if (effect.isTextual() && !effect.textValue().equalsIgnoreCase("Allow")
+                && !effect.textValue().equalsIgnoreCase("Deny")) {
+            throw new AwsException("ValidationException", "Invalid effect: " + effect.textValue(), 400);
         }
         Iterator<String> keys = statement.fieldNames();
         while (keys.hasNext()) {
             if (!STATEMENT_KEYS.contains(keys.next())) {
-                throw new AwsException("ValidationException", "Syntax error at position (-1,-1)", 400);
+                throw syntaxPosition();
             }
         }
-        String effect = statement.path("Effect").asText();
-        if (!effect.equalsIgnoreCase("Allow") && !effect.equalsIgnoreCase("Deny")) {
-            throw policySyntax();
+    }
+
+    private static void requireEffect(JsonNode statement) {
+        if (!statement.has("Effect")) {
+            throw new AwsException("ValidationException", "Effect must be explicitly available for a statement", 400);
         }
+    }
+
+    /** Only an AWS ARN may carry a slash. An empty list is left to {@link #requirePrincipal}. */
+    private static void validatePrincipalValues(JsonNode statement) {
+        for (String member : List.of("Principal", "NotPrincipal")) {
+            Iterator<Map.Entry<String, JsonNode>> fields = statement.path(member).fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                if (field.getValue().isArray() && field.getValue().isEmpty()) {
+                    continue;
+                }
+                List<String> values = policyValues(field.getValue());
+                // AWS checks no pattern on these, so a slash or a "!" passes.
+                if ("Federated".equals(field.getKey()) || "CanonicalUser".equals(field.getKey())) {
+                    continue;
+                }
+                for (String value : values) {
+                    Pattern allowed = "Service".equals(field.getKey()) ? PRINCIPAL_SERVICE
+                            : "AWS".equals(field.getKey()) && AwsArnUtils.isArn(value) ? PRINCIPAL_AWS_ARN : PRINCIPAL_AWS;
+                    if (!"*".equals(value) && !allowed.matcher(value).matches()) {
+                        throw new AwsException("ValidationException", "The provided input'" + value
+                                + "'was invalid. Member must satisfy expression: " + allowed.pattern()
+                                + " Please check your input and try again.", 400);
+                    }
+                    if ("Service".equals(field.getKey()) && "*".equals(value)) {
+                        throw new AwsException("ValidationException", "The provided input'*'was invalid."
+                                + " Member must satisfy expression: " + PRINCIPAL_SERVICE.pattern()
+                                + " Please check your input and try again.", 400);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void requirePrincipal(JsonNode statement) {
+        JsonNode principal = statement.path("Principal");
+        if ((principal.isMissingNode() && !statement.has("NotPrincipal")) || (principal.isObject() && principal.isEmpty())) {
+            throw new AwsException("ValidationException", INVALID_PRINCIPAL, 400);
+        }
+        for (JsonNode value : principal) {
+            if (value.isArray() && value.isEmpty()) {
+                throw new AwsException("ValidationException", INVALID_PRINCIPAL, 400);
+            }
+        }
+    }
+
+    private static void validateGrant(JsonNode statement, String functionArn) {
         if (statement.has("NotPrincipal") || statement.has("NotAction") || statement.has("NotResource")) {
             throw policySyntax();
         }
-        JsonNode principal = statement.get("Principal");
-        validatePrincipal(principal);
         for (String action : policyValues(statement.get("Action"))) {
             if (!action.startsWith("lambda:")) {
                 throw policySyntax();
@@ -1459,50 +1536,6 @@ public class LambdaWebService implements Resettable {
                 && !hasTrustedCondition(statement.path("Condition"))) {
             throw new AwsException("ValidationException", "Lambda blocked the creation of this policy"
                     + " because it would grant public access to your function.", 400);
-        }
-    }
-
-    private static void validatePrincipal(JsonNode principal) {
-        if (principal == null || principal.isNull() || (principal.isObject() && principal.isEmpty())) {
-            throw new AwsException("ValidationException", INVALID_PRINCIPAL, 400);
-        }
-        if (principal.isTextual()) {
-            if (!"*".equals(principal.textValue())) {
-                throw policySyntax();
-            }
-            return;
-        }
-        if (!principal.isObject()) {
-            throw policySyntax();
-        }
-        Iterator<Map.Entry<String, JsonNode>> fields = principal.fields();
-        while (fields.hasNext()) {
-            Map.Entry<String, JsonNode> field = fields.next();
-            if (!PRINCIPAL_KEYS.contains(field.getKey())) {
-                throw policySyntax();
-            }
-            if (field.getValue().isArray() && field.getValue().isEmpty()) {
-                throw new AwsException("ValidationException", INVALID_PRINCIPAL, 400);
-            }
-            List<String> values = policyValues(field.getValue());
-            // AWS checks no pattern on these, so a slash or a "!" passes.
-            if ("Federated".equals(field.getKey()) || "CanonicalUser".equals(field.getKey())) {
-                continue;
-            }
-            for (String value : values) {
-                Pattern allowed = "Service".equals(field.getKey()) ? PRINCIPAL_SERVICE
-                        : "AWS".equals(field.getKey()) && AwsArnUtils.isArn(value) ? PRINCIPAL_AWS_ARN : PRINCIPAL_AWS;
-                if (!"*".equals(value) && !allowed.matcher(value).matches()) {
-                    throw new AwsException("ValidationException", "The provided input'" + value
-                            + "'was invalid. Member must satisfy expression: " + allowed.pattern()
-                            + " Please check your input and try again.", 400);
-                }
-                if ("Service".equals(field.getKey()) && "*".equals(value)) {
-                    throw new AwsException("ValidationException", "The provided input'*'was invalid."
-                            + " Member must satisfy expression: " + PRINCIPAL_SERVICE.pattern()
-                            + " Please check your input and try again.", 400);
-                }
-            }
         }
     }
 
@@ -1586,6 +1619,10 @@ public class LambdaWebService implements Resettable {
 
     private static AwsException policySyntax() {
         return new AwsException("ValidationException", POLICY_SYNTAX, 400);
+    }
+
+    private static AwsException syntaxPosition() {
+        return new AwsException("ValidationException", "Syntax error at position (-1,-1)", 400);
     }
 
     // ---------------------------------------------------------------- identifiers
